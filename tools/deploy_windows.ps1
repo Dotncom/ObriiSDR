@@ -162,6 +162,8 @@ foreach ($DocFile in $DocFiles) {
         Copy-Item -LiteralPath $DocPath -Destination (Join-Path $DeployPath $DocFile) -Force
     }
 }
+Copy-Item -LiteralPath (Join-Path $Workspace 'tools\Install-Wireless-AddOn.ps1') `
+    -Destination (Join-Path $DeployPath 'Install-Wireless-AddOn.ps1') -Force
 
 $DeployDocsPath = Join-Path $DeployPath "docs"
 if (Test-Path -LiteralPath $DeployDocsPath) {
@@ -174,12 +176,16 @@ $ReleaseDocFiles = @(
     "docs\dmr_external_backend.md",
     "docs\gnss_preflight_4.1.md",
     "docs\iq_pipeline_audit.md",
-    "docs\release_notes_6.0.0.md",
+    "docs\release_notes_6.1.0.md",
     "docs\dmr_motorola_privacy.md",
     "docs\performance_and_dmr_audit.md",
     "docs\wireless_lab.md",
     "docs\roadmap_4.0_cleanup.md",
-    "docs\radio_propagation_lab.md"
+    "docs\radio_propagation_lab.md",
+    "docs\research_backends.md",
+    "docs\psk31_decoder.md",
+    "docs\hf_prediction.md",
+    "docs\wireless_addon.md"
 )
 foreach ($DocFile in $ReleaseDocFiles) {
     $DocPath = Join-Path $Workspace $DocFile

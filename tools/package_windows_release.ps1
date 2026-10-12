@@ -1,7 +1,8 @@
 param(
     [string]$Version = "",
     [string]$RuntimeDir = "release\bin",
-    [string]$OutputPath = ""
+    [string]$OutputPath = "",
+    [switch]$WirelessAddOn
 )
 
 $ErrorActionPreference = "Stop"
@@ -35,9 +36,10 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 }
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid release version: $Version" }
 $ReleaseDir = Assert-WorkspacePath (Join-Path $Workspace "release")
-$Stage = Assert-WorkspacePath (Join-Path $ReleaseDir "ObriiSDR-v$Version-windows-x64")
+$PackageName = if ($WirelessAddOn) { "ObriiSDR-v$Version-wireless-windows-x64" } else { "ObriiSDR-v$Version-windows-x64" }
+$Stage = Assert-WorkspacePath (Join-Path $ReleaseDir $PackageName)
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-    $OutputPath = Join-Path $ReleaseDir "ObriiSDR-v$Version-windows-x64.zip"
+    $OutputPath = Join-Path $ReleaseDir "$PackageName.zip"
 }
 $OutputFullPath = Assert-WorkspacePath $OutputPath
 if (Test-Path -LiteralPath $Stage) { Remove-Item -LiteralPath $Stage -Recurse -Force }
@@ -46,7 +48,7 @@ New-Item -ItemType Directory -Path $Stage -Force | Out-Null
 # Explicit runtime manifest: a development folder also contains private overrides,
 # rotated logs, captures and screenshots. Unknown files never enter a release.
 $RootFiles = @(
-    'ObriiSDR.exe', 'LICENSE', 'README.md', 'CHANGELOG.md', 'THIRD_PARTY_LICENSES.txt',
+    'ObriiSDR.exe', 'Install-Wireless-AddOn.ps1', 'LICENSE', 'README.md', 'CHANGELOG.md', 'THIRD_PARTY_LICENSES.txt',
     'translations.json', 'fobos.dll', 'fobos_sdr.dll', 'libfftw3f-3.dll', 'libusb-1.0.dll',
     'rtlsdr.dll', 'Qt5Core.dll', 'Qt5Gui.dll', 'Qt5Widgets.dll', 'Qt5Network.dll',
     'Qt5SerialPort.dll', 'Qt5Multimedia.dll', 'MSVCP140.dll', 'MSVCP140_1.dll',
@@ -57,12 +59,38 @@ $PublicDocs = @(
     'gnss_preflight_4.1.md', 'iq_pipeline_audit.md', 'performance_and_dmr_audit.md',
     'radio_propagation_lab.md', 'wireless_lab.md', 'roadmap_4.0_cleanup.md',
     "release_notes_$Version.md"
+    'research_backends.md', 'psk31_decoder.md', 'hf_prediction.md', 'wireless_addon.md'
 )
+$Backends = if ($WirelessAddOn) { @('wireshark', 'wifi-phy', 'wifi-ht') } else { @('pocketsdr', 'satdump', 'hdf5', 'itu_hf') }
+$ResearchFiles = @{}
+foreach ($Backend in $Backends) {
+    $ManifestPath = Join-Path $RuntimePath ($Backend + '/runtime-manifest.json')
+    if (-not (Test-Path -LiteralPath $ManifestPath)) { continue }
+    $Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+    foreach ($Entry in $Manifest.files) {
+        if ($Entry.path -match '(^/|(^|/)\.\.(/|$)|\\|:)') { throw "Unsafe runtime manifest path: $($Entry.path)" }
+        $Relative = $Backend + '/' + $Entry.path
+        $Source = Assert-WorkspacePath (Join-Path $RuntimePath $Relative)
+        if ((Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash -ne $Entry.sha256) { throw "Modified or missing backend file: $Relative" }
+        $ResearchFiles[$Relative] = $true
+    }
+    $ResearchFiles[$Backend + '/runtime-manifest.json'] = $true
+}
 $RuntimeRoot = $RuntimePath.TrimEnd('\', '/')
 Get-ChildItem -LiteralPath $RuntimePath -Recurse -File -Force | ForEach-Object {
     $File = $_
     $Relative = $File.FullName.Substring($RuntimeRoot.Length).TrimStart('\', '/') -replace '\\', '/'
     $Allowed = $false
+    if ($ResearchFiles.ContainsKey($Relative)) { $Allowed = $true }
+    if ($WirelessAddOn) {
+        $Allowed = $Allowed -or $Relative -in @('wireless/wifi_phy_decoder.py', 'docs/wireless_addon.md')
+        if (-not $Allowed) { return }
+        $Source = Assert-WorkspacePath $File.FullName
+        $Destination = Join-Path $Stage $Relative
+        New-Item -ItemType Directory -Path (Split-Path -Parent $Destination) -Force | Out-Null
+        Copy-Item -LiteralPath $Source -Destination $Destination -Force
+        return
+    }
     switch -Regex ($Relative) {
         '^[^/]+$' { $Allowed = $RootFiles -contains $File.Name }
         '^docs/[^/]+$' { $Allowed = $PublicDocs -contains $File.Name }
@@ -83,7 +111,12 @@ Get-ChildItem -LiteralPath $RuntimePath -Recurse -File -Force | ForEach-Object {
     New-Item -ItemType Directory -Path (Split-Path -Parent $Destination) -Force | Out-Null
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
 }
-foreach ($Required in @('ObriiSDR.exe', 'LICENSE', 'translations.json', 'platforms/qwindows.dll')) {
+$RequiredFiles = if ($WirelessAddOn) {
+    @('wifi-phy/python.exe', 'wifi-ht/python.exe', 'wireshark/tshark.exe', 'wireless/wifi_phy_decoder.py', 'docs/wireless_addon.md')
+} else {
+    @('ObriiSDR.exe', 'Install-Wireless-AddOn.ps1', 'LICENSE', 'translations.json', 'platforms/qwindows.dll')
+}
+foreach ($Required in $RequiredFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $Stage $Required))) { throw "Missing release file: $Required" }
 }
 Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $OutputFullPath -Force

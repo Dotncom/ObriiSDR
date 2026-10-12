@@ -136,11 +136,10 @@ bool SpectrumFrameRecorder::appendFrameRecord(const SpectrumFrameRecord &frame) 
     return true;
 }
 
-bool SpectrumFrameRecorder::loadFile(const QString &path,
-                                     SpectrumFrameRecording &recording,
-                                     QString *errorMessage) {
-    recording = SpectrumFrameRecording();
-    QFile file(path);
+bool SpectrumFrameReader::open(const QString &path, QString *errorMessage) {
+    file.close(); header = {};
+    if (errorMessage) errorMessage->clear();
+    file.setFileName(path);
     if (!file.open(QIODevice::ReadOnly)) {
         if (errorMessage) {
             *errorMessage = file.errorString();
@@ -176,13 +175,23 @@ bool SpectrumFrameRecorder::loadFile(const QString &path,
         }
         return false;
     }
-    recording.metadata = metadataDoc.object();
+    header = metadataDoc.object();
+    return true;
+}
 
-    while (!file.atEnd()) {
+bool SpectrumFrameReader::readNext(SpectrumFrameRecord &frame, QString *errorMessage) {
+    if (errorMessage) errorMessage->clear();
+    frame = {};
+    if (!file.isOpen()) { if (errorMessage) *errorMessage = QStringLiteral("spectrum file is not open"); return false; }
+    if (file.atEnd()) return false;
+    QDataStream stream(&file);
+    stream.setByteOrder(QDataStream::LittleEndian);
+    stream.setVersion(QDataStream::Qt_5_15);
         quint32 frameMagic = 0;
         stream >> frameMagic;
         if (stream.status() != QDataStream::Ok) {
-            break;
+            if (errorMessage) *errorMessage = QStringLiteral("truncated spectrum frame marker");
+            return false;
         }
         if (frameMagic != kFrameMagic) {
             if (errorMessage) {
@@ -191,7 +200,6 @@ bool SpectrumFrameRecorder::loadFile(const QString &path,
             return false;
         }
 
-        SpectrumFrameRecord frame;
         qint32 fftLength = 0;
         qint32 count = 0;
         stream >> frame.elapsedMs;
@@ -216,6 +224,24 @@ bool SpectrumFrameRecorder::loadFile(const QString &path,
             }
             return false;
         }
+    if (!std::isfinite(frame.centerFrequency) || !std::isfinite(frame.minFrequency) ||
+        !std::isfinite(frame.maxFrequency) || frame.maxFrequency < frame.minFrequency || fftLength <= 0) {
+        if (errorMessage) *errorMessage = QStringLiteral("invalid spectrum frame geometry");
+        return false;
+    }
+    return true;
+}
+
+bool SpectrumFrameRecorder::loadFile(const QString &path,
+                                     SpectrumFrameRecording &recording,
+                                     QString *errorMessage) {
+    recording = {};
+    SpectrumFrameReader reader;
+    if (!reader.open(path, errorMessage)) return false;
+    recording.metadata = reader.metadata();
+    while (!reader.atEnd()) {
+        SpectrumFrameRecord frame;
+        if (!reader.readNext(frame, errorMessage)) return false;
         recording.frames.push_back(std::move(frame));
     }
 

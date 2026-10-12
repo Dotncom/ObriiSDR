@@ -1,8 +1,26 @@
 #include "spectrumscienceanalyzer.h"
-
+#include <QJsonObject>
 #include <algorithm>
 #include <cmath>
 #include <limits>
+
+QJsonArray SpectrumScienceAnalyzer::markerConfiguration() const {
+    QJsonArray result;
+    for (const auto &marker : markers)
+        result.append(QJsonObject{{"label", marker.label}, {"enabled", marker.enabled}, {"frequencyHz", marker.frequencyHz}});
+    return result;
+}
+void SpectrumScienceAnalyzer::restoreMarkerConfiguration(const QJsonArray &configuration) {
+    markers.resize(2);
+    clearMarkers();
+    for (int i = 0; i < (std::min)(configuration.size(), MaximumMarkers); ++i) {
+        if (i >= markerCount()) addMarker();
+        const QJsonObject object = configuration[i].toObject();
+        const double frequency = object.value("frequencyHz").toDouble();
+        if (object.value("enabled").toBool() && std::isfinite(frequency) && frequency >= 0)
+            setMarker(i, frequency);
+    }
+}
 
 namespace {
 constexpr float kFloorDb = -200.0f;
@@ -132,6 +150,8 @@ bool SpectrumScienceAnalyzer::geometryMatches(const std::vector<float> &frequenc
 void SpectrumScienceAnalyzer::resetForGeometry(const std::vector<float> &frequencies,
                                                const std::vector<float> &levels) {
     frameFrequencies = frequencies;
+    frequenciesAscending = std::is_sorted(frequencies.begin(), frequencies.end()) &&
+        std::all_of(frequencies.begin(), frequencies.end(), [](float value) { return std::isfinite(value); });
     detectorHistory.clear();
     averageHistoryPower.clear();
     quasiPeakAmplitude.clear();
@@ -339,8 +359,26 @@ void SpectrumScienceAnalyzer::clearMarker(int index) {
 }
 
 void SpectrumScienceAnalyzer::clearMarkers() {
-    clearMarker(0);
-    clearMarker(1);
+    for (int index = 0; index < markerCount(); ++index) clearMarker(index);
+}
+
+int SpectrumScienceAnalyzer::addMarker() {
+    if (markerCount() >= MaximumMarkers) return -1;
+    const int index = markerCount();
+    markers.push_back({false, 0.0, -160.0f, QStringLiteral("M%1").arg(index + 1)});
+    return index;
+}
+
+bool SpectrumScienceAnalyzer::removeMarker(int index) {
+    // A/B remain the compatible measurement-range and delta pair.
+    if (index < 2 || index >= markerCount()) return false;
+    markers.erase(markers.begin() + index);
+    for (int i = 2; i < markerCount(); ++i) markers[i].label = QStringLiteral("M%1").arg(i + 1);
+    return true;
+}
+
+bool SpectrumScienceAnalyzer::hasMarkers() const {
+    return std::any_of(markers.begin(), markers.end(), [](const auto &m) { return m.enabled; });
 }
 
 SpectrumScienceMarker SpectrumScienceAnalyzer::marker(int index) const {
@@ -352,6 +390,16 @@ SpectrumScienceMarker SpectrumScienceAnalyzer::marker(int index) const {
 int SpectrumScienceAnalyzer::nearestBin(double frequencyHz) const {
     if (frameFrequencies.empty() || !std::isfinite(frequencyHz)) {
         return -1;
+    }
+    if (frequenciesAscending) {
+        const auto found = std::lower_bound(frameFrequencies.begin(), frameFrequencies.end(), frequencyHz);
+        if (found == frameFrequencies.begin()) return 0;
+        if (found == frameFrequencies.end())
+            return static_cast<int>(std::lower_bound(frameFrequencies.begin(), frameFrequencies.end(), frameFrequencies.back()) - frameFrequencies.begin());
+        const int right = static_cast<int>(found - frameFrequencies.begin());
+        if (frequencyHz - frameFrequencies[static_cast<std::size_t>(right - 1)] <= *found - frequencyHz)
+            return static_cast<int>(std::lower_bound(frameFrequencies.begin(), found, frameFrequencies[static_cast<std::size_t>(right - 1)]) - frameFrequencies.begin());
+        return right;
     }
     int bestBin = 0;
     double bestDistance = std::numeric_limits<double>::infinity();

@@ -2,6 +2,7 @@
 #define PROPAGATIONLABDIALOG_H
 #include "radiopropagation.h"
 #include <QDialog>
+#include <QPointer>
 class QComboBox;
 class QCheckBox;
 class QDoubleSpinBox;
@@ -23,6 +24,7 @@ public:
                                   const QString &settingsFile = QString());
     ~PropagationLabDialog() override;
     void setReferenceMarkers(const QVector<qth::UserMarker> &markers, const QString &tileDirectory);
+    void setUiTranslator(std::function<QString(const QString &, const QString &)> translate) { uiTranslator = std::move(translate); }
     void setOnlineMapSource(const QString &providerName, const QString &resolvedTemplate,
                             const QString &attribution, int layerMode);
 protected:
@@ -75,6 +77,8 @@ private:
     QPushButton *swapButton = nullptr;
     QPushButton *useTxButton = nullptr, *useRxButton = nullptr;
     QDialog *profileDialog = nullptr;
+    QPointer<QDialog> hfDialog;
+    std::function<QString(const QString &, const QString &)> uiTranslator;
     PropagationProfileWidget *profile = nullptr;
 };
 #endif

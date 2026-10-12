@@ -1,4 +1,6 @@
 #include "solarconditionswidget.h"
+#include "publicdatafetch.h"
+#include "spaceeventsfeed.h"
 #include <QDesktopServices>
 #include <QEventLoop>
 #include <QJsonArray>
@@ -27,62 +29,6 @@ QDateTime utc(QString text) {
     if (time.isValid() && !text.endsWith('Z') && !text.contains('+')) time.setTimeSpec(Qt::UTC);
     return time.toUTC();
 }
-QByteArray fetch(const QString &path, const std::atomic_bool &cancel, QString *error) {
-    constexpr int limit = 1024 * 1024;
-    if (cancel.load()) return {};
-#ifdef Q_OS_WIN
-    // Qt 5 distributions without OpenSSL still have the system TLS implementation.
-    if (!QSslSocket::supportsSsl()) {
-        HINTERNET session = WinHttpOpen(L"ObriiSDR-Solar/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-        if (!session) { *error = QStringLiteral("WinHTTP session error"); return {}; }
-        WinHttpSetTimeouts(session, 1500, 1500, 1500, 1500);
-        HINTERNET connection = WinHttpConnect(session, L"services.swpc.noaa.gov", INTERNET_DEFAULT_HTTPS_PORT, 0);
-        HINTERNET request = connection ? WinHttpOpenRequest(connection, L"GET",
-            reinterpret_cast<LPCWSTR>(path.utf16()), nullptr, WINHTTP_NO_REFERER,
-            WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr;
-        QByteArray data;
-        bool okay = request && WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                       WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(request, nullptr);
-        DWORD code = 0, size = sizeof(code);
-        okay = okay && WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                         WINHTTP_HEADER_NAME_BY_INDEX, &code, &size, WINHTTP_NO_HEADER_INDEX) && code == 200;
-        while (okay && !cancel.load()) {
-            char chunk[8192]; DWORD count = 0;
-            if (!WinHttpReadData(request, chunk, sizeof(chunk), &count)) {okay = false; break;}
-            if (!count) break;
-            if (data.size() + int(count) > limit) {okay = false; break;}
-            data.append(chunk, int(count));
-        }
-        if (request) WinHttpCloseHandle(request);
-        if (connection) WinHttpCloseHandle(connection);
-        WinHttpCloseHandle(session);
-        if (!okay || cancel.load()) { *error = QStringLiteral("NOAA HTTPS request failed or cancelled"); return {}; }
-        return data;
-    }
-#endif
-    QNetworkAccessManager manager;
-    QNetworkRequest request(QUrl(QStringLiteral("https://services.swpc.noaa.gov") + path));
-    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    request.setRawHeader("User-Agent", "ObriiSDR-Solar/1.0");
-    QNetworkReply *reply = manager.get(request);
-    QEventLoop loop;
-    QTimer timeout, cancellation;
-    timeout.setSingleShot(true);
-    QObject::connect(&timeout, &QTimer::timeout, reply, &QNetworkReply::abort);
-    QObject::connect(&cancellation, &QTimer::timeout, reply, [&]() { if (cancel.load()) reply->abort(); });
-    QObject::connect(reply, &QNetworkReply::downloadProgress, reply, [&](qint64 count, qint64 total) {
-        if (count > limit || total > limit) reply->abort();
-    });
-    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    timeout.start(12000); cancellation.start(100);
-    loop.exec();
-    const QByteArray data = reply->readAll();
-    if (reply->error() != QNetworkReply::NoError || data.size() > limit || cancel.load()) {
-        *error = reply->errorString(); return {};
-    }
-    return data;
-}
 }
 bool solar::parseFlux(const QByteArray &json, Observation *out) {
     if (!out) return false;
@@ -110,14 +56,22 @@ bool solar::parseKp(const QByteArray &json, Observation *out) {
     const auto document = QJsonDocument::fromJson(json);
     if (!document.isArray()) return false;
     bool found = false;
+    const auto array = document.array();
+    const auto fields = array.isEmpty() ? QJsonArray() : array.first().toArray();
     for (const auto &value : document.array()) {
-        const auto object = value.toObject();
+        auto object = value.toObject();
+        if (value.isArray()) {
+            const auto values = value.toArray();
+            for (int i = 0; i < fields.size() && i < values.size(); ++i) object.insert(fields[i].toString(), values[i]);
+        }
         const auto time = utc(object.value("time_tag").toString());
-        const double kp = object.value("Kp").toDouble(-1);
+        bool converted = false;
+        const double kp = object.value("Kp").isString() ? object.value("Kp").toString().toDouble(&converted) : object.value("Kp").toDouble(-1);
+        if (object.value("Kp").isString() && !converted) continue;
         if (time.isValid() && kp >= 0 && kp <= 9) found = true;
         if (time.isValid() && kp >= 0 && kp <= 9 && (!out->kpUtc.isValid() || time > out->kpUtc)) {
             out->kpUtc = time; out->kp = kp;
-            const double ap = object.value("a_running").toDouble(-1);
+            const double ap = object.value("a_running").isString() ? object.value("a_running").toString().toDouble() : object.value("a_running").toDouble(-1);
             out->ap = ap >= 0 && ap <= 400 ? ap : std::numeric_limits<double>::quiet_NaN();
             found = true;
         }
@@ -135,7 +89,7 @@ SolarConditionsWidget::SolarConditionsWidget(bool ukrainian, QWidget *parent)
         "F10.7: solar flux in sfu, with a 90-day mean. Kp: planetary geomagnetic activity (0-9). HF context only, not a MUF or point-to-point ionospheric forecast. Download is manual; no coordinates are sent.", this);
     notes->setWordWrap(true); layout->addWidget(notes);
     auto *source = new QPushButton(uk ? QString::fromUtf8(u8"Про індекси NOAA") : "NOAA index reference", this);
-    layout->addWidget(source); layout->addStretch();
+    layout->addWidget(source); layout->addWidget(new SpaceEventsFeedWidget(uk, this), 1);
     status->setText(uk ? QString::fromUtf8(u8"Дані ще не завантажені") : "Not downloaded yet");
     connect(refreshButton, &QPushButton::clicked, this, &SolarConditionsWidget::refresh);
     connect(source, &QPushButton::clicked, this, []() {
@@ -153,8 +107,9 @@ void SolarConditionsWidget::refresh() {
     worker = QThread::create([this]() {
         solar::Observation observation = last;
         QString errorFlux, errorKp;
-        const auto flux = fetch("/json/f107_cm_flux.json", cancel, &errorFlux);
-        const auto kp = cancel.load() ? QByteArray() : fetch("/products/noaa-planetary-k-index.json", cancel, &errorKp);
+        const auto fluxSource = spaceevents::source("noaa_flux"), kpSource = spaceevents::source("noaa_kp");
+        const auto flux = fluxSource.enabled ? fetchPublicData(QUrl(fluxSource.url), cancel, &errorFlux) : QByteArray();
+        const auto kp = cancel.load() || !kpSource.enabled ? QByteArray() : fetchPublicData(QUrl(kpSource.url), cancel, &errorKp);
         const bool fluxOkay = solar::parseFlux(flux, &observation);
         const bool kpOkay = solar::parseKp(kp, &observation);
         QMetaObject::invokeMethod(this, [this, observation, fluxOkay, kpOkay, errorFlux, errorKp]() {

@@ -274,6 +274,10 @@ struct RadioSettings {
     bool cwDecoderAdaptiveSpeed = true;
     int cwDecoderAlphabet = 2;
     int cwDecoderSelectivity = 5;
+    double pskDecoderToneHz = 1000.0;
+    int pskDecoderSquelchPercent = 50;
+    bool pskDecoderAfc = true;
+    int pskDecoderEncoding = 0;
     std::uint8_t gpoValue = 0;
     bool dmrLabEnabled = false;
     int dmrLabColorCode = -1;

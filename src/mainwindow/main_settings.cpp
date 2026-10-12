@@ -467,6 +467,8 @@ void YourClassName::loadPersistentSettings() {
                      SCAN_MEASUREMENT_MIN_UPDATE_MS,
                      SCAN_MEASUREMENT_MAX_UPDATE_MS);
     spectrumScienceMaxHoldEnabled = settings.value("spectrumScience/maxHold", spectrumScienceMaxHoldEnabled).toBool();
+    if (settings.contains("spectrumScience/markers"))
+        spectrumScienceAnalyzer.restoreMarkerConfiguration(QJsonDocument::fromJson(settings.value("spectrumScience/markers").toByteArray()).array());
     spectrumScienceMinHoldEnabled = settings.value("spectrumScience/minHold", spectrumScienceMinHoldEnabled).toBool();
     spectrumScienceAverageEnabled = settings.value("spectrumScience/average", spectrumScienceAverageEnabled).toBool();
     spectrumScienceAverageSeconds = (std::clamp)(settings.value("spectrumScience/averageSeconds",
@@ -830,6 +832,8 @@ void YourClassName::loadPersistentSettings() {
         point.amplitudeOffsetDb = settings.value(QStringLiteral("amplitudeOffsetDb")).toDouble();
         point.uncertaintyDb = settings.value(QStringLiteral("uncertaintyDb"), 0.0).toDouble();
         point.note = settings.value(QStringLiteral("note")).toString();
+        point.conditions = ReceiverCalibrationContext::fromJson(QJsonDocument::fromJson(
+            settings.value(QStringLiteral("conditions")).toByteArray()).object());
         calibrationPoints.append(point);
     }
     settings.endArray();
@@ -1143,6 +1147,15 @@ void YourClassName::loadPersistentSettings() {
     if (cwDecoderControlsWidget) {
         cwDecoderControlsWidget->setVisible(pendingSettings.modulationType == MOD_CW);
     }
+    pendingSettings.pskDecoderToneHz = std::clamp(settings.value("digital/pskToneHz",1000).toDouble(),100.0,3500.0);
+    pendingSettings.pskDecoderSquelchPercent = std::clamp(settings.value("digital/pskSquelch",50).toInt(),1,100);
+    pendingSettings.pskDecoderAfc = settings.value("digital/pskAfc",true).toBool();
+    pendingSettings.pskDecoderEncoding = std::clamp(settings.value("digital/pskEncoding",0).toInt(),0,1);
+    if (pskDecoderToneSpin) { QSignalBlocker b(pskDecoderToneSpin); pskDecoderToneSpin->setValue(pendingSettings.pskDecoderToneHz); }
+    if (pskDecoderSquelchSpin) { QSignalBlocker b(pskDecoderSquelchSpin); pskDecoderSquelchSpin->setValue(pendingSettings.pskDecoderSquelchPercent); }
+    if (pskDecoderAfcCheckbox) { QSignalBlocker b(pskDecoderAfcCheckbox); pskDecoderAfcCheckbox->setChecked(pendingSettings.pskDecoderAfc); }
+    if (pskDecoderEncodingCombo) { QSignalBlocker b(pskDecoderEncodingCombo); pskDecoderEncodingCombo->setCurrentIndex(pendingSettings.pskDecoderEncoding); }
+    if (pskDecoderControlsWidget) pskDecoderControlsWidget->setVisible(pendingSettings.modulationType == MOD_PSK);
     auto setComboToData = [](QComboBox *combo, const QVariant &data) {
         if (!combo) {
             return;
@@ -1572,6 +1585,7 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("spectrumMeasurement/binMhz", scanMeasurementBinMhz);
     settings.setValue("spectrumMeasurement/updateIntervalMs", scanMeasurementUpdateIntervalMs);
     settings.setValue("spectrumScience/maxHold", spectrumScienceMaxHoldEnabled);
+    settings.setValue("spectrumScience/markers", QJsonDocument(spectrumScienceAnalyzer.markerConfiguration()).toJson(QJsonDocument::Compact));
     settings.setValue("spectrumScience/minHold", spectrumScienceMinHoldEnabled);
     settings.setValue("spectrumScience/average", spectrumScienceAverageEnabled);
     settings.setValue("spectrumScience/averageSeconds", spectrumScienceAverageSeconds);
@@ -1772,6 +1786,7 @@ void YourClassName::savePersistentSettings() {
         settings.setValue(QStringLiteral("amplitudeOffsetDb"), point.amplitudeOffsetDb);
         settings.setValue(QStringLiteral("uncertaintyDb"), point.uncertaintyDb);
         settings.setValue(QStringLiteral("note"), point.note);
+        settings.setValue(QStringLiteral("conditions"), QJsonDocument(point.conditions.toJson()).toJson(QJsonDocument::Compact));
     }
     settings.endArray();
     settings.setValue("ui/waterfallRowsPerFrame", waterfallRowsPerFrame);
@@ -1847,6 +1862,10 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("digital/cwToneHz",
                       cwDecoderToneSpin ? cwDecoderToneSpin->value()
                                         : pendingSettings.cwDecoderToneHz);
+    settings.setValue("digital/pskToneHz", pendingSettings.pskDecoderToneHz);
+    settings.setValue("digital/pskSquelch", pendingSettings.pskDecoderSquelchPercent);
+    settings.setValue("digital/pskAfc", pendingSettings.pskDecoderAfc);
+    settings.setValue("digital/pskEncoding", pendingSettings.pskDecoderEncoding);
     settings.setValue("digital/cwInitialWpm",
                       cwDecoderWpmSpin ? cwDecoderWpmSpin->value()
                                        : pendingSettings.cwDecoderWpm);

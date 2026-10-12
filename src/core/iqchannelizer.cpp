@@ -211,7 +211,8 @@ IqChannelizer::Result IqChannelizer::processFloatIq(const float *samples,
                                                     std::size_t floatCount,
                                                     const RadioSettings &settings,
                                                     std::vector<float> &output,
-                                                    bool applyAgc) {
+                                                    bool applyAgc,
+                                                    const Options *options) {
     output.clear();
 
     Result result;
@@ -226,20 +227,32 @@ IqChannelizer::Result IqChannelizer::processFloatIq(const float *samples,
     }
 
     const std::size_t iqSamples = floatCount / 2U;
-    const double targetRate = channelizerTargetRate(settings);
+    const double targetRate = options ? options->outputRateHz : channelizerTargetRate(settings);
+    if (!std::isfinite(targetRate) || targetRate <= 0.0 ||
+        (options && (targetRate > settings.sampleRate || !std::isfinite(options->cutoffHz) ||
+                     options->cutoffHz <= 0.0 || options->cutoffHz >= targetRate * 0.45))) return result;
     const int totalDecimationFactor =
         (std::max)(1, static_cast<int>(std::floor(settings.sampleRate / targetRate)));
-    const int frontDecimationFactor =
+    int frontDecimationFactor =
         frontDecimationFactorForRatio(totalDecimationFactor);
+    const int requestedDecimation = options ? options->decimationFactor : 0;
+    if (requestedDecimation < 0 || requestedDecimation > 4096 ||
+        (requestedDecimation > 0 && settings.sampleRate / requestedDecimation < targetRate)) return result;
+    if (requestedDecimation > 0) {
+        frontDecimationFactor = 1;
+        while (frontDecimationFactor < 64 && requestedDecimation % (frontDecimationFactor * 2) == 0)
+            frontDecimationFactor *= 2;
+    }
     configureFrontDecimator(frontDecimationFactor);
     const double frontOutputRate =
         settings.sampleRate / static_cast<double>(frontDecimationFactor);
     const int coarseDecimationFactor =
+        requestedDecimation > 0 ? requestedDecimation / frontDecimationFactor :
         (std::max)(1, static_cast<int>(std::floor(frontOutputRate / targetRate)));
     const double coarseRate =
         frontOutputRate / static_cast<double>(coarseDecimationFactor);
     const double outputRate = (std::min)(targetRate, coarseRate);
-    const double cutoff = channelizerCutoff(settings, outputRate);
+    const double cutoff = options ? options->cutoffHz : channelizerCutoff(settings, outputRate);
     configureResampler(coarseRate, outputRate, cutoff);
     const float preLowPassAlpha = static_cast<float>((std::clamp)(
         1.0 - std::exp(-TWO_PI * cutoff / frontOutputRate),

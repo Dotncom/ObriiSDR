@@ -14,6 +14,7 @@
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QLabel>
+#include <QJsonDocument>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QProgressBar>
@@ -31,6 +32,14 @@
 #include <limits>
 
 namespace {
+
+QTableWidgetItem *calibrationConditionsItem(const ReceiverCalibrationContext &context) {
+    auto *item = new QTableWidgetItem(context.description());
+    item->setData(Qt::UserRole, context.toJson());
+    item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+    item->setToolTip(context.description());
+    return item;
+}
 
 class NumericTableWidgetItem : public QTableWidgetItem {
 public:
@@ -514,19 +523,22 @@ void YourClassName::openPresetManager() {
         pageLayout->addWidget(calibrationEnabledCheckbox);
 
         QTableWidget *table = new QTableWidget(page);
-        table->setColumnCount(5);
+        table->setColumnCount(6);
         table->setHorizontalHeaderLabels({
             uiText(QStringLiteral("calibration_frequency_mhz"), QStringLiteral("Frequency MHz")),
             uiText(QStringLiteral("calibration_frequency_offset_hz"), QStringLiteral("Frequency correction Hz")),
             uiText(QStringLiteral("calibration_amplitude_offset_db"), QStringLiteral("Amplitude correction dB")),
             uiText(QStringLiteral("calibration_uncertainty_db"), QStringLiteral("Uncertainty +/- dB")),
-            uiText(QStringLiteral("note"), QStringLiteral("Note"))
+            uiText(QStringLiteral("note"), QStringLiteral("Note")),
+            uiText(QStringLiteral("calibration_conditions"), QStringLiteral("Receiver conditions"))
         });
         table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
         table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
         table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
         table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
         table->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
+        table->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Interactive);
+        table->setColumnWidth(5, 200);
         table->setSelectionBehavior(QAbstractItemView::SelectRows);
         table->setSelectionMode(QAbstractItemView::SingleSelection);
         table->setSortingEnabled(false);
@@ -538,6 +550,7 @@ void YourClassName::openPresetManager() {
             table->setItem(row, 2, new QTableWidgetItem(QString::number(point.amplitudeOffsetDb, 'f', 3)));
             table->setItem(row, 3, new QTableWidgetItem(QString::number(point.uncertaintyDb, 'f', 2)));
             table->setItem(row, 4, new QTableWidgetItem(point.note));
+            table->setItem(row, 5, calibrationConditionsItem(point.conditions));
             ++row;
         }
 
@@ -558,6 +571,55 @@ void YourClassName::openPresetManager() {
         buttonLayout->addWidget(removeButton);
         buttonLayout->addWidget(sortButton);
         buttonLayout->addWidget(wizardButton);
+        auto *conditionsButton = new QPushButton(uiText("calibration_conditions_edit", "Conditions..."), page);
+        buttonLayout->addWidget(conditionsButton);
+        QObject::connect(conditionsButton, &QPushButton::clicked, table, [this, table]() {
+            const int row = table->currentRow();
+            if (row < 0) return;
+            const auto old = ReceiverCalibrationContext::fromJson(table->item(row, 5)
+                ? table->item(row, 5)->data(Qt::UserRole).toJsonObject() : QJsonObject{});
+            QDialog editor(table);
+            editor.setWindowTitle(uiText("calibration_conditions", "Receiver conditions"));
+            auto *form = new QFormLayout(&editor);
+            auto *backend = new QComboBox(&editor);
+            backend->setEditable(true);
+            backend->addItems({"*", "fobos-standard", "fobos-agile", "rtl-native", "rtl-tcp", "hackrf-native", "soapy"});
+            backend->setCurrentText(old.backendId.isEmpty() ? "*" : old.backendId);
+            form->addRow(uiText("receiver", "Receiver:"), backend);
+            const auto integer = [&](const QString &label, int value) {
+                auto *spin = new QSpinBox(&editor);
+                spin->setRange(-1, 1000); spin->setSpecialValueText("*"); spin->setValue(value);
+                form->addRow(label, spin); return spin;
+            };
+            auto *input = integer(uiText("calibration_input", "Input mode:"), old.inputMode);
+            auto *rate = new QDoubleSpinBox(&editor);
+            rate->setRange(0, 100000); rate->setDecimals(6); rate->setSpecialValueText("*"); rate->setSuffix(" MS/s");
+            rate->setValue(old.sampleRateHz/1e6); form->addRow(uiText("sample_rate", "Sample rate:"), rate);
+            auto *lna = integer("LNA", old.lnaGain);
+            auto *vga = integer("VGA", old.vgaGain);
+            auto *rtl = integer(uiText("calibration_rtl_gain", "RTL gain (0.1 dB):"), old.rtlGainTenthsDb);
+            auto *state = integer(uiText("calibration_gain_state", "AGC / RF amp (0/1):"), old.gainState);
+            state->setMaximum(1);
+            auto *bind = new QPushButton(uiText("calibration_bind_current", "Use current receiver conditions"), &editor);
+            form->addRow(bind);
+            auto *warning = new QLabel(uiText("calibration_agc_warning", "For absolute levels disable AGC and keep the calibrated hardware gain. An AGC state is not a known gain."), &editor);
+            warning->setWordWrap(true); form->addRow(warning);
+            QObject::connect(bind, &QPushButton::clicked, &editor, [=]() {
+                const auto c = receiverCalibrationContext(pendingSettings);
+                backend->setCurrentText(c.backendId); input->setValue(c.inputMode); rate->setValue(c.sampleRateHz/1e6);
+                lna->setValue(c.lnaGain); vga->setValue(c.vgaGain); rtl->setValue(c.rtlGainTenthsDb); state->setValue(c.gainState);
+            });
+            auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &editor);
+            form->addRow(buttons);
+            QObject::connect(buttons, &QDialogButtonBox::accepted, &editor, &QDialog::accept);
+            QObject::connect(buttons, &QDialogButtonBox::rejected, &editor, &QDialog::reject);
+            if (editor.exec() != QDialog::Accepted) return;
+            ReceiverCalibrationContext c;
+            c.backendId = backend->currentText().trimmed(); if (c.backendId == "*") c.backendId.clear();
+            c.inputMode = input->value(); c.sampleRateHz = rate->value()*1e6;
+            c.lnaGain = lna->value(); c.vgaGain = vga->value(); c.rtlGainTenthsDb = rtl->value(); c.gainState = state->value();
+            table->setItem(row, 5, calibrationConditionsItem(c));
+        });
         buttonLayout->addStretch();
         pageLayout->addWidget(table);
         pageLayout->addWidget(interpolationHint);
@@ -572,6 +634,7 @@ void YourClassName::openPresetManager() {
             table->setItem(row, 2, new QTableWidgetItem(QStringLiteral("0.000")));
             table->setItem(row, 3, new QTableWidgetItem(QStringLiteral("0.00")));
             table->setItem(row, 4, new QTableWidgetItem());
+            table->setItem(row, 5, calibrationConditionsItem(receiverCalibrationContext(pendingSettings)));
             table->setCurrentCell(row, 0);
             table->editItem(table->item(row, 0));
         });
@@ -777,7 +840,7 @@ void YourClassName::openPresetManager() {
             });
 
             QObject::connect(addPointButton, &QPushButton::clicked, &wizard,
-                             [table, calibrationEnabledCheckbox, uncertaintySpin, noteEdit,
+                             [this, table, calibrationEnabledCheckbox, uncertaintySpin, noteEdit,
                               addPointButton, &result]() {
                 if (!result.valid) return;
                 const int row = table->rowCount();
@@ -791,6 +854,7 @@ void YourClassName::openPresetManager() {
                 table->setItem(row, 3, new QTableWidgetItem(
                     QString::number(uncertaintySpin->value(), 'f', 2)));
                 table->setItem(row, 4, new QTableWidgetItem(noteEdit->text().trimmed()));
+                table->setItem(row, 5, calibrationConditionsItem(receiverCalibrationContext(pendingSettings)));
                 table->setCurrentCell(row, 0);
                 calibrationEnabledCheckbox->setChecked(true);
                 addPointButton->setEnabled(false);
@@ -1159,14 +1223,19 @@ void YourClassName::openPresetManager() {
             point.amplitudeOffsetDb = amplitudeOffsetDb;
             point.uncertaintyDb = uncertaintyDb;
             point.note = note.left(256);
+            if (table->item(row, 5)) point.conditions = ReceiverCalibrationContext::fromJson(table->item(row, 5)->data(Qt::UserRole).toJsonObject());
             next.append(point);
         }
         std::sort(next.begin(), next.end(),
                   [](const ReceiverCalibrationPoint &a, const ReceiverCalibrationPoint &b) {
+                      const auto aKey = QJsonDocument(a.conditions.toJson()).toJson(QJsonDocument::Compact);
+                      const auto bKey = QJsonDocument(b.conditions.toJson()).toJson(QJsonDocument::Compact);
+                      if (aKey != bKey) return aKey < bKey;
                       return a.frequencyHz < b.frequencyHz;
                   });
         for (int i = 1; i < next.size(); ++i) {
-            if (std::abs(next.at(i).frequencyHz - next.at(i - 1).frequencyHz) < 0.001) {
+            if (std::abs(next.at(i).frequencyHz - next.at(i - 1).frequencyHz) < 0.001 &&
+                next.at(i).conditions.toJson() == next.at(i - 1).conditions.toJson()) {
                 if (error) {
                     *error = uiText(QStringLiteral("duplicate_calibration_frequency"),
                                     QStringLiteral("Calibration frequencies must be unique."));

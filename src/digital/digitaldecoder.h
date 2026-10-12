@@ -13,6 +13,8 @@
 #include "dmrvocoder.h"
 #include "dmrprivacyprocessor.h"
 #include "cwaudiodecoder.h"
+#include "psk31audiodecoder.h"
+#include <QTextCodec>
 #include "radiosettings.h"
 
 class DigitalDecoder : public QObject {
@@ -125,6 +127,10 @@ private:
     std::vector<int> recentFt8CandidateAnalysis;
     QString lastStatus;
     CwAudioDecoder cwDecoder;
+    Psk31AudioDecoder pskDecoder;
+    std::unique_ptr<QTextDecoder> pskTextDecoder;
+    int pskEncoding = -1;
+    qint64 pskStatusSamples = 0;
     DmrDecoder dmrDecoder;
     DmrPrivacyProcessor dmrPrivacy;
     DmrVocoder dmrVocoder;

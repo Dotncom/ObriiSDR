@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 6.0.0)
+project(ObriiSDR VERSION 6.1.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -181,6 +181,12 @@ set(SOURCES
     src/wireless/wirelesscaptureworker.h
     src/wireless/wirelesslabdialog.cpp
     src/wireless/wirelesslabdialog.h
+    src/wireless/wirelesspacketdetails.cpp
+    src/wireless/wirelesspacketdetails.h
+    src/wireless/wifiphywidget.cpp
+    src/wireless/wifiphywidget.h
+    src/wireless/wifiliveiqworker.cpp
+    src/wireless/wifiliveiqworker.h
     src/core/dmrcicdecimator.h
     src/mainwindow/main_network.cpp
     src/mainwindow/main_network_audio.cpp
@@ -203,6 +209,11 @@ set(SOURCES
     src/core/channelizerutils.h
     src/core/iqchannelizer.cpp
     src/core/iqchannelizer.h
+    src/core/dspgraphmodel.cpp
+    src/core/dspgraphmodel.h
+    src/core/dspbranchengine.cpp
+    src/core/dspbranchengine.h
+    src/core/fftplannermutex.cpp
     src/utils/appconstants.h
     src/utils/appsettingsutils.cpp
     src/utils/appsettingsutils.h
@@ -238,6 +249,8 @@ set(SOURCES
     src/digital/ft8stationservices.cpp
     src/digital/ft8stationdialog.h
     src/digital/cwaudiodecoder.cpp
+    src/digital/psk31audiodecoder.cpp
+    src/digital/psk31audiodecoder.h
     src/digital/cwaudiodecoder.h
     src/backends/bladerfbackend.cpp
     src/backends/bladerfbackend.h
@@ -273,6 +286,21 @@ set(SOURCES
     src/research/spectrumiqeventrecorder.h
     src/research/spectrumscienceanalyzer.cpp
     src/research/spectrumscienceanalyzer.h
+    src/research/tonalspectrum.cpp
+    src/gnss/gnsssdrstream.cpp
+    src/gnss/gnsssdrstream.h
+    src/gnss/gnsssdrpvtdialog.cpp
+    src/gnss/gnsssdrpvtdialog.h
+    src/digital/lrptdecodedialog.cpp
+    src/digital/lrptdecodedialog.h
+    src/mainwindow/main_externaltools.cpp
+    src/research/tonalspectrum.h
+    src/research/hdf5spectrumexport.cpp
+    src/research/hdf5spectrumexport.h
+    src/research/hdf5spectrumexportui.cpp
+    src/research/hdf5spectrumexportui.h
+    src/research/publicdatafetch.cpp src/research/publicdatafetch.h
+    src/research/spaceeventsfeed.cpp src/research/spaceeventsfeed.h
     src/research/receivercalibrationtable.cpp
     src/research/receivercalibrationtable.h
     src/research/researchanalysisdialog.cpp
@@ -393,6 +421,12 @@ if(WIN32)
 endif()
 
 add_executable(ObriiSDR ${SOURCES})
+option(FOBOS_ENABLE_HF_PREDICTION "Optional isolated ITU HF planning dialog" ON)
+if(FOBOS_ENABLE_HF_PREDICTION)
+    add_subdirectory(src/propagation/ituhf)
+    target_link_libraries(ObriiSDR PRIVATE $<LINK_ONLY:fobos_hf_prediction>)
+    set_source_files_properties(src/research/propagationlabdialog.cpp PROPERTIES COMPILE_DEFINITIONS FOBOS_ENABLE_HF_PREDICTION=1)
+endif()
 
 if(MSVC)
     target_compile_options(ObriiSDR PRIVATE /utf-8)
@@ -488,7 +522,50 @@ if(FOBOS_HAS_VKFFT AND FOBOS_BUILD_GPU_FFT_SELFTEST)
     )
 endif()
 
+find_path(OBRII_HDF5_INCLUDE_DIR hdf5.h
+    HINTS "${CMAKE_SOURCE_DIR}/build/deps/hdf5-runtime/HDF5-1.14.6-win64/include"
+    PATH_SUFFIXES hdf5/serial)
+if(OBRII_HDF5_INCLUDE_DIR)
+    target_include_directories(ObriiSDR PRIVATE ${OBRII_HDF5_INCLUDE_DIR})
+    target_compile_definitions(ObriiSDR PRIVATE OBRII_HAS_HDF5_HEADERS=1)
+endif()
+
 if(FOBOS_BUILD_CW_SELFTEST)
+    add_executable(ObriiScienceSelfTest tools/science_selftest.cpp
+        src/research/tonalspectrum.cpp src/research/receivercalibrationtable.cpp
+        src/research/spectrumscienceanalyzer.cpp src/research/spectrumframerecorder.cpp
+        src/research/hdf5spectrumexport.cpp)
+    target_include_directories(ObriiScienceSelfTest PRIVATE src/research src/core src/ui src/utils)
+    target_link_libraries(ObriiScienceSelfTest PRIVATE Qt5::Core)
+    if(OBRII_HDF5_INCLUDE_DIR)
+        target_include_directories(ObriiScienceSelfTest PRIVATE ${OBRII_HDF5_INCLUDE_DIR})
+        target_compile_definitions(ObriiScienceSelfTest PRIVATE OBRII_HAS_HDF5_HEADERS=1)
+    endif()
+
+    add_executable(ObriiPsk31SelfTest tools/psk31_selftest.cpp src/digital/psk31audiodecoder.cpp)
+    add_executable(ObriiSpaceEventsSelfTest tools/spaceevents_selftest.cpp
+        src/research/spaceeventsfeed.cpp src/research/spaceeventsfeed.h src/research/publicdatafetch.cpp
+        src/research/solarconditionswidget.cpp src/research/solarconditionswidget.h src/utils/appsettingsutils.cpp)
+    target_include_directories(ObriiSpaceEventsSelfTest PRIVATE src/research src/utils)
+    target_link_libraries(ObriiSpaceEventsSelfTest PRIVATE Qt5::Widgets Qt5::Network)
+    if(WIN32)
+        target_link_libraries(ObriiSpaceEventsSelfTest PRIVATE winhttp)
+    endif()
+    if(MSVC)
+        target_compile_options(ObriiSpaceEventsSelfTest PRIVATE /utf-8)
+    endif()
+    add_executable(ObriiExternalBackendSelfTest tools/external_backend_selftest.cpp
+        src/gnss/gnsssdrstream.cpp src/gnss/gnsssdrstream.h
+        src/gnss/gnsssdrpvtdialog.cpp src/gnss/gnsssdrpvtdialog.h
+        src/digital/lrptdecodedialog.cpp src/digital/lrptdecodedialog.h
+        src/core/iqbuffer.cpp src/audio/playbackmanager.cpp src/audio/playbackmanager.h src/utils/samplefileutils.cpp)
+    target_include_directories(ObriiExternalBackendSelfTest PRIVATE src/gnss src/digital src/core src/audio src/utils)
+    target_link_libraries(ObriiExternalBackendSelfTest PRIVATE Qt5::Widgets Qt5::Network)
+    if(MSVC)
+        target_compile_options(ObriiExternalBackendSelfTest PRIVATE /utf-8)
+    endif()
+    target_include_directories(ObriiPsk31SelfTest PRIVATE src/digital)
+    target_link_libraries(ObriiPsk31SelfTest PRIVATE Qt5::Core)
     add_executable(ObriiDiagnosticLoggingSelfTest
         tools/diagnostic_logging_selftest.cpp src/core/appdiagnostics.cpp)
     target_include_directories(ObriiDiagnosticLoggingSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
@@ -503,6 +580,7 @@ if(FOBOS_BUILD_CW_SELFTEST)
         src/research/propagationlabdialog.cpp src/research/propagationlabdialog.h
         src/utils/appsettingsutils.cpp
         src/research/solarconditionswidget.cpp src/research/solarconditionswidget.h
+        src/research/publicdatafetch.cpp src/research/spaceeventsfeed.cpp src/research/spaceeventsfeed.h
         src/digital/ft8stationutils.cpp src/digital/ft8countrycatalog.cpp
         src/gnss/qthmapwidget.cpp src/gnss/qthmapwidget.h src/gnss/qthlocator.cpp
         src/app_resources.qrc)
@@ -511,6 +589,9 @@ if(FOBOS_BUILD_CW_SELFTEST)
         ${CMAKE_SOURCE_DIR}/src/research ${CMAKE_SOURCE_DIR}/src/digital ${CMAKE_SOURCE_DIR}/src/gnss)
     target_include_directories(ObriiPropagationSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src/utils)
     target_link_libraries(ObriiPropagationSelfTest PRIVATE ObriiItm Qt5::Widgets Qt5::Network)
+    if(FOBOS_ENABLE_HF_PREDICTION)
+        target_link_libraries(ObriiPropagationSelfTest PRIVATE $<LINK_ONLY:fobos_hf_prediction>)
+    endif()
     if(WIN32)
         target_link_libraries(ObriiPropagationSelfTest PRIVATE winhttp)
     endif()
@@ -520,6 +601,7 @@ if(FOBOS_BUILD_CW_SELFTEST)
 
     add_executable(ObriiDspFlowSelfTest
         tools/dsp_flow_selftest.cpp
+        tools/dsp_branch_selftest.cpp
         src/ui/dspflowpanel.cpp src/ui/dspflowpanel.h
         src/ui/multivfowidget.cpp src/ui/multivfowidget.h
         src/ui/dspresearchwidget.cpp
@@ -530,10 +612,14 @@ if(FOBOS_BUILD_CW_SELFTEST)
         src/ui/waterfall3drenderer.cpp
         src/utils/appsettingsutils.cpp
         src/core/iqbuffer.cpp
+        src/core/dspgraphmodel.cpp src/core/dspbranchengine.cpp
+        src/core/iqchannelizer.cpp src/core/channelizerutils.cpp
+        src/core/fftplannermutex.cpp
+        src/ui/audiofilterchainwidget.cpp src/audio/audiofilterchain.cpp
         src/scan/scanvisualassembler.cpp)
     get_target_property(OBRII_DSP_TEST_INCLUDES ObriiSDR INCLUDE_DIRECTORIES)
     target_include_directories(ObriiDspFlowSelfTest PRIVATE ${OBRII_DSP_TEST_INCLUDES})
-    target_link_libraries(ObriiDspFlowSelfTest PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets)
+    target_link_libraries(ObriiDspFlowSelfTest PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets ${FFTW_FLOAT_LIBRARY})
     target_compile_definitions(ObriiDspFlowSelfTest PRIVATE OBRII_VFO_SELFTEST=1)
     if(WIN32)
         target_link_libraries(ObriiDspFlowSelfTest PRIVATE opengl32)
@@ -565,6 +651,12 @@ if(FOBOS_BUILD_CW_SELFTEST)
         src/wireless/wirelesscaptureworker.h
         src/wireless/wirelesslabdialog.cpp
         src/wireless/wirelesslabdialog.h
+        src/wireless/wirelesspacketdetails.cpp
+        src/wireless/wirelesspacketdetails.h
+        src/wireless/wifiphywidget.cpp
+        src/wireless/wifiphywidget.h
+        src/wireless/wifiliveiqworker.cpp
+        src/wireless/wifiliveiqworker.h
         src/digital/dsdneobridge.cpp
         src/digital/dsdneobridge.h
         src/utils/dmrprivacyutils.cpp

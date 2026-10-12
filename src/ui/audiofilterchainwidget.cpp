@@ -626,6 +626,11 @@ public:
         });
 
         QVBoxLayout *layout = new QVBoxLayout(this);
+        auto *enabled = new QCheckBox(ukrainian ? QStringLiteral("Увімкнути фільтр") : QStringLiteral("Enable filter"), this);
+        enabled->setObjectName(QStringLiteral("audioFilterEnabled"));
+        enabled->setChecked(stage.enabled);
+        connect(enabled, &QCheckBox::toggled, this, [this](bool value) { if (enabledChanged) enabledChanged(value); });
+        layout->addWidget(enabled);
         layout->addLayout(form);
         layout->addWidget(responseWidget, 1);
         layout->addWidget(stayOnTop);
@@ -678,6 +683,7 @@ public:
     }
 
     std::function<void(const AudioFilterStage &)> stageChanged;
+    std::function<void(bool)> enabledChanged;
 
     AudioFilterStage result() const {
         AudioFilterStage value = stage;
@@ -957,6 +963,11 @@ AudioFilterChainWidget::AudioFilterChainWidget(QWidget *parent)
             return;
         }
         stages[item->row()].enabled = item->checkState() == Qt::Checked;
+        if (auto *editor = openEditors.value(stages[item->row()].id).data()) {
+            if (auto *box = editor->findChild<QCheckBox *>(QStringLiteral("audioFilterEnabled"))) {
+                const QSignalBlocker blocker(box); box->setChecked(stages[item->row()].enabled);
+            }
+        }
         emitConfigurationChanged();
     });
 
@@ -996,7 +1007,7 @@ void AudioFilterChainWidget::setLanguage(bool ukrainian) {
     rebuildTable(table->currentRow());
 }
 
-void AudioFilterChainWidget::ensureStage(const QString &id, AudioFilterKind kind) {
+void AudioFilterChainWidget::ensureStage(const QString &id, AudioFilterKind kind, bool initiallyEnabled) {
     if (id.trimmed().isEmpty()) {
         return;
     }
@@ -1019,9 +1030,20 @@ void AudioFilterChainWidget::ensureStage(const QString &id, AudioFilterKind kind
     }
     AudioFilterStage stage = defaultAudioFilterStage(kind);
     stage.id = id;
+    stage.enabled = initiallyEnabled;
     stages.push_back(stage);
     rebuildTable(stages.size() - 1);
     emitConfigurationChanged();
+}
+
+bool AudioFilterChainWidget::removeStageById(const QString &id) {
+    const int row = rowForStageId(id);
+    if (row < 0) return false;
+    closeEditorForStage(id);
+    stages.removeAt(row);
+    rebuildTable(std::min(row, stages.size() - 1));
+    emitConfigurationChanged();
+    return true;
 }
 
 bool AudioFilterChainWidget::openStageEditor(const QString &id) {
@@ -1154,6 +1176,9 @@ void AudioFilterChainWidget::editStage(int row) {
     ensureStageIds();
     const QString id = stages.at(row).id;
     if (QWidget *existing = openEditors.value(id).data()) {
+        if (auto *box = existing->findChild<QCheckBox *>(QStringLiteral("audioFilterEnabled"))) {
+            const QSignalBlocker blocker(box); box->setChecked(stages[row].enabled);
+        }
         existing->show();
         existing->raise();
         existing->activateWindow();
@@ -1162,6 +1187,13 @@ void AudioFilterChainWidget::editStage(int row) {
     AudioFilterEditorDialog *dialog = new AudioFilterEditorDialog(stages.at(row),
                                                                    ukrainianLanguage,
                                                                    this);
+    dialog->enabledChanged = [this, id](bool enabled) {
+        const int row = rowForStageId(id);
+        if (row < 0 || stages[row].enabled == enabled) return;
+        stages[row].enabled = enabled;
+        { const QSignalBlocker blocker(table); table->item(row, 1)->setCheckState(enabled ? Qt::Checked : Qt::Unchecked); }
+        emitConfigurationChanged();
+    };
     dialog->stageChanged = [this, id](const AudioFilterStage &updated) {
         const int currentRow = rowForStageId(id);
         if (currentRow < 0) {

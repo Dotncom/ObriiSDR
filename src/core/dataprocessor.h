@@ -69,14 +69,18 @@ public:
                                 QString *errorMessage = nullptr);
     void updateNetworkIqSettings(const RadioSettings &settings, bool channelizeFrames);
     void configureNetworkIqStreaming(const RadioSettings &settings, bool emitFrames, bool channelizeFrames);
+    void setWifiIqStreamingEnabled(bool enabled);
     std::shared_ptr<ZoomSpectrumProcessor> zoomSpectrumProcessor() const { return zoomProcessor; }
 signals:
     void iqFrameReady(const QByteArray &iqData, double sampleRate, int sampleCount, bool channelized);
+    void wifiIqFrameReady(const QByteArray &iqData, double sampleRate,
+                          double centerFrequency, int sampleCount);
     void readerFailed(int errorCode, bool stoppedByRequest);
 
 private:
     void emitIqFrame(const float *samples, std::size_t floatCount);
     void emitFullIqFrame(const float *samples, std::size_t floatCount);
+    void emitWifiIqFrame(const float *samples, std::size_t floatCount);
     void emitChannelIqFrame(const float *samples, std::size_t floatCount, const RadioSettings &settings);
     void resetNetworkIqState();
     void resetStreamDiagnostics();
@@ -96,6 +100,8 @@ private:
     std::atomic<bool> requestedQueueAudioBlocks;
     std::atomic<bool> requestedPublishIqSnapshot;
     std::atomic<bool> requestedEmitIqFrames;
+    std::atomic<bool> requestedWifiIqFrames{false};
+    float wifiIqGain = 0.0f;
     std::atomic<bool> requestedChannelizeIqFrames;
     std::atomic<bool> requestedAgileScanEnabled;
     std::atomic<bool> networkIqResetRequested;

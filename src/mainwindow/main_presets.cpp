@@ -70,6 +70,25 @@ void YourClassName::ensureDefaultFrequencyPresets() {
             listeningFrequencyPresets[name] = valueHz;
         }
     };
+    const QVector<QPair<const char *, double>> wirelessPresets = {
+        {"Wi-Fi 2.4 ch1 2412 MHz", 2412.0},
+        {"Wi-Fi 2.4 ch6 2437 MHz", 2437.0},
+        {"Wi-Fi 2.4 ch11 2462 MHz", 2462.0},
+        {"Wi-Fi 2.4 ch13 2472 MHz", 2472.0},
+        {"Wi-Fi 5 ch36 5180 MHz", 5180.0},
+        {"Wi-Fi 5 ch100 5500 MHz", 5500.0},
+        {"Wi-Fi 5 ch149 5745 MHz", 5745.0},
+        {"Wi-Fi 6 ch1 5955 MHz", 5955.0},
+        {"BLE advertising 37 2402 MHz", 2402.0},
+        {"BLE advertising 38 2426 MHz", 2426.0},
+        {"BLE advertising 39 2480 MHz", 2480.0},
+        {"Bluetooth 2.4 band center 2441 MHz", 2441.0},
+        {"GSM/LTE B8 downlink 942.5 MHz", 942.5},
+        {"NR n78 band center 3550 MHz", 3550.0}
+    };
+    for (const auto &preset : wirelessPresets) {
+        addMissingFrequencyPreset(QString::fromLatin1(preset.first), preset.second * 1000000.0);
+    }
     addMissingFrequencyPreset(QStringLiteral("LTE 700 downlink 780.5 MHz"), 780500000.0);
     addMissingFrequencyPreset(QStringLiteral("LTE 800 downlink 806 MHz"), 806000000.0);
     addMissingFrequencyPreset(QStringLiteral("UMTS/LTE 1800 downlink 1842.5 MHz"), 1842500000.0);

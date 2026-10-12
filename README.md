@@ -4,10 +4,10 @@ Obrii SDR is a wideband SDR receiver and research workstation, optimized first
 for RigExpert Fobos SDR hardware while also supporting additional receiver
 backends.
 The current packaged release is Windows-first, with active Linux/Raspberry Pi
-support and a separately maintained Android USB/network client. Version 6.0.0
-adds RF-tested known-key Motorola ARC4/AES-256 receive decryption, repaired DMR
-backend transport, an FT8 station manager, a parametric signal generator,
-terrain-based radio propagation and a beta wireless packet laboratory, while retaining
+support and a separately maintained Android USB/network client. Version 6.1.0
+adds optional live Wi-Fi IQ decoding, experimental HT20 support, research
+backends for GNSS/LRPT/HF prediction, and expanded measurement tools. It retains
+the 6.0.0 DMR, FT8, signal-generation and terrain-propagation features, plus
 the graphical DSP path designer, live audio-filter chain, Multi-VFO views, and
 hardware-tested native HackRF RX backend. Live I/Q/time 3D constellations and
 optional radial surfaces are available in Signal Lab, research and DSP widgets.
@@ -23,8 +23,12 @@ package changes.
 
 ## Windows Release Package
 
-Release 6.0.0 provides a Windows x64 ZIP and a Raspberry/Linux source tar.gz.
-Extract the Linux source with `tar -xzf ObriiSDR-v6.0.0-raspberry-source.tar.gz`;
+Release 6.1.0 provides a Windows x64 core ZIP, an optional Wireless add-on ZIP,
+and a Raspberry/Linux source tar.gz. The add-on contains the portable GNU Radio
+Wi-Fi and Wireshark tools; to enable them, run `Install-Wireless-AddOn.ps1` beside
+`ObriiSDR.exe` or extract the add-on into that same folder. See
+`docs/wireless_addon.md`. Npcap is not bundled.
+Extract the Linux source with `tar -xzf ObriiSDR-v6.1.0-raspberry-source.tar.gz`;
 the build/run shell scripts have executable permissions. Android packages are
 maintained and released separately.
 

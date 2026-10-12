@@ -5,6 +5,7 @@
 #include "audioprocessor.h"
 #include "iqbuffer.h"
 #include "diagnosticlogging.h"
+#include "fmphasediscriminator.h"
 #include <limits>
 
 #ifdef _MSC_VER
@@ -1032,6 +1033,10 @@ void AudioProcessor::processDemodulatorBlock(const std::vector<float>& iqBlock,
         1.0
         ));
     const bool digitalAudioMode = isDigitalAudioMode(modulationType);
+    const bool fastFm = settings.simplifiedAudioChannelizer &&
+        (demodulationType == MOD_NFM || demodulationType == MOD_WFM ||
+         demodulationType == MOD_ATV || demodulationType == MOD_APT || demodulationType == MOD_FSK);
+    const bool rotateIq = fShift != 0.0 || ncoPhase != 0.0;
     double demodAudioCutoff = demodAudioCutoffForMode(demodulationType, bandwidth);
     if (!digitalAudioMode && settings.audioLowPassHz > 0.0) {
         demodAudioCutoff = clampDouble(settings.audioLowPassHz, 100.0, 20000.0);
@@ -1173,24 +1178,22 @@ void AudioProcessor::processDemodulatorBlock(const std::vector<float>& iqBlock,
                 iSample = qSample;
                 qSample = 0.0f;
             }
-            const float mixedI = iSample * rotI - qSample * rotQ;
-            const float mixedQ = iSample * rotQ + qSample * rotI;
+            const float mixedI = rotateIq ? iSample * rotI - qSample * rotQ : iSample;
+            const float mixedQ = rotateIq ? iSample * rotQ + qSample * rotI : qSample;
             std::complex<float> mixedSample(mixedI, mixedQ);
             channelSumI += std::real(mixedSample);
             channelSumQ += std::imag(mixedSample);
         }
         ++decimationCount;
 
-        const float nextRotI = rotI * rotStepI - rotQ * rotStepQ;
-        const float nextRotQ = rotI * rotStepQ + rotQ * rotStepI;
-        rotI = nextRotI;
-        rotQ = nextRotQ;
-
-        if ((n & 4095) == 4095) {
-            const float norm = std::sqrt(rotI * rotI + rotQ * rotQ);
-            if (norm > 0.0f) {
-                rotI /= norm;
-                rotQ /= norm;
+        if (rotateIq) {
+            const float nextRotI = rotI * rotStepI - rotQ * rotStepQ;
+            const float nextRotQ = rotI * rotStepQ + rotQ * rotStepI;
+            rotI = nextRotI;
+            rotQ = nextRotQ;
+            if ((n & 4095) == 4095) {
+                const float norm = std::sqrt(rotI * rotI + rotQ * rotQ);
+                if (norm > 0.0f) { rotI /= norm; rotQ /= norm; }
             }
         }
 
@@ -1284,7 +1287,7 @@ void AudioProcessor::processDemodulatorBlock(const std::vector<float>& iqBlock,
         lowPassQ += lowPassAlpha * (channelQ - lowPassQ);
 
         const std::complex<float> filteredChannel(lowPassI, lowPassQ);
-        const float envelope = std::sqrt(lowPassI * lowPassI + lowPassQ * lowPassQ);
+        const float envelope = fastFm ? 0.0f : std::sqrt(lowPassI * lowPassI + lowPassQ * lowPassQ);
         float demodulatedSample = 0.0f;
 
         switch (demodulationType) {
@@ -1296,16 +1299,19 @@ void AudioProcessor::processDemodulatorBlock(const std::vector<float>& iqBlock,
         case MOD_DMR: {
             float limitedI = lowPassI;
             float limitedQ = lowPassQ;
-            const float magnitude = std::sqrt(limitedI * limitedI + limitedQ * limitedQ);
-            if (magnitude > 0.000001f) {
+            const float magnitude = fastFm ? 0.0f : std::sqrt(limitedI * limitedI + limitedQ * limitedQ);
+            if (!fastFm && magnitude > 0.000001f) {
                 const float invMagnitude = 1.0f / magnitude;
                 limitedI *= invMagnitude;
                 limitedQ *= invMagnitude;
             }
             if (fmPreviousValid) {
-                const float discriminatorQ = limitedQ * fmPrevI - limitedI * fmPrevQ;
-                const float discriminatorI = limitedI * fmPrevI + limitedQ * fmPrevQ;
-                demodulatedSample = std::atan2(discriminatorQ, discriminatorI);
+                if (fastFm) demodulatedSample = fmPhaseDifference(limitedI, limitedQ, fmPrevI, fmPrevQ);
+                else {
+                    const float discriminatorQ = limitedQ * fmPrevI - limitedI * fmPrevQ;
+                    const float discriminatorI = limitedI * fmPrevI + limitedQ * fmPrevQ;
+                    demodulatedSample = std::atan2(discriminatorQ, discriminatorI);
+                }
             }
             fmPrevI = limitedI;
             fmPrevQ = limitedQ;
@@ -1482,10 +1488,19 @@ void AudioProcessor::SDRThread() {
     std::uint64_t healthAudioSamples = 0;
     double healthDemodMs = 0.0;
     double healthMaxDemodMs = 0.0;
-    std::uint64_t previousDroppedBlocks = IqBuffer::stats().droppedQueuedBlocks;
+    bool healthLoggingActive = fobosVerboseLoggingEnabled();
+    std::uint64_t previousDroppedBlocks = healthLoggingActive ? IqBuffer::stats().droppedQueuedBlocks : 0;
 
     while (running) {
         const RadioSettings settings = currentSettingsSnapshot();
+        const bool healthLogging = fobosVerboseLoggingEnabled();
+        if (healthLogging != healthLoggingActive) {
+            healthLoggingActive = healthLogging;
+            healthWindowStart = std::chrono::steady_clock::now();
+            healthBlocks = healthIqSamples = healthAudioSamples = healthSequenceGaps = 0;
+            healthDemodMs = healthMaxDemodMs = 0.0;
+            if (healthLogging) previousDroppedBlocks = IqBuffer::stats().droppedQueuedBlocks;
+        }
         if (demodulatorResetRequested.exchange(false) ||
             activeInputMode != settings.inputMode ||
             activeModulationType != settings.modulationType ||
@@ -1536,71 +1551,73 @@ void AudioProcessor::SDRThread() {
         }
         previousIqSequence = iqBlockSequence;
 
-        const auto demodStart = std::chrono::steady_clock::now();
+        const auto demodStart = healthLogging ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         int dmrBasebandSampleRate = 0;
         processDemodulatorBlock(iqBlock,
                                 audioSamples,
                                 dmrBasebandSamples,
                                 dmrBasebandSampleRate,
                                 settings);
-        const auto demodEnd = std::chrono::steady_clock::now();
+        const auto demodEnd = healthLogging ? std::chrono::steady_clock::now() : demodStart;
         const double demodMs = std::chrono::duration<double, std::milli>(demodEnd - demodStart).count();
-        ++healthBlocks;
-        healthIqSamples += static_cast<std::uint64_t>(iqBlock.size() / 2U);
-        healthAudioSamples += static_cast<std::uint64_t>(
-            settings.modulationType == MOD_DMR ? dmrBasebandSamples.size() : audioSamples.size());
-        healthDemodMs += demodMs;
-        healthMaxDemodMs = (std::max)(healthMaxDemodMs, demodMs);
+        if (healthLogging) {
+            ++healthBlocks;
+            healthIqSamples += static_cast<std::uint64_t>(iqBlock.size() / 2U);
+            healthAudioSamples += static_cast<std::uint64_t>(
+                settings.modulationType == MOD_DMR ? dmrBasebandSamples.size() : audioSamples.size());
+            healthDemodMs += demodMs;
+            healthMaxDemodMs = (std::max)(healthMaxDemodMs, demodMs);
 
-        const auto healthNow = std::chrono::steady_clock::now();
-        const double healthElapsedMs =
-            std::chrono::duration<double, std::milli>(healthNow - healthWindowStart).count();
-        if (healthElapsedMs >= 1000.0) {
-            const IqBuffer::Stats iqStats = IqBuffer::stats();
-            const std::uint64_t droppedBlocks =
-                iqStats.droppedQueuedBlocks >= previousDroppedBlocks
-                    ? iqStats.droppedQueuedBlocks - previousDroppedBlocks
-                    : iqStats.droppedQueuedBlocks;
-            const double elapsedSeconds = healthElapsedMs / 1000.0;
-            const double producedRatio =
-                static_cast<double>(healthAudioSamples) /
-                    ((std::max)(0.001, elapsedSeconds) *
-                     (settings.modulationType == MOD_DMR ? activeDmrBasebandSampleRate : AUDIO_OUTPUT_RATE));
-            const double queuedMs = settings.sampleRate > 0.0
-                                        ? static_cast<double>(iqStats.queuedFloatCount) * 500.0 /
-                                              settings.sampleRate
-                                        : 0.0;
-            if (fobosVerboseLoggingEnabled()) {
-                qDebug() << "[Audio health]"
-                           << "channelizer"
-                           << (settings.modulationType == MOD_DMR ?
-                               (dmrLastLoggedDecimationFactor <= DmrCicDecimator::MaxFixedPointFactor ?
-                                    "dmr-cic5" : "dmr-box5") :
-                               (settings.simplifiedAudioChannelizer ? "simplified" : "multistage"))
-                           << "realtimeRatio" << producedRatio
-                           << "configuredRate" << settings.sampleRate
-                           << "estimatedRate" << iqStats.sampleRateEstimate
-                           << "blocks" << static_cast<qulonglong>(healthBlocks)
-                           << "iqMs" << (settings.sampleRate > 0.0
-                                             ? static_cast<double>(healthIqSamples) * 1000.0 /
-                                                   settings.sampleRate
-                                             : 0.0)
-                           << "pcmMs" << static_cast<double>(healthAudioSamples) * 1000.0 /
-                                             (settings.modulationType == MOD_DMR ? activeDmrBasebandSampleRate : AUDIO_OUTPUT_RATE)
-                           << "demodMs" << healthDemodMs
-                           << "maxDemodMs" << healthMaxDemodMs
-                           << "queuedMs" << queuedMs
-                           << "sequenceGaps" << static_cast<qulonglong>(healthSequenceGaps)
-                           << "droppedBlocks" << static_cast<qulonglong>(droppedBlocks);
+            const auto healthNow = std::chrono::steady_clock::now();
+            const double healthElapsedMs =
+                std::chrono::duration<double, std::milli>(healthNow - healthWindowStart).count();
+            if (healthElapsedMs >= 1000.0) {
+                const IqBuffer::Stats iqStats = IqBuffer::stats();
+                const std::uint64_t droppedBlocks =
+                    iqStats.droppedQueuedBlocks >= previousDroppedBlocks
+                        ? iqStats.droppedQueuedBlocks - previousDroppedBlocks
+                        : iqStats.droppedQueuedBlocks;
+                const double elapsedSeconds = healthElapsedMs / 1000.0;
+                const double producedRatio =
+                    static_cast<double>(healthAudioSamples) /
+                        ((std::max)(0.001, elapsedSeconds) *
+                         (settings.modulationType == MOD_DMR ? activeDmrBasebandSampleRate : AUDIO_OUTPUT_RATE));
+                const double queuedMs = settings.sampleRate > 0.0
+                                            ? static_cast<double>(iqStats.queuedFloatCount) * 500.0 /
+                                                  settings.sampleRate
+                                            : 0.0;
+                if (fobosVerboseLoggingEnabled()) {
+                    qDebug() << "[Audio health]"
+                               << "channelizer"
+                               << (settings.modulationType == MOD_DMR ?
+                                   (dmrLastLoggedDecimationFactor <= DmrCicDecimator::MaxFixedPointFactor ?
+                                        "dmr-cic5" : "dmr-box5") :
+                                   (settings.simplifiedAudioChannelizer ? "simplified" : "multistage"))
+                               << "realtimeRatio" << producedRatio
+                               << "configuredRate" << settings.sampleRate
+                               << "estimatedRate" << iqStats.sampleRateEstimate
+                               << "blocks" << static_cast<qulonglong>(healthBlocks)
+                               << "iqMs" << (settings.sampleRate > 0.0
+                                                 ? static_cast<double>(healthIqSamples) * 1000.0 /
+                                                       settings.sampleRate
+                                                 : 0.0)
+                               << "pcmMs" << static_cast<double>(healthAudioSamples) * 1000.0 /
+                                                 (settings.modulationType == MOD_DMR ? activeDmrBasebandSampleRate : AUDIO_OUTPUT_RATE)
+                               << "demodMs" << healthDemodMs
+                               << "maxDemodMs" << healthMaxDemodMs
+                               << "queuedMs" << queuedMs
+                               << "sequenceGaps" << static_cast<qulonglong>(healthSequenceGaps)
+                               << "droppedBlocks" << static_cast<qulonglong>(droppedBlocks);
+                }
+                healthWindowStart = healthNow;
+                healthSequenceGaps = 0;
+                healthBlocks = 0;
+                healthIqSamples = 0;
+                healthAudioSamples = 0;
+                healthDemodMs = 0.0;
+                healthMaxDemodMs = 0.0;
+                previousDroppedBlocks = iqStats.droppedQueuedBlocks;
             }
-            healthWindowStart = healthNow;
-            healthSequenceGaps = 0;
-            healthBlocks = 0;
-            healthIqSamples = 0;
-            healthAudioSamples = 0;
-            healthDemodMs = 0.0;
-            healthMaxDemodMs = 0.0;
-            previousDroppedBlocks = iqStats.droppedQueuedBlocks;
         }
         if (!dmrBasebandSamples.empty() && dmrBasebandSampleRate > 0) {
             dmrPcmPending.append(

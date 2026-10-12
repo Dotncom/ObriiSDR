@@ -403,7 +403,7 @@ void YourClassName::handleGnssSerialReadyRead() {
     }
 }
 
-void YourClassName::processGnssNmeaLine(const QString &line, bool fromReplay) {
+void YourClassName::processGnssNmeaLine(const QString &line, bool fromReplay, bool fromSdr) {
     const QString trimmed = line.trimmed();
     if (trimmed.isEmpty()) {
         return;
@@ -521,10 +521,10 @@ void YourClassName::processGnssNmeaLine(const QString &line, bool fromReplay) {
     QString status;
     const QString policy = normalizedGnssPositionPolicy(gnssPositionPolicy);
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-    if (policy == QStringLiteral("ubx_only") ||
+    if (!fromSdr && (policy == QStringLiteral("ubx_only") ||
         (policy == QStringLiteral("ubx_preferred") &&
          gnssLastUbxFixMs > 0 &&
-         nowMs - gnssLastUbxFixMs <= 3000)) {
+         nowMs - gnssLastUbxFixMs <= 3000))) {
         if (fobosVerboseLoggingEnabled() &&
             (gnssSerialSentenceCount <= 4 || (gnssSerialSentenceCount % 64) == 0)) {
             qDebug() << "[GNSS policy] NMEA fix ignored"

@@ -31,7 +31,6 @@ constexpr int FFT_PROFILE_MIN_LENGTH = 524288;
 constexpr int FFT_AUTO_GPU_BENCHMARK_MAX_LENGTH = 8388608;
 constexpr unsigned int FFT_MAX_WORKER_THREADS = 4;
 
-std::mutex fftwPlannerMutex;
 bool fftwWisdomImported = false;
 #ifdef FOBOSAPP_HAS_FFTW_THREADS
 bool fftwThreadsInitializationAttempted = false;
@@ -147,10 +146,6 @@ std::complex<float> clampComplexMagnitude(std::complex<float> value, float maxMa
     }
     return value * (maxMagnitude / magnitude);
 }
-}
-
-std::mutex &fftwPlannerGlobalMutex() {
-    return fftwPlannerMutex;
 }
 
 FFTResult::FFTResult(bool optimizeLargePlans, QObject *parent)

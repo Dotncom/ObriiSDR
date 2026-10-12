@@ -9,12 +9,24 @@
 #include <cstddef>
 
 namespace Wireless {
-enum class Protocol { Wifi, Bluetooth, Gsm, Lte };
+enum class Protocol { Wifi, Bluetooth, Gsm, Lte, Umts, All };
 QString displayFilter(Protocol protocol);
 QStringList tsharkFields();
 QStringList tsharkOutputArguments();
 bool parsePacketLine(const QByteArray &line, QStringList &fields);
 int wifiChannel(int frequencyMhz);
+QString ssidText(const QString &field);
+QString findTshark();
+QStringList availableProfiles();
+struct CaptureInterface { QString id, label; };
+QVector<CaptureInterface> parseInterfaces(const QString &report);
+struct AnalysisRequest {
+    QString inputFile, interfaceId, outputFile, displayFilter, captureFilter, profile;
+    bool live = false, monitor = false, decryptWithProfile = false;
+};
+QStringList analysisArguments(const AnalysisRequest &request, QString *error);
+enum class PayloadState { NotWifi, Clear, Decoded, Protected };
+PayloadState payloadState(const QStringList &fields);
 
 struct IqStreamDescriptor {
     double sampleRateHz = 0.0;
@@ -24,6 +36,14 @@ struct IqStreamDescriptor {
     std::uint64_t epoch = 0;
     QString clockId;
     bool continuous = false;
+    int channelIndex = 0;
+    int activeChannels = 1;
+    int activeTransmitChannels = 0;
+    QString deviceSerial;
+    std::uint64_t hardwareTick = 0;
+    double hardwareTicksPerSecond = 0.0;
+    bool hardwareTimeValid = false;
+    bool clockLocked = false;
 };
 struct BackendCapabilities {
     QString id;
@@ -35,7 +55,16 @@ struct BackendCapabilities {
     bool timedTransmit = false;
     double maximumSampleRateHz = 0.0;
     double maximumBandwidthHz = 0.0;
+    double minimumFrequencyHz = 0.0, maximumFrequencyHz = 0.0;
+    double maximumDualChannelSampleRateHz = 0.0;
+    int receiveChannels = 1, transmitChannels = 1;
+    bool transmitsIq = false;
+    bool externalReference = false, externalPps = false;
+    bool sharedRxLo = false, sharedTxLo = false;
+    bool requiresHardwareTime = false;
+    bool planningOnly = false;
 };
+BackendCapabilities usrpB210PlanningCapabilities();
 struct PacketTxRequest {
     QByteArray frame;
     std::uint64_t targetSample = 0;
@@ -43,6 +72,10 @@ struct PacketTxRequest {
     QString clockId;
     bool timed = false;
     bool simultaneousRxOnSameDevice = false;
+    int channelIndex = 0;
+    bool useHardwareTicks = false;
+    std::uint64_t targetHardwareTick = 0;
+    std::uint64_t minimumLeadTicks = 0;
 };
 
 // Future PHY/MAC engines plug in here, outside the receiver callback path.

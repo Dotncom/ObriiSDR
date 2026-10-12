@@ -38,6 +38,10 @@ QJsonObject YourClassName::settingsToJson() const {
     settings["bandwidth"] = pendingSettings.bandwidth;
     settings["modulationType"] = pendingSettings.modulationType;
     settings["cwDecoderSelectivity"] = pendingSettings.cwDecoderSelectivity;
+    settings["pskDecoderToneHz"] = pendingSettings.pskDecoderToneHz;
+    settings["pskDecoderSquelchPercent"] = pendingSettings.pskDecoderSquelchPercent;
+    settings["pskDecoderAfc"] = pendingSettings.pskDecoderAfc;
+    settings["pskDecoderEncoding"] = pendingSettings.pskDecoderEncoding;
     settings["sstvDemodulationMode"] =
         normalizedSstvDemodulationMode(pendingSettings.sstvDemodulationMode);
     settings["fftLength"] = pendingSettings.fftLength;
@@ -121,6 +125,7 @@ QJsonObject YourClassName::settingsToJson() const {
     settings["scanMeasurementBinMhz"] = scanMeasurementBinMhz;
     settings["scanMeasurementUpdateIntervalMs"] = scanMeasurementUpdateIntervalMs;
     settings["spectrumScienceMaxHold"] = spectrumScienceMaxHoldEnabled;
+    settings["spectrumScienceMarkers"] = spectrumScienceAnalyzer.markerConfiguration();
     settings["spectrumScienceMinHold"] = spectrumScienceMinHoldEnabled;
     settings["spectrumScienceAverage"] = spectrumScienceAverageEnabled;
     settings["spectrumScienceAverageSeconds"] = spectrumScienceAverageSeconds;
@@ -205,6 +210,7 @@ QJsonObject YourClassName::settingsToJson() const {
         object["amplitudeOffsetDb"] = point.amplitudeOffsetDb;
         object["uncertaintyDb"] = point.uncertaintyDb;
         object["note"] = point.note;
+        object["conditions"] = point.conditions.toJson();
         calibrationPointsJson.append(object);
     }
     settings["calibrationTable"] = calibrationPointsJson;
@@ -276,6 +282,14 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
     pendingSettings.modulationType = readInt("modulationType", pendingSettings.modulationType);
     pendingSettings.cwDecoderSelectivity = (std::clamp)(
         readInt("cwDecoderSelectivity", pendingSettings.cwDecoderSelectivity), 1, 10);
+    pendingSettings.pskDecoderToneHz = std::clamp(readDouble("pskDecoderToneHz", pendingSettings.pskDecoderToneHz),100.0,3500.0);
+    pendingSettings.pskDecoderSquelchPercent = std::clamp(readInt("pskDecoderSquelchPercent", pendingSettings.pskDecoderSquelchPercent),1,100);
+    pendingSettings.pskDecoderAfc = readBool("pskDecoderAfc", pendingSettings.pskDecoderAfc);
+    pendingSettings.pskDecoderEncoding = std::clamp(readInt("pskDecoderEncoding", pendingSettings.pskDecoderEncoding),0,1);
+    if (pskDecoderToneSpin) { QSignalBlocker b(pskDecoderToneSpin); pskDecoderToneSpin->setValue(pendingSettings.pskDecoderToneHz); }
+    if (pskDecoderSquelchSpin) { QSignalBlocker b(pskDecoderSquelchSpin); pskDecoderSquelchSpin->setValue(pendingSettings.pskDecoderSquelchPercent); }
+    if (pskDecoderAfcCheckbox) { QSignalBlocker b(pskDecoderAfcCheckbox); pskDecoderAfcCheckbox->setChecked(pendingSettings.pskDecoderAfc); }
+    if (pskDecoderEncodingCombo) { QSignalBlocker b(pskDecoderEncodingCombo); pskDecoderEncodingCombo->setCurrentIndex(pendingSettings.pskDecoderEncoding); }
     if (cwDecoderSelectivitySpin) {
         cwDecoderSelectivitySpin->setValue(pendingSettings.cwDecoderSelectivity);
     }
@@ -473,6 +487,8 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
                      SCAN_MEASUREMENT_MIN_UPDATE_MS,
                      SCAN_MEASUREMENT_MAX_UPDATE_MS);
     spectrumScienceMaxHoldEnabled = readBool("spectrumScienceMaxHold", spectrumScienceMaxHoldEnabled);
+    if (settingsJson.contains("spectrumScienceMarkers"))
+        spectrumScienceAnalyzer.restoreMarkerConfiguration(settingsJson.value("spectrumScienceMarkers").toArray());
     spectrumScienceMinHoldEnabled = readBool("spectrumScienceMinHold", spectrumScienceMinHoldEnabled);
     spectrumScienceAverageEnabled = readBool("spectrumScienceAverage", spectrumScienceAverageEnabled);
     spectrumScienceAverageSeconds = (std::clamp)(readDouble("spectrumScienceAverageSeconds",
@@ -639,6 +655,7 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
                 std::numeric_limits<double>::quiet_NaN());
             point.uncertaintyDb = object.value(QStringLiteral("uncertaintyDb")).toDouble(0.0);
             point.note = object.value(QStringLiteral("note")).toString();
+            point.conditions = ReceiverCalibrationContext::fromJson(object.value("conditions").toObject());
             calibrationPoints.append(point);
         }
         receiverCalibrationTable.setPoints(calibrationPoints);

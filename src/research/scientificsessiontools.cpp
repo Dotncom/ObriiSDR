@@ -1,4 +1,5 @@
 #include "scientificsessiontools.h"
+#include "hdf5spectrumexportui.h"
 
 #include "appsettingsutils.h"
 #include "fft.h"
@@ -867,6 +868,9 @@ MeasurementSessionWidget::MeasurementSessionWidget(Translator translator,
     controls->addWidget(impl->capture, 1, 3);
     controls->addWidget(impl->clear, 1, 4);
     controls->addWidget(impl->exportButton, 1, 5);
+    auto *hdf5Button = new QPushButton(impl->text("hdf5_export", "HDF5 export..."), this);
+    controls->addWidget(hdf5Button, 2, 5);
+    connect(hdf5Button, &QPushButton::clicked, this, [this]() { showSpectrumHdf5Export(this, impl->translator); });
     controls->setColumnStretch(6, 1);
     root->addLayout(controls);
     impl->notes = new QPlainTextEdit(this);

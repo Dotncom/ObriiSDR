@@ -22,12 +22,15 @@ public:
 
     void setSettings(const QJsonObject &settings);
     void setConnected(bool connected, bool ukrainian);
+    void setExternalInput(bool enabled);
+    void setExternalFrame(const std::vector<float> &iq, double sampleRate, std::uint64_t sequence);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
 
 private:
     void refreshSnapshot();
+    void ingestIq(const std::vector<float> &iq, double sampleRate, std::uint64_t sequence);
     void updateConstellationView();
     void drawGrid(QPainter &painter, const QRectF &plot) const;
     void drawOscilloscope(QPainter &painter, const QRectF &plot) const;
@@ -45,5 +48,6 @@ private:
     std::uint64_t sequence_ = 0;
     double sampleRate_ = 0.0;
     bool connected_ = false;
+    bool externalInput_ = false;
     bool ukrainian_ = false;
 };

@@ -982,6 +982,7 @@ void YourClassName::updateSpectrum() {
     }
 
     if (calibrationTableEnabled) {
+        receiverCalibrationTable.setContext(receiverCalibrationContext(spectrumSettings));
         receiverCalibrationTable.applyAmplitudeCorrection(spectrumFrequencies,
                                                            spectrumMagnitudes,
                                                            &referenceMagnitudes,
@@ -1519,6 +1520,7 @@ void YourClassName::updateSpectrum() {
                 }
 
                 if (calibrationTableEnabled) {
+                    receiverCalibrationTable.setContext(receiverCalibrationContext(pendingSettings));
                     receiverCalibrationTable.applyAmplitudeCorrection(
                         spectrumFrequencies,
                         historyRow.magnitudes,

@@ -87,6 +87,21 @@ cmake -S "${WORKSPACE}" -B "${BUILD_DIR}" \
 
 cmake --build "${BUILD_DIR}" -j "${JOBS}"
 
+# The small opt-in HF engine is a separate process, never part of RX/audio.
+if [ "${BUILD_HF_HELPER:-1}" = 1 ] && [ -f "${WORKSPACE}/third_party/itu_hf/P533/Src/P533/P533.c" ]; then
+    HF_BUILD="${WORKSPACE}/build/itu-hf-native"
+    cmake -S "${WORKSPACE}/tools/itu_hf" -B "${HF_BUILD}" \
+        -DITU_HF_BUILD_QT=OFF -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
+    cmake --build "${HF_BUILD}" -j 2
+    cmake --install "${HF_BUILD}" --prefix "${BUILD_DIR}"
+    if [ -d "${WORKSPACE}/third_party/runtime/itu_hf/data" ]; then
+        mkdir -p "${BUILD_DIR}/itu_hf/data"
+        cp "${WORKSPACE}/third_party/runtime/itu_hf/data/"* "${BUILD_DIR}/itu_hf/data/"
+    fi
+fi
+
 echo
 echo "Build complete:"
 echo "  ${BUILD_DIR}/ObriiSDR"
+mkdir -p "${BUILD_DIR}/wireless"
+cp "${WORKSPACE}/tools/wifi_phy_decoder.py" "${BUILD_DIR}/wireless/"

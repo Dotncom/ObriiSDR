@@ -221,6 +221,7 @@ void YourClassName::onModulationChanged(int id) {
     if (cwDecoderControlsWidget) {
         cwDecoderControlsWidget->setVisible(id == MOD_CW);
     }
+    if (pskDecoderControlsWidget) pskDecoderControlsWidget->setVisible(id == MOD_PSK);
     pendingSettings.bandwidth = defaultBandwidthForModulation(id);
     if (bandwidthControl) {
         QSignalBlocker blocker(bandwidthControl);
@@ -872,16 +873,41 @@ void YourClassName::onSampleRateChanged(int index) {
     }
 
     if (!isIdle()) {
-        // Changing the sample rate reconfigures the USB stream. Agile can tune
-        // frequency while read_async is active, but set_samplerate may stall
-        // the callback for several seconds. Stop and recreate only the stream.
-        qDebug() << "[FobosLifecycle] restarting reader for sample-rate change"
-                 << "previous" << previousSampleRate
-                 << "requested" << selectedSampleRate
-                 << "apiKind" << fobosApiKindName(activeFobosApiKind);
-        restartStreamForHardwareChange();
+        // A second selection can arrive before the previous reader has delivered
+        // its first callback. Apply only the last requested rate once it is ready.
+        if (!sampleRateChangeTimer) {
+            sampleRateChangeTimer = new QTimer(this);
+            sampleRateChangeTimer->setSingleShot(true);
+            connect(sampleRateChangeTimer, &QTimer::timeout, this, [this]() {
+                if (isNetworkClientMode()) return;
+                if (runState == RadioRunState::Starting || runState == RadioRunState::Stopping ||
+                    (runState == RadioRunState::Running && processor && processor->isRunning() &&
+                     streamStartElapsedTimer.isValid() && streamStartElapsedTimer.elapsed() < 1200 &&
+                     processor->callbackCount() <= streamStartCallbackCount)) {
+                    sampleRateChangeTimer->start(100);
+                    return;
+                }
+                if (isIdle()) {
+                    sampleRateReopenRequired = hasActiveFobosDevice() &&
+                        (appliedSampleRate <= 0.0 ||
+                         std::abs(appliedSampleRate - pendingSettings.sampleRate) > 0.5);
+                    return;
+                }
+                if (hasActiveFobosDevice() && appliedSampleRate > 0.0 &&
+                    std::abs(appliedSampleRate - pendingSettings.sampleRate) <= 0.5) {
+                    return;
+                }
+                qDebug() << "[FobosLifecycle] restarting reader for settled sample-rate change"
+                         << "requested" << pendingSettings.sampleRate
+                         << "apiKind" << fobosApiKindName(activeFobosApiKind);
+                restartStreamForHardwareChange();
+            });
+        }
+        sampleRateChangeTimer->start(300);
         return;
     }
+
+    if (sampleRateChangeTimer) sampleRateChangeTimer->stop();
 
     if (hasActiveFobosDevice()) {
         const bool selectedRateMatchesOpenSession =

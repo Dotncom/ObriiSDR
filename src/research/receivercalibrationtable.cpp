@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <utility>
+#include <QJsonDocument>
+#include <QStringList>
 
 namespace {
 
@@ -28,6 +30,69 @@ ReceiverCalibrationCorrection interpolate(const ReceiverCalibrationPoint &lower,
 
 } // namespace
 
+QJsonObject ReceiverCalibrationContext::toJson() const {
+    return {{"backend", backendId}, {"input", inputMode}, {"rate", sampleRateHz},
+            {"lna", lnaGain}, {"vga", vgaGain}, {"rtlGain", rtlGainTenthsDb}, {"gainState", gainState}};
+}
+
+ReceiverCalibrationContext ReceiverCalibrationContext::fromJson(const QJsonObject &o) {
+    ReceiverCalibrationContext c;
+    c.backendId = o.value("backend").toString().trimmed();
+    c.inputMode = o.value("input").toInt(-1);
+    c.sampleRateHz = o.value("rate").toDouble(0.0);
+    c.lnaGain = o.value("lna").toInt(-1);
+    c.vgaGain = o.value("vga").toInt(-1);
+    c.rtlGainTenthsDb = o.value("rtlGain").toInt(-1);
+    c.gainState = o.value("gainState").toInt(-1);
+    if (!std::isfinite(c.sampleRateHz) || c.sampleRateHz < 0) c.sampleRateHz = 0;
+    return c;
+}
+
+QString ReceiverCalibrationContext::description() const {
+    QStringList parts;
+    if (!backendId.isEmpty()) parts << backendId;
+    if (inputMode >= 0) parts << QStringLiteral("Input=%1").arg(inputMode);
+    if (sampleRateHz > 0) parts << QStringLiteral("Fs=%1 MS/s").arg(sampleRateHz/1e6, 0, 'g', 8);
+    if (lnaGain >= 0) parts << QStringLiteral("LNA=%1").arg(lnaGain);
+    if (vgaGain >= 0) parts << QStringLiteral("VGA=%1").arg(vgaGain);
+    if (rtlGainTenthsDb >= 0) parts << QStringLiteral("RTL=%1 dB").arg(rtlGainTenthsDb/10.0);
+    if (gainState >= 0) parts << QStringLiteral("AGC/RFamp=%1").arg(gainState);
+    return parts.isEmpty() ? QStringLiteral("*") : parts.join(QStringLiteral(" / "));
+}
+
+QVector<ReceiverCalibrationPoint> ReceiverCalibrationTable::selectedPoints(const ReceiverCalibrationContext &c) const {
+    QVector<ReceiverCalibrationPoint> selected;
+    int best = -1;
+    for (const auto &p : calibrationPoints) {
+        const auto &s = p.conditions;
+        if ((!s.backendId.isEmpty() && s.backendId != c.backendId) ||
+            (s.inputMode >= 0 && s.inputMode != c.inputMode) ||
+            (s.sampleRateHz > 0 && std::abs(s.sampleRateHz-c.sampleRateHz) > 0.5) ||
+            (s.lnaGain >= 0 && s.lnaGain != c.lnaGain) ||
+            (s.vgaGain >= 0 && s.vgaGain != c.vgaGain) ||
+            (s.rtlGainTenthsDb >= 0 && s.rtlGainTenthsDb != c.rtlGainTenthsDb) ||
+            (s.gainState >= 0 && s.gainState != c.gainState)) continue;
+        const int specificity = (!s.backendId.isEmpty() ? 64 : 0) + (s.inputMode >= 0 ? 32 : 0) +
+            (s.sampleRateHz > 0 ? 16 : 0) + (s.lnaGain >= 0 ? 8 : 0) +
+            (s.vgaGain >= 0 ? 4 : 0) + (s.rtlGainTenthsDb >= 0 ? 2 : 0) + (s.gainState >= 0 ? 1 : 0);
+        if (specificity < best) continue;
+        if (specificity > best) { selected.clear(); best = specificity; }
+        selected.append(p);
+    }
+    std::sort(selected.begin(), selected.end(), [](const auto &a, const auto &b) { return a.frequencyHz < b.frequencyHz; });
+    return selected;
+}
+
+void ReceiverCalibrationTable::setContext(const ReceiverCalibrationContext &context) {
+    if (contextInitialized && currentContext.backendId == context.backendId &&
+        currentContext.inputMode == context.inputMode && currentContext.sampleRateHz == context.sampleRateHz &&
+        currentContext.lnaGain == context.lnaGain && currentContext.vgaGain == context.vgaGain &&
+        currentContext.rtlGainTenthsDb == context.rtlGainTenthsDb && currentContext.gainState == context.gainState) return;
+    currentContext = context;
+    contextInitialized = true;
+    activePoints = selectedPoints(context);
+}
+
 void ReceiverCalibrationTable::setPoints(const QVector<ReceiverCalibrationPoint> &points) {
     calibrationPoints.clear();
     calibrationPoints.reserve(points.size());
@@ -44,6 +109,9 @@ void ReceiverCalibrationTable::setPoints(const QVector<ReceiverCalibrationPoint>
     }
     std::sort(calibrationPoints.begin(), calibrationPoints.end(),
               [](const ReceiverCalibrationPoint &a, const ReceiverCalibrationPoint &b) {
+                  const QByteArray aKey = QJsonDocument(a.conditions.toJson()).toJson(QJsonDocument::Compact);
+                  const QByteArray bKey = QJsonDocument(b.conditions.toJson()).toJson(QJsonDocument::Compact);
+                  if (aKey != bKey) return aKey < bKey;
                   return a.frequencyHz < b.frequencyHz;
               });
 
@@ -51,16 +119,27 @@ void ReceiverCalibrationTable::setPoints(const QVector<ReceiverCalibrationPoint>
     unique.reserve(calibrationPoints.size());
     for (const ReceiverCalibrationPoint &point : std::as_const(calibrationPoints)) {
         if (!unique.isEmpty() &&
-            std::abs(unique.last().frequencyHz - point.frequencyHz) < kMinimumFrequencySpacingHz) {
+            std::abs(unique.last().frequencyHz - point.frequencyHz) < kMinimumFrequencySpacingHz &&
+            unique.last().conditions.toJson() == point.conditions.toJson()) {
             unique.last() = point;
         } else {
             unique.append(point);
         }
     }
     calibrationPoints = std::move(unique);
+    activePoints = selectedPoints(currentContext);
+}
+
+ReceiverCalibrationCorrection ReceiverCalibrationTable::correctionAt(double frequencyHz, const ReceiverCalibrationContext &context) const {
+    ReceiverCalibrationTable selected;
+    selected.setPoints(selectedPoints(context));
+    // Explicitly select this context so specific profiles are not treated as wildcard rows.
+    selected.setContext(context);
+    return selected.correctionAt(frequencyHz);
 }
 
 ReceiverCalibrationCorrection ReceiverCalibrationTable::correctionAt(double frequencyHz) const {
+    const auto &calibrationPoints = activePoints;
     ReceiverCalibrationCorrection result;
     if (calibrationPoints.isEmpty() || !std::isfinite(frequencyHz)) {
         return result;
@@ -92,6 +171,7 @@ ReceiverCalibrationCorrection ReceiverCalibrationTable::correctionAt(double freq
 
 double ReceiverCalibrationTable::interpolatedAmplitudeOffset(double frequencyHz,
                                                               int &upperIndex) const {
+    const auto &calibrationPoints = activePoints;
     if (calibrationPoints.isEmpty() || !std::isfinite(frequencyHz)) {
         return 0.0;
     }
@@ -115,6 +195,7 @@ void ReceiverCalibrationTable::applyAmplitudeCorrection(const std::vector<float>
                                                          std::vector<float> &primary,
                                                          std::vector<float> *secondary,
                                                          double baseOffsetDb) const {
+    const auto &calibrationPoints = activePoints;
     const std::size_t count = (std::min)(frequencies.size(), primary.size());
     if (count == 0) {
         return;

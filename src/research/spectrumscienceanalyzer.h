@@ -4,6 +4,7 @@
 #include "spectrumoverlaytypes.h"
 
 #include <QElapsedTimer>
+#include <QJsonArray>
 
 #include <algorithm>
 #include <array>
@@ -52,6 +53,13 @@ struct SpectrumScienceMetrics {
 
 class SpectrumScienceAnalyzer {
 public:
+    static constexpr int MaximumMarkers = 64;
+    int markerCount() const { return static_cast<int>(markers.size()); }
+    int addMarker();
+    bool removeMarker(int index);
+    bool hasMarkers() const;
+    QJsonArray markerConfiguration() const;
+    void restoreMarkerConfiguration(const QJsonArray &configuration);
     void setTraceEnabled(bool maxHold, bool minHold, bool average);
     void setAverageTimeSeconds(double seconds);
     void setAverageFrameCount(int frames);
@@ -106,6 +114,7 @@ private:
     bool percentile90Enabled = false;
     bool percentile99Enabled = false;
     std::vector<float> frameFrequencies;
+    bool frequenciesAscending = false;
     std::vector<float> frameLevels;
     std::vector<float> maxHoldDb;
     std::vector<float> minHoldDb;
@@ -118,10 +127,10 @@ private:
     std::vector<float> percentile99Db;
     std::deque<std::vector<float>> detectorHistory;
     std::deque<std::vector<float>> averageHistoryPower;
-    std::array<SpectrumScienceMarker, 2> markers{{
+    std::vector<SpectrumScienceMarker> markers{
         {false, 0.0, -160.0f, QStringLiteral("A")},
         {false, 0.0, -160.0f, QStringLiteral("B")}
-    }};
+    };
     SpectrumScienceMetrics currentMetrics;
     QElapsedTimer updateClock;
 };

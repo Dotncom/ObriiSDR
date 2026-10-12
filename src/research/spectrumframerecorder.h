@@ -24,6 +24,19 @@ struct SpectrumFrameRecording {
     std::vector<SpectrumFrameRecord> frames;
 };
 
+class SpectrumFrameReader {
+public:
+    bool open(const QString &path, QString *errorMessage);
+    bool readNext(SpectrumFrameRecord &frame, QString *errorMessage);
+    bool atEnd() const { return file.atEnd(); }
+    qint64 position() const { return file.pos(); }
+    qint64 size() const { return file.size(); }
+    const QJsonObject &metadata() const { return header; }
+private:
+    QFile file;
+    QJsonObject header;
+};
+
 class SpectrumFrameRecorder {
 public:
     bool start(const RadioSettings &settings,

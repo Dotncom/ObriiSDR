@@ -169,6 +169,7 @@ constexpr std::array<std::array<int, FT8_LDPC_MAX_CHECK_DEGREE>, FT8_LDPC_CHECK_
 
 bool isSupportedDecoderMode(int modulationType) {
     return modulationType == MOD_CW ||
+           modulationType == MOD_PSK ||
            modulationType == MOD_FT8 ||
            modulationType == MOD_RTTY ||
            modulationType == MOD_FSK ||
@@ -1033,6 +1034,7 @@ bool DigitalDecoder::isEnabled() const {
 
 void DigitalDecoder::reset() {
     cwDecoder.reset();
+    pskDecoder.reset(); pskTextDecoder.reset(); pskEncoding = -1; pskStatusSamples = 0;
     resetRttyState();
     markPhase = 0.0;
     spacePhase = 0.0;
@@ -1182,6 +1184,25 @@ void DigitalDecoder::processPcmFrame(const QByteArray &pcmData, const RadioSetti
     QString decodedText;
     const int sampleCount = pcmData.size() / static_cast<int>(sizeof(qint16));
     const char *raw = pcmData.constData();
+
+    if (settings.modulationType == MOD_PSK) {
+        pskDecoder.configure(sampleRate, settings.pskDecoderToneHz, settings.pskDecoderSquelchPercent, settings.pskDecoderAfc);
+        if (!pskTextDecoder || pskEncoding != settings.pskDecoderEncoding) {
+            pskEncoding = settings.pskDecoderEncoding;
+            pskTextDecoder.reset(QTextCodec::codecForName(pskEncoding == 1 ? "UTF-8" : "ISO-8859-1")->makeDecoder());
+        }
+        const QByteArray text = pskDecoder.process(pcmData);
+        if (!text.isEmpty()) emit textDecoded(pskTextDecoder->toUnicode(text));
+        pskStatusSamples += sampleCount;
+        if (pskStatusSamples >= sampleRate/2) {
+            pskStatusSamples = 0;
+            updateStatus(QStringLiteral("BPSK31: %1 | %2 Hz | quality %3% | AFC %4 Hz")
+                .arg(pskDecoder.isLocked() ? "LOCK" : "SEARCH")
+                .arg(settings.pskDecoderToneHz,0,'f',1).arg(pskDecoder.qualityPercent(),0,'f',0)
+                .arg(pskDecoder.carrierOffsetHz(),0,'f',2));
+        }
+        return;
+    }
 
     if (settings.modulationType == MOD_CW) {
         CwAudioDecoder::Settings cwSettings;
@@ -1839,7 +1860,7 @@ void DigitalDecoder::configureForMode(int modulationType, int sampleRate) {
                                .arg(activeSampleRate / 1000)
                                .arg(samplesPerSymbol, 0, 'f', 1));
     } else if (modulationType == MOD_PSK) {
-        updateStatus(QStringLiteral("PSK mode: clean audio pass-through; PSK31 decoder not implemented yet"));
+        updateStatus(QStringLiteral("BPSK31 decoder: waiting for an audio carrier"));
     } else if (isDigitalMode(modulationType)) {
         updateStatus(QStringLiteral("Digital audio decoder waiting for supported mode"));
     } else {

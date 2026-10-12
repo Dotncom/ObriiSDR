@@ -1,0 +1,12 @@
+# Optional Linux ELF cross-build from Windows; native Linux needs no toolchain file.
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR x86_64)
+set(ITU_HF_ZIG "$ENV{ITU_HF_ZIG}" CACHE FILEPATH "Absolute path to a trusted Zig compiler")
+if(NOT EXISTS "${ITU_HF_ZIG}")
+    message(FATAL_ERROR "Set ITU_HF_ZIG to an existing trusted zig executable")
+endif()
+set(CMAKE_C_COMPILER "${ITU_HF_ZIG}")
+set(CMAKE_C_COMPILER_ARG1 "cc -target x86_64-linux-gnu.2.17")
+set(CMAKE_CXX_COMPILER "${ITU_HF_ZIG}")
+set(CMAKE_CXX_COMPILER_ARG1 "c++ -target x86_64-linux-gnu.2.17")
+set(CMAKE_TRY_COMPILE_PLATFORM_VARIABLES ITU_HF_ZIG)

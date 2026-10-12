@@ -11,6 +11,11 @@
 
 class IqChannelizer {
 public:
+    struct Options {
+        double outputRateHz = 0.0;
+        double cutoffHz = 0.0;
+        int decimationFactor = 0;
+    };
     struct Result {
         bool valid = false;
         double inputRate = 0.0;
@@ -33,7 +38,8 @@ public:
                           std::size_t floatCount,
                           const RadioSettings &settings,
                           std::vector<float> &output,
-                          bool applyAgc = true);
+                          bool applyAgc = true,
+                          const Options *options = nullptr);
 
 private:
     friend struct IqChannelizerTestAccess;

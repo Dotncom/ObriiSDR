@@ -3,6 +3,7 @@
 #include "iqbuffer.h"
 #include "spectrumframereplaydialog.h"
 #include "spectrumfftworker.h"
+#include "wirelesslabdialog.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -226,6 +227,7 @@ QJsonObject YourClassName::recordingScientificSnapshot(const QString &phase) con
             object["amplitudeOffsetDb"] = point.amplitudeOffsetDb;
             object["uncertaintyDb"] = point.uncertaintyDb;
             object["note"] = point.note;
+            object["conditions"] = point.conditions.toJson();
             calibrationPoints.append(object);
         }
     }
@@ -265,6 +267,7 @@ QJsonObject YourClassName::recordingScientificSnapshot(const QString &phase) con
     QJsonObject markers;
     markers["a"] = markerJson(spectrumScienceAnalyzer.marker(0));
     markers["b"] = markerJson(spectrumScienceAnalyzer.marker(1));
+    markers["all"] = spectrumScienceAnalyzer.markerConfiguration();
     snapshot["markers"] = markers;
 
     const SpectrumScienceMetrics &metrics = spectrumScienceAnalyzer.metrics();
@@ -350,6 +353,12 @@ void YourClassName::handleLocalIqFrame(const QByteArray &iqData, double sampleRa
 }
 
 void YourClassName::updateIqFrameProducerSettings() {
+    if (wirelessLabDialog) {
+        wirelessLabDialog->setLiveIqSource(pendingSettings.sampleRate,
+            pendingSettings.centerFrequency,
+            runState == RadioRunState::Running && pendingSettings.inputMode == INPUT_RF &&
+                !isNetworkClientMode());
+    }
     const bool dmrAudioIq = dmrAudioIqProducerNeeded();
     if (audioProcessor) audioProcessor->setDmrChannelIqEnabled(dmrAudioIq);
     if (!processor) {

@@ -28,6 +28,7 @@
 #include "transmitdialog.h"
 #include "ft8stationdialog.h"
 #include "dspflowpanel.h"
+#include "wirelesslabdialog.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -377,7 +378,7 @@ YourClassName::YourClassName(QWidget *parent)
     addModulationRadioButton(digitalWidget, digitalModeLayout, "CW", MOD_CW, "Morse audio decoder");
     addModulationRadioButton(digitalWidget, digitalModeLayout, "RTTY", MOD_RTTY, "AFSK RTTY decoder");
     addModulationRadioButton(digitalWidget, digitalModeLayout, "FSK", MOD_FSK, "Frequency-shift keying decoder");
-    addModulationRadioButton(digitalWidget, digitalModeLayout, "PSK", MOD_PSK, "PSK audio mode placeholder");
+    addModulationRadioButton(digitalWidget, digitalModeLayout, "BPSK31", MOD_PSK, "BPSK31 audio decoder");
     addModulationRadioButton(digitalWidget, digitalModeLayout, "DMR", MOD_DMR, "DMR 4FSK sync monitor");
     digitalModeLayout->addStretch();
     cwDecoderControlsWidget = new QWidget(digitalWidget);
@@ -429,6 +430,24 @@ YourClassName::YourClassName(QWidget *parent)
     cwDecoderLayout->addWidget(cwDecoderAlphabetCombo, 2, 1, 1, 3);
     cwDecoderLayout->setColumnStretch(3, 1);
     cwDecoderControlsWidget->setVisible(pendingSettings.modulationType == MOD_CW);
+    pskDecoderControlsWidget = new QWidget(digitalWidget);
+    auto *pskLayout = new QGridLayout(pskDecoderControlsWidget); pskLayout->setContentsMargins(0,0,0,0);
+    pskDecoderToneSpin = new QDoubleSpinBox(pskDecoderControlsWidget);
+    pskDecoderToneSpin->setRange(100,3500); pskDecoderToneSpin->setDecimals(1); pskDecoderToneSpin->setSingleStep(.1);
+    pskDecoderToneSpin->setSuffix(" Hz"); pskDecoderToneSpin->setValue(pendingSettings.pskDecoderToneHz);
+    pskDecoderSquelchSpin = new QSpinBox(pskDecoderControlsWidget);
+    pskDecoderSquelchSpin->setRange(1,100); pskDecoderSquelchSpin->setSuffix(" %"); pskDecoderSquelchSpin->setValue(pendingSettings.pskDecoderSquelchPercent);
+    pskDecoderAfcCheckbox = new QCheckBox("AFC", pskDecoderControlsWidget); pskDecoderAfcCheckbox->setChecked(pendingSettings.pskDecoderAfc);
+    pskDecoderEncodingCombo = new QComboBox(pskDecoderControlsWidget);
+    pskDecoderEncodingCombo->addItem("Latin-1",0); pskDecoderEncodingCombo->addItem("UTF-8",1);
+    auto *pskToneLabel = new QLabel(uiText("psk_tone", "PSK audio tone:"), pskDecoderControlsWidget);
+    markTranslatable(pskToneLabel,"psk_tone","PSK audio tone:");
+    auto *pskSquelchLabel = new QLabel(uiText("psk_squelch", "PSK selectivity:"), pskDecoderControlsWidget);
+    markTranslatable(pskSquelchLabel,"psk_squelch","PSK selectivity:");
+    pskLayout->addWidget(pskToneLabel,0,0); pskLayout->addWidget(pskDecoderToneSpin,0,1);
+    pskLayout->addWidget(pskSquelchLabel,1,0); pskLayout->addWidget(pskDecoderSquelchSpin,1,1);
+    pskLayout->addWidget(pskDecoderAfcCheckbox,2,0); pskLayout->addWidget(pskDecoderEncodingCombo,2,1);
+    pskDecoderControlsWidget->setVisible(pendingSettings.modulationType == MOD_PSK);
     dmrLabLayout->addWidget(dmrLabCaptureCheckbox, 0, 0);
     QLabel *dmrCcLabel = new QLabel("CC:", digitalWidget);
     markTranslatable(dmrCcLabel, QStringLiteral("dmr_cc"), QStringLiteral("CC:"));
@@ -497,6 +516,7 @@ YourClassName::YourClassName(QWidget *parent)
     digitalLayout->addWidget(dmrPrivacyCapabilityLabel);
     digitalLayout->addLayout(digitalModeLayout);
     digitalLayout->addWidget(cwDecoderControlsWidget);
+    digitalLayout->addWidget(pskDecoderControlsWidget);
     digitalLayout->addLayout(dmrLabLayout);
     digitalLayout->addWidget(digitalStatusLabel);
     digitalLayout->addWidget(digitalTextEdit);
@@ -584,6 +604,10 @@ YourClassName::YourClassName(QWidget *parent)
     videoHeaderLayout->addWidget(videoVSyncCheckbox);
     videoHeaderLayout->addWidget(videoTestPatternCheckbox);
     videoHeaderLayout->addWidget(videoSaveImageButton);
+    lrptDecodeButton = new QPushButton(uiText(QStringLiteral("lrpt_decode"), QStringLiteral("LRPT decode")), videoPanel);
+    markTranslatable(lrptDecodeButton, QStringLiteral("lrpt_decode"), QStringLiteral("LRPT decode"));
+    videoHeaderLayout->addWidget(lrptDecodeButton);
+    connect(lrptDecodeButton, &QPushButton::clicked, this, &YourClassName::showLrptDecoder);
     videoHeaderLayout->addStretch();
     videoLayout->addLayout(videoModeLayout);
     videoLayout->addLayout(videoHeaderLayout);
@@ -1598,6 +1622,29 @@ YourClassName::YourClassName(QWidget *parent)
     spectrumScienceMarkerCombo->addItem(QStringLiteral("A"), 0);
     spectrumScienceMarkerCombo->addItem(QStringLiteral("B"), 1);
     spectrumScienceMarkerCombo->setMaximumWidth(48);
+    auto *addScienceMarker = new QPushButton(QStringLiteral("+"), spectrumMeasurementBox);
+    auto *removeScienceMarker = new QPushButton(QStringLiteral("-"), spectrumMeasurementBox);
+    addScienceMarker->setMaximumWidth(28);
+    removeScienceMarker->setMaximumWidth(28);
+    addScienceMarker->setToolTip(uiText("science_marker_add", "Add marker"));
+    removeScienceMarker->setToolTip(uiText("science_marker_remove", "Remove selected marker (A/B are retained)"));
+    connect(addScienceMarker, &QPushButton::clicked, this, [this]() {
+        const int index = spectrumScienceAnalyzer.addMarker();
+        if (index < 0) return;
+        spectrumScienceMarkerCombo->addItem(spectrumScienceAnalyzer.marker(index).label, index);
+        spectrumScienceMarkerCombo->setCurrentIndex(index);
+    });
+    connect(removeScienceMarker, &QPushButton::clicked, this, [this]() {
+        const int index = spectrumScienceMarkerCombo->currentIndex();
+        if (!spectrumScienceAnalyzer.removeMarker(index)) return;
+        const QSignalBlocker blocker(spectrumScienceMarkerCombo);
+        spectrumScienceMarkerCombo->clear();
+        for (int i = 0; i < spectrumScienceAnalyzer.markerCount(); ++i)
+            spectrumScienceMarkerCombo->addItem(spectrumScienceAnalyzer.marker(i).label, i);
+        spectrumScienceActiveMarker = std::min(index, spectrumScienceAnalyzer.markerCount() - 1);
+        spectrumScienceMarkerCombo->setCurrentIndex(spectrumScienceActiveMarker);
+        updateSpectrumScienceUi();
+    });
     spectrumScienceSetButton = new QPushButton("Set", spectrumMeasurementBox);
     markTranslatable(spectrumScienceSetButton, QStringLiteral("science_set"), QStringLiteral("Set"));
     spectrumScienceSetButton->setToolTip(uiText(
@@ -1790,6 +1837,8 @@ YourClassName::YourClassName(QWidget *parent)
     spectrumScienceMarkerLayout->setSpacing(4);
     spectrumScienceMarkerLayout->addWidget(scienceMarkerLabel);
     spectrumScienceMarkerLayout->addWidget(spectrumScienceMarkerCombo);
+    spectrumScienceMarkerLayout->addWidget(addScienceMarker);
+    spectrumScienceMarkerLayout->addWidget(removeScienceMarker);
     spectrumScienceMarkerLayout->addWidget(spectrumScienceSetButton);
     spectrumScienceMarkerLayout->addWidget(spectrumSciencePeakButton);
     spectrumScienceMarkerLayout->addStretch(1);
@@ -2344,6 +2393,9 @@ YourClassName::YourClassName(QWidget *parent)
         QStringLiteral("gnss_timezone_tooltip"),
         QStringLiteral("Time zone used only for displaying GNSS UTC time. Raw NMEA/UBX data remains unchanged.")));
     gnssTuneButton = new QPushButton("Tune", qthBox);
+    gnssPvtButton = new QPushButton(uiText(QStringLiteral("gnss_sdr_pvt"), QStringLiteral("SDR PVT")), qthBox);
+    markTranslatable(gnssPvtButton, QStringLiteral("gnss_sdr_pvt"), QStringLiteral("SDR PVT"));
+    connect(gnssPvtButton, &QPushButton::clicked, this, &YourClassName::showGnssSdrPvt);
     markTranslatable(gnssTuneButton, QStringLiteral("tune_gnss_l1"), QStringLiteral("Tune"));
     gnssScanButton = new QPushButton("Scan", qthBox);
     markTranslatable(gnssScanButton, QStringLiteral("use_gnss_scan"), QStringLiteral("Scan"));
@@ -2653,15 +2705,16 @@ YourClassName::YourClassName(QWidget *parent)
     qthLayout->addWidget(gnssNetworkTimeButton, 16, 0);
     qthLayout->addWidget(gnssOfflineAcquireButton, 16, 1);
     qthLayout->addWidget(gnssPositionSelfTestButton, 16, 2);
-    qthLayout->addWidget(gnssFilterLabel2, 17, 0);
-    qthLayout->addWidget(gnssFilterWidget, 17, 1, 1, 2);
-    qthLayout->addWidget(gnssMonitorCheckbox, 18, 0);
-    qthLayout->addWidget(gnssPositionPolicyCombo, 18, 1, 1, 2);
-    qthLayout->addWidget(gnssTimeZoneLabel, 19, 0);
-    qthLayout->addWidget(gnssTimeZoneCombo, 19, 1, 1, 2);
-    qthLayout->addWidget(gnssMonitorStatusLabel, 20, 0, 1, 3);
-    qthLayout->addWidget(gnssAcquireStatusLabel, 21, 0, 1, 3);
-    qthLayout->addWidget(qthStatusLabel, 22, 0, 1, 3);
+    qthLayout->addWidget(gnssPvtButton, 17, 0, 1, 3);
+    qthLayout->addWidget(gnssFilterLabel2, 18, 0);
+    qthLayout->addWidget(gnssFilterWidget, 18, 1, 1, 2);
+    qthLayout->addWidget(gnssMonitorCheckbox, 19, 0);
+    qthLayout->addWidget(gnssPositionPolicyCombo, 19, 1, 1, 2);
+    qthLayout->addWidget(gnssTimeZoneLabel, 20, 0);
+    qthLayout->addWidget(gnssTimeZoneCombo, 20, 1, 1, 2);
+    qthLayout->addWidget(gnssMonitorStatusLabel, 21, 0, 1, 3);
+    qthLayout->addWidget(gnssAcquireStatusLabel, 22, 0, 1, 3);
+    qthLayout->addWidget(qthStatusLabel, 23, 0, 1, 3);
 
     dmrHunterControls = new SpectrumHunterControls(
         QStringLiteral("DMR Hunter"),
@@ -3862,6 +3915,18 @@ YourClassName::YourClassName(QWidget *parent)
             QOverload<int>::of(&QComboBox::currentIndexChanged),
             this,
             [applyCwDecoderSettings](int) { applyCwDecoderSettings(); });
+    const auto applyPsk = [this]() {
+        pendingSettings.pskDecoderToneHz = pskDecoderToneSpin->value();
+        pendingSettings.pskDecoderSquelchPercent = pskDecoderSquelchSpin->value();
+        pendingSettings.pskDecoderAfc = pskDecoderAfcCheckbox->isChecked();
+        pendingSettings.pskDecoderEncoding = pskDecoderEncodingCombo->currentData().toInt();
+        if (pendingSettings.modulationType == MOD_PSK) updateDigitalDecoderMode();
+        savePersistentSettings();
+    };
+    connect(pskDecoderToneSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [applyPsk](double) { applyPsk(); });
+    connect(pskDecoderSquelchSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [applyPsk](int) { applyPsk(); });
+    connect(pskDecoderAfcCheckbox, &QCheckBox::toggled, this, [applyPsk](bool) { applyPsk(); });
+    connect(pskDecoderEncodingCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [applyPsk](int) { applyPsk(); });
     auto updateDmrLabControls = [this](bool locked) {
         const QList<QWidget *> controls = {
             dmrLabColorCodeCombo,
@@ -4825,7 +4890,7 @@ YourClassName::YourClassName(QWidget *parent)
     connect(scanMeasurementResetPeakButton, &QPushButton::clicked, this, &YourClassName::resetScanMeasurementPeaks);
     connect(scanMeasurementExportButton, &QPushButton::clicked, this, &YourClassName::exportScanMeasurementCsv);
     connect(spectrumScienceMarkerCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
-        spectrumScienceActiveMarker = (std::clamp)(index, 0, 1);
+        spectrumScienceActiveMarker = (std::clamp)(index, 0, spectrumScienceAnalyzer.markerCount() - 1);
         updateSpectrumScienceUi();
     });
     connect(spectrumScienceSetButton, &QPushButton::clicked, this, [this]() {
@@ -5673,13 +5738,33 @@ void YourClassName::closeEvent(QCloseEvent *event) {
     QMainWindow::closeEvent(event);
 }
 
+ReceiverCalibrationContext YourClassName::receiverCalibrationContext(const RadioSettings &settings) const {
+    ReceiverCalibrationContext context;
+    context.backendId = isRtlSdrNativeSelected() ? QStringLiteral("rtl-native") :
+        isRtlTcpSelected() ? QStringLiteral("rtl-tcp") :
+        isHackRfNativeSelected() ? QStringLiteral("hackrf-native") :
+        isSoapySdrSelected() ? QStringLiteral("soapy") :
+        selectedFobosDeviceInfo().apiKind == FobosApiKind::Agile ? QStringLiteral("fobos-agile") : QStringLiteral("fobos-standard");
+    context.inputMode = settings.inputMode;
+    context.sampleRateHz = settings.sampleRate;
+    if (context.backendId.startsWith(QStringLiteral("rtl"))) {
+        context.rtlGainTenthsDb = settings.rtlTunerGainTenthsDb;
+        context.gainState = settings.rtlAgc ? 1 : 0;
+    } else if (context.backendId == QStringLiteral("hackrf-native")) {
+        context.lnaGain = settings.hackRfLnaGainDb;
+        context.vgaGain = settings.hackRfVgaGainDb;
+        context.gainState = settings.hackRfAmpEnabled ? 1 : 0;
+    } else { context.lnaGain = settings.lnaGain; context.vgaGain = settings.vgaGain; }
+    return context;
+}
+
 double YourClassName::effectiveFrequencyCalibrationOffsetHz(double logicalFrequencyHz) const {
     double offsetHz = std::isfinite(frequencyCalibrationOffsetHz)
                           ? frequencyCalibrationOffsetHz
                           : 0.0;
     if (calibrationTableEnabled) {
         const ReceiverCalibrationCorrection correction =
-            receiverCalibrationTable.correctionAt(logicalFrequencyHz);
+            receiverCalibrationTable.correctionAt(logicalFrequencyHz, receiverCalibrationContext(pendingSettings));
         if (correction.valid && std::isfinite(correction.frequencyOffsetHz)) {
             offsetHz += correction.frequencyOffsetHz;
         }
@@ -5693,7 +5778,7 @@ double YourClassName::effectiveAmplitudeCalibrationOffsetDb(double frequencyHz) 
                           : 0.0;
     if (calibrationTableEnabled) {
         const ReceiverCalibrationCorrection correction =
-            receiverCalibrationTable.correctionAt(frequencyHz);
+            receiverCalibrationTable.correctionAt(frequencyHz, receiverCalibrationContext(pendingSettings));
         if (correction.valid && std::isfinite(correction.amplitudeOffsetDb)) {
             offsetDb += correction.amplitudeOffsetDb;
         }
@@ -6552,6 +6637,12 @@ void YourClassName::connectDataProcessorSignals() {
                 }
             },
             Qt::QueuedConnection);
+    if (wirelessLabDialog) {
+        connect(processor, &DataProcessor::wifiIqFrameReady,
+                wirelessLabDialog, &WirelessLabDialog::appendLiveIq,
+                static_cast<Qt::ConnectionType>(Qt::DirectConnection | Qt::UniqueConnection));
+        processor->setWifiIqStreamingEnabled(wirelessLabDialog->isLiveIqActive());
+    }
 }
 
 void YourClassName::applyServerLocalOutputPolicy() {
@@ -6989,6 +7080,13 @@ void YourClassName::updateUiForRunState() {
         idle || runState == RadioRunState::Running;
 
     if (audioCheckbox) audioCheckbox->setEnabled(liveAudioControlsEnabled);
+    if (wirelessLabDialog) wirelessLabDialog->setAudioControlEnabled(liveAudioControlsEnabled);
+    if (wirelessLabDialog) {
+        wirelessLabDialog->setLiveIqSource(pendingSettings.sampleRate,
+            pendingSettings.centerFrequency,
+            runState == RadioRunState::Running && pendingSettings.inputMode == INPUT_RF &&
+                !isNetworkClientMode());
+    }
     if (syncCheckbox) syncCheckbox->setEnabled(false);
     const bool liveDemodControlsEnabled =
         idle || runState == RadioRunState::Running;

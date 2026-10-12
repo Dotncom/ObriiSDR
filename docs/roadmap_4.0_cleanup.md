@@ -52,7 +52,8 @@ Usable but still requiring explicit qualification:
 Experimental, not a stable-release claim:
 
 1. DMR voice/metadata, DSD-neo, GopherTrunk, and authorized ARC4/AES key paths.
-2. SDR-only GNSS acquisition and navigation decoding.
+2. SDR-only native GNSS acquisition and the optional PocketSDR PVT adapter;
+   validate real fixes and recorded-IQ replay before a stable claim.
 3. FPV/ATV/digital-video decoding beyond current laboratory scaffolding.
 4. SoapySDR across untested hardware and all bladeRF support.
 
@@ -60,12 +61,14 @@ Experimental, not a stable-release claim:
 
 ### Wireless Laboratory (Beta)
 
-TShark capture/import, Wi-Fi packet/network tables, SDR channel-energy inspection
-and a packet/IQ/timed-TX capability interface are implemented.
-Bluetooth/GSM/LTE selectors inspect packet captures, not SDR PHY decoding.
-Next: validate monitor-mode hardware, connect gr-ieee802-11, then BLE advertising
-and GSM broadcast/GSMTAP adapters. Real-time MAC/TX, Bluetooth hopping, UMTS and
-LTE PHY/link stacks remain future work. Review: docs/wireless_lab.md.
+Portable TShark/Wireshark, capture/import, packet details/profile keys and the
+isolated gr-ieee802-11 20 MHz recording-to-PCAP adapter are implemented/tested.
+Validate real Wi-Fi captures and monitor-mode hardware. PCAP decoder time is
+not RF time. Bluetooth/GSM/UMTS/LTE remain packet inspection, not SDR PHY.
+Next: qualified live-IQ/timestamp transport, BLE advertising and GSM broadcast.
+The B210 planning template defines multi-channel/full-duplex/device-clock
+contracts but cannot authorize TX. Native UHD/clone tests, real-time PHY/MAC,
+Bluetooth hopping and cellular links remain future work. See docs/wireless_lab.md.
 
 ### P0: Stability And Release Hygiene
 
@@ -102,9 +105,9 @@ LTE PHY/link stacks remain future work. Review: docs/wireless_lab.md.
    Multi-VFO path deliberately shares one FFT and one proven audio monitor.
 3. Add backend-specific USB/driver discontinuity counters only where the
    underlying API can report them reliably.
-4. Add HDF5 only when a real large-series workflow justifies the runtime and
-   packaging cost. CSV, JSON, SigMF, raw IQ, and spectrum-frame files remain
-   the portable baseline.
+4. Streaming HDF5 spectrum export, condition-bound calibration, up to 64
+   markers and single-tone SNR/SINAD/THD are implemented. Validate RF results
+   with a known generator. CSV/JSON/SigMF remain the dependency-light baseline.
 5. Separate exact full-resolution measurements from optional overview/selected-
    band FFT modes. First evaluate linear-power display reduction before dB
    conversion; preserve calibration, detectors, recording and RBW semantics.
@@ -112,11 +115,18 @@ LTE PHY/link stacks remain future work. Review: docs/wireless_lab.md.
 
 ### P3: Deferred Signal Work
 
+The optional ITU-R P.533/P.372 monthly HF planner is implemented and tested
+against published fixtures/all months. It is not a real-time storm model.
+NOAA/comet/meteor/fireball source URLs are editable in General settings; network
+refresh is explicit or independently opted in while the event feed is visible.
+
 1. Validate Hytera Basic on HP785 and extend repeatable weak-signal/timeslot
    coverage. Native Motorola ARC4/AES-256 speech is RF-confirmed;
    cipher/PI/late-entry fixtures pass. Gopher DMR AES remains unsupported.
-2. Compare saved GNSS IQ against a mature reference receiver before changing
-   acquisition thresholds or adding more constellations.
+2. Validate the optional PocketSDR live/file GNSS PVT adapter and SatDump
+   Meteor LRPT file-to-image path with repeatable RF captures. The native
+   LRPT live view remains a QPSK monitor, not a complete live image decoder.
+   Native BPSK31 reception has synthetic tests; validate real interoperability.
 3. Resume video-decoder work only with repeatable captures and expected output.
 4. Revisit multi-receiver display and synchronization after one-receiver
    operation remains stable on Raspberry-class hardware.
@@ -137,16 +147,27 @@ measurement sessions. Oscilloscope, constellation, eye diagram, digital
 synchronization, VFO spectrum, and VFO waterfall also have self-contained
 visual blocks.
 
-The board is a live control and visualization surface, not yet an arbitrary
-IQ graph scheduler. Connections document intended flow; only implemented
-blocks alter the real processing path. This boundary prevents a visual layout
-from silently adding copies or latency to the Fobos hot path.
+The board now also executes an explicit Source -> DDC -> branch FFT/display
+grammar alongside the unchanged main pipeline. Two DDC branches and two FFTs
+per branch are supported; research views can consume DDC IQ. Processing uses
+one bounded worker, snapshot reads (never audio-queue consumption), generation
+checks and gap counters. Hidden/offscreen consumers stop requesting work.
+Typed links distinguish data, controls, bindings and legacy diagram-only links.
+New board audio filters start disabled and deletion removes their matching
+table stage. Existing saved stages retain their activation state.
+
+Remaining graph work: independent demodulator/recorder sinks, an explicit
+opt-in audio-filter order compiler, configurable FIR quality/transition bands,
+and a measured PFB stage for many channels. There is no arbitrary IQ scheduler
+and no graph-controlled replacement of the main RX/audio/DMR pipeline.
 
 ## Release Checklist
 Radio propagation planning is implemented as an independent, manually started
 tool: local SRTM HGT, dominant knife-edge / NTIA ITM / free-space models,
-coverage raster, link budget and terrain/Fresnel profile. HF solar conditions
-are a separate manual NOAA F10.7/Kp panel, not an ionospheric path predictor.
+coverage raster, link budget and terrain/Fresnel profile. The independent
+ITU-R P.533/P.372 HF planner adds monthly MUF/SNR/reliability predictions;
+NOAA F10.7/Kp and public space-event feeds remain separate observations, not
+real-time corrections to the propagation model.
 FT8 filters now use the complete 340-entity CTY/DXCC catalog, with local CTY
 import and explicit callsign-labeled journal export to the QTH map.
 See docs/radio_propagation_lab.md for limits and privacy behavior.

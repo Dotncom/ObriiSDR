@@ -1,5 +1,6 @@
 #include "dspflowpanel.h"
 #include "dspresearchwidget.h"
+#include "dspbranchengine.h"
 #include "finetunewidget.h"
 #include "MyWaterfallWidget.h"
 #include "appsettingsutils.h"
@@ -224,10 +225,11 @@ public:
                      const std::vector<float> &levels,
                      double centerHz,
                      double bandwidthHz,
-                     const QString &name) {
+                     const QString &name,
+                     bool levelsShifted = false) {
         if (frequencies.empty() || frequencies.size() != levels.size() ||
             !std::isfinite(centerHz) || !std::isfinite(bandwidthHz) || bandwidthHz <= 0.0) return;
-        if (updateTimer_.elapsed() < 55) return;
+        if (!levelsShifted && updateTimer_.elapsed() < 55) return;
         updateTimer_.restart();
         name_ = name;
         centerHz_ = centerHz;
@@ -254,7 +256,7 @@ public:
             const std::size_t sourceBegin = first + (last - first) * static_cast<std::size_t>(pixel) / bins;
             const std::size_t sourceEnd = first + (last - first) * static_cast<std::size_t>(pixel + 1) / bins;
             for (std::size_t index = sourceBegin; index < (std::max)(sourceBegin + 1U, sourceEnd) && index < levels.size(); ++index) {
-                const std::size_t shiftedIndex = (index + levels.size() / 2U) % levels.size();
+                const std::size_t shiftedIndex = levelsShifted ? index : (index + levels.size() / 2U) % levels.size();
                 if (std::isfinite(levels[shiftedIndex])) displayLevels_[static_cast<std::size_t>(pixel)] =
                     (std::max)(displayLevels_[static_cast<std::size_t>(pixel)], levels[shiftedIndex]);
             }
@@ -329,11 +331,10 @@ protected:
             painter.drawText(plot, Qt::AlignCenter | Qt::TextWordWrap, status_);
         }
         painter.setPen(QColor(220, 226, 234));
+        const QString heading = QStringLiteral("%1  %2 MHz / %3 kHz").arg(name_)
+            .arg(centerHz_ / 1.0e6, 0, 'f', 6).arg(bandwidthHz_ / 1000.0, 0, 'f', 1);
         painter.drawText(QRect(5, 1, width() - 10, 16), Qt::AlignLeft | Qt::AlignVCenter,
-                         QStringLiteral("%1  %2 MHz / %3 kHz")
-                             .arg(name_)
-                             .arg(centerHz_ / 1.0e6, 0, 'f', 6)
-                             .arg(bandwidthHz_ / 1000.0, 0, 'f', 1));
+                         painter.fontMetrics().elidedText(heading, Qt::ElideRight, width()-10));
         painter.setPen(QColor(145, 157, 171));
         painter.drawText(QRect(5, height() - 17, width() - 10, 16), Qt::AlignLeft | Qt::AlignVCenter,
                          QStringLiteral("%1").arg((centerHz_ - bandwidthHz_ * 0.5) / 1.0e6, 0, 'f', 6));
@@ -2121,7 +2122,8 @@ bool acceptsControlType(const QString &targetType, const QString &controlType) {
         QStringLiteral("digital_audio_settings"), QStringLiteral("digital_video_settings"),
         QStringLiteral("agile_scan"), QStringLiteral("standard_scan"), QStringLiteral("listening_scan"),
         QStringLiteral("spectrum_measurement"), QStringLiteral("spur_suppression"),
-        QStringLiteral("hf_interference"), QStringLiteral("gnss_sdr"), QStringLiteral("gnss_serial")
+        QStringLiteral("hf_interference"), QStringLiteral("gnss_sdr"), QStringLiteral("gnss_serial"),
+        QStringLiteral("ddc_channelizer")
         , QStringLiteral("multi_vfo_channelizer")
     };
     return toggleable.contains(targetType);
@@ -2185,6 +2187,7 @@ bool typeHasInput(const QString &type) {
 }
 
 bool typeHasOutput(const QString &type) {
+    if (type == QStringLiteral("branch_spectrum") || type == QStringLiteral("branch_waterfall")) return false;
     if (type.startsWith(QStringLiteral("research_")) ||
         type == QStringLiteral("zoom_density")) {
         return false;
@@ -2221,6 +2224,8 @@ QStringList allBlockTypes() {
             QStringLiteral("network_input"), QStringLiteral("playback"),
             QStringLiteral("frequency_control"), QStringLiteral("fine_tune_control"),
             QStringLiteral("display_scale"), QStringLiteral("channel_filter"),
+            QStringLiteral("ddc_channelizer"), QStringLiteral("branch_fft"),
+            QStringLiteral("branch_spectrum"), QStringLiteral("branch_waterfall"),
             QStringLiteral("multi_vfo_channelizer"), QStringLiteral("vfo_channel"),
             QStringLiteral("vfo_spectrum"), QStringLiteral("vfo_waterfall"),
             QStringLiteral("resampler"), QStringLiteral("fft"),
@@ -2276,6 +2281,7 @@ bool isFilterBlockType(const QString &type) {
 }
 
 QString blockCategory(const QString &type) {
+    if (type == QStringLiteral("branch_spectrum") || type == QStringLiteral("branch_waterfall")) return QStringLiteral("visualization");
     if (isFilterBlockType(type)) return QStringLiteral("filters");
     if (type.contains(QStringLiteral("scan")) || type.contains(QStringLiteral("hunter")))
         return QStringLiteral("scanning");
@@ -2375,9 +2381,11 @@ public:
                 if (fineTuneDelta) fineTuneDelta(deltaHz);
             });
         }
-        if (type_ == QStringLiteral("vfo_spectrum") || type_ == QStringLiteral("vfo_waterfall")) {
-            miniVfoDisplay_ = new MiniVfoDisplay(type_ == QStringLiteral("vfo_waterfall"));
+        if (type_ == QStringLiteral("vfo_spectrum") || type_ == QStringLiteral("vfo_waterfall") ||
+            type_ == QStringLiteral("branch_spectrum") || type_ == QStringLiteral("branch_waterfall")) {
+            miniVfoDisplay_ = new MiniVfoDisplay(type_ == QStringLiteral("vfo_waterfall") || type_ == QStringLiteral("branch_waterfall"));
             miniVfoDisplay_->setAttribute(Qt::WA_TransparentForMouseEvents);
+            miniVfoDisplay_->setObjectName(QStringLiteral("dspPreview_%1").arg(id_));
             miniVfoProxy_ = new QGraphicsProxyWidget(this);
             miniVfoProxy_->setWidget(miniVfoDisplay_);
             miniVfoProxy_->setPos(8.0, 43.0);
@@ -2593,6 +2601,15 @@ public:
         if (!researchDisplay_) return;
         researchDisplay_->setSettings(settings);
         researchDisplay_->setConnected(connected, ukrainian);
+    }
+    void setResearchExternalInput(bool external) {
+        if (researchDisplay_) researchDisplay_->setExternalInput(external);
+    }
+    void setResearchFrame(const DspBranchFrame &frame) {
+        if (researchDisplay_) researchDisplay_->setExternalFrame(frame.iq ? *frame.iq : std::vector<float>(), frame.sampleRateHz, frame.sequence);
+    }
+    void setBranchSpectrum(const DspBranchFrame &frame, const QString &label) {
+        if (miniVfoDisplay_) miniVfoDisplay_->setSpectrum(frame.frequencies, frame.levels, frame.centerHz, frame.sampleRateHz, label, true);
     }
     bool hasInput() const { return typeHasInput(type_); }
     bool hasOutput() const { return typeHasOutput(type_); }
@@ -3098,7 +3115,7 @@ private:
 
 class DspConnectionItem final : public QGraphicsPathItem {
 public:
-    DspConnectionItem(DspBlockItem *source, DspBlockItem *target) : source_(source), target_(target) {
+    DspConnectionItem(DspBlockItem *source, DspBlockItem *target, bool ukrainian = false) : source_(source), target_(target), ukrainian_(ukrainian) {
         setZValue(-5.0);
         setFlag(ItemIsSelectable, true);
         if (source_) source_->addConnection(this);
@@ -3130,9 +3147,14 @@ public:
             path.cubicTo(from + QPointF(bend, 0.0), to - QPointF(bend, 0.0), to);
         }
         setPath(path);
-        const QColor normal = isControlConnection() ? QColor(190, 122, 235) : QColor(104, 188, 255);
+        const auto kind = dspLinkKind(source_->blockType(), target_->blockType());
+        const QColor normal = kind == DspLinkKind::Control ? QColor(190, 122, 235) :
+            kind == DspLinkKind::Settings ? QColor(78, 202, 151) :
+            kind == DspLinkKind::Spectrum ? QColor(244, 184, 70) :
+            kind == DspLinkKind::Documentation ? QColor(125, 133, 145) : QColor(104, 188, 255);
+        setToolTip(dspLinkDescription(kind, ukrainian_));
         setPen(QPen(isSelected() ? QColor(255, 194, 72) : normal,
-                    isSelected() ? 3.0 : 2.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                    isSelected() ? 3.0 : 2.2, kind == DspLinkKind::Documentation ? Qt::DashLine : Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     }
     QPainterPath shape() const override {
         QPainterPathStroker stroker;
@@ -3148,6 +3170,7 @@ protected:
 private:
     DspBlockItem *source_ = nullptr;
     DspBlockItem *target_ = nullptr;
+    bool ukrainian_ = false;
 };
 
 void DspBlockItem::updateConnections() {
@@ -3566,6 +3589,10 @@ public:
 
     bool addConnection(DspBlockItem *source, DspBlockItem *target, bool notify = true) {
         if (!source || !target || source == target || !source->hasOutput()) return false;
+        if (dspLinkKind(source->blockType(), target->blockType()) == DspLinkKind::Invalid) {
+            setStatus(dspLinkDescription(DspLinkKind::Invalid, ukrainian));
+            return false;
+        }
         if (isWorkspaceDisplaySettingsType(source->blockType()) &&
             !workspaceSettingsMatchView(source->blockType(), target->blockType())) {
             setStatus(ukrainian
@@ -3592,7 +3619,7 @@ public:
             }
         }
         for (DspConnectionItem *edge : oldInputs) delete edge;
-        auto *edge = new DspConnectionItem(source, target);
+        auto *edge = new DspConnectionItem(source, target, ukrainian);
         addItem(edge);
         frameRoutesDirty_ = true;
         updateConnectionContainer(edge);
@@ -3746,7 +3773,9 @@ public:
             if (block->blockType() == QStringLiteral("run_control")) {
                 active = receiverRunning;
             } else if (DspBlockItem *target = controlTargetFor(block)) {
-                active = enabledByBlockType.value(target->blockType(), false);
+                active = target->blockType() == QStringLiteral("ddc_channelizer")
+                    ? target->settings().value(QStringLiteral("enabled")).toBool(false)
+                    : enabledByBlockType.value(target->blockType(), false);
             }
             block->setControlState(active, ukrainian);
         }
@@ -4246,6 +4275,7 @@ public:
              !isWorkspaceDisplaySettingsType(block->blockType()) &&
              block->blockType() != QStringLiteral("vfo_spectrum") &&
              block->blockType() != QStringLiteral("vfo_waterfall") &&
+             !dspIsBranchType(block->blockType()) &&
              !block->blockType().startsWith(QStringLiteral("workspace_")))) {
             return false;
         }
@@ -4262,6 +4292,121 @@ public:
     bool hasMultiVfoDisplayBlocks() const {
         ensureFrameRoutes();
         return !vfoFrameBlocks_.isEmpty();
+    }
+
+    DspGraphPlan visibleBranchPlan(const DspGraphPlan &plan) const {
+        DspGraphPlan visible = plan;
+        QSet<QString> presented;
+        for (QGraphicsItem *item : items()) {
+            auto *block = dynamic_cast<DspBlockItem *>(item);
+            if (!block || !block->isVisualBlock() || !block->isVisible()) continue;
+            for (const auto *view : views()) {
+                if (view->isVisible() && !view->window()->isMinimized() &&
+                    view->viewport()->rect().intersects(view->mapFromScene(block->sceneBoundingRect()).boundingRect())) {
+                    presented.insert(block->id()); break;
+                }
+            }
+        }
+        QStringList liveSinks;
+        for (auto &branch : visible.branches) {
+            branch.iqConsumer = false;
+            for (auto route = researchControllers_.cbegin(); route != researchControllers_.cend(); ++route) {
+                if (presented.contains(route.key()) && plan.researchRoutes.value(route.value()) == branch.id) {
+                    branch.iqConsumer = true; liveSinks.append(route.key());
+                }
+            }
+            for (int i = branch.ffts.size()-1; i >= 0; --i) {
+                bool shown = false;
+                for (auto route = plan.spectrumRoutes.cbegin(); route != plan.spectrumRoutes.cend(); ++route) {
+                    if (route.value() == branch.ffts[i].id && presented.contains(route.key())) {
+                        shown = true; liveSinks.append(route.key());
+                    }
+                }
+                if (!shown) branch.ffts.removeAt(i);
+            }
+        }
+        std::sort(liveSinks.begin(), liveSinks.end());
+        for (int i = visible.branches.size()-1; i >= 0; --i)
+            if (!visible.branches[i].iqConsumer && visible.branches[i].ffts.isEmpty()) visible.branches.removeAt(i);
+        visible.executionKey += liveSinks.join(QLatin1Char('|')).toUtf8();
+        return visible;
+    }
+
+    void applyBranchFrame(const DspGraphPlan &plan, const DspBranchFrame &frame) {
+        const QString info = frame.error.isEmpty()
+            ? QStringLiteral("Fs %1 ksps | D %2 (%3) | gaps %4 | %5 ms")
+                .arg(frame.sampleRateHz/1000.0, 0, 'f', 3).arg(frame.decimation).arg(frame.frontDecimation)
+                .arg(qulonglong(frame.gaps)).arg(frame.processingMs, 0, 'f', 1)
+            : (ukrainian ? QStringLiteral("Помилка параметрів/джерела DDC: %1").arg(frame.error) : frame.error);
+        branchStatuses_.insert(frame.id, info);
+        if (auto *block = blockById(frame.id)) block->setToolTip(info);
+        for (auto route = plan.spectrumRoutes.cbegin(); route != plan.spectrumRoutes.cend(); ++route) {
+            auto *view = blockById(route.key());
+            if (!view) continue;
+            if (route.value() == frame.id) {
+                if (frame.error.isEmpty()) view->setBranchSpectrum(frame,
+                    QStringLiteral("%1 ksps | bin %2 Hz | RBW %3 Hz").arg(frame.sampleRateHz/1000.0, 0, 'f', 1)
+                        .arg(frame.binWidthHz, 0, 'f', 2).arg(frame.rbwHz, 0, 'f', 2));
+                else view->setMiniVfoStatus(info);
+            } else if (!frame.error.isEmpty()) {
+                for (const auto &branch : plan.branches) if (branch.id == frame.id)
+                    for (const auto &fft : branch.ffts) if (fft.id == route.value()) view->setMiniVfoStatus(info);
+            }
+        }
+        for (auto view = researchControllers_.cbegin(); view != researchControllers_.cend(); ++view) {
+            if (plan.researchRoutes.value(view.value()) == frame.id)
+                if (auto *block = blockById(view.key())) block->setResearchFrame(frame);
+        }
+    }
+
+    QString branchStatus(const QString &id) const {
+        if (auto *block = blockById(id)) {
+            if (block->blockType() == QStringLiteral("ddc_channelizer") && !block->settings().value(QStringLiteral("enabled")).toBool(false))
+                return ukrainian ? QStringLiteral("Гілку вимкнено") : QStringLiteral("Branch disabled");
+        }
+        return branchStatuses_.value(id, ukrainian ? QStringLiteral("Очікування IQ / увімкнення гілки") : QStringLiteral("Waiting for IQ / branch enable"));
+    }
+
+    void resetBranchRouteStatus(const DspGraphPlan &plan) {
+        branchStatuses_.clear();
+        for (QGraphicsItem *item : items()) {
+            auto *block = dynamic_cast<DspBlockItem *>(item);
+            if (!block || (block->blockType() != QStringLiteral("branch_spectrum") && block->blockType() != QStringLiteral("branch_waterfall"))) continue;
+            const QString fftId = plan.spectrumRoutes.value(block->id());
+            bool enabled = false;
+            for (const auto &b : plan.branches) for (const auto &f : b.ffts) if (f.id == fftId) enabled = b.enabled;
+            block->setMiniVfoStatus(fftId.isEmpty() ?
+                (ukrainian ? QStringLiteral("Під'єднайте FFT гілки") : QStringLiteral("Connect branch FFT")) :
+                enabled ? (ukrainian ? QStringLiteral("Очікування IQ") : QStringLiteral("Waiting for IQ")) :
+                (ukrainian ? QStringLiteral("Гілку вимкнено") : QStringLiteral("Branch disabled")));
+        }
+    }
+
+    void addDdcBranch(int sectorIndex = -1) {
+        DspBlockItem *source = nullptr;
+        for (QGraphicsItem *item : items()) {
+            auto *b = dynamic_cast<DspBlockItem *>(item);
+            if (b && (b->blockType() == QStringLiteral("receiver_source") || b->blockType() == QStringLiteral("iq_source"))) { source = b; break; }
+        }
+        const QRectF bounds = itemsBoundingRect();
+        const QPointF origin(bounds.isEmpty() ? 0.0 : bounds.left(), bounds.isEmpty() ? 0.0 : bounds.bottom()+100.0);
+        if (!source) source = addBlock(QStringLiteral("iq_source"), titleFor(QStringLiteral("iq_source")), origin-QPointF(220, 0));
+        auto *ddc = addBlock(QStringLiteral("ddc_channelizer"), titleFor(QStringLiteral("ddc_channelizer")), origin);
+        auto *fft = addBlock(QStringLiteral("branch_fft"), titleFor(QStringLiteral("branch_fft")), origin+QPointF(230, 0));
+        auto *spectrum = addBlock(QStringLiteral("branch_spectrum"), titleFor(QStringLiteral("branch_spectrum")), origin+QPointF(460, 0));
+        auto *waterfall = addBlock(QStringLiteral("branch_waterfall"), titleFor(QStringLiteral("branch_waterfall")), origin+QPointF(460, 230));
+        if (sectorIndex >= 0 && sectorIndex < sectorCount()) {
+            const qreal scale = canvasScaleForSector(sectorIndex);
+            const QList<DspBlockItem *> added{ddc, fft, spectrum, waterfall};
+            const QList<QPointF> positions{QPointF(10, 10), QPointF(205, 10), QPointF(10, 100), QPointF(10, 315)};
+            for (int i = 0; i < added.size(); ++i) {
+                auto settings = added[i]->settings(); settings.insert(QStringLiteral("workspaceSector"), sectorIndex);
+                settings.insert(QStringLiteral("workspaceCanvasScale"), scale);
+                added[i]->setSettings(settings); assignBlockToSector(added[i], sectorIndex, false);
+                added[i]->setScale(scale); added[i]->setPos(positions[i]*scale);
+            }
+        }
+        addConnection(source, ddc); addConnection(ddc, fft); addConnection(fft, spectrum); addConnection(fft, waterfall);
     }
 
     void updateMultiVfoSpectrum(const QString &configurationJson,
@@ -4431,7 +4576,7 @@ public:
             connections.append(object);
         }
         QJsonObject root;
-        root.insert(QStringLiteral("version"), 7);
+        root.insert(QStringLiteral("version"), 8);
         root.insert(QStringLiteral("sectorColumns"), sectorColumns_);
         root.insert(QStringLiteral("sectorRows"), sectorRows());
         root.insert(QStringLiteral("sectorColumnCuts"), sectorCutsToJson(columnCuts_));
@@ -5915,6 +6060,7 @@ private:
     }
     void refreshResearchDisplays() {
         const QList<QGraphicsItem *> sceneItems = items();
+        researchControllers_.clear();
         for (QGraphicsItem *item : sceneItems) {
             auto *view = dynamic_cast<DspBlockItem *>(item);
             if (!view || !isResearchViewType(view->blockType())) continue;
@@ -5946,6 +6092,15 @@ private:
             view->setResearchConnection(settingsBlock != nullptr,
                                         settingsBlock ? settingsBlock->settings() : QJsonObject(),
                                         ukrainian);
+            bool branchInput = false;
+            if (settingsBlock) {
+                researchControllers_.insert(view->id(), settingsBlock->id());
+                for (QGraphicsItem *edgeItem : sceneItems) {
+                    auto *edge = dynamic_cast<DspConnectionItem *>(edgeItem);
+                    if (edge && edge->target() == settingsBlock && edge->source()->blockType() == QStringLiteral("ddc_channelizer")) branchInput = true;
+                }
+            }
+            view->setResearchExternalInput(branchInput);
         }
     }
     void refreshWorkspaceDisplayBindings() {
@@ -6090,6 +6245,8 @@ private:
     mutable QList<DspBlockItem *> workspaceFrameBlocks_;
     mutable QList<DspBlockItem *> vfoFrameBlocks_;
     mutable QHash<DspBlockItem *, int> vfoFrameChannels_;
+    QHash<QString, QString> researchControllers_;
+    QHash<QString, QString> branchStatuses_;
     QString cachedVfoConfiguration_;
     QJsonArray cachedVfoChannels_;
     QRectF workspaceRect_{-800.0, -450.0, 1600.0, 900.0};
@@ -6164,6 +6321,11 @@ DspFlowPanel::DspFlowPanel(QWidget *parent) : QDialog(parent, Qt::Window) {
     statusLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     statusLabel_->setStyleSheet(QStringLiteral("color: #8793a2; padding-right: 4px;"));
     toolbar->addWidget(addButton_);
+    auto *ddcButton = new QToolButton(this);
+    ddcButton->setObjectName(QStringLiteral("addDdcBranch"));
+    ddcButton->setText(QStringLiteral("DDC +"));
+    connect(ddcButton, &QToolButton::clicked, this, &DspFlowPanel::addDdcBranch);
+    toolbar->addWidget(ddcButton);
     toolbar->addWidget(openButton_);
     toolbar->addWidget(renameButton_);
     toolbar->addWidget(deleteButton_);
@@ -6260,6 +6422,10 @@ DspFlowPanel::DspFlowPanel(QWidget *parent) : QDialog(parent, Qt::Window) {
         if (isVisible()) emit controlStateRefreshRequested();
     });
     controlStateTimer->start();
+    auto *branchTimer = new QTimer(this);
+    branchTimer->setInterval(20);
+    connect(branchTimer, &QTimer::timeout, this, &DspFlowPanel::refreshBranches);
+    branchTimer->start();
 
     connect(openButton_, &QPushButton::clicked, this, [this]() { scene_->activateSelection(); });
     connect(renameButton_, &QPushButton::clicked, this, [this]() { scene_->renameSelection(); });
@@ -6378,6 +6544,8 @@ void DspFlowPanel::setLanguage(bool ukrainian) {
                                                : QStringLiteral("Delete the selected saved layout"));
     statusLabel_->setText(ukrainian_ ? QStringLiteral("Готово") : QStringLiteral("Ready"));
     scene_->ukrainian = ukrainian_;
+    if (auto *button = findChild<QToolButton *>(QStringLiteral("addDdcBranch")))
+        button->setToolTip(ukrainian_ ? QStringLiteral("Додати окрему IQ-гілку DDC → FFT → спектр/водоспад") : QStringLiteral("Add an independent DDC -> FFT -> spectrum/waterfall IQ branch"));
     scene_->refreshStandardTitles();
     scene_->refreshResearchDisplayLanguage();
     rebuildAddMenu();
@@ -6471,6 +6639,16 @@ QString DspFlowPanel::configurationJson() const {
 }
 
 bool DspFlowPanel::setConfigurationJson(const QString &json) {
+    if (!json.trimmed().isEmpty()) {
+        const auto object = QJsonDocument::fromJson(json.toUtf8()).object();
+        if (!object.isEmpty()) {
+            const auto plan = compileDspGraph(object);
+            if (!plan.errors.isEmpty()) {
+                statusLabel_->setText(plan.errors.join(QStringLiteral("; ")));
+                return false;
+            }
+        }
+    }
     loading_ = true;
     bool loaded = false;
     if (!json.trimmed().isEmpty()) loaded = scene_->loadConfiguration(json);
@@ -6487,6 +6665,49 @@ bool DspFlowPanel::setConfigurationJson(const QString &json) {
     });
     if (loaded) scheduleConfigurationChanged();
     return loaded;
+}
+
+DspFlowPanel::~DspFlowPanel() { branchEngine_.reset(); }
+
+void DspFlowPanel::setBranchSourceContext(const RadioSettings &settings, bool running) {
+    branchSource_ = settings;
+    branchSourceRunning_ = running;
+}
+
+QString DspFlowPanel::branchStatus(const QString &id) const {
+    return scene_->branchStatus(id);
+}
+
+void DspFlowPanel::refreshBranches() {
+    if (branchPlanDirty_) {
+        auto plan = compileDspGraph(QJsonDocument::fromJson(configurationJson().toUtf8()).object());
+        if (branchPlan_.executionKey != plan.executionKey || branchPlan_.spectrumRoutes != plan.spectrumRoutes)
+            scene_->resetBranchRouteStatus(plan);
+        branchPlan_ = std::move(plan);
+        branchPlanDirty_ = false;
+        if (!branchPlan_.errors.isEmpty()) statusLabel_->setText(
+            (ukrainian_ ? QStringLiteral("Гілки DSP зупинено: ") : QStringLiteral("DSP branches stopped: ")) + branchPlan_.errors.join(QStringLiteral("; ")));
+    }
+    if (branchPlan_.branches.isEmpty()) {
+        if (branchEngine_) branchEngine_->configure(branchPlan_, branchSource_, false);
+        return;
+    }
+    const auto plan = scene_->visibleBranchPlan(branchPlan_);
+    bool enabled = false;
+    for (const auto &b : plan.branches) if (b.enabled && (b.iqConsumer || !b.ffts.isEmpty())) enabled = true;
+    const bool active = enabled && branchSourceRunning_ && isVisible() && !isMinimized();
+    if (!branchEngine_ && active) branchEngine_ = std::make_unique<DspBranchEngine>();
+    if (!branchEngine_) return;
+    branchEngine_->configure(plan, branchSource_, active);
+    for (const auto &frame : branchEngine_->takeFrames()) scene_->applyBranchFrame(branchPlan_, frame);
+}
+
+void DspFlowPanel::addDdcBranch() {
+    scene_->addDdcBranch(workspaceMode_ ? sectorIndexCombo_->currentData().toInt() : -1);
+    if (!workspaceMode_) {
+        const auto bounds = scene_->itemsBoundingRect();
+        view_->fitInView(bounds.adjusted(-40, -40, 40, 40), Qt::KeepAspectRatio);
+    }
 }
 
 void DspFlowPanel::refreshSectorControls() {
@@ -6706,7 +6927,19 @@ void DspFlowPanel::rebuildAddMenu() {
 }
 
 void DspFlowPanel::scheduleConfigurationChanged() {
-    if (!loading_) saveTimer_->start();
+    if (loading_) return;
+    branchPlanDirty_ = true;
+    QHash<QString, QString> filters;
+    const auto blocks = QJsonDocument::fromJson(configurationJson().toUtf8()).object().value(QStringLiteral("blocks")).toArray();
+    for (const auto &value : blocks) {
+        const auto block = value.toObject();
+        const auto type = block.value(QStringLiteral("type")).toString();
+        if (type.startsWith(QStringLiteral("filter_"))) filters.insert(block.value(QStringLiteral("id")).toString(), type);
+    }
+    for (auto old = knownFilterBlocks_.cbegin(); old != knownFilterBlocks_.cend(); ++old)
+        if (!filters.contains(old.key())) emit blockRemoved(old.value(), old.key());
+    knownFilterBlocks_ = filters;
+    saveTimer_->start();
 }
 
 void DspFlowPanel::addBlock(const QString &type) {
@@ -6721,6 +6954,10 @@ void DspFlowPanel::addBlock(const QString &type) {
 }
 
 QString DspFlowPanel::blockTitle(const QString &type) const {
+    if (type == QStringLiteral("ddc_channelizer")) return ukrainian_ ? QStringLiteral("DDC каналізатор") : QStringLiteral("DDC channelizer");
+    if (type == QStringLiteral("branch_fft")) return ukrainian_ ? QStringLiteral("FFT гілки") : QStringLiteral("Branch FFT");
+    if (type == QStringLiteral("branch_spectrum")) return ukrainian_ ? QStringLiteral("Спектр гілки") : QStringLiteral("Branch spectrum");
+    if (type == QStringLiteral("branch_waterfall")) return ukrainian_ ? QStringLiteral("Водоспад гілки") : QStringLiteral("Branch waterfall");
     if (type == QStringLiteral("run_control")) return ukrainian_ ? QStringLiteral("СТАРТ") : QStringLiteral("START");
     if (type == QStringLiteral("enable_control")) return ukrainian_ ? QStringLiteral("ВКЛ") : QStringLiteral("ON");
     if (type == QStringLiteral("receiver_source")) return ukrainian_ ? QStringLiteral("Вхід приймача") : QStringLiteral("Receiver input");
@@ -6738,7 +6975,7 @@ QString DspFlowPanel::blockTitle(const QString &type) const {
     if (type == QStringLiteral("workspace_spectrum")) return ukrainian_ ? QStringLiteral("Робочий спектр") : QStringLiteral("Workspace spectrum");
     if (type == QStringLiteral("workspace_ruler")) return ukrainian_ ? QStringLiteral("Лінійка частот") : QStringLiteral("Frequency ruler");
     if (type == QStringLiteral("workspace_waterfall")) return ukrainian_ ? QStringLiteral("Робочий водоспад") : QStringLiteral("Workspace waterfall");
-    if (type == QStringLiteral("resampler")) return ukrainian_ ? QStringLiteral("Ресемплер") : QStringLiteral("Resampler");
+    if (type == QStringLiteral("resampler")) return ukrainian_ ? QStringLiteral("Sample rate приймача") : QStringLiteral("Receiver sample rate");
     if (type == QStringLiteral("fft")) return ukrainian_ ? QStringLiteral("FFT / спектр") : QStringLiteral("FFT / spectrum");
     if (type == QStringLiteral("hf_interference")) return ukrainian_ ? QStringLiteral("HF лабораторія завад") : QStringLiteral("HF interference lab");
     if (type == QStringLiteral("demodulator")) return ukrainian_ ? QStringLiteral("Демодулятор") : QStringLiteral("Demodulator");

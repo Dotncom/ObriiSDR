@@ -609,7 +609,7 @@ void DataProcessor::run() {
                 }
             }
             updateStreamDiagnostics(syncBuffer.data(), actual_buf_length, "sync");
-            if (requestedEmitIqFrames.load()) {
+            if (requestedEmitIqFrames.load() || requestedWifiIqFrames.load()) {
                 emitIqFrame(syncBuffer.data(), floatCount);
             }
             accumulatedPublishMs += publishTimer.elapsed();
@@ -1533,7 +1533,7 @@ void DataProcessor::handleUnsigned8IqData(const unsigned char *buf, uint32_t byt
         }
     }
     updateStreamDiagnostics(floatBuffer.data(), sampleCount, readerMode);
-    if (requestedEmitIqFrames.load()) {
+    if (requestedEmitIqFrames.load() || requestedWifiIqFrames.load()) {
         emitIqFrame(floatBuffer.data(), floatBuffer.size());
     }
 
@@ -1610,7 +1610,7 @@ void DataProcessor::handleData(float *buf, uint32_t buf_length, int agileScanInd
         }
     }
     updateStreamDiagnostics(buf, buf_length, "async");
-    if (requestedEmitIqFrames.load()) {
+    if (requestedEmitIqFrames.load() || requestedWifiIqFrames.load()) {
         emitIqFrame(buf, static_cast<size_t>(buf_length) * FLOATS_PER_IQ_SAMPLE);
     }
     ++asyncCallbackCounter;
@@ -1880,6 +1880,10 @@ void DataProcessor::configureNetworkIqStreaming(const RadioSettings &settings, b
     }
 }
 
+void DataProcessor::setWifiIqStreamingEnabled(bool enabled) {
+    requestedWifiIqFrames.store(enabled, std::memory_order_release);
+}
+
 void DataProcessor::resetNetworkIqState() {
     networkIqNcoPhase = 0.0;
     networkIqDecimationSum = std::complex<float>(0.0f, 0.0f);
@@ -1908,11 +1912,13 @@ void DataProcessor::emitIqFrame(const float *samples, std::size_t floatCount) {
         return;
     }
 
-    if (networkIqResetRequested.exchange(false)) {
-        resetNetworkIqState();
-    }
+    const bool regular = requestedEmitIqFrames.load(std::memory_order_acquire);
+    const bool wifi = requestedWifiIqFrames.load(std::memory_order_acquire);
+    if (!regular && !wifi) return;
 
-    if (requestedChannelizeIqFrames.load()) {
+    if (regular && networkIqResetRequested.exchange(false)) resetNetworkIqState();
+    if (regular && requestedChannelizeIqFrames.load()) {
+        if (wifi) emitWifiIqFrame(samples, floatCount);
         RadioSettings settings;
         {
             std::lock_guard<std::mutex> lock(networkIqSettingsMutex);
@@ -1926,16 +1932,47 @@ void DataProcessor::emitIqFrame(const float *samples, std::size_t floatCount) {
 }
 
 void DataProcessor::emitFullIqFrame(const float *samples, std::size_t floatCount) {
-    QByteArray quantized;
-    quantized.resize(static_cast<int>(floatCount));
+    const double rate = requestedSampleRate.load();
+    const int count = static_cast<int>(floatCount / FLOATS_PER_IQ_SAMPLE);
+    if (requestedWifiIqFrames.load(std::memory_order_acquire))
+        emitWifiIqFrame(samples, floatCount);
+    if (requestedEmitIqFrames.load(std::memory_order_acquire)) {
+        QByteArray quantized(static_cast<int>(floatCount), Qt::Uninitialized);
+        char *dst = quantized.data();
+        for (std::size_t i = 0; i < floatCount; ++i) dst[i] = quantizeIqSample(samples[i]);
+        emit iqFrameReady(quantized, rate, count, false);
+    }
+}
+
+void DataProcessor::emitWifiIqFrame(const float *samples, std::size_t floatCount) {
+    double power = 0.0;
+    float peak = 0.0f;
+    std::size_t measured = 0;
+    const std::size_t stride = (std::max)(std::size_t(2), (floatCount / 8192) & ~std::size_t(1));
+    for (std::size_t i = 0; i < floatCount; i += stride) {
+        const float value = std::isfinite(samples[i]) ? samples[i] : 0.0f;
+        power += static_cast<double>(value) * value;
+        peak = (std::max)(peak, std::abs(value));
+        ++measured;
+    }
+    const float rms = measured ? static_cast<float>(std::sqrt(power / measured)) : 0.0f;
+    const float target = (std::min)(0.06f / (std::max)(rms, 1e-7f),
+                                    0.8f / (std::max)(peak, 1e-7f));
+    const float desired = (std::clamp)(target, 1.0f, 4096.0f);
+    wifiIqGain = wifiIqGain == 0.0f ? desired :
+        wifiIqGain + (desired - wifiIqGain) * (desired < wifiIqGain ? 0.2f : 0.05f);
+    QByteArray quantized(static_cast<int>(floatCount), Qt::Uninitialized);
     char *dst = quantized.data();
     for (std::size_t i = 0; i < floatCount; ++i) {
-        dst[i] = quantizeIqSample(samples[i]);
+        const float value = std::isfinite(samples[i]) ? samples[i] : 0.0f;
+        const float scaled = (std::clamp)(value * wifiIqGain, -1.0f, 1.0f) * 127.0f;
+        const int rounded = scaled >= 0.0f ? static_cast<int>(scaled + 0.5f)
+                                            : static_cast<int>(scaled - 0.5f);
+        dst[i] = static_cast<char>((std::clamp)(rounded, -128, 127));
     }
-
-    emit iqFrameReady(quantized,
-                      requestedSampleRate.load(),
-                      static_cast<int>(floatCount / FLOATS_PER_IQ_SAMPLE), false);
+    emit wifiIqFrameReady(quantized, requestedSampleRate.load(),
+                          requestedCenterFrequency.load(),
+                          static_cast<int>(floatCount / FLOATS_PER_IQ_SAMPLE));
 }
 
 void DataProcessor::emitChannelIqFrame(const float *samples,

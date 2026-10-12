@@ -5,6 +5,13 @@
 #include "wirelesspackettools.h"
 #include "wirelesslabdialog.h"
 #include "wirelesscaptureworker.h"
+#include "wirelesspacketdetails.h"
+#include "wifiliveiqworker.h"
+#include <QTemporaryDir>
+#include <QFile>
+#include <QDataStream>
+#include <QSettings>
+#include <QLayout>
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QImage>
@@ -15,6 +22,7 @@
 #include <QHostAddress>
 #include <QDir>
 #include <QTableWidget>
+#include <QCheckBox>
 #include <QTabWidget>
 #include <iostream>
 #include <random>
@@ -31,7 +39,7 @@
 namespace {
 int failures = 0;
 void check(bool condition, const char *name) {
-    if (!condition) { qCritical() << "FAIL:" << name; ++failures; }
+    if (!condition) { qCritical() << "FAIL:" << name; std::cerr << "FAIL: " << name << '\n'; ++failures; }
 }
 void testDsdDmrArguments() {
     for (int rate : {24000, 48000}) {
@@ -218,6 +226,27 @@ void testPackets() {
     check(!Wireless::validateTransmission(c, s, r, error), "half-duplex concurrent RX rejected");
     c.fullDuplex = true;
     check(Wireless::validateTransmission(c, s, r, error), "confirmed full-duplex concurrent RX allowed");
+    auto usrp = Wireless::usrpB210PlanningCapabilities();
+    s.centerFrequencyHz = 2412e6;
+    check(!Wireless::validateIqStream(usrp,s,20e6,error), "B210 planning profile is not advertised as detected hardware");
+    usrp.planningOnly = false; s.activeChannels = 2;
+    check(!Wireless::validateIqStream(usrp,s,20e6,error), "Dual-channel B210 does not promise 50 MS/s per channel");
+    s.activeChannels = 1; s.activeTransmitChannels = 2;
+    check(!Wireless::validateIqStream(usrp,s,20e6,error), "Two TX channels also constrain the shared B210 master clock");
+    s.activeChannels = 2; s.activeTransmitChannels = 0;
+    s.sampleRateHz = 30.72e6; s.usableBandwidthHz = 25e6;
+    check(Wireless::validateIqStream(usrp,s,20e6,error), "B210 qualified dual-channel descriptor");
+    check(!Wireless::validateTransmission(usrp,s,r,error), "IQ TX capability alone is not a Wi-Fi/Bluetooth/LTE packet transmitter");
+    usrp.transmitsPackets = true;
+    check(!Wireless::validateTransmission(usrp,s,r,error), "UHD timing cannot use an unverified GUI/sample clock");
+    s.hardwareTimeValid = s.clockLocked = true; s.deviceSerial = "synthetic-device";
+    s.hardwareTick = 100; s.hardwareTicksPerSecond = 30.72e6;
+    r.useHardwareTicks = true; r.targetHardwareTick = 200; r.minimumLeadTicks = 20;
+    check(Wireless::validateTransmission(usrp,s,r,error), "Separate hardware ticks permit differing RX/TX sample rates");
+    s.continuous = false; s.firstSample = 1000000;
+    check(Wireless::validateTransmission(usrp,s,r,error), "Hardware-timed TX remains possible with RX stopped");
+    r.targetHardwareTick = 110;
+    check(!Wireless::validateTransmission(usrp,s,r,error), "Late hardware-timed transmission rejected");
 }
 void testCaptureWorker(QApplication &app) {
     auto *worker = new WirelessCaptureWorker;
@@ -245,6 +274,56 @@ void testCaptureWorker(QApplication &app) {
     }, Qt::QueuedConnection);
     check(thread.wait(3000), "packet worker shutdown");
     qInfo() << "Packet worker: delivered=" << total << "boundedDrops=" << lost;
+}
+void testActualTshark() {
+    const QString program = qEnvironmentVariable("OBRII_TSHARK_PATH", Wireless::findTshark());
+    if (program.isEmpty()) { std::cout << "Actual TShark integration: skipped (runtime not found)\n"; return; }
+    QTemporaryDir directory;
+    check(directory.isValid(), "packet fixture directory");
+    const QString capture = directory.filePath("beacon.pcap");
+    const QByteArray radiotap = QByteArray::fromHex("00000d00280000006c09a000d6");
+    QByteArray frame = QByteArray::fromHex("80000000ffffffffffff0200000000010200000000010000000000000000000064000100");
+    frame.append(char(0)); frame.append(char(10)); frame.append("Obrii test");
+    frame.append(QByteArray::fromHex("010182030101"));
+    const QByteArray packet = radiotap + frame;
+    QFile file(capture); check(file.open(QIODevice::WriteOnly), "PCAP fixture open");
+    QDataStream stream(&file); stream.setByteOrder(QDataStream::LittleEndian);
+    stream << quint32(0xa1b2c3d4) << quint16(2) << quint16(4) << qint32(0) << quint32(0) << quint32(65535) << quint32(127);
+    stream << quint32(1700000000) << quint32(0) << quint32(packet.size()) << quint32(packet.size());
+    file.write(packet); file.close();
+    Wireless::AnalysisRequest request; request.inputFile = capture; request.displayFilter = "wlan";
+    QString error;
+    QProcess process;
+    process.start(program, Wireless::analysisArguments(request, &error));
+    check(process.waitForFinished(15000) && process.exitCode() == 0, "Actual TShark packet dissection");
+    QStringList row;
+    check(Wireless::parsePacketLine(process.readAllStandardOutput().trimmed(), row), "Actual TShark TSV format");
+    std::cout << "Synthetic beacon fields: SSID=" << row.value(7).toStdString() << " frequency=" << row.value(8).toStdString() << " RSSI=" << row.value(9).toStdString() << '\n';
+    check(Wireless::ssidText(row.value(7)) == "Obrii test" && row.value(8) == "2412" && row.value(9) == "-42", "Real Wireshark SSID/frequency/RSSI fields");
+    check(Wireless::ssidText("00ff") == "0x00ff" && Wireless::ssidText("test SSID") == "test SSID", "Binary SSID and fake/legacy text remain unambiguous");
+    check(Wireless::payloadState(row) == Wireless::PayloadState::Clear, "Open beacon is not falsely marked decrypted");
+    for (auto protocol : {Wireless::Protocol::Bluetooth, Wireless::Protocol::Gsm, Wireless::Protocol::Lte, Wireless::Protocol::Umts, Wireless::Protocol::All}) {
+        request.displayFilter = Wireless::displayFilter(protocol);
+        process.start(program, Wireless::analysisArguments(request, &error));
+        check(process.waitForFinished(15000) && process.exitCode() == 0, "Protocol selectors are valid TShark filters");
+    }
+    process.start(program, {"-n", "-r", capture, "-Y", "frame.number == 1", "-T", "json", "-x"});
+    check(process.waitForFinished(15000) && process.exitCode() == 0, "Actual TShark JSON details");
+    QJsonObject layers; QByteArray raw;
+    check(Wireless::packetDetails(process.readAllStandardOutput(), &layers, &raw, &error) && raw == packet, "Packet detail parser preserves captured bytes");
+    request.live = true; request.inputFile.clear(); request.interfaceId = "test"; request.outputFile = directory.filePath("out.pcapng"); request.displayFilter = "wlan"; request.captureFilter = "type mgt";
+    auto args = Wireless::analysisArguments(request, &error);
+    check(error.isEmpty() && args.contains("-f") && args.contains("-P") && !args.contains("-Y"), "Saved live analysis uses capture filter, never invalid -w/-Y combination");
+    request.outputFile.clear(); args = Wireless::analysisArguments(request, &error);
+    check(args.contains("-Y") && !args.contains("filesize:102400"), "Unsaved live analysis uses display filter");
+    const auto interfaces = Wireless::parseInterfaces("1. \\Device\\NPF_123 (Wi-Fi)\n2. wlan0 (Wireless)\ninvalid");
+    check(interfaces.size() == 2 && interfaces[0].id == "\\Device\\NPF_123" && interfaces[1].id == "wlan0", "Stable interface IDs are not list ordinals");
+    check(!Wireless::packetDetails("not json", &layers, &raw, &error), "Invalid detail output rejected");
+    row = QStringList(Wireless::tsharkFields()); for (auto &field : row) field.clear(); row[12] = "1"; row[16] = "radiotap:wlan:llc:ip:udp";
+    check(Wireless::payloadState(row) == Wireless::PayloadState::Decoded, "Protected payload must have decoded higher layers");
+    row[16] = "radiotap:wlan:data";
+    check(Wireless::payloadState(row) == Wireless::PayloadState::Protected, "Protected bit alone does not imply successful decryption");
+    std::cout << "Actual TShark PCAP, protocol filters, details and capture arguments: PASS\n";
 }
 void testDsdTransport() {
     QUdpSocket sink;
@@ -442,6 +521,61 @@ void testDsdStdinRecovery(){
     check(thread.wait(3000),"Crashed/restarted stdin bridge destroys timers on owning thread");
 }
 }
+void testWifiLiveIqWorker(QApplication &app, const QString &iqPath,
+                          const QString &pythonPath, const QString &scriptPath) {
+    QFile input(iqPath);
+    check(input.open(QIODevice::ReadOnly), "Live Wi-Fi fixture opens");
+    if (!input.isOpen()) return;
+    const QByteArray iq = input.readAll();
+    check(!iq.isEmpty() && iq.size() % 2 == 0, "Live Wi-Fi fixture is CS8 IQ");
+    if (iq.isEmpty() || iq.size() % 2) return;
+    QTemporaryDir output;
+    check(output.isValid(), "Live Wi-Fi temporary output exists");
+    if (!output.isValid()) return;
+    const QString pcap = output.filePath(QStringLiteral("live.pcap"));
+    QThread thread;
+    auto *worker = new WifiLiveIqWorker;
+    worker->moveToThread(&thread);
+    QObject::connect(&thread, &QThread::finished, worker, &QObject::deleteLater);
+    bool started = false, finished = false;
+    int rows = 0;
+    QObject::connect(worker, &WifiLiveIqWorker::started, &app, [&] { started = true; });
+    QObject::connect(worker, &WifiLiveIqWorker::finished, &app,
+                     [&](bool, const QString &detail) {
+        std::cerr << "Live Wi-Fi worker finished: " << detail.toStdString() << '\n';
+        finished = true;
+    });
+    QObject::connect(worker, &WifiLiveIqWorker::message, &app,
+                     [](const QString &detail) {
+        std::cerr << "Live Wi-Fi worker: " << detail.toStdString() << '\n';
+    });
+    QObject::connect(worker, &WifiLiveIqWorker::packetRow, &app,
+                     [&](const QStringList &row) { if (row.size() == 17) ++rows; });
+    thread.start();
+    QMetaObject::invokeMethod(worker, [worker, pythonPath, scriptPath, pcap,
+                                       working = output.path()] {
+        worker->start(pythonPath,
+                      {QStringLiteral("-I"), QStringLiteral("-B"), scriptPath,
+                       QStringLiteral("--live"), QStringLiteral("--output"), pcap,
+                       QStringLiteral("--sample-rate"), QStringLiteral("20000000"),
+                       QStringLiteral("--center"), QStringLiteral("2412000000"),
+                       QStringLiteral("--channel"), QStringLiteral("2412000000")},
+                      working, 20e6, 2412e6);
+    }, Qt::QueuedConnection);
+    check(waitFor(app, [&] { return started || finished; }, 5000) && started,
+          "Live Wi-Fi worker starts the PHY process");
+    if (started) {
+        worker->enqueue(iq, 20e6, 2412e6, iq.size() / 2);
+        waitFor(app, [&] { return rows > 0 || finished; }, 5000);
+        QMetaObject::invokeMethod(worker, [worker] { worker->stop(); }, Qt::QueuedConnection);
+        waitFor(app, [&] { return finished; }, 3000);
+        check(rows > 0, "Live Wi-Fi worker forwards CRC-valid packet rows");
+        check(QFileInfo(pcap).size() > 24, "Live Wi-Fi worker writes radiotap PCAP");
+    }
+    QMetaObject::invokeMethod(worker, [worker] { worker->stop(); }, Qt::BlockingQueuedConnection);
+    thread.quit();
+    check(thread.wait(3000), "Live Wi-Fi worker thread stops cleanly");
+}
 int main(int argc, char **argv) {
     if(argc>1&&std::strcmp(argv[1],"--fake-dsd-stdin")==0){
 #ifdef Q_OS_WIN
@@ -467,6 +601,12 @@ int main(int argc, char **argv) {
         return 0;
     }
     QApplication app(argc, argv);
+    if (argc == 5 && std::strcmp(argv[1], "--wifi-live-fixture") == 0) {
+        testWifiLiveIqWorker(app, QString::fromLocal8Bit(argv[2]),
+                             QString::fromLocal8Bit(argv[3]), QString::fromLocal8Bit(argv[4]));
+        qInfo() << "Live Wi-Fi selftest failures=" << failures;
+        return failures ? 1 : 0;
+    }
     if (app.arguments().contains(QStringLiteral("--fake-tshark"))) {
         for (int i = 1; i <= 6000; ++i) {
             QStringList fields = Wireless::tsharkFields();
@@ -480,7 +620,11 @@ int main(int argc, char **argv) {
         return 0;
     }
     testDecimator();
+    QTemporaryDir preferences;
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, preferences.path());
     testPackets();
+    testActualTshark();
     testDsdDmrArguments();
     testDsdTransport();
     setFobosVerboseLoggingEnabled(true);
@@ -490,6 +634,27 @@ int main(int argc, char **argv) {
     testDsdProcessRestart();
     testDsdStdinRecovery();
     testCaptureWorker(app);
+    {
+        WirelessLabDialog dialog(false);
+        auto *audio = dialog.findChild<QCheckBox *>(QStringLiteral("wirelessAudioCheckbox"));
+        check(audio != nullptr, "wireless audio control exists");
+        if (audio) {
+            int requests = 0;
+            bool requestedState = false;
+            QObject::connect(&dialog, &WirelessLabDialog::audioEnabledRequested,
+                             [&requests, &requestedState](bool enabled) {
+                ++requests;
+                requestedState = enabled;
+            });
+            dialog.setAudioEnabled(true);
+            check(audio->isChecked() && requests == 0, "wireless audio programmatic sync is quiet");
+            audio->click();
+            check(!audio->isChecked() && requests == 1 && !requestedState,
+                  "wireless audio user toggle requests mute");
+            dialog.setAudioControlEnabled(false);
+            check(!audio->isEnabled(), "wireless audio follows receiver control availability");
+        }
+    }
     if (app.arguments().contains(QStringLiteral("--render"))) {
 #ifdef Q_OS_WIN
         QFontDatabase::addApplicationFont(QStringLiteral("C:/Windows/Fonts/segoeui.ttf"));
@@ -497,7 +662,7 @@ int main(int argc, char **argv) {
 #endif
         for (bool uk : {false, true}) {
             WirelessLabDialog dialog(uk);
-            dialog.resize(1050, 640); dialog.show(); app.processEvents();
+            dialog.resize(1050, 640); dialog.ensurePolished(); dialog.layout()->activate(); app.processEvents();
             std::vector<float> f(4096), levels(4096);
             for (int i = 0; i < 4096; ++i) {
                 f[i] = float(2412e6 - 25e6 + i * 50e6 / 4096);
@@ -513,6 +678,8 @@ int main(int argc, char **argv) {
             dialog.render(&image);
             check(image.save(QDir::current().filePath(uk ? QStringLiteral("wireless-rf-uk.png")
                                                        : QStringLiteral("wireless-rf-en.png"))), "RF render");
+            dialog.findChild<QTabWidget *>()->setCurrentIndex(3); app.processEvents(); dialog.render(&image);
+            check(image.save(QDir::current().filePath(uk ? QStringLiteral("wireless-phy-uk.png") : QStringLiteral("wireless-phy-en.png"))), "PHY render");
         }
     }
     qInfo() << "Wireless/DMR selftest failures=" << failures;

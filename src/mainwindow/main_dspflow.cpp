@@ -392,6 +392,11 @@ void YourClassName::ensureDspFlowPanel() {
             this, &YourClassName::openDspBlockReference);
     connect(dspFlowPanel, &DspFlowPanel::blockCreated,
             this, &YourClassName::registerDspFilterBlock);
+    connect(dspFlowPanel, &DspFlowPanel::blockRemoved, this,
+            [this](const QString &type, const QString &id) {
+                if (type.startsWith(QStringLiteral("filter_")) && audioFilterChainWidget)
+                    audioFilterChainWidget->removeStageById(id);
+            });
     connect(dspFlowPanel, &DspFlowPanel::controlTriggered,
             this, &YourClassName::triggerDspControlBlock);
     connect(dspFlowPanel, &DspFlowPanel::controlStateRefreshRequested,
@@ -461,14 +466,17 @@ void YourClassName::registerDspFilterBlock(const QString &type, const QString &i
     bool ok = false;
     const AudioFilterKind kind = filterKindForBlock(type, &ok);
     if (ok && audioFilterChainWidget) {
-        audioFilterChainWidget->ensureStage(id, kind);
+        audioFilterChainWidget->ensureStage(id, kind, false);
     }
 }
 
 void YourClassName::refreshDspControlStates() {
     if (!dspFlowPanel) return;
+    dspFlowPanel->setBranchSourceContext(pendingSettings, runState == RadioRunState::Running);
     const auto checked = [](const QCheckBox *box) { return box && box->isChecked(); };
     QHash<QString, bool> states;
+    states.insert(QStringLiteral("multi_vfo_channelizer"), multiVfoWidget && QJsonDocument::fromJson(
+        multiVfoWidget->configurationJson().toUtf8()).object().value(QStringLiteral("enabled")).toBool(false));
     states.insert(QStringLiteral("spectrum_display"), checked(spectrumCheckbox));
     states.insert(QStringLiteral("second_spectrum"), checked(graphCheckbox));
     states.insert(QStringLiteral("waterfall_3d"), waterfallDisplayModeCombo &&
@@ -536,7 +544,13 @@ void YourClassName::triggerDspControlBlock(const QString &controlType,
                                            const QString &targetType,
                                            const QString &targetId) {
     Q_UNUSED(controlId);
-    Q_UNUSED(targetId);
+    if (controlType == QStringLiteral("enable_control") && targetType == QStringLiteral("ddc_channelizer") && dspFlowPanel) {
+        auto settings = dspFlowPanel->blockSettings(targetId);
+        settings.insert(QStringLiteral("enabled"), !settings.value(QStringLiteral("enabled")).toBool(false));
+        dspFlowPanel->setBlockSettings(targetId, settings);
+        refreshDspControlStates();
+        return;
+    }
     if (controlType == QStringLiteral("run_control")) {
         if (!targetType.isEmpty() && targetType != QStringLiteral("receiver_source") &&
             targetType != QStringLiteral("iq_source") && targetType != QStringLiteral("network_input") &&
@@ -550,6 +564,12 @@ void YourClassName::triggerDspControlBlock(const QString &controlType,
         return;
     }
     if (controlType != QStringLiteral("enable_control") || targetType.isEmpty()) return;
+    if (targetType == QStringLiteral("multi_vfo_channelizer") && multiVfoWidget) {
+        auto settings = QJsonDocument::fromJson(multiVfoWidget->configurationJson().toUtf8()).object();
+        settings.insert(QStringLiteral("enabled"), !settings.value(QStringLiteral("enabled")).toBool(false));
+        multiVfoWidget->setConfigurationJson(QString::fromUtf8(QJsonDocument(settings).toJson(QJsonDocument::Compact)));
+        refreshDspControlStates(); savePersistentSettings(); return;
+    }
 
     QCheckBox *toggle = nullptr;
     if (targetType == QStringLiteral("spectrum_display")) toggle = spectrumCheckbox;
@@ -608,7 +628,7 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
     const AudioFilterKind filterKind = filterKindForBlock(type, &filterBlock);
     if (filterBlock) {
         if (audioFilterChainWidget) {
-            audioFilterChainWidget->ensureStage(id, filterKind);
+            audioFilterChainWidget->ensureStage(id, filterKind, false);
             audioFilterChainWidget->openStageEditor(id);
         }
         return;
@@ -801,7 +821,84 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
     };
 
     QString title;
-    if (type == QStringLiteral("oscilloscope") || type == QStringLiteral("constellation") ||
+    if (type == QStringLiteral("ddc_channelizer") || type == QStringLiteral("branch_fft") ||
+        type == QStringLiteral("branch_spectrum") || type == QStringLiteral("branch_waterfall")) {
+        const auto stored = dspFlowPanel->blockSettings(id);
+        title = type == QStringLiteral("ddc_channelizer") ? text("DDC: додаткова IQ-гілка", "DDC: additional IQ branch") :
+            type == QStringLiteral("branch_fft") ? text("FFT додаткової гілки", "Additional branch FFT") :
+            type == QStringLiteral("branch_spectrum") ? text("Спектр гілки", "Branch spectrum") : text("Водоспад гілки", "Branch waterfall");
+        auto *status = new QLabel(dspFlowPanel->branchStatus(id), dialog);
+        status->setWordWrap(true);
+        const auto number = [dialog, form](const QString &label, double value, double low, double high, int decimals, const QString &suffix) {
+            auto *spin = new QDoubleSpinBox(dialog);
+            spin->setRange(low, high); spin->setDecimals(decimals); spin->setSuffix(suffix);
+            spin->setKeyboardTracking(false); spin->setValue(value); form->addRow(label, spin); return spin;
+        };
+        if (type == QStringLiteral("ddc_channelizer")) {
+            auto *enabled = new QCheckBox(text("Увімкнути гілку", "Enable branch"), dialog);
+            enabled->setChecked(stored.value("enabled").toBool(false)); form->addRow(enabled);
+            auto *follow = new QCheckBox(text("Частота основного прослуховування", "Follow main listening frequency"), dialog);
+            follow->setChecked(stored.value("frequencyHz").toDouble(0.0) == 0.0); form->addRow(follow);
+            auto *frequency = number(text("Частота:", "Frequency:"),
+                (stored.value("frequencyHz").toDouble(0.0) > 0.0 ? stored.value("frequencyHz").toDouble() : pendingSettings.listeningFrequency)/1.0e6, 0.0, 8000.0, 6, QStringLiteral(" MHz"));
+            frequency->setEnabled(!follow->isChecked());
+            auto *bandwidth = number(text("Смуга каналу:", "Channel bandwidth:"), stored.value("bandwidthHz").toDouble(12500.0)/1000.0,
+                0.1, 1500.0, 3, QStringLiteral(" kHz"));
+            auto *rate = number(text("Вихідний sample rate:", "Output sample rate:"), stored.value("outputRateHz").toDouble(192000.0)/1000.0,
+                1.0, 2000.0, 3, QStringLiteral(" ksps"));
+            auto *decimation = new QSpinBox(dialog);
+            decimation->setRange(0, 4096); decimation->setSpecialValueText(QStringLiteral("Auto"));
+            decimation->setKeyboardTracking(false); decimation->setValue(stored.value("decimation").toInt(0));
+            form->addRow(text("Децимація до ресемплера:", "Decimation before resampler:"), decimation);
+            form->addRow(text("Фільтр:", "Filter:"), new QLabel(QStringLiteral("3-stage prefilter + 32-tap / 64-phase Blackman FIR"), dialog));
+            const auto apply = [this, id, enabled, follow, frequency, bandwidth, rate, decimation]() {
+                auto value = dspFlowPanel->blockSettings(id);
+                value.insert("enabled", enabled->isChecked());
+                value.insert("frequencyHz", follow->isChecked() ? 0.0 : frequency->value()*1.0e6);
+                value.insert("bandwidthHz", bandwidth->value()*1000.0);
+                value.insert("outputRateHz", rate->value()*1000.0);
+                value.insert("decimation", decimation->value());
+                frequency->setEnabled(!follow->isChecked());
+                dspFlowPanel->setBlockSettings(id, value);
+            };
+            connect(enabled, &QCheckBox::toggled, dialog, [apply](bool) { apply(); });
+            connect(follow, &QCheckBox::toggled, dialog, [apply](bool) { apply(); });
+            for (auto *spin : {frequency, bandwidth, rate}) connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), dialog, [apply](double) { apply(); });
+            connect(decimation, QOverload<int>::of(&QSpinBox::valueChanged), dialog, [apply](int) { apply(); });
+        } else if (type == QStringLiteral("branch_fft")) {
+            auto *fft = new QComboBox(dialog);
+            for (int n = 512; n <= 65536; n *= 2) fft->addItem(QString::number(n), n);
+            fft->setCurrentIndex(std::max(0, fft->findData(stored.value("fftLength").toInt(2048))));
+            form->addRow(QStringLiteral("FFT:"), fft);
+            auto *window = new QComboBox(dialog);
+            for (int w = FFT_WINDOW_RECTANGULAR; w <= FFT_WINDOW_FLAT_TOP; ++w) window->addItem(QString::fromLatin1(fftWindowTypeName(w)), w);
+            window->setCurrentIndex(std::max(0, window->findData(stored.value("window").toInt(FFT_WINDOW_HANN))));
+            form->addRow(text("Вікно:", "Window:"), window);
+            auto *refresh = new QSpinBox(dialog);
+            refresh->setRange(20, 2000); refresh->setSuffix(QStringLiteral(" ms")); refresh->setKeyboardTracking(false);
+            refresh->setValue(stored.value("refreshMs").toInt(100)); form->addRow(text("Оновлення:", "Refresh:"), refresh);
+            const auto apply = [this, id, fft, window, refresh]() {
+                auto value = dspFlowPanel->blockSettings(id);
+                value.insert("fftLength", fft->currentData().toInt()); value.insert("window", window->currentData().toInt());
+                value.insert("refreshMs", refresh->value()); dspFlowPanel->setBlockSettings(id, value);
+            };
+            for (auto *combo : {fft, window}) connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), dialog, [apply](int) { apply(); });
+            connect(refresh, QOverload<int>::of(&QSpinBox::valueChanged), dialog, [apply](int) { apply(); });
+        } else {
+            auto *minimum = number(text("Мінімум:", "Minimum:"), stored.value("minimumDbfs").toDouble(-140.0), -200.0, 19.0, 1, QStringLiteral(" dBFS"));
+            auto *maximum = number(text("Максимум:", "Maximum:"), stored.value("maximumDbfs").toDouble(-40.0), -199.0, 20.0, 1, QStringLiteral(" dBFS"));
+            const auto apply = [this, id, minimum, maximum]() {
+                if (maximum->value() <= minimum->value()) return;
+                auto value = dspFlowPanel->blockSettings(id);
+                value.insert("minimumDbfs", minimum->value()); value.insert("maximumDbfs", maximum->value());
+                dspFlowPanel->setBlockSettings(id, value);
+            };
+            connect(minimum, QOverload<double>::of(&QDoubleSpinBox::valueChanged), dialog, [apply](double) { apply(); });
+            connect(maximum, QOverload<double>::of(&QDoubleSpinBox::valueChanged), dialog, [apply](double) { apply(); });
+        }
+        form->addRow(text("Стан:", "Status:"), status);
+        connect(syncTimer, &QTimer::timeout, status, [this, id, status]() { status->setText(dspFlowPanel->branchStatus(id)); });
+    } else if (type == QStringLiteral("oscilloscope") || type == QStringLiteral("constellation") ||
         type == QStringLiteral("eye_diagram") || type == QStringLiteral("digital_sync_lab")) {
         title = type == QStringLiteral("oscilloscope")
                     ? text("Осцилограф: параметри", "Oscilloscope settings")
@@ -954,6 +1051,17 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         form->addRow(QStringLiteral("FFT:"), linkedCombo(fftComboBox, dialog, syncTimer));
         form->addRow(QString(), linkedCheckBox(fftBinWidthModeCheckbox, QStringLiteral("Hz/point"), dialog, syncTimer));
         form->addRow(QStringLiteral("Hz/point:"), linkedDoubleSpin(fftBinWidthSpin, dialog, syncTimer));
+        auto *window = new QComboBox(dialog);
+        for (int w = FFT_WINDOW_RECTANGULAR; w <= FFT_WINDOW_FLAT_TOP; ++w) window->addItem(QString::fromLatin1(fftWindowTypeName(w)), w);
+        window->setCurrentIndex(window->findData(normalizedFftWindowType(pendingSettings.fftWindowType)));
+        form->addRow(text("Вікно FFT:", "FFT window:"), window);
+        connect(window, QOverload<int>::of(&QComboBox::currentIndexChanged), dialog, [this, window](int) {
+            pendingSettings.fftWindowType = normalizedFftWindowType(window->currentData().toInt()); savePersistentSettings();
+        });
+        connect(syncTimer, &QTimer::timeout, window, [this, window]() {
+            if (focusInside(window)) return;
+            const QSignalBlocker blocker(window); window->setCurrentIndex(window->findData(normalizedFftWindowType(pendingSettings.fftWindowType)));
+        });
     } else if (type == QStringLiteral("display_scale")) {
         title = text("Масштаб і рівні", "Scale and levels");
         form->addRow(text("Масштаб:", "Scale:"),
@@ -1003,7 +1111,7 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         form->addRow(QString(), actionButton(hfInterferenceAnalyzeButton,
                                              text("Відкрити аналіз", "Open analysis")));
     } else if (type == QStringLiteral("resampler")) {
-        title = text("Sample rate / ресемплер", "Sample rate / resampler");
+        title = text("Sample rate приймача", "Receiver sample rate");
         form->addRow(text("Sample rate:", "Sample rate:"), linkedCombo(sampleBox, dialog, syncTimer));
     } else if (type == QStringLiteral("workspace_spectrum") ||
                type == QStringLiteral("workspace_ruler") ||
@@ -2114,6 +2222,10 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         form->addRow(text("DMR backend:", "DMR backend:"), linkedCombo(dmrBackendCombo, dialog, syncTimer));
         form->addRow(QString(), linkedLabel(dmrPrivacyCapabilityLabel, dialog, syncTimer));
         form->addRow(text("4FSK rate:", "4FSK rate:"), linkedCombo(dmrBasebandRateCombo, dialog, syncTimer));
+        form->addRow(text("Тон BPSK31:", "BPSK31 tone:"), linkedDoubleSpin(pskDecoderToneSpin, dialog, syncTimer));
+        form->addRow(text("Вибірковість BPSK31:", "BPSK31 selectivity:"), linkedSpin(pskDecoderSquelchSpin, dialog, syncTimer));
+        form->addRow(QString(), linkedCheckBox(pskDecoderAfcCheckbox, QStringLiteral("PSK AFC"), dialog, syncTimer));
+        form->addRow(text("Кодування PSK:", "PSK encoding:"), linkedCombo(pskDecoderEncodingCombo, dialog, syncTimer));
         form->addRow(text("Канал:", "Channel:"), linkedCombo(dmrChannelRateCombo, dialog, syncTimer));
         form->addRow(QString(), commandButton(text("Відкрити текстовий вихід", "Open text output"),
                                               [this, id]() { openDspBlockReference(QStringLiteral("digital_text_output"), id + QStringLiteral(":text")); }));
@@ -2164,6 +2276,7 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         form->addRow(QString(), linkedCheckBox(videoHSyncCheckbox, QStringLiteral("H sync"), dialog, syncTimer));
         form->addRow(QString(), linkedCheckBox(videoVSyncCheckbox, QStringLiteral("V sync"), dialog, syncTimer));
         form->addRow(QString(), linkedCheckBox(videoTestPatternCheckbox, text("Тестовий шаблон", "Test pattern"), dialog, syncTimer));
+        form->addRow(QString(), commandButton(text("Декодувати LRPT запис (SatDump)", "Decode LRPT recording (SatDump)"), [this] { showLrptDecoder(); }));
         form->addRow(QString(), commandButton(text("Відкрити зображення", "Open image output"),
                                               [this, id]() { openDspBlockReference(QStringLiteral("digital_image_output"), id + QStringLiteral(":image")); }));
     } else if (type == QStringLiteral("dmr_hunter") || type == QStringLiteral("fpv_hunter") ||
@@ -2209,6 +2322,7 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         form->addRow(QString(), buttonRow({actionButton(gnssPlotButton, text("Графік", "Plot")),
                                           actionButton(gnssSatellitesButton, text("Супутники", "Satellites")),
                                           actionButton(gnssMonitorResetButton, text("Скинути", "Reset"))}));
+        form->addRow(QString(), commandButton(text("Позиція з SDR (PocketSDR)", "SDR PVT (PocketSDR)"), [this] { showGnssSdrPvt(); }));
     } else if (type == QStringLiteral("gnss_serial")) {
         title = text("GNSS модуль / NMEA / UBX", "GNSS module / NMEA / UBX");
         form->addRow(text("Порт:", "Port:"), linkedCombo(gnssSerialPortEdit, dialog, syncTimer));

@@ -20,7 +20,8 @@ public:
     QString configurationJson() const;
     void setConfigurationJson(const QString &json);
     void setLanguage(bool ukrainian);
-    void ensureStage(const QString &id, AudioFilterKind kind);
+    void ensureStage(const QString &id, AudioFilterKind kind, bool initiallyEnabled = true);
+    bool removeStageById(const QString &id);
     bool openStageEditor(const QString &id);
 
 signals:

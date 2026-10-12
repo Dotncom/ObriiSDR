@@ -72,7 +72,7 @@ void DspResearchWidget::setConnected(bool connected, bool ukrainian) {
 }
 
 void DspResearchWidget::refreshSnapshot() {
-    if (!isVisible() || window()->isMinimized() || !connected_) return;
+    if (externalInput_ || !isVisible() || window()->isMinimized() || !connected_) return;
     // Embedded widgets can stay QWidget-visible while their board is hidden.
     if (const auto *proxy = graphicsProxyWidget()) {
         if (!proxy->isVisible() || !proxy->scene()) return;
@@ -90,8 +90,29 @@ void DspResearchWidget::refreshSnapshot() {
     std::uint64_t sequence = 0;
     const std::size_t requestedFloats = static_cast<std::size_t>(boundedSamples(settings_)) * 2U;
     if (!IqBuffer::snapshotRecent(raw, requestedFloats, &sequence) || raw.size() < 8U || sequence == sequence_) return;
+    ingestIq(raw, IqBuffer::sampleRateEstimate(), sequence);
+}
+
+void DspResearchWidget::setExternalInput(bool enabled) {
+    if (externalInput_ == enabled) return;
+    externalInput_ = enabled;
+    iSamples_.clear(); qSamples_.clear(); sequence_ = 0;
+    updateConstellationView(); update();
+}
+
+void DspResearchWidget::setExternalFrame(const std::vector<float> &iq, double sampleRate, std::uint64_t sequence) {
+    if (!externalInput_ || !connected_) return;
+    const std::size_t count = std::min(iq.size(), std::size_t(boundedSamples(settings_))*2U);
+    const std::vector<float> tail(iq.end()-static_cast<std::ptrdiff_t>(count), iq.end());
+    ingestIq(tail, sampleRate, sequence);
+}
+
+void DspResearchWidget::ingestIq(const std::vector<float> &raw, double sampleRate, std::uint64_t sequence) {
     sequence_ = sequence;
     const std::size_t pairs = raw.size() / 2U;
+    if (pairs < 2) {
+        iSamples_.clear(); qSamples_.clear(); updateConstellationView(); update(); return;
+    }
     iSamples_.resize(pairs);
     qSamples_.resize(pairs);
     double meanI = 0.0;
@@ -110,7 +131,7 @@ void DspResearchWidget::refreshSnapshot() {
         iSamples_[index] -= static_cast<float>(meanI);
         qSamples_[index] -= static_cast<float>(meanQ);
     }
-    sampleRate_ = IqBuffer::sampleRateEstimate();
+    sampleRate_ = sampleRate;
     updateConstellationView();
     update();
 }

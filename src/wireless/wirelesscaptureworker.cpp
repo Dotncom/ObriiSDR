@@ -4,6 +4,9 @@
 
 WirelessCaptureWorker::WirelessCaptureWorker(QObject *parent)
     : QObject(parent), process(new QProcess(this)) {
+#ifdef Q_OS_WIN
+    process->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *args) { args->flags |= 0x08000000 | 0x00004000; });
+#endif
     connect(process, &QProcess::readyReadStandardOutput, this, &WirelessCaptureWorker::readOutput);
     connect(process, &QProcess::readyReadStandardError, this, [this]() {
         diagnostics += process->readAllStandardError();
@@ -15,11 +18,9 @@ WirelessCaptureWorker::WirelessCaptureWorker(QObject *parent)
     });
     connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [this](int code, QProcess::ExitStatus) {
+        exited = true; exitCode = code;
         readOutput();
-        if (listing) emit interfacesReady(QString::fromUtf8(interfaceOutput));
-        if (code) emit statusChanged(QString::fromUtf8(diagnostics).trimmed().left(1024));
-        else emit statusChanged(QStringLiteral("TShark: complete"));
-        emit finished();
+        finishIfDrained();
     });
 }
 WirelessCaptureWorker::~WirelessCaptureWorker() { stop(); }
@@ -29,9 +30,11 @@ Wireless::BackendCapabilities WirelessCaptureWorker::capabilities() const {
     result.receivesPackets = true;
     return result;
 }
-void WirelessCaptureWorker::start(const QString &program, const QStringList &arguments, bool list) {
+void WirelessCaptureWorker::start(const QString &program, const QStringList &arguments, Job requestedJob) {
     stop();
-    pending.clear(); interfaceOutput.clear(); diagnostics.clear(); listing = list;
+    ++generation;
+    pending.clear(); interfaceOutput.clear(); diagnostics.clear(); job = requestedJob;
+    scheduled = exited = false; exitCode = 0;
     { QMutexLocker lock(&mutex); packets.clear(); droppedPackets = 0; }
     process->setProgram(program);
     process->setArguments(arguments);
@@ -47,7 +50,7 @@ void WirelessCaptureWorker::stop() {
 }
 void WirelessCaptureWorker::readOutput() {
     const QByteArray output = process->readAllStandardOutput();
-    if (listing) {
+    if (job != Job::Packets) {
         if (interfaceOutput.size() < 65536) interfaceOutput += output.left(65536 - interfaceOutput.size());
         return;
     }
@@ -76,8 +79,27 @@ void WirelessCaptureWorker::consumeLines() {
     }
     if (pending.contains('\n') && !scheduled) {
         scheduled = true;
-        QTimer::singleShot(0, this, [this]() { consumeLines(); });
+        const auto run = generation;
+        QTimer::singleShot(0, this, [this, run]() { if (run == generation) consumeLines(); });
     }
+    finishIfDrained();
+}
+void WirelessCaptureWorker::finishIfDrained() {
+    if (!exited || (job == Job::Packets && pending.contains('\n'))) return;
+    exited = false;
+    if (job == Job::Packets && !pending.isEmpty()) {
+        QStringList row;
+        if (Wireless::parsePacketLine(pending, row)) {
+            QMutexLocker lock(&mutex);
+            if (packets.size() == 2000) { packets.removeFirst(); ++droppedPackets; }
+            packets.append(row);
+        }
+        pending.clear();
+    }
+    emit statusChanged(exitCode ? QString::fromUtf8(diagnostics).trimmed().left(1024) : QStringLiteral("TShark: complete"));
+    if (job == Job::Interfaces) emit interfacesReady(QString::fromUtf8(interfaceOutput));
+    if (job == Job::Report) emit reportReady(QString::fromUtf8(interfaceOutput));
+    emit finished();
 }
 QVector<QStringList> WirelessCaptureWorker::takePackets(quint64 &dropped) {
     QMutexLocker lock(&mutex);

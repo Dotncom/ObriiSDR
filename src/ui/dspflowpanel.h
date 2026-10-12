@@ -7,6 +7,11 @@
 #include <QJsonObject>
 #include <QPoint>
 #include <vector>
+#include <memory>
+#include <QSet>
+#include "radiosettings.h"
+#include "dspgraphmodel.h"
+class DspBranchEngine;
 
 class DspFlowScene;
 class QCloseEvent;
@@ -25,6 +30,7 @@ class DspFlowPanel final : public QDialog {
 
 public:
     explicit DspFlowPanel(QWidget *parent = nullptr);
+    ~DspFlowPanel() override;
 
     void setLanguage(bool ukrainian);
     QString configurationJson() const;
@@ -51,6 +57,7 @@ public:
     void setWorkspaceVisualizationSettings(const QJsonObject &settings);
     bool isWorkspaceMode() const { return workspaceMode_; }
     void addMultiVfoBranch(int channelIndex = -1);
+    void addDdcBranch();
     int vfoIndexForBlock(const QString &blockId) const;
     bool assignVfoIndexToBlock(const QString &blockId, int channelIndex);
     QJsonObject blockSettings(const QString &blockId) const;
@@ -61,11 +68,14 @@ public:
     bool setBlockSettings(const QString &blockId, const QJsonObject &settings);
     int workspaceSectorCount() const;
     bool dockSettingsDialog(const QString &blockId, QDialog *dialog, int sectorIndex = -1);
+    void setBranchSourceContext(const RadioSettings &settings, bool running);
+    QString branchStatus(const QString &blockId) const;
 
 signals:
     void configurationChanged(const QString &json);
     void blockActivated(const QString &type, const QString &id);
     void blockCreated(const QString &type, const QString &id);
+    void blockRemoved(const QString &type, const QString &id);
     void controlTriggered(const QString &controlType,
                           const QString &controlId,
                           const QString &targetType,
@@ -101,6 +111,7 @@ private:
     QString blockTitle(const QString &type) const;
     void refreshSectorControls();
     void syncWorkspaceViewport();
+    void refreshBranches();
 
     bool ukrainian_ = false;
     bool loading_ = false;
@@ -131,5 +142,11 @@ private:
     bool analogPeakMeterEnabled_ = false;
     int analogPeakMeterStyle_ = 0;
     bool analogPeakMeterTargetValid_ = false;
+    QHash<QString, QString> knownFilterBlocks_;
+    std::unique_ptr<DspBranchEngine> branchEngine_;
+    DspGraphPlan branchPlan_;
+    RadioSettings branchSource_;
+    bool branchSourceRunning_ = false;
+    bool branchPlanDirty_ = true;
     double analogPeakMeterTargetHz_ = 0.0;
 };

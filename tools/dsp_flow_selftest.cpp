@@ -20,6 +20,7 @@
 #include <stdexcept>
 
 bool multiVfoPreviewHistorySelfTest();
+bool dspBranchSelfTest();
 
 struct SignalLabConstellation3DTestAccess {
     static int points(const SignalLabConstellation3DWidget &widget) {
@@ -164,6 +165,7 @@ int main(int argc, char **argv) {
         testBoard();
         testVfoContext();
         testResearch3D();
+        require(dspBranchSelfTest(), "DSP branch tests failed");
         require(multiVfoPreviewHistorySelfTest(), "VFO level changes cleared or reordered waterfall history");
         std::cout << "DSP frame routing, cache lifetime, throttling and VFO context tests passed\n";
         return 0;

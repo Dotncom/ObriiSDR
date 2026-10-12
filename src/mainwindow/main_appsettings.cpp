@@ -6,6 +6,8 @@
 #include "appsettingsutils.h"
 #include "diagnosticlogging.h"
 #include "dspflowpanel.h"
+#include "spaceeventsfeed.h"
+#include "wirelesslabdialog.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -376,6 +378,11 @@ void YourClassName::openApplicationSettings() {
     generalLayout->addRow(uiText(QStringLiteral("agile_live_retune_interval"), QStringLiteral("Agile live retune interval")), agileLiveRetuneIntervalSpin);
     generalLayout->addRow(helpButton);
     generalLayout->addRow(fobosDetailsButton);
+    auto *publicSourcesButton = new QPushButton(uiText("public_data_sources", "Online data sources..."), &dialog);
+    generalLayout->addRow(publicSourcesButton);
+    connect(publicSourcesButton, &QPushButton::clicked, &dialog, [this, &dialog] {
+        spaceevents::configureSources(&dialog, normalizedUiLanguage(uiLanguage) == QStringLiteral("uk"));
+    });
     rootLayout->addLayout(generalLayout);
 
     QGroupBox *calibrationBox = new QGroupBox(
@@ -661,6 +668,7 @@ void YourClassName::openApplicationSettings() {
         }
         spectrumUpdateIntervalMs = value;
         updateSpectrumTimerInterval();
+        if (wirelessLabDialog) wirelessLabDialog->setSpectrumUpdateInterval(value);
         savePersistentSettings();
     };
     auto applyWaterfallRowsPerFrame = [this, waterfallRowsSpin]() {

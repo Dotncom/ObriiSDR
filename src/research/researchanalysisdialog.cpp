@@ -1,4 +1,5 @@
 #include "researchanalysisdialog.h"
+#include "tonalspectrum.h"
 
 #include "iqbuffer.h"
 #include "radiosettings.h"
@@ -948,6 +949,43 @@ ResearchAnalysisDialog::ResearchAnalysisDialog(Translator translator,
     analyzerStatus = new QLabel(analyzerPage);
     analyzerStatus->setWordWrap(true);
     analyzerLayout->addWidget(analyzerStatus);
+    auto *toneControls = new QGridLayout();
+    toneMeasurementsEnabled = new QCheckBox(trText("tone_measurements", "Single-tone SNR / SINAD / THD"), analyzerPage);
+    toneFundamentalMHz = new QDoubleSpinBox(analyzerPage);
+    toneFundamentalMHz->setRange(0, 100000); toneFundamentalMHz->setDecimals(6); toneFundamentalMHz->setSuffix(" MHz");
+    toneFundamentalMHz->setSpecialValueText(trText("tone_auto_peak", "Auto peak"));
+    toneHalfWidthHz = new QDoubleSpinBox(analyzerPage);
+    toneHalfWidthHz->setRange(0.001, 1e8); toneHalfWidthHz->setDecimals(3); toneHalfWidthHz->setSuffix(" Hz");
+    toneLastHarmonic = new QSpinBox(analyzerPage); toneLastHarmonic->setRange(2, 20);
+    toneControls->addWidget(toneMeasurementsEnabled, 0, 0, 1, 4);
+    toneControls->addWidget(new QLabel(trText("tone_fundamental", "Fundamental:"), analyzerPage), 1, 0);
+    toneControls->addWidget(toneFundamentalMHz, 1, 1);
+    toneControls->addWidget(new QLabel(trText("tone_halfwidth", "Integration half-width:"), analyzerPage), 1, 2);
+    toneControls->addWidget(toneHalfWidthHz, 1, 3);
+    toneControls->addWidget(new QLabel(trText("tone_last_harmonic", "Last harmonic:"), analyzerPage), 2, 0);
+    toneControls->addWidget(toneLastHarmonic, 2, 1);
+    analyzerLayout->addLayout(toneControls);
+    toneMeasurementsStatus = new QLabel(analyzerPage); toneMeasurementsStatus->setWordWrap(true);
+    toneMeasurementsStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    analyzerLayout->addWidget(toneMeasurementsStatus);
+    QSettings tonePreferences(persistentSettingsFilePath(), QSettings::IniFormat);
+    toneFundamentalMHz->setValue(tonePreferences.value("researchTone/fundamentalMHz", 0).toDouble());
+    toneHalfWidthHz->setValue(tonePreferences.value("researchTone/halfWidthHz", 100).toDouble());
+    toneLastHarmonic->setValue(tonePreferences.value("researchTone/lastHarmonic", 5).toInt());
+    const auto saveTone = [this]() {
+        QSettings s(persistentSettingsFilePath(), QSettings::IniFormat);
+        s.setValue("researchTone/fundamentalMHz", toneFundamentalMHz->value());
+        s.setValue("researchTone/halfWidthHz", toneHalfWidthHz->value());
+        s.setValue("researchTone/lastHarmonic", toneLastHarmonic->value());
+        toneMeasurementClock.invalidate();
+    };
+    connect(toneFundamentalMHz, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [saveTone](double) { saveTone(); });
+    connect(toneHalfWidthHz, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [saveTone](double) { saveTone(); });
+    connect(toneLastHarmonic, QOverload<int>::of(&QSpinBox::valueChanged), this, [saveTone](int) { saveTone(); });
+    connect(toneMeasurementsEnabled, &QCheckBox::toggled, this, [this](bool enabled) {
+        toneMeasurementClock.invalidate();
+        if (!enabled) toneMeasurementsStatus->clear();
+    });
     analyzerLayout->addStretch(1);
     tabs->addTab(analyzerPage, trText(QStringLiteral("research_analyzer_tab"), QStringLiteral("Spectrum analyzer")));
 
@@ -1158,6 +1196,11 @@ void ResearchAnalysisDialog::appendSpectrumFrame(const std::vector<float> &frequ
     const int tab = tabs ? tabs->currentIndex() : -1;
     if (isVisible() && tab == InterferenceTab) updateInterference(frequencies, levels);
     if (isVisible() && tab == StatisticsTab) updateStatistics(levels, metrics);
+    if (isVisible() && tab == AnalyzerTab && toneMeasurementsEnabled->isChecked() &&
+        (!toneMeasurementClock.isValid() || toneMeasurementClock.elapsed() >= 500)) {
+        toneMeasurementClock.restart();
+        updateToneMeasurements(frequencies, levels);
+    }
     const int amplitudeUnit = amplitudeUnitCombo
                                   ? amplitudeUnitCombo->currentData().toInt()
                                   : 0;
@@ -1190,6 +1233,31 @@ void ResearchAnalysisDialog::appendSpectrumFrame(const std::vector<float> &frequ
         sessionWidget->appendSpectrumFrame(
             frequencies, levels, scientificContext, metrics, amplitudeUnit);
     }
+}
+
+void ResearchAnalysisDialog::updateToneMeasurements(const std::vector<float> &frequencies,
+                                                   const std::vector<float> &levels) {
+    if (frequencies.empty() || levels.empty()) return;
+    double fundamental = toneFundamentalMHz->value()*1e6;
+    if (fundamental <= 0) {
+        const auto end = levels.begin()+std::min(frequencies.size(), levels.size());
+        const auto peak = std::max_element(levels.begin(), end);
+        fundamental = frequencies[std::distance(levels.begin(), peak)];
+    }
+    const auto r = analyzeTonalSpectrum(frequencies, levels, fundamental, toneHalfWidthHz->value(), toneLastHarmonic->value());
+    if (!r.valid) {
+        toneMeasurementsStatus->setText(trText("tone_invalid", "No measurable isolated tone: check frequency, integration width and contiguous span."));
+        return;
+    }
+    toneMeasurementsStatus->setText(QStringLiteral("f0 %1 MHz | bin %2 Hz | SNR %3 dB | SINAD %4 dB\nTHD %5 dB (%6%) | THD+N %7 dB (%8%) | H2..H%9: %10/%11\n%12")
+        .arg(r.fundamentalHz/1e6, 0, 'f', 6).arg(r.binWidthHz, 0, 'g', 7)
+        .arg(r.snrDb, 0, 'f', 2).arg(r.sinadDb, 0, 'f', 2)
+        .arg(r.thdDb, 0, 'f', 2).arg(r.thdPercent, 0, 'g', 5)
+        .arg(r.thdnDb, 0, 'f', 2).arg(r.thdnPercent, 0, 'g', 5)
+        .arg(toneLastHarmonic->value()).arg(r.harmonicsMeasured).arg(r.harmonicsRequested)
+        .arg(r.completeHarmonicSpan
+            ? trText("tone_span_complete", "Requested harmonics are in span; ratios are spectrum estimates, DC excluded, SINAD=S/(N+D).")
+            : trText("tone_span_partial", "PARTIAL: some harmonics are outside the span. THD includes visible harmonics only; widen the span for a complete measurement.")));
 }
 
 void ResearchAnalysisDialog::captureInterferenceReference() {

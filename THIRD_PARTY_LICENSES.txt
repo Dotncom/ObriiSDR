@@ -292,6 +292,75 @@ Source: https://www.country-files.com/ and https://github.com/WSJTX/wsjtx
 Copyright and permissive redistribution notice: licenses/dxcc/LICENSE.txt.
 
 Release/source obligation note:
+Wireless packet analysis optionally uses the separate Wireshark/TShark 4.6.9
+executables (GPL-2.0-or-later). Original COPYING and the exact runtime manifest
+are in wireshark/. Source: https://www.wireshark.org/download.html
+Corresponding source: https://www.wireshark.org/download/src/wireshark-4.6.9.tar.xz
+Npcap Free Edition is not redistributed. Use its official interactive installer
+and license: https://npcap.com/ . Offline analysis needs no capture driver.
+
+Optional recorded/live receive-only OFDM uses GNU Radio 3.10.12.0, gr-ieee802-11 revision
+ad0598e4a874f4b8e1f391a1e0323e80df2b34ff, and gr-foo revision
+9e0e002f5daf18e91ae428478785b74b2061a9f5 (GPL-3.0-or-later).
+Source: https://github.com/gnuradio/gnuradio
+https://github.com/bastibl/gr-ieee802-11
+https://github.com/bastibl/gr-foo
+The adapter's receive graph derives from upstream wifi_phy_hier.grc and retains
+credits/GPL notice in tools/wifi_phy_decoder.py. PACKAGE_SOURCES.json records
+all exact public conda package URLs/builds/hashes/licenses, with original notices
+in wifi-phy/source-notices/. It includes Python, BSD OpenBLAS and UHD 4.11.0
+(GPL-3.0-or-later, https://github.com/EttusResearch/uhd), among other dependencies.
+UHD inclusion does not claim tested native USRP support. Microsoft components
+remain under their own redistribution terms. No private preferences, keys,
+captures or environment history are on the publication manifest.
+Before binary publication, satisfy GPL/LGPL corresponding-source obligations
+for the exact packages and include these manifests/notices and adapter source.
+
+Native BPSK31 adapts the gMFSK receive filters, symbol timing and Varicode table.
+Copyright Tomi Manninen OH2BNS, with filter work by Peter Martinez G3PLX.
+Source: https://github.com/rubund/gmfsk (psk31rx.c, coeff.c, varicode.c).
+License: GPL-2.0-or-later, as noted in src/digital/psk31audiodecoder.cpp.
+
+Optional experimental Wi-Fi HT20 packet reception uses josephnef/gr-ieee802-11
+revision b3dbd2d476407db92f77056df23c166e4274c507 (GPL-3.0-or-later)
+in a separate GNU Radio Python process. Source:
+https://github.com/josephnef/gr-ieee802-11/tree/b3dbd2d476407db92f77056df23c166e4274c507
+The independent wifi-ht/ runtime carries package source metadata, notices and
+the fork's LICENSE. This does not add a Wi-Fi TX or association implementation.
+
+Optional GNSS PVT uses PocketSDR v0.20 as a separate executable, revision
+03787da53c65a8eb291eec571b6412ec470aeb17.
+Source: https://github.com/tomojitakasu/PocketSDR/tree/03787da53c65a8eb291eec571b6412ec470aeb17
+PocketSDR/RTKLIB: BSD-2-Clause. PocketFFT: BSD-3-Clause. SoapySDR: BSL-1.0.
+Upstream notices are beside pocketsdr/pocket_trk.exe. Only loopback IQ is used;
+the executable does not own the receiver. Native ARM builds use PocketFFT and
+disable SoapySDR in tools/prepare_pocketsdr_linux.sh.
+
+Optional Meteor LRPT image decoding uses the separate GPL-3.0 SatDump 1.2.2
+executable. It is not linked with the Obrii process.
+Source/build instructions: https://github.com/SatDump/SatDump/tree/1.2.2
+The portable backend retains the upstream license and uses an offline subset
+of its plugins. Publication must provide corresponding source for SatDump and
+its GPL/LGPL dependencies, with their notices. Do not ship private SatDump
+config/cache/output directories. Offline decoding disables automatic TLE fetch.
+
+Spectrum HDF5 export dynamically loads HDF5 1.14.6 (permissive HDF Group license).
+Source: https://github.com/HDFGroup/hdf5/releases/tag/hdf5_1.14.6
+The original COPYING notice is beside hdf5/hdf5.dll. No HDF5 DLL is required
+for ordinary reception or audio. Linux builds use libhdf5-dev headers and the
+system HDF5 shared library. Microsoft runtimes remain under their redistribution
+terms, not under the licenses of these engines.
+
+Optional HF sky-wave prediction uses the official ITU-R P.533/P.372 C model,
+revision 82017594a1c6cacfaa7e86954c4ae7b3a5825a3d, in a separate native helper.
+Source: https://github.com/ITU-R-Study-Group-3/ITU-R-HF
+This has a custom upstream ITU free-use/no-warranty notice, not MIT/BSD/GPL.
+The original notice and older reserved-rights headers are preserved, together
+with complete selected model source in itu_hf/source and source-notices.
+See docs/hf_prediction.md for the exact pin, license caveat and limitations.
+The public monthly model datasets are bundled; no user coordinates or cached
+prediction jobs are included. No ITU endorsement is implied.
+
 If a binary release includes GPL DMR voice backend DLLs, publish the
 corresponding FobosAPP and FobosDMRVoiceBackend-gpl source, plus the exact
 mbelib-neo and softdmr/OpenDMR source revisions used to build those DLLs, or

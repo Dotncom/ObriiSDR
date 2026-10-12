@@ -2,6 +2,7 @@
 #include "recordingmanager.h"
 #include "playbackmanager.h"
 #include "iqbuffer.h"
+#include "fmphasediscriminator.h"
 #include <QCoreApplication>
 #include <QFileInfo>
 #include <QDir>
@@ -38,11 +39,81 @@ struct AudioProcessorTestAccess {
                       const RadioSettings &settings, std::vector<short> &pcm, int &rate) {
         processor.processDmrIqDemodulatorBlock(iq, pcm, rate, settings);
     }
+    static void analog(AudioProcessor &processor, const std::vector<float> &iq,
+                       const RadioSettings &settings, std::vector<short> &pcm) {
+        std::vector<short> unused;
+        int rate = 0;
+        processor.processDemodulatorBlock(iq, pcm, unused, rate, settings);
+    }
 };
 namespace {
 int failures = 0;
 void check(bool ok, const char *name) {
     if (!ok) { std::cerr << "FAIL: " << name << '\n'; ++failures; }
+}
+void testLightweightFm() {
+    double maximumError = 0.0;
+    for (float amplitude : {1.0f, 0.01f, 1.0e-5f, 1.0e-12f, 1.0e-20f}) {
+        for (int i = 0; i < 10000; ++i) {
+            const double phase = i*0.071, delta = std::sin(i*0.003)*2.9;
+            const float a = float(std::cos(phase)*amplitude), b = float(std::sin(phase)*amplitude);
+            const float c = float(std::cos(phase+delta)*amplitude*0.37), d = float(std::sin(phase+delta)*amplitude*0.37);
+            const double actual = fmPhaseDifference(c, d, a, b);
+            maximumError = std::max(maximumError, std::abs(std::remainder(actual-delta, 6.283185307179586)));
+        }
+    }
+    check(maximumError < 1.0e-6, "Lightweight FM preserves phase across amplitude changes");
+    for (const int mode : {MOD_NFM, MOD_WFM}) {
+        RadioSettings s;
+        s.inputMode = INPUT_RF; s.modulationType = mode; s.sampleRate = 2048000;
+        s.centerFrequency = s.listeningFrequency = 145e6;
+        s.bandwidth = mode == MOD_NFM ? 12500 : 200000;
+        s.simplifiedAudioChannelizer = true;
+        const std::size_t count = 204800;
+        std::vector<float> iq(count*2U);
+        double phase = 0.0;
+        for (std::size_t n = 0; n < count; ++n) {
+            phase += 6.283185307179586*(mode == MOD_NFM ? 2000.0 : 30000.0)*std::sin(6.283185307179586*900*n/s.sampleRate)/s.sampleRate;
+            iq[2*n] = float(0.3*std::cos(phase)); iq[2*n+1] = float(0.3*std::sin(phase));
+        }
+        AudioProcessor whole, chunks;
+        whole.setLocalPlaybackEnabled(false); chunks.setLocalPlaybackEnabled(false);
+        std::vector<short> reference, result;
+        AudioProcessorTestAccess::analog(whole, iq, s, reference);
+        for (std::size_t start = 0; start < iq.size(); start += 8192) {
+            std::vector<float> block(iq.begin()+start, iq.begin()+std::min(iq.size(), start+8192));
+            std::vector<short> pcm;
+            AudioProcessorTestAccess::analog(chunks, block, s, pcm);
+            result.insert(result.end(), pcm.begin(), pcm.end());
+        }
+        int worst = 0;
+        if (result.size() == reference.size()) for (std::size_t n = 0; n < result.size(); ++n)
+            worst = std::max(worst, std::abs(int(result[n])-int(reference[n])));
+        check(reference.size() >= 4798 && reference.size() <= 4801 && result.size() == reference.size(), "Simplified FM retains duration and chunk sample counts");
+        check(worst <= 1, "Simplified FM chunking preserves PCM");
+    }
+    std::cout << "Lightweight FM maximum phase error " << maximumError << " rad\n";
+    struct Sample { float i, q, pi, pq, unitPi, unitPq; };
+    std::vector<Sample> samples(200000);
+    for (std::size_t n = 0; n < samples.size(); ++n) {
+        const double phase = n*0.071, delta = std::sin(n*0.03)*2.9;
+        const float gain = float(0.5+0.3*std::sin(n*0.023));
+        samples[n] = {float(gain*std::cos(phase+delta)), float(gain*std::sin(phase+delta)),
+            float(0.4*std::cos(phase)), float(0.4*std::sin(phase)), float(std::cos(phase)), float(std::sin(phase))};
+    }
+    volatile float checksum = 0.0f;
+    QElapsedTimer timer;
+    timer.start();
+    for (int repeat = 0; repeat < 4; ++repeat) for (const auto &s : samples) {
+        const float invMagnitude = 1.0f/std::sqrt(s.i*s.i+s.q*s.q);
+        const float i = s.i*invMagnitude, q = s.q*invMagnitude;
+        checksum += std::atan2(q*s.unitPi-i*s.unitPq, i*s.unitPi+q*s.unitPq);
+    }
+    const double referenceMs = timer.nsecsElapsed()/1.0e6;
+    timer.restart();
+    for (int repeat = 0; repeat < 4; ++repeat) for (const auto &s : samples)
+        checksum += fmPhaseDifference(s.i, s.q, s.pi, s.pq);
+    std::cout << "FM discriminator benchmark normalized=" << referenceMs << " ms, direct=" << timer.nsecsElapsed()/1.0e6 << " ms\n";
 }
 void testRecording() {
     RecordingManager recorder;
@@ -309,7 +380,7 @@ int main(int argc, char **argv) {
         if (rate != 24000 && rate != 48000) return 1;
         return inspectRecording(app.arguments()[2], app.arguments()[3], rate);
     }
-    testRecording(); testDemodulator(); testDiscriminatorAmplitude();
+    testRecording(); testDemodulator(); testDiscriminatorAmplitude(); testLightweightFm();
     testStreamRestart(app.arguments().contains(QStringLiteral("--waveout-restart")));
     testLivePcmBuffering();
     if (app.arguments().contains(QStringLiteral("--waveout-restart"))) testWaveOutRebuffering();

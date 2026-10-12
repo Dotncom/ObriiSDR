@@ -1,5 +1,51 @@
 # Changelog
 
+## 6.1.0 - 2026-10-12
+- Added receive-only live 20 MHz Wi-Fi OFDM decoding from SDR IQ via a bounded
+  GNU Radio subprocess, immediate packet table updates, PCAP recording, and
+  visible IQ-drop counts. The offline file decoder remains available.
+- Added an experimental HT20 Wi-Fi decoder path with synthetic-frame coverage;
+  real-air HT data reception is not yet validated.
+- Debounced rapid live receiver sample-rate changes to avoid overlapping
+  restarts; the final selected rate is applied after the control settles.
+- Added common Wi-Fi/Bluetooth/mobile tuning presets to center and listening
+  frequency lists, plus a Wireless Lab Audio checkbox synchronized with the
+  main receiver control. Documented Full IQ to offline Wi-Fi PCAP workflow.
+- Fixed overlapping GNSS/PVT and constellation-filter controls.
+- Bundled optional Wireshark/TShark 4.6.9, packet details/bytes, capture filters,
+  profile-based known-key Wi-Fi decoding and explicit payload state; corrected
+  modern TShark hex SSIDs and final-buffer packet delivery.
+- Optional isolated gr-ieee802-11 recording-to-PCAP decoder for 20 MHz legacy
+  OFDM with eight-rate/format/resampling tests; no live SDR MAC or RF timestamp
+  claims. Added non-operational B210 planning capabilities and guarded device
+  clock/channel/timed-TX contracts; actual clone qualification remains future work.
+- Native BPSK31 audio reception with AFC, selectivity and Latin-1/UTF-8 output.
+- Condition-bound receiver calibration profiles, up to 64 persistent markers,
+  optional single-tone SNR/SINAD/THD/THD+N, and streamed spectrum HDF5 export.
+- Optional bundled PocketSDR GNSS tracking/navigation/PVT from live or recorded
+  IQ, and SatDump Meteor LRPT recording-to-image decoding. RF validation is
+  still required; the existing live LRPT monitor is not a full image pipeline.
+- Optional ITU-R P.533/P.372 monthly HF prediction with all twelve months of
+  public model data, independent asynchronous execution and explicit CSV.
+- Configurable NOAA, comet-orbit, meteor-news and fireball public data sources;
+  manual refresh by default and opt-in visible-only periodic refresh.
+- Portable Windows research runtimes with checksum manifests and private
+  working directories; Raspberry sources include the public HF datasets.
+- Split the large optional Windows Wi-Fi GNU Radio and Wireshark runtimes into
+  a version-matched add-on with a checked download script; the core ZIP stays
+  usable without them.
+
+- Added typed DSP-board links and independent, opt-in DDC/FFT branches with
+  output-rate/decimation controls, dedicated spectra/waterfalls and research IQ
+  routing. The main RX/audio/DMR path remains unchanged.
+- New board audio filters start disabled; block deletion releases the matching
+  real filter. Added an enable checkbox to individual filter editors.
+- Renamed the legacy resampler block to Receiver sample rate and exposed the
+  main FFT window in its block editor.
+- Extended the basic low-resource audio profile with exact-phase FM without
+  redundant amplitude normalization, skipped zero-offset IQ rotation, and
+  lower-priority research DDC. Audio-health profiling runs only with logging.
+
 ## 6.0.0 - 2026-10-12
 
 ### Added

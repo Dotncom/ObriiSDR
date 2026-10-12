@@ -21,6 +21,7 @@ if (-not $OutputFullPath.StartsWith($Workspace, [System.StringComparison]::Ordin
 
 $Stage = Join-Path $ReleaseDir "ObriiSDR-raspberry-source"
 if (Test-Path -LiteralPath $Stage) {
+    if ((Get-Item -LiteralPath $Stage -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Raspberry staging folder must not be a reparse point.' }
     Remove-Item -LiteralPath $Stage -Recurse -Force
 }
 New-Item -ItemType Directory -Path $Stage | Out-Null
@@ -52,6 +53,7 @@ $excludeExactPaths = @(
     "tools/build_windows_local.ps1",
     "tools/deploy_windows.ps1",
     "tools/package_windows_release.ps1",
+    "tools/Install-Wireless-AddOn.ps1",
     "tools/sign_windows.ps1"
 )
 
@@ -94,6 +96,17 @@ foreach ($file in $files) {
     Copy-Item -LiteralPath $source -Destination $dest -Force
 }
 
+# Public ITU datasets, not the user's HF prediction job/cache directory.
+$HfData = Join-Path $Workspace 'release/bin/itu_hf/data'
+if (Test-Path -LiteralPath $HfData) {
+    $DataManifest = Get-Content -LiteralPath (Join-Path $Workspace 'third_party/itu_hf/SOURCE_MANIFEST.json') -Raw | ConvertFrom-Json
+    $DataDestination = Join-Path $Stage 'third_party/runtime/itu_hf/data'
+    New-Item -ItemType Directory -Path $DataDestination -Force | Out-Null
+    foreach ($Entry in $DataManifest.files | Where-Object { $_.path.StartsWith('P533/Data/') }) {
+        $Name = Split-Path -Leaf $Entry.path
+        Copy-Item -LiteralPath (Join-Path $HfData $Name) -Destination $DataDestination -Force
+    }
+}
 if ($NoArchive) {
     Get-Item -LiteralPath $Stage | Select-Object FullName, LastWriteTime
 } else {

@@ -98,8 +98,7 @@ void YourClassName::updateSpectrumScience(const std::vector<float> &frequencies,
 }
 
 bool YourClassName::spectrumScienceAnalysisRequired() const {
-    return spectrumScienceAnalyzer.marker(0).enabled ||
-           spectrumScienceAnalyzer.marker(1).enabled ||
+    return spectrumScienceAnalyzer.hasMarkers() ||
            spectrumScienceMaxHoldEnabled ||
            spectrumScienceMinHoldEnabled ||
            spectrumScienceAverageEnabled ||
@@ -256,10 +255,18 @@ void YourClassName::setSpectrumScienceMarker(double frequencyHz) {
 }
 
 void YourClassName::updateSpectrumScienceUi() {
+    if (spectrumScienceMarkerCombo && spectrumScienceMarkerCombo->count() != spectrumScienceAnalyzer.markerCount()) {
+        const QSignalBlocker blocker(spectrumScienceMarkerCombo);
+        spectrumScienceMarkerCombo->clear();
+        for (int i = 0; i < spectrumScienceAnalyzer.markerCount(); ++i)
+            spectrumScienceMarkerCombo->addItem(spectrumScienceAnalyzer.marker(i).label, i);
+        spectrumScienceActiveMarker = (std::clamp)(spectrumScienceActiveMarker, 0, spectrumScienceAnalyzer.markerCount() - 1);
+        spectrumScienceMarkerCombo->setCurrentIndex(spectrumScienceActiveMarker);
+    }
     QVector<SpectrumScienceMarker> markers;
-    markers.reserve(2);
-    markers.append(spectrumScienceAnalyzer.marker(0));
-    markers.append(spectrumScienceAnalyzer.marker(1));
+    markers.reserve(spectrumScienceAnalyzer.markerCount());
+    for (int i = 0; i < spectrumScienceAnalyzer.markerCount(); ++i)
+        markers.append(spectrumScienceAnalyzer.marker(i));
     const int activeMarkerIndex = std::clamp(spectrumScienceActiveMarker, 0, markers.size() - 1);
     const SpectrumScienceMarker activeMarker = markers.at(activeMarkerIndex);
     if (graphWidget) {
@@ -306,14 +313,16 @@ void YourClassName::updateSpectrumScienceUi() {
                              .arg(scienceLevelText(marker.levelDb, spectrumAmplitudeUnit))
                        : QStringLiteral("%1 --").arg(marker.label);
         };
-        QString status = QStringLiteral("%1 | %2").arg(markerText(markers.at(0)), markerText(markers.at(1)));
+        QString status = markerText(markers.at(activeMarkerIndex));
+        QStringList allMarkers;
+        for (const auto &marker : markers) if (marker.enabled) allMarkers << markerText(marker);
         if (markers.at(0).enabled && markers.at(1).enabled) {
             status += QStringLiteral(" | dF %1 kHz | dL %2 dB")
                           .arg(std::abs(markers.at(1).frequencyHz - markers.at(0).frequencyHz) / 1.0e3, 0, 'f', 3)
                           .arg(markers.at(1).levelDb - markers.at(0).levelDb, 0, 'f', 1);
         }
         spectrumScienceMarkerStatusLabel->setText(status);
-        spectrumScienceMarkerStatusLabel->setToolTip(status);
+        spectrumScienceMarkerStatusLabel->setToolTip(allMarkers.join(QLatin1Char('\n')));
     }
 
     if (spectrumScienceMetricsLabel) {
@@ -391,6 +400,10 @@ void YourClassName::exportSpectrumScienceCsv() {
                                       spectrumAmplitudeUnit == 3 ? "uV_50ohm" : "dBFS") << '\n';
     out << "# marker_a_hz," << (markerA.enabled ? QString::number(markerA.frequencyHz, 'f', 3) : QString()) << '\n';
     out << "# marker_b_hz," << (markerB.enabled ? QString::number(markerB.frequencyHz, 'f', 3) : QString()) << '\n';
+    for (int i = 2; i < spectrumScienceAnalyzer.markerCount(); ++i) {
+        const auto marker = spectrumScienceAnalyzer.marker(i);
+        out << "# marker_" << marker.label << "_hz," << (marker.enabled ? QString::number(marker.frequencyHz, 'f', 3) : QString()) << '\n';
+    }
     if (metrics.valid) {
         out << "# peak_hz," << QString::number(metrics.peakFrequencyHz, 'f', 3) << '\n';
         out << "# peak_db," << QString::number(metrics.peakDb, 'f', 3) << '\n';

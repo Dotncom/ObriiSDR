@@ -5,6 +5,7 @@
 #include "spectrumscienceanalyzer.h"
 
 #include <QDialog>
+#include <QElapsedTimer>
 #include <QString>
 
 #include <functional>
@@ -120,6 +121,7 @@ private:
     void rebuildTexts();
     void applySpectrumSettings();
     void updateAnalyzerStatus();
+    void updateToneMeasurements(const std::vector<float> &frequencies, const std::vector<float> &levels);
     void updateLiveSyncButton();
 
     Translator translator;
@@ -212,6 +214,12 @@ private:
     QCheckBox *percentile99Checkbox = nullptr;
     QComboBox *amplitudeUnitCombo = nullptr;
     QLabel *analyzerStatus = nullptr;
+    QCheckBox *toneMeasurementsEnabled = nullptr;
+    QDoubleSpinBox *toneFundamentalMHz = nullptr;
+    QDoubleSpinBox *toneHalfWidthHz = nullptr;
+    QSpinBox *toneLastHarmonic = nullptr;
+    QLabel *toneMeasurementsStatus = nullptr;
+    QElapsedTimer toneMeasurementClock;
     SignalDensityWidget *densityWidget = nullptr;
     SpectrumMaskWidget *maskWidget = nullptr;
     PulseAnalysisWidget *pulseWidget = nullptr;

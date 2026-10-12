@@ -104,6 +104,8 @@ class Ft8StationDialog;
 class AudioFilterChainWidget;
 class DspFlowPanel;
 class MultiVfoWidget;
+class GnssSdrPvtDialog;
+class LrptDecodeDialog;
 
 extern fobos_dev_t *device;
 extern float* dataq;
@@ -302,6 +304,7 @@ private:
     bool applyFobosSettings(bool forceFrequencyApply = false);
     double calibratedHardwareFrequency(double logicalFrequencyHz) const;
     double effectiveFrequencyCalibrationOffsetHz(double logicalFrequencyHz) const;
+    ReceiverCalibrationContext receiverCalibrationContext(const RadioSettings &settings) const;
     double effectiveAmplitudeCalibrationOffsetDb(double frequencyHz) const;
     int setCalibratedActiveFrequencySafely(double logicalFrequencyHz, double *logicalActualFrequencyHz);
     void applyReceiverCalibrationLive();
@@ -426,7 +429,9 @@ private:
     void startGnssSerial();
     void stopGnssSerial();
     void handleGnssSerialReadyRead();
-    void processGnssNmeaLine(const QString &line, bool fromReplay = false);
+    void processGnssNmeaLine(const QString &line, bool fromReplay = false, bool fromSdr = false);
+    void showGnssSdrPvt();
+    void showLrptDecoder();
     void processGnssUbxFrame(quint8 messageClass, quint8 messageId, const QByteArray &payload);
     void sendGnssUbxConfiguration(bool enabled);
     void applyGnssUbxConstellationConfig();
@@ -694,6 +699,11 @@ private:
     QLabel *dmrPrivacyCapabilityLabel = nullptr;
     QCheckBox *dsdNeoAutoStartCheckbox = nullptr;
     QWidget *cwDecoderControlsWidget = nullptr;
+    QWidget *pskDecoderControlsWidget = nullptr;
+    QDoubleSpinBox *pskDecoderToneSpin = nullptr;
+    QSpinBox *pskDecoderSquelchSpin = nullptr;
+    QCheckBox *pskDecoderAfcCheckbox = nullptr;
+    QComboBox *pskDecoderEncodingCombo = nullptr;
     QSpinBox *dsdNeoInputPortSpin = nullptr;
     QSpinBox *dsdNeoUdpOutputPortSpin = nullptr;
     QButtonGroup *modulationButtonGroup = nullptr;
@@ -731,6 +741,10 @@ private:
     QPushButton *gnssUbxSystemsButton = nullptr;
     QPushButton *gnssUbxSaveButton = nullptr;
     QPushButton *gnssTuneButton = nullptr;
+    QPushButton *gnssPvtButton = nullptr;
+    QPushButton *lrptDecodeButton = nullptr;
+    QPointer<GnssSdrPvtDialog> gnssSdrPvtDialog;
+    QPointer<LrptDecodeDialog> lrptDecodeDialog;
     QPushButton *gnssScanButton = nullptr;
     QPushButton *gnssRawLogButton = nullptr;
     QPushButton *gnssAcquireButton = nullptr;
@@ -958,6 +972,7 @@ private:
     QTimer *updateTimer = nullptr;
     QTimer *stopPollTimer = nullptr;
     QTimer *streamWatchdogTimer = nullptr;
+    QTimer *sampleRateChangeTimer = nullptr;
     QTimer *networkSettingsDebounceTimer = nullptr;
     QTimer *networkSettingsAckTimer = nullptr;
     QTimer *standardScanAdvanceTimer = nullptr;

@@ -1,6 +1,9 @@
 #include "propagationlabdialog.h"
 #include "qthmapwidget.h"
 #include "solarconditionswidget.h"
+#ifdef FOBOS_ENABLE_HF_PREDICTION
+#include "../propagation/ituhf/hfpredictiondialog.h"
+#endif
 #include "appsettingsutils.h"
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -225,7 +228,26 @@ PropagationLabDialog::PropagationLabDialog(bool ukrainian,QWidget *parent,const 
         });
     };
     wireRange(rxColorMinimum,rxColorMaximum);wireRange(marginColorMinimum,marginColorMaximum);
-    controls->addTab(new SolarConditionsWidget(uk,controls),text("HF / Sun",u8"КХ / Сонце"));
+    auto *hfPage = new QWidget(controls);
+    auto *hfLayout = new QVBoxLayout(hfPage);
+    hfLayout->addWidget(new SolarConditionsWidget(uk, hfPage), 1);
+#ifdef FOBOS_ENABLE_HF_PREDICTION
+    auto *hfPrediction = new QPushButton(text("HF prediction (ITU-R P.533/P.372)", u8"Прогноз КХ (ITU-R P.533/P.372)"), hfPage);
+    hfPrediction->setToolTip(text("Monthly sky-wave planning. Imports TX/RX, power and isotropic gains, not terrain, feeder loss or real-time storm data.", u8"Місячний прогноз іоносферного КХ. Імпортує TX/RX, потужність і підсилення, не рельєф, кабельні втрати або поточну магнітну бурю."));
+    connect(hfPrediction, &QPushButton::clicked, this, [this] {
+        if (!txPresent || !rxPresent) { status->setText(text("Place both TX and RX first.", u8"Спочатку встановіть TX та RX.")); return; }
+        auto *dialog = qobject_cast<HfPredictionDialog *>(hfDialog.data());
+        if (!dialog) {
+            dialog = new HfPredictionDialog(this, uiTranslator);
+            dialog->setAttribute(Qt::WA_DeleteOnClose); hfDialog = dialog;
+        }
+        dialog->setLink({parameters.tx.latitude, parameters.tx.longitude}, {parameters.rx.latitude, parameters.rx.longitude},
+                        parameters.powerW, parameters.txGainDbi, parameters.rxGainDbi);
+        dialog->show(); dialog->raise();
+    });
+    hfLayout->addWidget(hfPrediction);
+#endif
+    controls->addTab(hfPage,text("HF / Sun",u8"КХ / Сонце"));
     map=new QthMapWidget(splitter);map->setUiLanguage(uk?"uk":"en");map->setPositionVisible(false);map->setMarkerCreationEnabled(false);
     map->setPositionStatusVisible(false);
     map->setOnlineDiskCacheEnabled(false);map->setMapZoomRange(3,19);map->setMapZoom(11);map->centerOn(0,0);
@@ -315,7 +337,7 @@ PropagationLabDialog::PropagationLabDialog(bool ukrainian,QWidget *parent,const 
     updateEndpointElevations();
 }
 PropagationLabDialog::~PropagationLabDialog(){saveSettings();cancel.store(true);if(worker){worker->wait();delete worker;}}
-void PropagationLabDialog::closeEvent(QCloseEvent *event){saveSettings();cancel.store(true);if(profileDialog)profileDialog->hide();QDialog::closeEvent(event);}
+void PropagationLabDialog::closeEvent(QCloseEvent *event){saveSettings();cancel.store(true);if(profileDialog)profileDialog->hide();if(hfDialog)hfDialog->close();QDialog::closeEvent(event);}
 
 void PropagationLabDialog::setPoint(bool tx,const qth::GeoPosition &point){
     if(worker||!std::isfinite(point.latitude)||!std::isfinite(point.longitude))return;
