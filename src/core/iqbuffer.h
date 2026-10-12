@@ -25,6 +25,7 @@ struct DiscontinuityStats {
     std::uint64_t epoch = 0;
     std::uint64_t droppedQueuedBlocks = 0;
     std::uint64_t skippedSnapshotBlocks = 0;
+    std::uint64_t deferredSnapshotBlocks = 0;
 };
 
 struct BlockMetadata {

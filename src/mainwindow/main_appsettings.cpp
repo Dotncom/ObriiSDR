@@ -493,6 +493,13 @@ void YourClassName::openApplicationSettings() {
     waterfallFpsOption->setToolTip(uiText(
         QStringLiteral("waterfall_fps_overlay_tooltip"),
         QStringLiteral("Show the actual rendered frame rate over the 2D or 3D waterfall window.")));
+    QCheckBox *audioQueueDropRowsOption = new QCheckBox(
+        uiText(QStringLiteral("audio_queue_drop_rows"), QStringLiteral("Waterfall diagnostic rows")),
+        quickOptionsBox);
+    audioQueueDropRowsOption->setToolTip(uiText(
+        QStringLiteral("audio_queue_drop_rows_tooltip"),
+        QStringLiteral("Enable red rows for audio-queue overflow and gray rows for skipped FFT snapshots. Neither proves a USB loss. Off by default.")));
+    audioQueueDropRowsOption->setChecked(showAudioQueueDropRows);
     QCheckBox *spectrumPeakMeterOption = new QCheckBox(
         uiText(QStringLiteral("spectrum_peak_meter"), QStringLiteral("Analog peak meter")),
         quickOptionsBox);
@@ -569,6 +576,7 @@ void YourClassName::openApplicationSettings() {
                                                      QStringLiteral("FFT display reduction:")),
                                              quickOptionsBox), 9, 0);
     quickOptionsLayout->addWidget(displayReductionCombo, 9, 1, 1, 2);
+    quickOptionsLayout->addWidget(audioQueueDropRowsOption, 10, 0, 1, 3);
     rootLayout->addWidget(quickOptionsBox);
 
     const bool ukrainian = normalizedUiLanguage(uiLanguage) == QStringLiteral("uk");
@@ -938,6 +946,10 @@ void YourClassName::openApplicationSettings() {
         if (graphWidget) {
             graphWidget->setFpsOverlayEnabled(checked);
         }
+        savePersistentSettings();
+    });
+    connect(audioQueueDropRowsOption, &QCheckBox::toggled, &dialog, [this](bool checked) {
+        showAudioQueueDropRows = checked;
         savePersistentSettings();
     });
     connect(waterfallFpsOption, &QCheckBox::toggled, &dialog, [this](bool checked) {

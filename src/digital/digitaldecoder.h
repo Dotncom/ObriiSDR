@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <QByteArray>
+#include <QDateTime>
 #include <QString>
 #include <QtGlobal>
 
@@ -10,6 +11,7 @@
 
 #include "dmrdecoder.h"
 #include "dmrvocoder.h"
+#include "dmrprivacyprocessor.h"
 #include "cwaudiodecoder.h"
 #include "radiosettings.h"
 
@@ -25,10 +27,19 @@ public:
     void configure(const RadioSettings &settings, int sampleRate = 48000);
     void setDmrVoiceBackendId(const QString &backendId);
     void setDmrVoiceOutputEnabled(bool enabled);
+    void setDmrVoicePayloadEnabled(bool enabled);
     void processPcmFrame(const QByteArray &pcmData, const RadioSettings &settings, int sampleRate = 48000);
 
 signals:
     void textDecoded(const QString &text);
+    void ft8Decoded(const QDateTime &utc,
+                    double rfFrequencyHz,
+                    double audioFrequencyHz,
+                    double dtSeconds,
+                    int snrDbEstimate,
+                    double qualityDb,
+                    int costasHits,
+                    const QString &message);
     void statusChanged(const QString &status);
     void voicePcmReady(const QByteArray &pcmData);
     void dmrMetadataDetected(int colorCode,
@@ -75,6 +86,7 @@ private:
     void updateStatus(const QString &status);
     void clearDmrVoicePcmBuffer();
     void queueDmrVoicePcm(const QByteArray &pcmData);
+    void configureDmrPrivacy(const RadioSettings &settings);
 
     bool decoderEnabled = true;
     int activeMode = -1;
@@ -114,6 +126,7 @@ private:
     QString lastStatus;
     CwAudioDecoder cwDecoder;
     DmrDecoder dmrDecoder;
+    DmrPrivacyProcessor dmrPrivacy;
     DmrVocoder dmrVocoder;
     DmrVocoder dmrPayloadProbeVocoder;
     DmrVocoder dmrRawProbeVocoder;

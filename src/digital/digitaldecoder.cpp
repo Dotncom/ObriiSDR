@@ -1,6 +1,7 @@
 #include "digitaldecoder.h"
 
 #include "diagnosticlogging.h"
+#include "dmrprivacyutils.h"
 
 #include <algorithm>
 #include <array>
@@ -1041,6 +1042,7 @@ void DigitalDecoder::reset() {
     spaceQ = 0.0;
     resetFt8State();
     dmrDecoder.reset();
+    dmrPrivacy.reset();
     dmrVocoder.reset();
     dmrPayloadProbeVocoder.reset();
     dmrRawProbeVocoder.reset();
@@ -1111,6 +1113,18 @@ void DigitalDecoder::configure(const RadioSettings &settings, int sampleRate) {
                                  settings.liveDigitalSyncTimingPhase,
                                  settings.liveDigitalSyncConfidence);
     configureForMode(settings.modulationType, sampleRate);
+    configureDmrPrivacy(settings);
+}
+
+void DigitalDecoder::configureDmrPrivacy(const RadioSettings &settings) {
+    if (!dmrPrivacy.configure(settings.dmrPrivacyMode,
+                              settings.modulationType == MOD_DMR && dmrVoiceOutputEnabled,
+                              settings.dmrPrivacyKeyHex, settings.dmrPrivacyKeyId)) return;
+    dmrVocoder.reset();
+    dmrPayloadProbeVocoder.reset();
+    dmrRawProbeVocoder.reset();
+    dmrCanonicalProbeVocoder.reset();
+    clearDmrVoicePcmBuffer();
 }
 
 void DigitalDecoder::setDmrVoiceBackendId(const QString &backendId) {
@@ -1124,6 +1138,10 @@ void DigitalDecoder::setDmrVoiceBackendId(const QString &backendId) {
     dmrRawProbeVocoder.setPreferredBackendId(clean);
     dmrCanonicalProbeVocoder.setPreferredBackendId(clean);
     clearDmrVoicePcmBuffer();
+}
+
+void DigitalDecoder::setDmrVoicePayloadEnabled(bool enabled) {
+    dmrDecoder.setVoicePayloadEnabled(enabled);
 }
 
 void DigitalDecoder::setDmrVoiceOutputEnabled(bool enabled) {
@@ -1181,7 +1199,8 @@ void DigitalDecoder::processPcmFrame(const QByteArray &pcmData, const RadioSetti
     }
 
     if (settings.modulationType == MOD_DMR) {
-        const DmrDecoder::Result result =
+        configureDmrPrivacy(settings);
+        DmrDecoder::Result result =
             dmrDecoder.processPcmFrame(pcmData, sampleRate, settings.listeningFrequency);
         if (!result.serviceStatusText.isEmpty()) {
             updateStatus(result.serviceStatusText);
@@ -1216,6 +1235,7 @@ void DigitalDecoder::processPcmFrame(const QByteArray &pcmData, const RadioSetti
                                     burst.ambe49Payloads);
         }
         if (result.lockAcquired) {
+            dmrPrivacy.resetVoiceAlignment();
             dmrVocoder.reset();
             dmrPayloadProbeVocoder.reset();
             dmrRawProbeVocoder.reset();
@@ -1224,6 +1244,14 @@ void DigitalDecoder::processPcmFrame(const QByteArray &pcmData, const RadioSetti
             dmrVocoderResetRecoveryCount = 0;
             dmrArtifactConcealCount = 0;
             clearDmrVoicePcmBuffer();
+        }
+        if (dmrPrivacy.isActive()) {
+            for (const DmrDecoder::DibitBurst &burst : result.dibitBursts)
+                if (burst.burstKind == QStringLiteral("data") && burst.dataType == 0)
+                    dmrPrivacy.observePi(burst.dibits, burst.timeslot, burst.sample);
+            // External backends already received the original encrypted burst.
+            // Native audio must use only corrected, decrypted 49-bit payloads.
+            dmrPrivacy.processVoiceFrames(result.ambePayloads, result.ambeFrames, result.ambeSoftFrames);
         }
         const qint64 previousFrameCount = dmrAmbeFrameCount;
         const qint64 previousPayloadCount = dmrAmbePayloadCount;
@@ -1240,9 +1268,9 @@ void DigitalDecoder::processPcmFrame(const QByteArray &pcmData, const RadioSetti
             dmrAmbePayloadCount += static_cast<qint64>(validAmbePayloads);
             dmrAmbeFecCorrectionCount += result.ambeFecCorrections;
         }
-        if (!result.ambeFrames.empty() ||
+        if (dmrVoiceOutputEnabled && (!result.ambeFrames.empty() ||
             !result.ambeSoftFrames.empty() ||
-            !result.ambePayloads.empty()) {
+            !result.ambePayloads.empty())) {
             int decodedVoiceFrames = 0;
             int vocoderErrors = 0;
             QByteArray voicePcm;
@@ -1668,6 +1696,20 @@ void DigitalDecoder::processPcmFrame(const QByteArray &pcmData, const RadioSetti
                          << "probeCanonical" << dmrVoiceProbeSummary(canonicalProbe)
                          << "decoded" << decodedVoiceFrames
                          << "vocoderErrors" << vocoderErrors;
+                if (dmrPrivacy.isActive()) {
+                    const auto &privacy = dmrPrivacy.statistics();
+                    qDebug() << "[DMR native privacy] mode" << dmrPrivacyModeId(settings.dmrPrivacyMode)
+                             << "keyBits" << dmrPrivacy.keyBits()
+                             << "applied" << privacy.applied << "silence" << privacy.silence
+                             << "unaligned" << privacy.unaligned
+                             << "invalidKey" << privacy.invalidKey
+                             << "invalidPayload" << privacy.invalidPayload
+                             << "missingMi" << privacy.missingMi << "keyMismatch" << privacy.keyMismatch
+                             << "piAccepted" << privacy.piAccepted << "piRejected" << privacy.piRejected
+                             << "lateEntryAccepted" << privacy.lateEntryAccepted
+                             << "lateEntryRejected" << privacy.lateEntryRejected
+                             << "clearFrames" << privacy.clearFrames;
+                }
             }
             if (decodedVoiceFrames > 0) {
                 dmrVocoderFrameCount += decodedVoiceFrames;
@@ -1699,6 +1741,7 @@ void DigitalDecoder::processPcmFrame(const QByteArray &pcmData, const RadioSetti
             emit textDecoded(result.decodedText);
         }
         if (result.lockLost) {
+            dmrPrivacy.reset();
             dmrVocoder.reset();
             dmrPayloadProbeVocoder.reset();
             dmrRawProbeVocoder.reset();
@@ -2431,6 +2474,19 @@ void DigitalDecoder::analyzeFt8Buffer(QString &decodedText, qint64 decodeSlotSta
                      << "message" << candidate.decodedMessage
                      << "payload" << payloadBits;
             if (!candidate.decodedMessage.isEmpty()) {
+                // FT8 reports S/N in a 2500 Hz reference bandwidth. syncDb is
+                // measured in one 6.25 Hz tone bin, so this is explicitly an
+                // estimate until the decoder exposes calibrated noise power.
+                const int snrEstimate = (std::clamp)(
+                    static_cast<int>(std::lround(candidate.syncDb - 26.0)), -50, 49);
+                emit ft8Decoded(QDateTime::fromMSecsSinceEpoch(decodeSlotStartMs, Qt::UTC),
+                                rfFrequencyHz,
+                                signalCenterHz,
+                                dtSeconds,
+                                snrEstimate,
+                                candidate.syncDb,
+                                candidate.decodedCostasHits,
+                                candidate.decodedMessage);
                 report += QStringLiteral("  %1  %2%3  (+%4 Hz, DT %5, sync %6 dB, Costas %7/21, pass %8)\n")
                               .arg(decodeTimeText)
                               .arg(rfText.isEmpty() ? QString() : rfText + QStringLiteral("  "))

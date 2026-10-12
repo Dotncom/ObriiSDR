@@ -92,6 +92,9 @@ QString YourClassName::localizedStatusText(const QString &status) const {
     if (status == QStringLiteral("Recording stopped: no data")) {
         return uiText(QStringLiteral("recording_stopped_no_data"), status);
     }
+    if (status == QStringLiteral("IQ recording stopped: sample rate changed")) {
+        return uiText(QStringLiteral("iq_recording_stopped_rate_changed"), status);
+    }
     if (status == QStringLiteral("Playback blocked: stop receiver first")) {
         return uiText(QStringLiteral("playback_blocked_stop_receiver"), status);
     }
@@ -349,6 +352,12 @@ void YourClassName::applyUiLanguage() {
                      DMR_PRIVACY_NONE,
                      QStringLiteral("dmr_privacy_none"),
                      QStringLiteral("No privacy"));
+    setComboItemText(dmrPrivacyModeCombo, DMR_PRIVACY_HYTERA_BASIC,
+                     QStringLiteral("dmr_privacy_hytera_basic"),
+                     QStringLiteral("Hytera Basic (beta)"));
+    if (dmrPrivacyModeCombo)
+        dmrPrivacyModeCombo->setToolTip(uiText(QStringLiteral("dmr_privacy_mode_tooltip"),
+            QStringLiteral("The selected mode and saved key automatically apply to the selected decoder. No privacy disables decryption. No key guessing is performed.")));
     if (dmrBackendCombo) {
         dmrBackendCombo->setToolTip(uiText(
             QStringLiteral("dmr_backend_tooltip"),
@@ -695,6 +704,7 @@ void YourClassName::applyUiLanguage() {
     updateScanMeasurementStatus();
     updateSpurSuppressionStatus();
     updateVideoProcessorMode();
+    updateDigitalDecoderMode();
     updateNetworkButtonText();
 }
 

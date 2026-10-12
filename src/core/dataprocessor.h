@@ -71,7 +71,7 @@ public:
     void configureNetworkIqStreaming(const RadioSettings &settings, bool emitFrames, bool channelizeFrames);
     std::shared_ptr<ZoomSpectrumProcessor> zoomSpectrumProcessor() const { return zoomProcessor; }
 signals:
-    void iqFrameReady(const QByteArray &iqData, double sampleRate, int sampleCount);
+    void iqFrameReady(const QByteArray &iqData, double sampleRate, int sampleCount, bool channelized);
     void readerFailed(int errorCode, bool stoppedByRequest);
 
 private:

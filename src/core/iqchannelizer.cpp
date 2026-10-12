@@ -83,25 +83,19 @@ bool IqChannelizer::pushFrontDecimatorSample(const std::complex<float> &sample,
         output = sample;
         return true;
     }
-
     std::complex<float> stageValue = sample;
     for (int stage = 0; stage < FrontDecimatorOrder; ++stage) {
         auto &delay = frontDecimationDelay[static_cast<std::size_t>(stage)];
         auto &sum = frontDecimationSums[static_cast<std::size_t>(stage)];
-        const std::complex<float> oldest =
-            delay[static_cast<std::size_t>(frontDecimationWriteIndex)];
+        const std::complex<float> oldest = delay[static_cast<std::size_t>(frontDecimationWriteIndex)];
         delay[static_cast<std::size_t>(frontDecimationWriteIndex)] = stageValue;
         sum += stageValue - oldest;
         stageValue = sum;
     }
-
     frontDecimationWriteIndex =
         (frontDecimationWriteIndex + 1) % configuredFrontDecimationFactor;
     ++frontDecimationCount;
-    if (frontDecimationCount < configuredFrontDecimationFactor) {
-        return false;
-    }
-
+    if (frontDecimationCount < configuredFrontDecimationFactor) return false;
     frontDecimationCount = 0;
     output = stageValue * frontDecimationScale;
     return true;

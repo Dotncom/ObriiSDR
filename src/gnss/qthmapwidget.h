@@ -5,6 +5,7 @@
 
 #include <QColor>
 #include <QHash>
+#include <QImage>
 #include <QPointF>
 #include <QPixmap>
 #include <QSet>
@@ -56,20 +57,33 @@ public:
     void setOverlayMode(OverlayMode mode);
     void setSatelliteMarkers(const QVector<SatelliteMarker> &markers);
     void setPositionVisible(bool visible);
+    void setPositionStatusVisible(bool visible);
     void centerOnPosition();
     void centerOn(double latitude, double longitude);
+    qth::GeoPosition mapCenter() const;
+    int mapZoomLevel() const { return mapZoom; }
+    bool positionAt(const QPointF &point, qth::GeoPosition *position) const;
     void setSearchMarker(double latitude, double longitude, const QString &label);
     void clearSearchMarker();
     void setUserMarkers(const QVector<qth::UserMarker> &markers);
     QVector<qth::UserMarker> userMarkerList() const;
+    void setUserMarkerDetailLabels(const QHash<int, QString> &labels);
     void clearUserMarkers();
+    void setRasterOverlay(const QImage &image, const qth::GeoBounds &bounds, double opacity);
+    void setPointPickingEnabled(bool enabled);
+    void setMarkerEditingEnabled(bool enabled);
+    void setMarkerCreationEnabled(bool enabled);
+    void setPathLine(const qth::GeoPosition &a, const qth::GeoPosition &b);
+    void clearPathLine();
 
 signals:
     void mapZoomChanged(int zoom);
     void userMarkersChanged();
     void userMarkerAdded(double latitude, double longitude, const QString &label, int number);
     void userMarkerRemoved(double latitude, double longitude, const QString &label, int number);
+    void userMarkerMoved(double latitude, double longitude, int number);
     void currentPositionCleared();
+    void pointPicked(double latitude, double longitude);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -105,18 +119,22 @@ private:
                        double markerLongitude,
                        const QColor &color,
                        const QString &label,
-                       bool drawLabel);
+                       bool drawLabel,
+                       bool labelOnLeft = false);
     int userMarkerAtPosition(const QPointF &point, const QRectF &mapRect) const;
+    void moveDraggedUserMarker(const QPointF &point);
     bool searchMarkerAtPosition(const QPointF &point, const QRectF &mapRect) const;
     bool currentPositionAtPosition(const QPointF &point, const QRectF &mapRect) const;
     void drawUserMarkers(QPainter &painter, const QRectF &mapRect);
     void drawSatelliteMarkers(QPainter &painter, const QRectF &mapRect);
     void drawMarkerAndTitle(QPainter &painter, const QRectF &mapRect);
     void drawFooter(QPainter &painter, const QRectF &mapRect);
+    void drawRasterOverlay(QPainter &painter, const QRectF &mapRect);
 
     double latitude = 0.0;
     double longitude = 0.0;
     bool positionVisible = true;
+    bool positionStatusVisible = true;
     double viewCenterLatitude = 0.0;
     double viewCenterLongitude = 0.0;
     bool viewCenterInitialized = false;
@@ -137,14 +155,27 @@ private:
     int lastTilesPending = 0;
     int lastTilesFailed = 0;
     bool draggingMap = false;
+    int draggedMarkerNumber = -1;
+    bool draggedMarkerMoved = false;
+    QPointF markerDragOffset;
+    QPointF markerDragStart;
     QPointF lastDragPosition;
     QVector<qth::UserMarker> userMarkers;
     QVector<SatelliteMarker> satelliteMarkers;
     bool hasSearchMarker = false;
     qth::UserMarker searchMarker;
+    QImage rasterOverlay;
+    qth::GeoBounds rasterBounds;
+    double rasterOpacity = 0.65;
+    bool pointPickingEnabled = false;
+    bool markerEditingEnabled = true;
+    bool markerCreationEnabled = true;
+    bool pathLineVisible = false;
+    qth::GeoPosition pathStart, pathEnd;
 
     class QNetworkAccessManager *tileNetwork = nullptr;
     QHash<QString, QPixmap> onlineTilePixmaps;
+    QHash<int, QString> userMarkerDetailLabels;
     QHash<QString, QString> onlineTileErrors;
     QSet<QString> pendingTileRequests;
     QString lastOnlineError;

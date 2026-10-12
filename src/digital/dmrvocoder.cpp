@@ -565,6 +565,10 @@ struct DmrVocoder::Impl {
                backendWith(FOBOS_DMR_VOICE_CAP_DECODE_CANONICAL_AMBE_FRAME72);
     }
 
+    bool hasBackendEncoder() const {
+        return backendWith(FOBOS_DMR_VOICE_CAP_ENCODE_CANONICAL_AMBE_FRAME72) != nullptr;
+    }
+
     bool fallbackAvailable() const {
 #ifdef FOBOSAPP_HAS_MBELIB_NEO
         return preferredBackendId.isEmpty() || preferredBackendId.contains(QStringLiteral("mbelib"), Qt::CaseInsensitive);
@@ -596,6 +600,38 @@ DmrVocoder::~DmrVocoder() {
 
 bool DmrVocoder::isAvailable() const {
     return impl && (impl->hasBackendDecoder() || impl->fallbackAvailable());
+}
+
+bool DmrVocoder::canEncode() const {
+    return impl && impl->hasBackendEncoder();
+}
+
+QByteArray DmrVocoder::encodeCanonicalFrame(const qint16 *pcm8k160, QString *error) {
+    if (!impl || !pcm8k160) {
+        if (error) *error = QStringLiteral("Invalid DMR encoder input");
+        return {};
+    }
+    Impl::Backend *backend =
+        impl->backendWith(FOBOS_DMR_VOICE_CAP_ENCODE_CANONICAL_AMBE_FRAME72);
+    if (!backend || !backend->context || !backend->encodeCanonical) {
+        if (error) *error = QStringLiteral("No DMR AMBE+2 encoder backend is available");
+        return {};
+    }
+    QByteArray frame(DMR_VOICE_FRAME_BYTES, '\0');
+    const int status = backend->encodeCanonical(
+        backend->context,
+        reinterpret_cast<const std::int16_t *>(pcm8k160),
+        reinterpret_cast<std::uint8_t *>(frame.data()));
+    if (status != FOBOS_DMR_VOICE_OK) {
+        const char *backendError = backend->lastError ? backend->lastError(backend->context) : nullptr;
+        if (error) {
+            *error = backendError && backendError[0] != '\0'
+                         ? QString::fromUtf8(backendError)
+                         : QStringLiteral("DMR AMBE+2 encoding failed (%1)").arg(status);
+        }
+        return {};
+    }
+    return frame;
 }
 
 void DmrVocoder::setPreferredBackendId(const QString &backendId) {

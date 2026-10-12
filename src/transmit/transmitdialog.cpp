@@ -1,8 +1,11 @@
 #include "transmitdialog.h"
 
 #include "appsettingsutils.h"
+#include "dmrtransmitencoder.h"
 #include "hackrfbackend.h"
 #include "sstvimageeditordialog.h"
+#include "signallabdialog.h"
+#include "signalunits.h"
 #include "transmitmediagenerator.h"
 
 #include <QApplication>
@@ -48,6 +51,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <utility>
 
 class TxWaveformPreviewWidget final : public QWidget {
 public:
@@ -198,8 +202,10 @@ void TransmitDialog::buildUi() {
     frequencySpin->setSuffix(QStringLiteral(" MHz"));
     sampleRateCombo = new QComboBox(hardwareBox);
     sampleRateCombo->setEditable(true);
-    for (int rate : {12000, 24000, 48000, 96000, 192000, 1000000, 2000000}) {
-        sampleRateCombo->addItem(QString::number(rate), rate);
+    sampleRateCombo->setInsertPolicy(QComboBox::NoInsert);
+    for (int rate : {12000, 24000, 48000, 96000, 192000, 1000000, 2000000, 20000000,
+                     100000000, 500000000, 1000000000}) {
+        sampleRateCombo->addItem(signalunits::sampleRateText(rate), rate);
     }
     levelSpin = new QSpinBox(hardwareBox);
     levelSpin->setRange(1, 90);
@@ -242,21 +248,17 @@ void TransmitDialog::buildUi() {
     hardware->addWidget(deviceCombo, 0, 3);
     hardware->addWidget(rfLabel, 1, 0);
     hardware->addWidget(frequencySpin, 1, 1);
-    hardware->addWidget(basebandLabel, 1, 2);
-    hardware->addWidget(sampleRateCombo, 1, 3);
-    hardware->addWidget(deviceRateLabel, 2, 0);
-    hardware->addWidget(deviceSampleRateCombo, 2, 1);
-    hardware->addWidget(bandwidthLabel, 2, 2);
-    hardware->addWidget(bandwidthCombo, 2, 3);
-    hardware->addWidget(levelLabel, 3, 0);
-    hardware->addWidget(levelSpin, 3, 1);
-    hardware->addWidget(txGainLabel, 3, 2);
-    hardware->addWidget(txGainSpin, 3, 3);
-    hardware->addWidget(watchdogLabel, 4, 0);
-    hardware->addWidget(watchdogSpin, 4, 1);
-    hardware->addWidget(rfAmpCheck, 4, 2);
-    hardware->addWidget(armCheck, 4, 3);
-    hardware->addWidget(rfLockLabel, 5, 0, 1, 4);
+    hardware->addWidget(deviceRateLabel, 1, 2);
+    hardware->addWidget(deviceSampleRateCombo, 1, 3);
+    hardware->addWidget(bandwidthLabel, 2, 0);
+    hardware->addWidget(bandwidthCombo, 2, 1);
+    hardware->addWidget(txGainLabel, 2, 2);
+    hardware->addWidget(txGainSpin, 2, 3);
+    hardware->addWidget(watchdogLabel, 3, 0);
+    hardware->addWidget(watchdogSpin, 3, 1);
+    hardware->addWidget(rfAmpCheck, 3, 2);
+    hardware->addWidget(armCheck, 3, 3);
+    hardware->addWidget(rfLockLabel, 4, 0, 1, 4);
     hardware->setColumnStretch(1, 1);
     hardware->setColumnStretch(3, 1);
 
@@ -266,7 +268,10 @@ void TransmitDialog::buildUi() {
     modulationCombo = new QComboBox(signalBox);
     const QVector<TxModulation> modes = {
         TxModulation::Am, TxModulation::Nfm, TxModulation::Wfm, TxModulation::Dsb,
-        TxModulation::Usb, TxModulation::Lsb, TxModulation::Cw, TxModulation::Ft8
+        TxModulation::Usb, TxModulation::Lsb, TxModulation::Cw, TxModulation::Ft8,
+        TxModulation::Ook, TxModulation::Ask, TxModulation::Fsk, TxModulation::Gfsk,
+        TxModulation::Gmsk, TxModulation::Bpsk, TxModulation::Qpsk, TxModulation::Rtty,
+        TxModulation::Dmr
     };
     for (TxModulation mode : modes) {
         modulationCombo->addItem(TransmitWaveformGenerator::modulationName(mode), static_cast<int>(mode));
@@ -289,9 +294,11 @@ void TransmitDialog::buildUi() {
     signalBandwidthCombo->addItem(QStringLiteral("Auto / unlimited"), 0.0);
     signalBandwidthCombo->addItem(QStringLiteral("100 Hz - FT8"), 100.0);
     signalBandwidthCombo->addItem(QStringLiteral("250 Hz - narrow CW"), 250.0);
-    signalBandwidthCombo->addItem(QStringLiteral("500 Hz - CW"), 500.0);
+    signalBandwidthCombo->addItem(QStringLiteral("500 Hz - CW / RTTY"), 500.0);
     signalBandwidthCombo->addItem(QStringLiteral("1 kHz - wide CW"), 1000.0);
+    signalBandwidthCombo->addItem(QStringLiteral("2.4 kHz - narrow data"), 2400.0);
     signalBandwidthCombo->addItem(QStringLiteral("2.7 kHz - SSB voice"), 2700.0);
+    signalBandwidthCombo->addItem(QStringLiteral("5 kHz - packet data"), 5000.0);
     signalBandwidthCombo->addItem(QStringLiteral("6 kHz - AM voice"), 6000.0);
     signalBandwidthCombo->addItem(QStringLiteral("8.33 kHz"), 8330.0);
     signalBandwidthCombo->addItem(QStringLiteral("12.5 kHz - NFM / SSTV"), 12500.0);
@@ -303,19 +310,37 @@ void TransmitDialog::buildUi() {
     signalBandwidthCombo->addItem(QStringLiteral("1 MHz - ATV"), 1000000.0);
     signalBandwidthCombo->addItem(QStringLiteral("1.5 MHz - ATV"), 1500000.0);
     deviationSpin = new QDoubleSpinBox(signalBox);
-    deviationSpin->setRange(100.0, 100000.0);
+    deviationSpin->setRange(1.0, 1000000.0);
     deviationSpin->setDecimals(0);
     deviationSpin->setSingleStep(100.0);
     deviationSpin->setSuffix(QStringLiteral(" Hz"));
     toneSpin = new QDoubleSpinBox(signalBox);
-    toneSpin->setRange(50.0, 5000.0);
+    toneSpin->setRange(0.0, 1000000.0);
     toneSpin->setDecimals(1);
     toneSpin->setSingleStep(10.0);
     toneSpin->setSuffix(QStringLiteral(" Hz"));
     cwWpmSpin = new QSpinBox(signalBox);
     cwWpmSpin->setRange(5, 60);
     cwWpmSpin->setSuffix(QStringLiteral(" WPM"));
+    symbolRateSpin = new QDoubleSpinBox(signalBox);
+    symbolRateSpin->setRange(1.0, 1000000.0);
+    symbolRateSpin->setDecimals(2);
+    symbolRateSpin->setSingleStep(50.0);
+    symbolRateSpin->setSuffix(QStringLiteral(" Bd"));
+    gaussianBtSpin = new QDoubleSpinBox(signalBox);
+    gaussianBtSpin->setRange(0.20, 1.00);
+    gaussianBtSpin->setDecimals(2);
+    gaussianBtSpin->setSingleStep(0.05);
+    askDepthSpin = new QSpinBox(signalBox);
+    askDepthSpin->setRange(1, 100);
+    askDepthSpin->setSuffix(QStringLiteral(" %"));
+    askDepthSpin->setValue(70);
+    invertDataCheck = new QCheckBox(signalBox);
     ft8UtcCheck = new QCheckBox(signalBox);
+    ft8SlotCombo = new QComboBox(signalBox);
+    ft8SlotCombo->addItem(QString(), -1);
+    ft8SlotCombo->addItem(QString(), 0);
+    ft8SlotCombo->addItem(QString(), 1);
     ft8UtcCheck->setChecked(true);
     liveKeyButton = new QPushButton(signalBox);
     liveKeyButton->setEnabled(false);
@@ -331,25 +356,77 @@ void TransmitDialog::buildUi() {
     signalBandwidthLabel = new QLabel(signalBox);
     toneLabel = new QLabel(signalBox);
     cwSpeedLabel = new QLabel(signalBox);
-    signal->addWidget(modeLabel, 0, 0);
-    signal->addWidget(modulationCombo, 0, 1);
-    signal->addWidget(sourceLabel, 0, 2);
-    signal->addWidget(sourceCombo, 0, 3);
-    signal->addWidget(audioInputLabel, 1, 0);
-    signal->addWidget(audioInputCombo, 1, 1, 1, 2);
-    signal->addWidget(audioRefreshButton, 1, 3);
-    signal->addWidget(deviationLabel, 2, 0);
-    signal->addWidget(deviationSpin, 2, 1);
-    signal->addWidget(toneLabel, 2, 2);
-    signal->addWidget(toneSpin, 2, 3);
-    signal->addWidget(signalBandwidthLabel, 3, 0);
-    signal->addWidget(signalBandwidthCombo, 3, 1, 1, 3);
-    signal->addWidget(cwSpeedLabel, 4, 0);
-    signal->addWidget(cwWpmSpin, 4, 1);
-    signal->addWidget(ft8UtcCheck, 4, 2, 1, 2);
-    signal->addWidget(liveKeyButton, 5, 0, 1, 4);
+    symbolRateLabel = new QLabel(signalBox);
+    gaussianBtLabel = new QLabel(signalBox);
+    askDepthLabel = new QLabel(signalBox);
+    signal->addWidget(basebandLabel, 0, 0);
+    signal->addWidget(sampleRateCombo, 0, 1);
+    signal->addWidget(levelLabel, 0, 2);
+    signal->addWidget(levelSpin, 0, 3);
+    signal->addWidget(modeLabel, 1, 0);
+    signal->addWidget(modulationCombo, 1, 1);
+    signal->addWidget(sourceLabel, 1, 2);
+    signal->addWidget(sourceCombo, 1, 3);
+    signal->addWidget(audioInputLabel, 2, 0);
+    signal->addWidget(audioInputCombo, 2, 1, 1, 2);
+    signal->addWidget(audioRefreshButton, 2, 3);
+    signal->addWidget(deviationLabel, 3, 0);
+    signal->addWidget(deviationSpin, 3, 1);
+    signal->addWidget(toneLabel, 3, 2);
+    signal->addWidget(toneSpin, 3, 3);
+    signal->addWidget(signalBandwidthLabel, 4, 0);
+    signal->addWidget(signalBandwidthCombo, 4, 1, 1, 3);
+    signal->addWidget(cwSpeedLabel, 5, 0);
+    signal->addWidget(cwWpmSpin, 5, 1);
+    signal->addWidget(ft8UtcCheck, 5, 2);
+    signal->addWidget(ft8SlotCombo, 5, 3);
+    signal->addWidget(symbolRateLabel, 6, 0);
+    signal->addWidget(symbolRateSpin, 6, 1);
+    signal->addWidget(gaussianBtLabel, 6, 2);
+    signal->addWidget(gaussianBtSpin, 6, 3);
+    signal->addWidget(askDepthLabel, 7, 0);
+    signal->addWidget(askDepthSpin, 7, 1);
+    signal->addWidget(invertDataCheck, 7, 2, 1, 2);
+    signal->addWidget(liveKeyButton, 8, 0, 1, 4);
     signal->setColumnStretch(1, 1);
     signal->setColumnStretch(3, 1);
+
+    dmrBox = new QGroupBox(this);
+    dmrBox->setObjectName(QStringLiteral("txDmrBox"));
+    QGridLayout *dmr = new QGridLayout(dmrBox);
+    dmrColorCodeLabel = new QLabel(dmrBox);
+    dmrColorCodeSpin = new QSpinBox(dmrBox);
+    dmrColorCodeSpin->setRange(0, 15);
+    dmrColorCodeSpin->setValue(1);
+    dmrTimeslotLabel = new QLabel(dmrBox);
+    dmrTimeslotCombo = new QComboBox(dmrBox);
+    dmrTimeslotCombo->addItem(QStringLiteral("1"), 1);
+    dmrTimeslotCombo->addItem(QStringLiteral("2"), 2);
+    dmrSourceIdLabel = new QLabel(dmrBox);
+    dmrSourceIdSpin = new QSpinBox(dmrBox);
+    dmrSourceIdSpin->setRange(1, 0xFFFFFF);
+    dmrSourceIdSpin->setValue(1);
+    dmrDestinationIdLabel = new QLabel(dmrBox);
+    dmrDestinationIdSpin = new QSpinBox(dmrBox);
+    dmrDestinationIdSpin->setRange(1, 0xFFFFFF);
+    dmrDestinationIdSpin->setValue(9);
+    dmrCallTypeLabel = new QLabel(dmrBox);
+    dmrCallTypeCombo = new QComboBox(dmrBox);
+    dmrCallTypeCombo->addItem(QStringLiteral("Group"), false);
+    dmrCallTypeCombo->addItem(QStringLiteral("Private"), true);
+    dmr->addWidget(dmrColorCodeLabel, 0, 0);
+    dmr->addWidget(dmrColorCodeSpin, 0, 1);
+    dmr->addWidget(dmrTimeslotLabel, 0, 2);
+    dmr->addWidget(dmrTimeslotCombo, 0, 3);
+    dmr->addWidget(dmrCallTypeLabel, 0, 4);
+    dmr->addWidget(dmrCallTypeCombo, 0, 5);
+    dmr->addWidget(dmrSourceIdLabel, 1, 0);
+    dmr->addWidget(dmrSourceIdSpin, 1, 1, 1, 2);
+    dmr->addWidget(dmrDestinationIdLabel, 1, 3);
+    dmr->addWidget(dmrDestinationIdSpin, 1, 4, 1, 2);
+    dmr->setColumnStretch(1, 1);
+    dmr->setColumnStretch(4, 1);
+    dmrBox->setVisible(false);
 
     QGroupBox *messageBox = new QGroupBox(this);
     messageBox->setObjectName(QStringLiteral("txMessageBox"));
@@ -400,15 +477,18 @@ void TransmitDialog::buildUi() {
     startButton = new QPushButton(this);
     stopButton = new QPushButton(this);
     exportButton = new QPushButton(this);
+    signalLabButton = new QPushButton(this);
     stopButton->setEnabled(false);
     exportButton->setEnabled(false);
     actions->addWidget(startButton);
     actions->addWidget(stopButton);
+    actions->addWidget(signalLabButton);
     actions->addStretch(1);
     actions->addWidget(exportButton);
 
     root->addWidget(hardwareBox);
     root->addWidget(signalBox);
+    root->addWidget(dmrBox);
     root->addWidget(messageBox);
     root->addWidget(mediaBox);
     root->addWidget(preview, 1);
@@ -418,13 +498,20 @@ void TransmitDialog::buildUi() {
     root->addLayout(actions);
 
     progressTimer = new QTimer(this);
+    ft8StartTimer = new QTimer(this);
+    ft8StartTimer->setSingleShot(true);
+    ft8StartTimer->setTimerType(Qt::PreciseTimer);
     progressTimer->setInterval(40);
     sourceTimer = new QTimer(this);
     sourceTimer->setInterval(20);
     connect(progressTimer, &QTimer::timeout, this, [this]() { updateProgress(); });
+    connect(ft8StartTimer, &QTimer::timeout, this, [this]() { beginTextWaveform(); });
     connect(sourceTimer, &QTimer::timeout, this, [this]() { processLiveSource(); });
     connect(modulationCombo, qOverload<int>(&QComboBox::currentIndexChanged),
-            this, [this]() { updateModeUi(); });
+            this, [this]() {
+                applyModulationPreset(selectedModulation());
+                updateModeUi();
+            });
     connect(backendCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, [this]() {
                 armCheck->setChecked(false);
@@ -435,6 +522,7 @@ void TransmitDialog::buildUi() {
     });
     connect(sourceCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, [this]() { updateModeUi(); });
+    connect(ft8UtcCheck, &QCheckBox::toggled, this, [this]() { updateModeUi(); });
     connect(audioRefreshButton, &QToolButton::clicked, this, [this]() {
         populateAudioInputs();
         updateModeUi();
@@ -450,6 +538,14 @@ void TransmitDialog::buildUi() {
     connect(signalBandwidthCombo, &QComboBox::currentTextChanged,
             this, [this]() { applyLiveSignalShape(); });
     connect(deviationSpin, qOverload<double>(&QDoubleSpinBox::valueChanged),
+            this, [this]() { applyLiveSignalShape(); });
+    connect(symbolRateSpin, qOverload<double>(&QDoubleSpinBox::valueChanged),
+            this, [this]() { applyLiveSignalShape(); });
+    connect(gaussianBtSpin, qOverload<double>(&QDoubleSpinBox::valueChanged),
+            this, [this]() { applyLiveSignalShape(); });
+    connect(askDepthSpin, qOverload<int>(&QSpinBox::valueChanged),
+            this, [this]() { applyLiveSignalShape(); });
+    connect(invertDataCheck, &QCheckBox::toggled,
             this, [this]() { applyLiveSignalShape(); });
     connect(liveKeyButton, &QPushButton::pressed, this, [this]() { setLiveKey(true); });
     connect(liveKeyButton, &QPushButton::released, this, [this]() { setLiveKey(false); });
@@ -467,6 +563,25 @@ void TransmitDialog::buildUi() {
         stopTransmission(text(QStringLiteral("Stopped by user"), QString::fromUtf8(u8"Зупинено користувачем")));
     });
     connect(exportButton, &QPushButton::clicked, this, [this]() { exportIq(); });
+    connect(signalLabButton, &QPushButton::clicked, this, [this]() {
+        if (!signalLabDialog) {
+            signalLabDialog = new SignalLabDialog(
+                language,
+                [this](const SignalLabGenerationResult &result) {
+                    startLaboratoryTransmission(result);
+                },
+                [this]() {
+                    stopTransmission(text(QStringLiteral("Stopped by user"),
+                                          QString::fromUtf8(u8"Зупинено користувачем")));
+                },
+                this);
+        }
+        signalLabDialog->setLanguage(language);
+        signalLabDialog->setInitialSampleRate(configurationFromUi().sampleRate);
+        signalLabDialog->show();
+        signalLabDialog->raise();
+        signalLabDialog->activateWindow();
+    });
     connect(mediaBrowseButton, &QPushButton::clicked, this, [this]() { chooseMediaFile(); });
     connect(mediaEditButton, &QPushButton::clicked, this, [this]() { editMediaImage(); });
     connect(mediaModeCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this]() {
@@ -538,11 +653,17 @@ void TransmitDialog::populateAudioInputs() {
 #endif
 }
 void TransmitDialog::populateHackRfDevices() {
+    const int previousDevice = deviceCombo->currentData().toInt();
     deviceCombo->clear();
     HackRfRuntimeStatus status;
     const QVector<HackRfDeviceInfo> devices = enumerateHackRfDevices(&status);
     for (const HackRfDeviceInfo &device : devices) {
-        deviceCombo->addItem(device.label, device.nativeIndex);
+        QString label = device.label;
+        if (hackRfReceiverUseChecker && hackRfReceiverUseChecker(device.nativeIndex)) {
+            label += text(QStringLiteral(" (active RX)"),
+                          QString::fromUtf8(u8" (активний RX)"));
+        }
+        deviceCombo->addItem(label, device.nativeIndex);
     }
     const bool available = status.libraryAvailable && !devices.isEmpty();
     if (!available) {
@@ -552,23 +673,108 @@ void TransmitDialog::populateHackRfDevices() {
     if (auto *model = qobject_cast<QStandardItemModel *>(backendCombo->model())) {
         if (QStandardItem *item = model->item(1)) item->setEnabled(available);
     }
+    const int previousIndex = deviceCombo->findData(previousDevice);
+    if (previousIndex >= 0) {
+        deviceCombo->setCurrentIndex(previousIndex);
+    }
     if (!available && hackRfSelected()) {
         backendCombo->setCurrentIndex(0);
     }
 }
 
+void TransmitDialog::setHackRfReceiverUseChecker(HackRfReceiverUseChecker checker) {
+    hackRfReceiverUseChecker = std::move(checker);
+    populateHackRfDevices();
+    updateModeUi();
+}
+
 void TransmitDialog::setLanguage(const QString &nextLanguage) {
     language = nextLanguage;
+    if (signalLabDialog) signalLabDialog->setLanguage(language);
     updateTexts();
     updateModeUi();
 }
 
+void TransmitDialog::prepareFt8Message(const QString &message,
+                                       double dialFrequencyHz,
+                                       double audioFrequencyHz,
+                                       int slotParity) {
+    const int modulationIndex = modulationCombo->findData(static_cast<int>(TxModulation::Ft8));
+    if (modulationIndex >= 0) modulationCombo->setCurrentIndex(modulationIndex);
+    const int sourceIndex = sourceCombo->findData(QStringLiteral("text"));
+    if (sourceIndex >= 0) sourceCombo->setCurrentIndex(sourceIndex);
+    messageEdit->setPlainText(message.simplified().toUpper());
+    if (dialFrequencyHz > 0.0) frequencySpin->setValue(dialFrequencyHz / 1e6);
+    if (audioFrequencyHz > 0.0) toneSpin->setValue(audioFrequencyHz);
+    ft8UtcCheck->setChecked(true);
+    const int slotIndex = ft8SlotCombo->findData(slotParity);
+    ft8SlotCombo->setCurrentIndex(slotIndex >= 0 ? slotIndex : 0);
+    updateModeUi();
+    setStatus(text(QStringLiteral("FT8 message prepared; verify RF settings and press Start."),
+                   QString::fromUtf8(u8"Повідомлення FT8 підготовлено; перевірте RF-налаштування й натисніть Старт.")));
+}
+bool TransmitDialog::startPreparedFt8Automatically(QString *error) {
+    auto fail = [this, error](const QString &message) {
+        if (error) *error = message;
+        setStatus(message, true);
+        return false;
+    };
+    if (!hackRfSelected()) {
+        return fail(text(QStringLiteral("Automatic FT8 requires an RF-capable HackRF output; select HackRF native in TX setup."),
+                         QString::fromUtf8(u8"Для автоматичного FT8 потрібен RF-вихід HackRF; у налаштуваннях TX оберіть HackRF native.")));
+    }
+    if (activeBackend && activeBackend->isRunning()) {
+        return fail(text(QStringLiteral("The transmitter is busy with another transmission."),
+                         QString::fromUtf8(u8"Передавач зайнятий іншою передачею.")));
+    }
+    if (!armCheck->isChecked()) {
+        return fail(text(QStringLiteral("RF output is not armed. Open TX setup, verify the antenna/load and arm RF output."),
+                         QString::fromUtf8(u8"RF-вихід не озброєно. Відкрийте налаштування TX, перевірте антену/навантаження та озбройте RF-вихід.")));
+    }
+    if (deviceCombo->currentData().toInt() < 0) {
+        return fail(text(QStringLiteral("No HackRF device is available for automatic FT8."),
+                         QString::fromUtf8(u8"Для автоматичного FT8 немає доступного HackRF.")));
+    }
+    if (selectedHackRfBusyForReception()) {
+        return fail(text(QStringLiteral("The selected HackRF is already receiving; select a different TX device."),
+                         QString::fromUtf8(u8"Вибраний HackRF уже працює на прийом; оберіть інший TX-пристрій.")));
+    }
+    if (selectedModulation() != TxModulation::Ft8 ||
+        sourceCombo->currentData().toString() != QStringLiteral("text")) {
+        return fail(text(QStringLiteral("No prepared FT8 text message is available."),
+                         QString::fromUtf8(u8"Немає підготовленого текстового FT8-повідомлення.")));
+    }
+
+    automaticFt8Active = true;
+    startTransmission();
+    const bool accepted = activeBackend && activeBackend->isRunning() &&
+                          ((ft8StartTimer && ft8StartTimer->isActive()) ||
+                           (progressTimer && progressTimer->isActive()));
+    if (!accepted) {
+        automaticFt8Active = false;
+        const QString details = statusLabel ? statusLabel->text() : QString();
+        return fail(details.isEmpty()
+                        ? text(QStringLiteral("Automatic FT8 transmission could not be started."),
+                               QString::fromUtf8(u8"Не вдалося запустити автоматичну FT8-передачу."))
+                        : details);
+    }
+    if (error) error->clear();
+    return true;
+}
+void TransmitDialog::cancelAutomaticFt8() {
+    if (!automaticFt8Active) return;
+    stopTransmission(text(QStringLiteral("Automatic FT8 transmission cancelled."),
+                          QString::fromUtf8(u8"Автоматичну FT8-передачу скасовано.")));
+}
 void TransmitDialog::updateTexts() {
     setWindowTitle(text(QStringLiteral("Transmitter laboratory"), QString::fromUtf8(u8"Лабораторія передавача")));
     if (auto *box = findChild<QGroupBox *>(QStringLiteral("txHardwareBox")))
-        box->setTitle(text(QStringLiteral("Output and safety"), QString::fromUtf8(u8"Вихід і безпека")));
+        box->setTitle(text(QStringLiteral("Device / backend and safety"), QString::fromUtf8(u8"Пристрій / бекенд і безпека")));
     if (auto *box = findChild<QGroupBox *>(QStringLiteral("txSignalBox")))
-        box->setTitle(text(QStringLiteral("Signal"), QString::fromUtf8(u8"Сигнал")));
+        box->setTitle(text(QStringLiteral("Software generator and modulation"), QString::fromUtf8(u8"Генератор програми і модуляція")));
+    if (dmrBox)
+        dmrBox->setTitle(text(QStringLiteral("DMR Tier II direct mode"),
+                              QString::fromUtf8(u8"DMR Tier II, прямий режим")));
     if (auto *box = findChild<QGroupBox *>(QStringLiteral("txMessageBox")))
         box->setTitle(text(QStringLiteral("Text message"), QString::fromUtf8(u8"Текстове повідомлення")));
     if (auto *box = findChild<QGroupBox *>(QStringLiteral("txMediaBox")))
@@ -576,8 +782,8 @@ void TransmitDialog::updateTexts() {
     backendLabel->setText(text(QStringLiteral("Output:"), QString::fromUtf8(u8"Вихід:")));
     deviceLabel->setText(text(QStringLiteral("Device:"), QString::fromUtf8(u8"Пристрій:")));
     rfLabel->setText(text(QStringLiteral("RF carrier:"), QString::fromUtf8(u8"Несуча RF:")));
-    basebandLabel->setText(text(QStringLiteral("Generator rate:"),
-                                QString::fromUtf8(u8"Частота генератора:")));
+    basebandLabel->setText(text(QStringLiteral("Generator sample rate:"),
+                                QString::fromUtf8(u8"Частота семплів генератора:")));
     deviceRateLabel->setText(text(QStringLiteral("HackRF IQ rate:"),
                                   QString::fromUtf8(u8"Частота передавання IQ:")));
     bandwidthLabel->setText(text(QStringLiteral("HackRF RF filter:"),
@@ -590,7 +796,16 @@ void TransmitDialog::updateTexts() {
     audioInputLabel->setText(text(QStringLiteral("Microphone input:"), QString::fromUtf8(u8"Мікрофонний вхід:")));
     audioRefreshButton->setToolTip(text(QStringLiteral("Refresh microphone devices"),
                                         QString::fromUtf8(u8"Оновити список мікрофонів")));
-    deviationLabel->setText(text(QStringLiteral("FM deviation:"), QString::fromUtf8(u8"Девіація FM:")));
+    const TxModulation modulation = selectedModulation();
+    const bool fskMode = modulation == TxModulation::Fsk ||
+                         modulation == TxModulation::Gfsk ||
+                         modulation == TxModulation::Gmsk ||
+                         modulation == TxModulation::Rtty;
+    deviationLabel->setText(
+        fskMode
+            ? text(QStringLiteral("FSK deviation (one side):"),
+                   QString::fromUtf8(u8"Девіація FSK (в один бік):"))
+            : text(QStringLiteral("FM deviation:"), QString::fromUtf8(u8"Девіація FM:")));
     signalBandwidthLabel->setText(text(QStringLiteral("TX signal bandwidth:"),
                                        QString::fromUtf8(u8"Смуга TX-сигналу:")));
     const auto setSignalBandwidthText = [this](double bandwidth, const QString &english,
@@ -602,9 +817,11 @@ void TransmitDialog::updateTexts() {
                            QString::fromUtf8(u8"Авто / без обмеження"));
     setSignalBandwidthText(100.0, QStringLiteral("100 Hz - FT8"), QString::fromUtf8(u8"100 Гц - FT8"));
     setSignalBandwidthText(250.0, QStringLiteral("250 Hz - narrow CW"), QString::fromUtf8(u8"250 Гц - вузький CW"));
-    setSignalBandwidthText(500.0, QStringLiteral("500 Hz - CW"), QString::fromUtf8(u8"500 Гц - CW"));
+    setSignalBandwidthText(500.0, QStringLiteral("500 Hz - CW / RTTY"), QString::fromUtf8(u8"500 Гц - CW / RTTY"));
     setSignalBandwidthText(1000.0, QStringLiteral("1 kHz - wide CW"), QString::fromUtf8(u8"1 кГц - широкий CW"));
+    setSignalBandwidthText(2400.0, QStringLiteral("2.4 kHz - narrow data"), QString::fromUtf8(u8"2,4 кГц - вузькі дані"));
     setSignalBandwidthText(2700.0, QStringLiteral("2.7 kHz - SSB voice"), QString::fromUtf8(u8"2,7 кГц - голос SSB"));
+    setSignalBandwidthText(5000.0, QStringLiteral("5 kHz - packet data"), QString::fromUtf8(u8"5 кГц - пакетні дані"));
     setSignalBandwidthText(6000.0, QStringLiteral("6 kHz - AM voice"), QString::fromUtf8(u8"6 кГц - голос AM"));
     setSignalBandwidthText(8330.0, QStringLiteral("8.33 kHz - channel"), QString::fromUtf8(u8"8,33 кГц - канал"));
     setSignalBandwidthText(12500.0, QStringLiteral("12.5 kHz - NFM / SSTV"), QString::fromUtf8(u8"12,5 кГц - NFM / SSTV"));
@@ -616,12 +833,16 @@ void TransmitDialog::updateTexts() {
     setSignalBandwidthText(1000000.0, QStringLiteral("1 MHz - ATV"), QString::fromUtf8(u8"1 МГц - ATV"));
     setSignalBandwidthText(1500000.0, QStringLiteral("1.5 MHz - ATV"), QString::fromUtf8(u8"1,5 МГц - ATV"));
     signalBandwidthCombo->setToolTip(text(
-        QStringLiteral("Full two-sided occupied IQ bandwidth. For example, 12.5 kHz passes approximately +/-6.25 kHz around the carrier. Type a custom value in Hz or choose a preset."),
-        QString::fromUtf8(u8"Повна двостороння зайнята смуга IQ. Наприклад, 12,5 кГц пропускає приблизно +/-6,25 кГц навколо несучої. Впишіть власне значення у Гц або оберіть пресет.")));
-    toneLabel->setText(text(QStringLiteral("CW / FT8 tone:"), QString::fromUtf8(u8"Тон CW / FT8:")));
+        QStringLiteral("Full two-sided occupied IQ bandwidth. Type Hz, kHz, MHz or GHz (e.g. 12.5 kHz), or select a preset. The occupied band must fit the generator and hardware; HackRF RF filter limits are separate."),
+        QString::fromUtf8(u8"Повна двостороння зайнята смуга IQ. Введіть Hz, kHz, MHz чи GHz (наприклад 12.5 kHz) або оберіть пресет. Смуга має вміщуватися в генератор і апаратуру; RF-фільтр HackRF має окремі обмеження.")));
+    toneLabel->setText(
+        TransmitWaveformGenerator::isDigitalTextMode(modulation)
+            ? text(QStringLiteral("Carrier / center offset:"),
+                   QString::fromUtf8(u8"Зсув несучої / центра:"))
+            : text(QStringLiteral("CW / FT8 tone:"), QString::fromUtf8(u8"Тон CW / FT8:")));
     basebandLabel->setToolTip(text(
-        QStringLiteral("Rate at which Obrii SDR generates the useful complex-IQ signal before hardware resampling."),
-        QString::fromUtf8(u8"Частота, з якою Obrii SDR формує корисний комплексний IQ до апаратної передискретизації.")));
+        QStringLiteral("Complex IQ generation rate before hardware resampling. Type ksps, Msps or Gsps, e.g. 48 ksps. Signal Lab supports up to 1 Gsps; live/text generation up to 20 Msps. Each hardware backend has independent limits."),
+        QString::fromUtf8(u8"Дискретизація комплексного IQ до апаратної передискретизації. Введіть ksps, Msps чи Gsps, наприклад 48 ksps. Лабораторія сигналів: до 1 Gsps; голос/текст: до 20 Msps. Апаратні бекенди мають власні обмеження.")));
     deviceRateLabel->setToolTip(text(
         QStringLiteral("Actual IQ sample rate sent to the HackRF DAC. It may be higher than the generated signal rate."),
         QString::fromUtf8(u8"Фактична частота IQ, що подається на DAC HackRF. Вона може бути вищою за частоту формування сигналу.")));
@@ -629,6 +850,27 @@ void TransmitDialog::updateTexts() {
         QStringLiteral("Hardware HackRF baseband filter. Keep it wider than the transmitted signal bandwidth."),
         QString::fromUtf8(u8"Апаратний фільтр HackRF. Його смуга має бути ширшою за смугу переданого сигналу.")));
     cwSpeedLabel->setText(text(QStringLiteral("CW speed:"), QString::fromUtf8(u8"Швидкість CW:")));
+    symbolRateLabel->setText(text(QStringLiteral("Symbol rate:"),
+                                  QString::fromUtf8(u8"Символьна швидкість:")));
+    gaussianBtLabel->setText(text(QStringLiteral("Gaussian BT:"),
+                                  QString::fromUtf8(u8"Gaussian BT:")));
+    askDepthLabel->setText(text(QStringLiteral("ASK depth:"),
+                                QString::fromUtf8(u8"Глибина ASK:")));
+    dmrColorCodeLabel->setText(text(QStringLiteral("Color Code:"), QString::fromUtf8(u8"Color Code:")));
+    dmrTimeslotLabel->setText(text(QStringLiteral("Time slot:"), QString::fromUtf8(u8"Таймслот:")));
+    dmrSourceIdLabel->setText(text(QStringLiteral("Source ID:"), QString::fromUtf8(u8"ID джерела:")));
+    dmrDestinationIdLabel->setText(text(QStringLiteral("Destination ID:"), QString::fromUtf8(u8"ID призначення:")));
+    dmrCallTypeLabel->setText(text(QStringLiteral("Call type:"), QString::fromUtf8(u8"Тип виклику:")));
+    dmrCallTypeCombo->setItemText(0, text(QStringLiteral("Group"), QString::fromUtf8(u8"Груповий")));
+    dmrCallTypeCombo->setItemText(1, text(QStringLiteral("Private"), QString::fromUtf8(u8"Приватний")));
+    invertDataCheck->setText(text(QStringLiteral("Invert data polarity"),
+                                  QString::fromUtf8(u8"Інвертувати полярність даних")));
+    symbolRateSpin->setToolTip(text(
+        QStringLiteral("Symbols per second. Raw packet modes use an Obrii laboratory frame with preamble, sync, UTF-8 length and CRC-16."),
+        QString::fromUtf8(u8"Символів за секунду. Сирі пакетні режими використовують лабораторний кадр Obrii з преамбулою, sync, довжиною UTF-8 та CRC-16.")));
+    gaussianBtSpin->setToolTip(text(
+        QStringLiteral("Gaussian bandwidth-time product for GFSK/GMSK shaping."),
+        QString::fromUtf8(u8"Добуток смуги на час Gaussian-фільтра для формування GFSK/GMSK.")));
     backendCombo->setItemText(0, text(QStringLiteral("Simulator / IQ file"),
                                       QString::fromUtf8(u8"Симулятор / файл IQ")));
     backendCombo->setItemText(1, QStringLiteral("HackRF native"));
@@ -680,8 +922,13 @@ void TransmitDialog::updateTexts() {
                              : text(QStringLiteral("Start simulation"), QString::fromUtf8(u8"Почати симуляцію")));
     stopButton->setText(text(QStringLiteral("Stop"), QString::fromUtf8(u8"Зупинити")));
     exportButton->setText(text(QStringLiteral("Export IQ..."), QString::fromUtf8(u8"Експорт IQ...")));
+    signalLabButton->setText(text(QStringLiteral("Signal lab..."),
+                                  QString::fromUtf8(u8"Лабораторія сигналів...")));
     ft8UtcCheck->setText(text(QStringLiteral("Align FT8 to UTC 15 s slot"),
                               QString::fromUtf8(u8"Прив'язати FT8 до 15-секундного UTC-слота")));
+    ft8SlotCombo->setItemText(0, text(QStringLiteral("Next slot"), QString::fromUtf8(u8"Наступний слот")));
+    ft8SlotCombo->setItemText(1, text(QStringLiteral("Even slot"), QString::fromUtf8(u8"Парний слот")));
+    ft8SlotCombo->setItemText(2, text(QStringLiteral("Odd slot"), QString::fromUtf8(u8"Непарний слот")));
     rfAmpCheck->setText(text(QStringLiteral("RF amp (+~11 dB)"),
                              QString::fromUtf8(u8"RF-підсилювач (+~11 дБ)")));
     armCheck->setText(text(QStringLiteral("ARM RF output"),
@@ -707,6 +954,11 @@ bool TransmitDialog::hackRfSelected() const {
     return backendCombo && backendCombo->currentData().toString() == QStringLiteral("hackrf-native");
 }
 
+bool TransmitDialog::selectedHackRfBusyForReception() const {
+    return hackRfSelected() && deviceCombo && hackRfReceiverUseChecker &&
+           hackRfReceiverUseChecker(deviceCombo->currentData().toInt());
+}
+
 TransmitterBackend *TransmitDialog::selectedBackend() {
     return hackRfSelected() ? static_cast<TransmitterBackend *>(&hackRf)
                             : static_cast<TransmitterBackend *>(&simulator);
@@ -718,83 +970,118 @@ TxModulation TransmitDialog::selectedModulation() const {
 
 double TransmitDialog::signalBandwidthFromUi() const {
     if (!signalBandwidthCombo) return 0.0;
-    const QVariant preset = signalBandwidthCombo->currentData();
-    if (signalBandwidthCombo->currentIndex() >= 0 && preset.isValid()) {
-        return (std::clamp)(preset.toDouble(), 0.0, 20000000.0);
-    }
-    QString value = signalBandwidthCombo->currentText().trimmed().toLower();
-    if (value.isEmpty() || value.contains(QStringLiteral("auto")) ||
-        value.contains(QString::fromUtf8(u8"авто"))) return 0.0;
-    double multiplier = 1.0;
-    if (value.contains(QStringLiteral("mhz")) || value.contains(QString::fromUtf8(u8"мгц"))) {
-        multiplier = 1.0e6;
-    } else if (value.contains(QStringLiteral("khz")) || value.contains(QString::fromUtf8(u8"кгц"))) {
-        multiplier = 1.0e3;
-    }
-    value.replace(QLatin1Char(','), QLatin1Char('.'));
-    int end = 0;
-    while (end < value.size() && (value.at(end).isDigit() || value.at(end) == QLatin1Char('.') ||
-                                  value.at(end).isSpace())) ++end;
-    bool ok = false;
-    const double numeric = value.left(end).trimmed().toDouble(&ok);
-    return ok ? (std::clamp)(numeric * multiplier, 0.0, 20000000.0) : 0.0;
+    const QString value = signalBandwidthCombo->currentText().trimmed().toLower();
+    if (value == "auto" || value == QString::fromUtf8(u8"авто")) return 0.0;
+    const double bandwidth = signalunits::comboValue(signalBandwidthCombo, false);
+    return bandwidth >= 0.0 && bandwidth <= 1e9 ? bandwidth : std::numeric_limits<double>::quiet_NaN();
 }
 
 bool TransmitDialog::validateSignalBandwidth(const TxConfiguration &configuration) {
-    if (configuration.signalBandwidthHz <= 0.0) return true;
-    const double maximum = configuration.sampleRate * 0.90;
-    if (configuration.signalBandwidthHz > maximum) {
-        setStatus(text(
-            QStringLiteral("Signal bandwidth %1 Hz does not fit the %2 Hz generator rate. Increase the generator rate or choose a narrower preset."),
-            QString::fromUtf8(u8"Смуга сигналу %1 Гц не вміщується у частоту генератора %2 Гц. Збільште частоту генератора або оберіть вужчий пресет."))
-                      .arg(configuration.signalBandwidthHz, 0, 'f', 0)
-                      .arg(configuration.sampleRate), true);
+    if (configuration.sampleRate < 8000 || configuration.sampleRate > 20000000 ||
+        !std::isfinite(configuration.signalBandwidthHz)) {
+        setStatus(text(QStringLiteral("Enter a valid rate (e.g. 48 ksps) and bandwidth (e.g. 12.5 kHz). Live/text generation supports up to 20 Msps; higher rates up to 1 Gsps are available in Signal Lab."),
+            QString::fromUtf8(u8"Введіть коректну дискретизацію (48 ksps) і смугу (12.5 kHz). Голос/текст: до 20 Msps; вищі значення до 1 Gsps доступні в лабораторії сигналів.")), true);
         return false;
     }
-    if (configuration.modulation == TxModulation::Nfm ||
-        configuration.modulation == TxModulation::Wfm) {
-        const double deviation =
-            TransmitWaveformGenerator::effectiveFmDeviationHz(configuration);
-        const double audioCutoff = configuration.signalBandwidthHz * 0.5 - deviation;
-        if (audioCutoff < 100.0) {
-            const double minimumBandwidth = 2.0 * (deviation + 100.0);
+    const bool digitalText = TransmitWaveformGenerator::isDigitalTextMode(configuration.modulation);
+    if (digitalText && (!std::isfinite(configuration.symbolRate) ||
+                        configuration.symbolRate <= 0.0 ||
+                        configuration.symbolRate > configuration.sampleRate * 0.25)) {
+        setStatus(text(
+            QStringLiteral("Symbol rate must be positive and no more than one quarter of the generator rate."),
+            QString::fromUtf8(u8"Символьна швидкість має бути додатною і не більшою за чверть частоти генератора.")),
+            true);
+        return false;
+    }
+
+    double estimatedDigitalBandwidth = 0.0;
+    if (digitalText) {
+        switch (configuration.modulation) {
+        case TxModulation::Fsk:
+        case TxModulation::Rtty:
+            estimatedDigitalBandwidth =
+                2.0 * TransmitWaveformGenerator::effectiveFskDeviationHz(configuration) +
+                configuration.symbolRate;
+            break;
+        case TxModulation::Gfsk:
+        case TxModulation::Gmsk:
+            estimatedDigitalBandwidth =
+                2.0 * TransmitWaveformGenerator::effectiveFskDeviationHz(configuration) +
+                configuration.symbolRate * 0.70;
+            break;
+        case TxModulation::Ook:
+        case TxModulation::Ask:
+        case TxModulation::Bpsk:
+        case TxModulation::Qpsk:
+            estimatedDigitalBandwidth = configuration.symbolRate * 1.50;
+            break;
+        default:
+            break;
+        }
+    }
+
+    if (configuration.signalBandwidthHz > 0.0) {
+        const double maximum = configuration.sampleRate * 0.90;
+        if (configuration.signalBandwidthHz > maximum) {
             setStatus(text(
-                QStringLiteral("The selected FM bandwidth is incompatible with %1 Hz deviation. Use at least %2 Hz bandwidth or reduce deviation."),
-                QString::fromUtf8(u8"Обрана смуга FM несумісна з девіацією %1 Гц. Задайте смугу не менше %2 Гц або зменште девіацію."))
-                          .arg(deviation, 0, 'f', 0)
-                          .arg(minimumBandwidth, 0, 'f', 0), true);
+                QStringLiteral("Signal bandwidth %1 Hz does not fit the %2 Hz generator rate. Increase the generator rate or choose a narrower preset."),
+                QString::fromUtf8(u8"Смуга сигналу %1 Гц не вміщується у частоту генератора %2 Гц. Збільште частоту генератора або оберіть вужчий пресет."))
+                          .arg(configuration.signalBandwidthHz, 0, 'f', 0)
+                          .arg(configuration.sampleRate), true);
+            return false;
+        }
+        if (configuration.modulation == TxModulation::Nfm ||
+            configuration.modulation == TxModulation::Wfm) {
+            const double deviation =
+                TransmitWaveformGenerator::effectiveFmDeviationHz(configuration);
+            const double audioCutoff = configuration.signalBandwidthHz * 0.5 - deviation;
+            if (audioCutoff < 100.0) {
+                const double minimumBandwidth = 2.0 * (deviation + 100.0);
+                setStatus(text(
+                    QStringLiteral("The selected FM bandwidth is incompatible with %1 Hz deviation. Use at least %2 Hz bandwidth or reduce deviation."),
+                    QString::fromUtf8(u8"Обрана смуга FM несумісна з девіацією %1 Гц. Задайте смугу не менше %2 Гц або зменште девіацію."))
+                              .arg(deviation, 0, 'f', 0)
+                              .arg(minimumBandwidth, 0, 'f', 0), true);
+                return false;
+            }
+        }
+        if (estimatedDigitalBandwidth > 0.0 &&
+            configuration.signalBandwidthHz < estimatedDigitalBandwidth) {
+            setStatus(text(
+                QStringLiteral("The selected digital bandwidth is too narrow. Use at least %1 Hz for the current symbol rate and deviation."),
+                QString::fromUtf8(u8"Обрана цифрова смуга занадто вузька. Для поточної символьної швидкості та девіації потрібно щонайменше %1 Гц."))
+                          .arg(std::ceil(estimatedDigitalBandwidth), 0, 'f', 0), true);
             return false;
         }
     }
-    double signalCenter = 0.0;
-    if (configuration.modulation == TxModulation::Cw) {
-        signalCenter = configuration.toneHz;
-    } else if (configuration.modulation == TxModulation::Ft8) {
-        signalCenter = configuration.toneHz + 21.875;
+
+    const double center = std::abs(TransmitWaveformGenerator::signalCenterHz(configuration));
+    double occupiedBandwidth = configuration.signalBandwidthHz;
+    if (occupiedBandwidth <= 0.0) {
+        occupiedBandwidth = estimatedDigitalBandwidth;
+        if (configuration.modulation == TxModulation::Ft8) occupiedBandwidth = 100.0;
+        if (configuration.modulation == TxModulation::Cw) occupiedBandwidth = 500.0;
     }
-    if (signalCenter + configuration.signalBandwidthHz * 0.5 >=
-        configuration.sampleRate * 0.49) {
+    if (center + occupiedBandwidth * 0.5 >= configuration.sampleRate * 0.49) {
         setStatus(text(
-            QStringLiteral("The selected tone and bandwidth do not fit the generator rate."),
-            QString::fromUtf8(u8"Обраний тон і смуга не вміщуються у частоту генератора.")), true);
+            QStringLiteral("The selected carrier offset and occupied bandwidth do not fit the generator rate."),
+            QString::fromUtf8(u8"Обраний зсув несучої та зайнята смуга не вміщуються у частоту генератора.")), true);
         return false;
     }
     return true;
 }
-
 QString TransmitDialog::signalShapeSummary(const TxConfiguration &configuration) const {
     const auto frequencyText = [](double value) {
         if (value >= 1.0e6) return QStringLiteral("%1 MHz").arg(value / 1.0e6, 0, 'f', 3);
         if (value >= 1.0e3) return QStringLiteral("%1 kHz").arg(value / 1.0e3, 0, 'f', 2);
         return QStringLiteral("%1 Hz").arg(value, 0, 'f', 0);
     };
-    if (configuration.signalBandwidthHz <= 0.0) {
-        return text(QStringLiteral("TX bandwidth: Auto"),
-                    QString::fromUtf8(u8"Смуга TX: Авто"));
-    }
-    QString summary = text(QStringLiteral("TX bandwidth: %1"),
-                           QString::fromUtf8(u8"Смуга TX: %1"))
-                          .arg(frequencyText(configuration.signalBandwidthHz));
+    QString summary = configuration.signalBandwidthHz <= 0.0
+                          ? text(QStringLiteral("TX bandwidth: Auto"),
+                                 QString::fromUtf8(u8"Смуга TX: Авто"))
+                          : text(QStringLiteral("TX bandwidth: %1"),
+                                 QString::fromUtf8(u8"Смуга TX: %1"))
+                                .arg(frequencyText(configuration.signalBandwidthHz));
     const double audioCutoff =
         TransmitWaveformGenerator::audioLowPassCutoffHz(configuration);
     if (audioCutoff > 0.0) {
@@ -809,14 +1096,54 @@ QString TransmitDialog::signalShapeSummary(const TxConfiguration &configuration)
                        .arg(frequencyText(
                            TransmitWaveformGenerator::effectiveFmDeviationHz(configuration)));
     }
+    if (configuration.modulation == TxModulation::Dmr) {
+        summary += text(QStringLiteral(" | CC %1 | TS %2 | %3 -> %4 | %5"),
+                        QString::fromUtf8(u8" | CC %1 | TS %2 | %3 -> %4 | %5"))
+                       .arg(configuration.dmrColorCode)
+                       .arg(configuration.dmrTimeslot)
+                       .arg(configuration.dmrSourceId)
+                       .arg(configuration.dmrDestinationId)
+                       .arg(configuration.dmrPrivateCall
+                                ? text(QStringLiteral("private"), QString::fromUtf8(u8"приватний"))
+                                : text(QStringLiteral("group"), QString::fromUtf8(u8"груповий")));
+    }
+    if (TransmitWaveformGenerator::isDigitalTextMode(configuration.modulation)) {
+        summary += text(QStringLiteral(" | symbols: %1 Bd"),
+                        QString::fromUtf8(u8" | символи: %1 Бод"))
+                       .arg(configuration.symbolRate, 0, 'f', 2);
+        const double fskDeviation =
+            TransmitWaveformGenerator::effectiveFskDeviationHz(configuration);
+        if (fskDeviation > 0.0) {
+            summary += text(QStringLiteral(" | FSK deviation: %1"),
+                            QString::fromUtf8(u8" | девіація FSK: %1"))
+                           .arg(frequencyText(fskDeviation));
+        }
+        if (configuration.modulation == TxModulation::Gfsk ||
+            configuration.modulation == TxModulation::Gmsk) {
+            summary += QStringLiteral(" | BT: %1").arg(configuration.gaussianBt, 0, 'f', 2);
+        }
+        if (configuration.modulation == TxModulation::Ask) {
+            summary += text(QStringLiteral(" | ASK depth: %1%"),
+                            QString::fromUtf8(u8" | глибина ASK: %1%"))
+                           .arg(configuration.askDepth * 100.0f, 0, 'f', 0);
+        }
+        if (configuration.invertData) {
+            summary += text(QStringLiteral(" | inverted"),
+                            QString::fromUtf8(u8" | інверсія"));
+        }
+    }
     return summary;
 }
-
 void TransmitDialog::applyLiveSignalShape() {
     if (!activeBackend || !activeBackend->isRunning()) return;
     TxConfiguration next = activeConfiguration;
     next.signalBandwidthHz = signalBandwidthFromUi();
     next.deviationHz = deviationSpin->value();
+    next.toneHz = toneSpin->value();
+    next.symbolRate = symbolRateSpin->value();
+    next.gaussianBt = gaussianBtSpin->value();
+    next.askDepth = static_cast<float>(askDepthSpin->value()) / 100.0f;
+    next.invertData = invertDataCheck->isChecked();
     if (!validateSignalBandwidth(next)) return;
     activeConfiguration = next;
     bandwidthLimiterState.reset();
@@ -829,6 +1156,10 @@ void TransmitDialog::applyLiveSignalShape() {
                       << "modulation" << TransmitWaveformGenerator::modulationName(activeConfiguration.modulation)
                       << "bandwidthHz" << activeConfiguration.signalBandwidthHz
                       << "deviationHz" << activeConfiguration.deviationHz
+                      << "symbolRate" << activeConfiguration.symbolRate
+                      << "gaussianBt" << activeConfiguration.gaussianBt
+                      << "askDepth" << activeConfiguration.askDepth
+                      << "invertData" << activeConfiguration.invertData
                       << "audioLowPassHz"
                       << TransmitWaveformGenerator::audioLowPassCutoffHz(activeConfiguration);
 }
@@ -849,15 +1180,23 @@ TxConfiguration TransmitDialog::configurationFromUi() const {
     TxConfiguration configuration;
     configuration.modulation = selectedModulation();
     configuration.frequencyHz = frequencySpin->value() * 1e6;
-    configuration.sampleRate = sampleRateCombo->currentData().toInt();
-    if (configuration.sampleRate <= 0) configuration.sampleRate = sampleRateCombo->currentText().toInt();
-    configuration.sampleRate = (std::clamp)(configuration.sampleRate, 8000, 20000000);
+    configuration.sampleRate = signalunits::sampleRateValue(sampleRateCombo);
     configuration.level = static_cast<float>(levelSpin->value()) / 100.0f;
     configuration.deviationHz = deviationSpin->value();
     configuration.signalBandwidthHz = signalBandwidthFromUi();
     configuration.toneHz = toneSpin->value();
     configuration.cwWpm = cwWpmSpin->value();
+    configuration.symbolRate = symbolRateSpin->value();
+    configuration.gaussianBt = gaussianBtSpin->value();
+    configuration.askDepth = static_cast<float>(askDepthSpin->value()) / 100.0f;
+    configuration.invertData = invertDataCheck->isChecked();
     configuration.alignFt8ToUtcSlot = ft8UtcCheck->isChecked();
+    configuration.ft8SlotParity = ft8SlotCombo->currentData().toInt();
+    configuration.dmrColorCode = dmrColorCodeSpin->value();
+    configuration.dmrTimeslot = dmrTimeslotCombo->currentData().toInt();
+    configuration.dmrSourceId = static_cast<std::uint32_t>(dmrSourceIdSpin->value());
+    configuration.dmrDestinationId = static_cast<std::uint32_t>(dmrDestinationIdSpin->value());
+    configuration.dmrPrivateCall = dmrCallTypeCombo->currentData().toBool();
     configuration.deviceIndex = deviceCombo->currentData().toInt();
     configuration.deviceSampleRate = deviceSampleRateCombo->currentData().toInt();
     configuration.bandwidthHz = static_cast<std::uint32_t>(bandwidthCombo->currentData().toUInt());
@@ -866,10 +1205,90 @@ TxConfiguration TransmitDialog::configurationFromUi() const {
     return configuration;
 }
 
+void TransmitDialog::applyModulationPreset(TxModulation modulation) {
+    const auto setBandwidth = [this](double bandwidth) {
+        const int index = signalBandwidthCombo->findData(bandwidth);
+        if (index >= 0) signalBandwidthCombo->setCurrentIndex(index);
+    };
+    switch (modulation) {
+    case TxModulation::Am:
+    case TxModulation::Dsb:
+        setBandwidth(6000.0);
+        break;
+    case TxModulation::Nfm:
+        deviationSpin->setValue(2500.0);
+        setBandwidth(12500.0);
+        break;
+    case TxModulation::Wfm:
+        deviationSpin->setValue(75000.0);
+        setBandwidth(200000.0);
+        break;
+    case TxModulation::Usb:
+    case TxModulation::Lsb:
+        setBandwidth(2700.0);
+        break;
+    case TxModulation::Cw:
+        toneSpin->setValue(700.0);
+        setBandwidth(500.0);
+        break;
+    case TxModulation::Ft8:
+        toneSpin->setValue(1500.0);
+        setBandwidth(100.0);
+        break;
+    case TxModulation::Ook:
+    case TxModulation::Ask:
+    case TxModulation::Bpsk:
+        symbolRateSpin->setValue(1200.0);
+        toneSpin->setValue(0.0);
+        setBandwidth(2400.0);
+        break;
+    case TxModulation::Fsk:
+    case TxModulation::Gfsk:
+        symbolRateSpin->setValue(1200.0);
+        deviationSpin->setValue(600.0);
+        gaussianBtSpin->setValue(0.50);
+        toneSpin->setValue(0.0);
+        setBandwidth(5000.0);
+        break;
+    case TxModulation::Gmsk:
+        symbolRateSpin->setValue(9600.0);
+        gaussianBtSpin->setValue(0.30);
+        toneSpin->setValue(0.0);
+        setBandwidth(12500.0);
+        break;
+    case TxModulation::Qpsk:
+        symbolRateSpin->setValue(2400.0);
+        toneSpin->setValue(0.0);
+        setBandwidth(5000.0);
+        break;
+    case TxModulation::Rtty:
+        symbolRateSpin->setValue(45.45);
+        deviationSpin->setValue(85.0);
+        toneSpin->setValue(2210.0);
+        setBandwidth(500.0);
+        break;
+    case TxModulation::Dmr: {
+        const int rateIndex = sampleRateCombo->findData(48000);
+        if (rateIndex >= 0) sampleRateCombo->setCurrentIndex(rateIndex);
+        symbolRateSpin->setValue(4800.0);
+        toneSpin->setValue(0.0);
+        setBandwidth(12500.0);
+        break;
+    }
+    }
+}
 void TransmitDialog::updateModeUi() {
     const TxModulation modulation = selectedModulation();
     QString source = sourceCombo->currentData().toString();
-    if (modulation == TxModulation::Ft8 && source != QStringLiteral("text")) {
+    const bool dmrMode = modulation == TxModulation::Dmr;
+    if (dmrMode && source != QStringLiteral("microphone") &&
+        source != QStringLiteral("microphone-ptt") &&
+        source != QStringLiteral("audio-file")) {
+        sourceCombo->setCurrentIndex(sourceCombo->findData(QStringLiteral("microphone")));
+        source = QStringLiteral("microphone");
+    } else if ((modulation == TxModulation::Ft8 ||
+         TransmitWaveformGenerator::isDigitalTextMode(modulation)) &&
+        source != QStringLiteral("text")) {
         sourceCombo->setCurrentIndex(sourceCombo->findData(QStringLiteral("text")));
         source = QStringLiteral("text");
     } else if (modulation == TxModulation::Cw && source != QStringLiteral("text") &&
@@ -897,6 +1316,7 @@ void TransmitDialog::updateModeUi() {
     messageEdit->setEnabled(textSource);
     if (auto *box = findChild<QGroupBox *>(QStringLiteral("txMessageBox"))) box->setVisible(textSource);
     if (auto *box = findChild<QGroupBox *>(QStringLiteral("txMediaBox"))) box->setVisible(mediaSource);
+    if (dmrBox) dmrBox->setVisible(dmrMode);
     mediaModeCombo->setEnabled(imageSource);
     mediaEditButton->setEnabled(imageSource && !mediaPath.isEmpty());
     mediaPauseButton->setEnabled(source == QStringLiteral("audio-file") ||
@@ -905,11 +1325,30 @@ void TransmitDialog::updateModeUi() {
                                      !audioInputCombo->currentData().toString().isEmpty();
     audioInputCombo->setEnabled(microphoneSource && microphoneAvailable);
     audioRefreshButton->setEnabled(microphoneSource && !(activeBackend && activeBackend->isRunning()));
-    deviationSpin->setEnabled(modulation == TxModulation::Nfm || modulation == TxModulation::Wfm);
+    const bool digitalText = TransmitWaveformGenerator::isDigitalTextMode(modulation);
+    const bool fskMode = modulation == TxModulation::Fsk ||
+                         modulation == TxModulation::Gfsk ||
+                         modulation == TxModulation::Gmsk ||
+                         modulation == TxModulation::Rtty;
+    deviationSpin->setEnabled(modulation == TxModulation::Nfm ||
+                              modulation == TxModulation::Wfm ||
+                              (fskMode && modulation != TxModulation::Gmsk));
+    signalBandwidthCombo->setEnabled(!dmrMode);
     toneSpin->setEnabled(TransmitWaveformGenerator::isTextMode(modulation) ||
                          source == QStringLiteral("manual-cw"));
     cwWpmSpin->setEnabled(modulation == TxModulation::Cw);
+    symbolRateSpin->setEnabled(digitalText);
+    gaussianBtSpin->setEnabled(modulation == TxModulation::Gfsk ||
+                               modulation == TxModulation::Gmsk);
+    askDepthSpin->setEnabled(modulation == TxModulation::Ask);
+    invertDataCheck->setEnabled(digitalText);
     ft8UtcCheck->setEnabled(modulation == TxModulation::Ft8);
+    ft8SlotCombo->setEnabled(modulation == TxModulation::Ft8 && ft8UtcCheck->isChecked());
+    messageEdit->setPlaceholderText(
+        digitalText
+            ? text(QStringLiteral("UTF-8 payload / RTTY text"),
+                   QString::fromUtf8(u8"UTF-8 payload / текст RTTY"))
+            : QStringLiteral("CQ TEST KN34 / HELLO WORLD"));
     liveKeyButton->setVisible(liveKeySource);
     liveKeyButton->setEnabled(liveKeySource);
     const bool hardware = hackRfSelected();
@@ -936,6 +1375,13 @@ void TransmitDialog::startTransmission() {
         if (deviceCombo->currentData().toInt() < 0) {
             setStatus(text(QStringLiteral("No HackRF device is available"),
                            QString::fromUtf8(u8"Немає доступного пристрою HackRF")), true);
+            return;
+        }
+        if (selectedHackRfBusyForReception()) {
+            setStatus(text(
+                QStringLiteral("This HackRF is already receiving. Select another HackRF or stop RX before transmitting."),
+                QString::fromUtf8(u8"Цей HackRF уже працює на прийом. Оберіть інший HackRF або зупиніть RX перед передачею.")),
+                true);
             return;
         }
     }
@@ -966,6 +1412,95 @@ void TransmitDialog::startTransmission() {
     }
 }
 
+void TransmitDialog::startLaboratoryTransmission(
+    const SignalLabGenerationResult &result) {
+    if (!result.ok()) {
+        setStatus(text(QStringLiteral("Signal laboratory has no valid IQ waveform"),
+                       QString::fromUtf8(u8"Лабораторія сигналів не має коректного IQ-сигналу")),
+                  true);
+        return;
+    }
+    if (activeBackend && activeBackend->isRunning()) {
+        setStatus(text(QStringLiteral("Stop the current transmission before starting a laboratory waveform"),
+                       QString::fromUtf8(u8"Зупиніть поточну передачу перед запуском лабораторного сигналу")),
+                  true);
+        return;
+    }
+
+    activeBackend = selectedBackend();
+    if (activeBackend->isRfCapable()) {
+        if (!armCheck->isChecked()) {
+            activeBackend = nullptr;
+            setStatus(text(QStringLiteral("Arm the RF output in the transmitter window before laboratory TX"),
+                           QString::fromUtf8(u8"Перед лабораторною TX-передачею озбройте RF-вихід у вікні передавача")),
+                      true);
+            return;
+        }
+        if (deviceCombo->currentData().toInt() < 0) {
+            activeBackend = nullptr;
+            setStatus(text(QStringLiteral("No HackRF device is available"),
+                           QString::fromUtf8(u8"Немає доступного пристрою HackRF")),
+                      true);
+            return;
+        }
+        if (selectedHackRfBusyForReception()) {
+            activeBackend = nullptr;
+            setStatus(text(
+                QStringLiteral("This HackRF is already receiving. Select another HackRF or stop RX before transmitting."),
+                QString::fromUtf8(u8"Цей HackRF уже працює на прийом. Оберіть інший HackRF або зупиніть RX перед передачею.")),
+                true);
+            return;
+        }
+    }
+
+    saveSettings();
+    preview->clear();
+    progressBar->setValue(0);
+    modulatorState = TxModulatorState{};
+    bandwidthLimiterState.reset();
+    bandwidthLimitedIq.clear();
+
+    TxConfiguration configuration = configurationFromUi();
+    configuration.sampleRate = result.sampleRate;
+    configuration.level = 1.0f;
+    configuration.signalBandwidthHz = result.occupiedBandwidthHz;
+    activeConfiguration = configuration;
+
+    QString error;
+    if (!activeBackend->start(configuration, &error)) {
+        activeBackend->stop();
+        activeBackend = nullptr;
+        armCheck->setChecked(false);
+        setStatus(error, true);
+        return;
+    }
+    // Laboratory IQ is already the final shaped baseband. Bypass the normal
+    // modulation bandwidth limiter so OFDM pilots, cyclic prefix and PAPR stay intact.
+    if (!activeBackend->writeIq(result.iq.constData(), result.iq.size(), &error)) {
+        activeBackend->stop();
+        activeBackend = nullptr;
+        armCheck->setChecked(false);
+        setStatus(error, true);
+        return;
+    }
+
+    preview->setIq(result.iq);
+    plannedDurationSeconds = result.durationSeconds;
+    textSimulation = true;
+    pttMode = false;
+    startButton->setEnabled(false);
+    stopButton->setEnabled(true);
+    sourceCombo->setEnabled(false);
+    exportButton->setEnabled(false);
+    statsLabel->setText(result.summary);
+    elapsedTimer.restart();
+    progressTimer->start();
+    setStatus(activeBackend->isRfCapable()
+                  ? text(QStringLiteral("Laboratory IQ waveform is being transmitted by HackRF"),
+                         QString::fromUtf8(u8"Лабораторний IQ-сигнал передається через HackRF"))
+                  : text(QStringLiteral("Laboratory IQ simulation is running"),
+                         QString::fromUtf8(u8"Симуляція лабораторного IQ запущена")));
+}
 void TransmitDialog::startTextSimulation(const TxConfiguration &configuration) {
     const TxGenerationResult generated =
         TransmitWaveformGenerator::generateText(configuration, messageEdit->toPlainText());
@@ -976,8 +1511,7 @@ void TransmitDialog::startTextSimulation(const TxConfiguration &configuration) {
     }
     QString error;
     activeConfiguration = configuration;
-    if (!activeBackend || !activeBackend->start(configuration, &error) ||
-        !writeActiveIq(generated.iq.constData(), generated.iq.size(), &error)) {
+    if (!activeBackend || !activeBackend->start(configuration, &error)) {
         if (activeBackend) activeBackend->stop();
         armCheck->setChecked(false);
         setStatus(error, true);
@@ -985,26 +1519,50 @@ void TransmitDialog::startTextSimulation(const TxConfiguration &configuration) {
     }
     preview->setIq(generated.iq);
     plannedDurationSeconds = generated.durationSeconds;
+    pendingTextIq = generated.iq;
     textSimulation = true;
-    elapsedTimer.restart();
-    progressTimer->start();
     startButton->setEnabled(false);
     stopButton->setEnabled(true);
     exportButton->setEnabled(false);
     sourceCombo->setEnabled(false);
     statsLabel->setText(generated.summary);
-    QString slotNote;
+
     if (configuration.modulation == TxModulation::Ft8 && configuration.alignFt8ToUtcSlot) {
-        slotNote = text(QStringLiteral(" UTC slot alignment is stored for the future RF backend; simulator starts now."),
-                        QString::fromUtf8(u8" Прив'язку до UTC-слота збережено для майбутнього RF backend; симулятор стартує одразу."));
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        qint64 targetMs = ((nowMs / 15000) + 1) * 15000;
+        if (configuration.ft8SlotParity >= 0) {
+            while (((targetMs / 15000) & 1) != configuration.ft8SlotParity) targetMs += 15000;
+        }
+        const int delayMs = static_cast<int>((std::max<qint64>)(1, targetMs - nowMs));
+        ft8StartTimer->start(delayMs);
+        progressBar->setValue(0);
+        setStatus(text(QStringLiteral("FT8 armed; waiting for UTC slot %1."),
+                       QString::fromUtf8(u8"FT8 підготовлено; очікування UTC-слота %1."))
+                      .arg(QDateTime::fromMSecsSinceEpoch(targetMs, Qt::UTC)
+                               .toString(QStringLiteral("HH:mm:ss"))));
+        return;
     }
+    beginTextWaveform();
+}
+
+void TransmitDialog::beginTextWaveform() {
+    if (!activeBackend || pendingTextIq.isEmpty()) return;
+    QString error;
+    if (!writeActiveIq(pendingTextIq.constData(), pendingTextIq.size(), &error)) {
+        armCheck->setChecked(false);
+        stopTransmission(error);
+        return;
+    }
+    pendingTextIq.clear();
+    pendingTextIq.squeeze();
+    elapsedTimer.restart();
+    progressTimer->start();
     setStatus(activeBackend->isRfCapable()
                   ? text(QStringLiteral("Text waveform is being transmitted by HackRF."),
                          QString::fromUtf8(u8"Текстовий сигнал передається через HackRF."))
                   : text(QStringLiteral("Text baseband simulation is running."),
-                         QString::fromUtf8(u8"Симуляція текстового baseband запущена.")) + slotNote);
+                         QString::fromUtf8(u8"Симуляція текстового baseband запущена.")));
 }
-
 void TransmitDialog::startMicrophoneSimulation(TxConfiguration configuration) {
 #ifdef FOBOSAPP_HAS_QT_MULTIMEDIA
     populateAudioInputs();
@@ -1048,12 +1606,24 @@ void TransmitDialog::startMicrophoneSimulation(TxConfiguration configuration) {
     configuration.liveSource = true;
     activeConfiguration = configuration;
     QString error;
+    if (configuration.modulation == TxModulation::Dmr &&
+        !configureDmrEncoder(configuration, &error)) {
+        armCheck->setChecked(false);
+        setStatus(error, true);
+        return;
+    }
     if (!activeBackend || !activeBackend->start(configuration, &error)) {
         armCheck->setChecked(false);
         setStatus(error, true);
         return;
     }
     if (pttMode && !activeBackend->setOutputEnabled(false, &error)) {
+        activeBackend->stop();
+        armCheck->setChecked(false);
+        setStatus(error, true);
+        return;
+    }
+    if (configuration.modulation == TxModulation::Dmr && !pttMode && !beginDmrCall(&error)) {
         activeBackend->stop();
         armCheck->setChecked(false);
         setStatus(error, true);
@@ -1154,7 +1724,19 @@ void TransmitDialog::startAudioFile(TxConfiguration configuration) {
     configuration.liveSource = true;
     activeConfiguration = configuration;
     QString error;
+    if (configuration.modulation == TxModulation::Dmr &&
+        !configureDmrEncoder(configuration, &error)) {
+        armCheck->setChecked(false);
+        setStatus(error, true);
+        return;
+    }
     if (!activeBackend || !activeBackend->start(configuration, &error)) {
+        armCheck->setChecked(false);
+        setStatus(error, true);
+        return;
+    }
+    if (configuration.modulation == TxModulation::Dmr && !beginDmrCall(&error)) {
+        activeBackend->stop();
         armCheck->setChecked(false);
         setStatus(error, true);
         return;
@@ -1268,6 +1850,59 @@ void TransmitDialog::startImageTransmission(TxConfiguration configuration) {
                    QString::fromUtf8(u8"Тестовий кадр аналогового відео передається циклічно.")));
 }
 
+bool TransmitDialog::configureDmrEncoder(const TxConfiguration &configuration, QString *error) {
+    if (!dmrEncoder) dmrEncoder = std::make_unique<DmrTransmitEncoder>();
+    DmrTxParameters parameters;
+    parameters.outputSampleRate = configuration.sampleRate;
+    parameters.level = configuration.level;
+    parameters.colorCode = configuration.dmrColorCode;
+    parameters.timeslot = configuration.dmrTimeslot;
+    parameters.sourceId = configuration.dmrSourceId;
+    parameters.destinationId = configuration.dmrDestinationId;
+    parameters.privateCall = configuration.dmrPrivateCall;
+    dmrCallActive = false;
+    return dmrEncoder->configure(parameters, error);
+}
+
+bool TransmitDialog::beginDmrCall(QString *error) {
+    if (!dmrEncoder) {
+        if (error) *error = QStringLiteral("DMR encoder is not configured");
+        return false;
+    }
+    const QVector<std::complex<float>> iq = dmrEncoder->begin(error);
+    if (iq.isEmpty()) return false;
+    if (!writeActiveIq(iq.constData(), iq.size(), error)) return false;
+    dmrCallActive = true;
+    preview->setIq(iq);
+    return true;
+}
+
+bool TransmitDialog::finishDmrCall(QString *error) {
+    if (!dmrCallActive || !dmrEncoder || dmrFinishing) return true;
+    dmrFinishing = true;
+    const QVector<std::complex<float>> iq = dmrEncoder->finish(error);
+    bool ok = true;
+    if (!iq.isEmpty()) {
+        ok = writeActiveIq(iq.constData(), iq.size(), error);
+        if (ok && activeBackend) ok = activeBackend->drain(2000, error);
+        if (ok) preview->setIq(iq);
+    } else if (error && !error->isEmpty()) {
+        ok = false;
+    }
+    dmrCallActive = false;
+    dmrFinishing = false;
+    return ok;
+}
+
+QVector<std::complex<float>> TransmitDialog::modulateActiveAudio(const QVector<float> &audio,
+                                                                 QString *error) {
+    if (activeConfiguration.modulation == TxModulation::Dmr) {
+        if (!dmrCallActive || !dmrEncoder) return {};
+        return dmrEncoder->pushAudio(audio, error);
+    }
+    return TransmitWaveformGenerator::modulateAudio(activeConfiguration, audio, &modulatorState);
+}
+
 void TransmitDialog::processLiveSource() {
     if (mediaPaused || !activeBackend || !activeBackend->isRunning()) return;
     const QString source = sourceCombo->currentData().toString();
@@ -1297,9 +1932,9 @@ void TransmitDialog::processLiveSource() {
         QVector<float> chunk(count);
         std::copy_n(mediaAudio.constData() + mediaPosition, count, chunk.data());
         mediaPosition += count;
-        const QVector<std::complex<float>> iq =
-            TransmitWaveformGenerator::modulateAudio(activeConfiguration, chunk, &modulatorState);
-        if (!iq.isEmpty() && !writeActiveIq(iq.constData(), iq.size(), &error)) stopTransmission(error);
+        const QVector<std::complex<float>> iq = modulateActiveAudio(chunk, &error);
+        if (!error.isEmpty()) stopTransmission(error);
+        else if (!iq.isEmpty() && !writeActiveIq(iq.constData(), iq.size(), &error)) stopTransmission(error);
         else preview->setIq(iq);
         return;
     }
@@ -1311,12 +1946,28 @@ void TransmitDialog::processLiveSource() {
 void TransmitDialog::setLiveKey(bool pressed) {
     if (pressed == liveKeyPressed || !activeBackend || !activeBackend->isRunning()) return;
     QString error;
-    if (!activeBackend->setOutputEnabled(pressed, &error)) {
-        stopTransmission(error);
-        return;
+    const bool dmrMode = activeConfiguration.modulation == TxModulation::Dmr;
+    if (pressed) {
+        if (!activeBackend->setOutputEnabled(true, &error)) {
+            stopTransmission(error);
+            return;
+        }
+        bandwidthLimiterState.reset();
+        if (dmrMode && !beginDmrCall(&error)) {
+            stopTransmission(error);
+            return;
+        }
+    } else {
+        if (dmrMode && !finishDmrCall(&error)) {
+            stopTransmission(error);
+            return;
+        }
+        if (!activeBackend->setOutputEnabled(false, &error)) {
+            stopTransmission(error);
+            return;
+        }
     }
     liveKeyPressed = pressed;
-    if (pressed) bandwidthLimiterState.reset();
     liveKeyButton->setText(pressed
                                ? text(QStringLiteral("TRANSMITTING - release to stop"),
                                       QString::fromUtf8(u8"ПЕРЕДАЧА - відпустіть для зупинки"))
@@ -1394,9 +2045,12 @@ void TransmitDialog::readMicrophone() {
     for (int i = 0; i < samples; ++i) {
         audio[i] = static_cast<float>(pcm[i]) / 32768.0f;
     }
-    const QVector<std::complex<float>> iq =
-        TransmitWaveformGenerator::modulateAudio(activeConfiguration, audio, &modulatorState);
     QString error;
+    const QVector<std::complex<float>> iq = modulateActiveAudio(audio, &error);
+    if (!error.isEmpty()) {
+        stopTransmission(error);
+        return;
+    }
     if (!iq.isEmpty() && !writeActiveIq(iq.constData(), iq.size(), &error)) {
         stopTransmission(error);
         return;
@@ -1460,6 +2114,9 @@ void TransmitDialog::updateProgress() {
 
 void TransmitDialog::stopTransmission(const QString &reason) {
     progressTimer->stop();
+    if (ft8StartTimer) ft8StartTimer->stop();
+    pendingTextIq.clear();
+    pendingTextIq.squeeze();
     sourceTimer->stop();
 #ifdef FOBOSAPP_HAS_QT_MULTIMEDIA
     if (audioInput) {
@@ -1470,10 +2127,18 @@ void TransmitDialog::stopTransmission(const QString &reason) {
     }
 #endif
     const bool hadSamples = activeBackend == &simulator && !simulator.capturedIq().isEmpty();
+    QString dmrError;
+    if (activeBackend && activeBackend->isRunning() && dmrCallActive) {
+        finishDmrCall(&dmrError);
+    }
     if (activeBackend) activeBackend->stop();
     activeBackend = nullptr;
+    if (dmrEncoder) dmrEncoder->reset();
+    dmrCallActive = false;
+    dmrFinishing = false;
     liveKeyPressed = false;
     pttMode = false;
+    automaticFt8Active = false;
     bandwidthLimiterState.reset();
     bandwidthLimitedIq.clear();
     mediaPaused = false;
@@ -1490,6 +2155,7 @@ void TransmitDialog::stopTransmission(const QString &reason) {
         QStringLiteral("background:#6b7078;color:white;font-weight:600;"));
     exportButton->setEnabled(hadSamples);
     if (!reason.isEmpty()) setStatus(reason);
+    else if (!dmrError.isEmpty()) setStatus(dmrError, true);
 }
 
 void TransmitDialog::exportIq() {
@@ -1564,7 +2230,7 @@ void TransmitDialog::loadSettings() {
     const int sampleRate = settings.value(QStringLiteral("transmit/sampleRate"), 48000).toInt();
     int rateIndex = sampleRateCombo->findData(sampleRate);
     if (rateIndex < 0) {
-        sampleRateCombo->addItem(QString::number(sampleRate), sampleRate);
+        sampleRateCombo->addItem(signalunits::sampleRateText(sampleRate), sampleRate);
         rateIndex = sampleRateCombo->count() - 1;
     }
     sampleRateCombo->setCurrentIndex(rateIndex);
@@ -1587,7 +2253,25 @@ void TransmitDialog::loadSettings() {
     }
     toneSpin->setValue(settings.value(QStringLiteral("transmit/toneHz"), 700.0).toDouble());
     cwWpmSpin->setValue(settings.value(QStringLiteral("transmit/cwWpm"), 18).toInt());
+    symbolRateSpin->setValue(settings.value(QStringLiteral("transmit/symbolRate"),
+                                            symbolRateSpin->value()).toDouble());
+    gaussianBtSpin->setValue(settings.value(QStringLiteral("transmit/gaussianBt"),
+                                             gaussianBtSpin->value()).toDouble());
+    askDepthSpin->setValue(settings.value(QStringLiteral("transmit/askDepthPercent"),
+                                           askDepthSpin->value() > 0 ? askDepthSpin->value() : 70).toInt());
+    invertDataCheck->setChecked(settings.value(QStringLiteral("transmit/invertData"), false).toBool());
     ft8UtcCheck->setChecked(settings.value(QStringLiteral("transmit/alignFt8Utc"), true).toBool());
+    const int ft8SlotIndex = ft8SlotCombo->findData(settings.value(QStringLiteral("transmit/ft8SlotParity"), -1).toInt());
+    if (ft8SlotIndex >= 0) ft8SlotCombo->setCurrentIndex(ft8SlotIndex);
+    dmrColorCodeSpin->setValue(settings.value(QStringLiteral("transmit/dmrColorCode"), 1).toInt());
+    const int dmrTimeslot = settings.value(QStringLiteral("transmit/dmrTimeslot"), 1).toInt();
+    const int dmrTimeslotIndex = dmrTimeslotCombo->findData(dmrTimeslot);
+    if (dmrTimeslotIndex >= 0) dmrTimeslotCombo->setCurrentIndex(dmrTimeslotIndex);
+    dmrSourceIdSpin->setValue(settings.value(QStringLiteral("transmit/dmrSourceId"), 1).toInt());
+    dmrDestinationIdSpin->setValue(settings.value(QStringLiteral("transmit/dmrDestinationId"), 9).toInt());
+    const bool dmrPrivateCall = settings.value(QStringLiteral("transmit/dmrPrivateCall"), false).toBool();
+    const int dmrCallTypeIndex = dmrCallTypeCombo->findData(dmrPrivateCall);
+    if (dmrCallTypeIndex >= 0) dmrCallTypeCombo->setCurrentIndex(dmrCallTypeIndex);
     const QString backend = settings.value(QStringLiteral("transmit/backend"),
                                            QStringLiteral("simulator-iq-file")).toString();
     const int backendIndex = backendCombo->findData(backend);
@@ -1631,7 +2315,17 @@ void TransmitDialog::saveSettings() const {
     settings.setValue(QStringLiteral("transmit/signalBandwidthHz"), signalBandwidthFromUi());
     settings.setValue(QStringLiteral("transmit/toneHz"), toneSpin->value());
     settings.setValue(QStringLiteral("transmit/cwWpm"), cwWpmSpin->value());
+    settings.setValue(QStringLiteral("transmit/symbolRate"), symbolRateSpin->value());
+    settings.setValue(QStringLiteral("transmit/gaussianBt"), gaussianBtSpin->value());
+    settings.setValue(QStringLiteral("transmit/askDepthPercent"), askDepthSpin->value());
+    settings.setValue(QStringLiteral("transmit/invertData"), invertDataCheck->isChecked());
     settings.setValue(QStringLiteral("transmit/alignFt8Utc"), ft8UtcCheck->isChecked());
+    settings.setValue(QStringLiteral("transmit/ft8SlotParity"), ft8SlotCombo->currentData().toInt());
+    settings.setValue(QStringLiteral("transmit/dmrColorCode"), dmrColorCodeSpin->value());
+    settings.setValue(QStringLiteral("transmit/dmrTimeslot"), dmrTimeslotCombo->currentData().toInt());
+    settings.setValue(QStringLiteral("transmit/dmrSourceId"), dmrSourceIdSpin->value());
+    settings.setValue(QStringLiteral("transmit/dmrDestinationId"), dmrDestinationIdSpin->value());
+    settings.setValue(QStringLiteral("transmit/dmrPrivateCall"), dmrCallTypeCombo->currentData().toBool());
     settings.setValue(QStringLiteral("transmit/backend"), backendCombo->currentData().toString());
     settings.setValue(QStringLiteral("transmit/hackRfDeviceIndex"), deviceCombo->currentData().toInt());
     settings.setValue(QStringLiteral("transmit/deviceSampleRate"), deviceSampleRateCombo->currentData().toInt());

@@ -635,10 +635,6 @@ void MyGraphWidget::drawAnalogPeakMeter(QPainter &painter) const {
             painter.restore();
         }
     }
-    painter.setPen(QPen(QColor(58, 210, 126), 2.0));
-    painter.drawArc(QRectF(center.x() - radius, center.y() - radius,
-                           radius * 2.0, radius * 2.0),
-                    int((180.0 - startDegrees) * 16.0), int(-sweepDegrees * 16.0));
     const double needleDegrees = startDegrees + sweepDegrees * normalized;
     painter.setPen(QPen(QColor(255, 91, 72), 2.1, Qt::SolidLine, Qt::RoundCap));
     painter.drawLine(center, pointAt(needleDegrees, 0.83));

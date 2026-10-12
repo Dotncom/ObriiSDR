@@ -8,6 +8,9 @@
 #include <mutex>
 
 #include <QDebug>
+#ifdef OBRII_IQBUFFER_SELFTEST
+#include <functional>
+#endif
 
 namespace {
 
@@ -18,9 +21,20 @@ constexpr double MAX_LIVE_QUEUED_SECONDS = 1.25;
 constexpr std::size_t MAX_SNAPSHOT_FLOATS = 16 * 1024 * 1024;
 constexpr std::size_t SNAPSHOT_COPY_CHUNK_FLOATS = 256 * 1024;
 constexpr std::size_t MAX_RECYCLED_BLOCKS = 8;
+constexpr std::size_t MAX_PENDING_SNAPSHOT_BLOCKS = 8;
+constexpr std::size_t MAX_PENDING_SNAPSHOT_FLOATS = 4 * 1024 * 1024;
+
+struct PendingSnapshotBlock {
+    std::vector<float> samples;
+    IqBuffer::BlockMetadata metadata;
+    std::uint64_t epoch = 0;
+};
 
 std::mutex g_iqMutex;
 std::mutex g_audioQueueMutex;
+std::mutex g_snapshotPublishMutex;
+std::deque<PendingSnapshotBlock> g_pendingSnapshotBlocks;
+std::size_t g_pendingSnapshotFloatCount = 0;
 std::vector<float> g_iqSnapshot(MAX_SNAPSHOT_FLOATS);
 std::size_t g_iqSnapshotStart = 0;
 std::size_t g_iqSnapshotSize = 0;
@@ -32,6 +46,9 @@ std::atomic<std::uint64_t> g_droppedQueuedBlocks{0};
 std::atomic<std::uint64_t> g_droppedQueuedFloats{0};
 std::atomic<std::uint64_t> g_audioBlockSequence{0};
 std::atomic<std::uint64_t> g_skippedSnapshotBlocks{0};
+std::atomic<std::uint64_t> g_deferredSnapshotBlocks{0};
+std::atomic_bool g_snapshotLossPending{false};
+std::atomic_bool g_discardPendingSnapshots{false};
 std::atomic<std::uint64_t> g_iqSequence{0};
 std::atomic<std::uint64_t> g_iqEpoch{1};
 std::uint64_t g_totalSnapshotFloatCount = 0;
@@ -103,6 +120,18 @@ void appendToSnapshot(const float *samples, std::size_t floatCount) {
         std::copy(samples + firstCopy, samples + floatCount, g_iqSnapshot.begin());
     }
     g_iqSnapshotSize += floatCount;
+}
+
+void appendSnapshotBlock(const float *samples, std::size_t floatCount,
+                         const IqBuffer::BlockMetadata *metadata) {
+    appendToSnapshot(samples, floatCount);
+    g_totalSnapshotFloatCount += static_cast<std::uint64_t>(floatCount);
+    const auto sequence = g_iqSequence.fetch_add(1, std::memory_order_relaxed) + 1;
+    g_latestMetadata = metadata ? *metadata : IqBuffer::BlockMetadata();
+    g_latestMetadata.sequence = sequence;
+    g_latestMetadata.epoch = g_iqEpoch.load(std::memory_order_relaxed);
+    g_latestMetadata.totalFloatCount = g_totalSnapshotFloatCount;
+    g_latestMetadata.floatCount = floatCount;
 }
 
 bool copySnapshotTail(std::vector<float> &out,
@@ -279,6 +308,17 @@ std::size_t maxQueuedFloatsForLiveAudio() {
 
 } // namespace
 
+#ifdef OBRII_IQBUFFER_SELFTEST
+void iqBufferWithSnapshotLockedForTest(const std::function<void()> &action) {
+    std::lock_guard<std::mutex> lock(g_iqMutex);
+    action();
+}
+void iqBufferWithPublisherLockedForTest(const std::function<void()> &action) {
+    std::lock_guard<std::mutex> lock(g_snapshotPublishMutex);
+    action();
+}
+#endif
+
 namespace IqBuffer {
 
 bool publish(const float *samples,
@@ -342,27 +382,75 @@ bool publish(const float *samples,
         g_iqQueuedFloatCount = 0;
     }
 
-    // The USB callback must never wait for an FFT snapshot reader. A busy
-    // snapshot simply means this visual frame is skipped; the continuous audio
-    // queue above has already received the complete IQ block.
+    // Never wait for an FFT reader in the USB callback. Short snapshot-lock
+    // collisions are buffered and flushed in source order at the next publish.
     if (updateSnapshot) {
+        std::unique_lock<std::mutex> publishLock(g_snapshotPublishMutex, std::try_to_lock);
+        if (!publishLock.owns_lock()) {
+            if (expectedEpoch != 0 && expectedEpoch != g_iqEpoch.load(std::memory_order_acquire)) {
+                return false;
+            }
+            g_skippedSnapshotBlocks.fetch_add(1, std::memory_order_relaxed);
+            g_snapshotLossPending.store(true, std::memory_order_relaxed);
+            g_discardPendingSnapshots.store(true, std::memory_order_release);
+            return true;
+        }
+        if (expectedEpoch != 0 && expectedEpoch != g_iqEpoch.load(std::memory_order_acquire)) {
+            return false;
+        }
+        if (g_discardPendingSnapshots.exchange(false, std::memory_order_acquire)) {
+            // A rejected publisher leaves a gap after the pending tail. That
+            // older tail cannot be concatenated with the next accepted block.
+            g_skippedSnapshotBlocks.fetch_add(g_pendingSnapshotBlocks.size(),
+                                              std::memory_order_relaxed);
+            g_pendingSnapshotBlocks.clear();
+            g_pendingSnapshotFloatCount = 0;
+        }
         std::unique_lock<std::mutex> snapshotLock(g_iqMutex, std::try_to_lock);
         if (snapshotLock.owns_lock()) {
             if (expectedEpoch != 0 &&
                 expectedEpoch != g_iqEpoch.load(std::memory_order_acquire)) {
                 return false;
             }
-            appendToSnapshot(samples, floatCount);
-            g_totalSnapshotFloatCount += static_cast<std::uint64_t>(floatCount);
-            const std::uint64_t snapshotSequence =
-                g_iqSequence.fetch_add(1, std::memory_order_relaxed) + 1;
-            g_latestMetadata = metadata ? *metadata : BlockMetadata();
-            g_latestMetadata.sequence = snapshotSequence;
-            g_latestMetadata.epoch = g_iqEpoch.load(std::memory_order_relaxed);
-            g_latestMetadata.totalFloatCount = g_totalSnapshotFloatCount;
-            g_latestMetadata.floatCount = floatCount;
+            if (g_snapshotLossPending.exchange(false, std::memory_order_relaxed)) {
+                // An actual overflow must not splice samples across the gap
+                // into a seemingly continuous FFT window.
+                g_iqSnapshotStart = 0;
+                g_iqSnapshotSize = 0;
+                ++g_snapshotResetGeneration;
+            }
+            while (!g_pendingSnapshotBlocks.empty()) {
+                const auto &pending = g_pendingSnapshotBlocks.front();
+                if (pending.epoch == g_iqEpoch.load(std::memory_order_relaxed)) {
+                    appendSnapshotBlock(pending.samples.data(), pending.samples.size(), &pending.metadata);
+                }
+                g_pendingSnapshotFloatCount -= pending.samples.size();
+                g_pendingSnapshotBlocks.pop_front();
+            }
+            appendSnapshotBlock(samples, floatCount, metadata);
         } else {
-            g_skippedSnapshotBlocks.fetch_add(1, std::memory_order_relaxed);
+            if (floatCount > MAX_PENDING_SNAPSHOT_FLOATS) {
+                g_skippedSnapshotBlocks.fetch_add(g_pendingSnapshotBlocks.size() + 1,
+                                                  std::memory_order_relaxed);
+                g_pendingSnapshotBlocks.clear();
+                g_pendingSnapshotFloatCount = 0;
+                g_snapshotLossPending.store(true, std::memory_order_relaxed);
+                return true;
+            }
+            while (g_pendingSnapshotBlocks.size() >= MAX_PENDING_SNAPSHOT_BLOCKS ||
+                   g_pendingSnapshotFloatCount + floatCount > MAX_PENDING_SNAPSHOT_FLOATS) {
+                g_pendingSnapshotFloatCount -= g_pendingSnapshotBlocks.front().samples.size();
+                g_pendingSnapshotBlocks.pop_front();
+                g_skippedSnapshotBlocks.fetch_add(1, std::memory_order_relaxed);
+                g_snapshotLossPending.store(true, std::memory_order_relaxed);
+            }
+            PendingSnapshotBlock pending;
+            pending.samples.assign(samples, samples + floatCount);
+            pending.metadata = metadata ? *metadata : BlockMetadata();
+            pending.epoch = g_iqEpoch.load(std::memory_order_relaxed);
+            g_pendingSnapshotBlocks.push_back(std::move(pending));
+            g_pendingSnapshotFloatCount += floatCount;
+            g_deferredSnapshotBlocks.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
@@ -460,8 +548,7 @@ bool popBlock(std::vector<float> &out, std::uint64_t *sequence) {
 }
 
 void clear(std::uint64_t epoch) {
-    std::lock_guard<std::mutex> snapshotLock(g_iqMutex);
-    std::lock_guard<std::mutex> queueLock(g_audioQueueMutex);
+    std::scoped_lock lock(g_snapshotPublishMutex, g_iqMutex, g_audioQueueMutex);
     const std::uint64_t previousEpoch = g_iqEpoch;
     const std::uint64_t previousSequence = g_iqSequence;
     const std::size_t previousSnapshotStart = g_iqSnapshotStart;
@@ -483,6 +570,11 @@ void clear(std::uint64_t epoch) {
     g_droppedQueuedFloats.store(0, std::memory_order_relaxed);
     g_audioBlockSequence.store(0, std::memory_order_relaxed);
     g_skippedSnapshotBlocks.store(0, std::memory_order_relaxed);
+    g_deferredSnapshotBlocks.store(0, std::memory_order_relaxed);
+    g_pendingSnapshotBlocks.clear();
+    g_pendingSnapshotFloatCount = 0;
+    g_snapshotLossPending.store(false, std::memory_order_relaxed);
+    g_discardPendingSnapshots.store(false, std::memory_order_relaxed);
     g_latestMetadata = BlockMetadata();
     g_totalSnapshotFloatCount = 0;
     ++g_snapshotResetGeneration;
@@ -540,6 +632,7 @@ DiscontinuityStats discontinuityStats() noexcept {
     result.epoch = g_iqEpoch.load(std::memory_order_relaxed);
     result.droppedQueuedBlocks = g_droppedQueuedBlocks.load(std::memory_order_relaxed);
     result.skippedSnapshotBlocks = g_skippedSnapshotBlocks.load(std::memory_order_relaxed);
+    result.deferredSnapshotBlocks = g_deferredSnapshotBlocks.load(std::memory_order_relaxed);
     return result;
 }
 

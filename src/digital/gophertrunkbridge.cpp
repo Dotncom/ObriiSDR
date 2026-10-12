@@ -88,6 +88,62 @@ QString applyDmrVoicePolarityForGopher(const QString &dibits, bool flip) {
     return flip ? rotateDibitPolarity(dibits) : dibits;
 }
 
+struct GopherProcessArguments {
+    QStringList actual;
+    QStringList display;
+};
+
+GopherProcessArguments buildGopherProcessArguments(const QStringList &baseArguments,
+                                                   const QString &mode,
+                                                   int keyId,
+                                                   const QString &keyHex,
+                                                   bool forwardToBackend,
+                                                   const QString &variant,
+                                                   const QString &layout,
+                                                   int frameOffset,
+                                                   const QString &overridePath) {
+    static const QStringList managedOptions = {
+        QStringLiteral("-privacy-mode"),
+        QStringLiteral("-privacy-key-id"),
+        QStringLiteral("-privacy-key-hex"),
+        QStringLiteral("-privacy-variant"),
+        QStringLiteral("-privacy-layout"),
+        QStringLiteral("-privacy-frame-offset"),
+        QStringLiteral("-privacy-override-file")};
+
+    GopherProcessArguments result;
+    for (int index = 0; index < baseArguments.size(); ++index) {
+        const QString argument = baseArguments.at(index);
+        if (managedOptions.contains(argument)) {
+            if (index + 1 < baseArguments.size()) {
+                ++index;
+            }
+            continue;
+        }
+        result.actual.append(argument);
+        result.display.append(argument);
+    }
+
+    const bool active = forwardToBackend && mode != QLatin1String("none");
+    const QString effectiveMode = active ? mode : QStringLiteral("none");
+    result.actual << QStringLiteral("-privacy-mode") << effectiveMode
+                  << QStringLiteral("-privacy-key-id") << QString::number(active ? keyId : 0)
+                  << QStringLiteral("-privacy-variant") << variant
+                  << QStringLiteral("-privacy-layout") << layout
+                  << QStringLiteral("-privacy-frame-offset") << QString::number(frameOffset);
+    result.display = result.actual;
+    if (active && !keyHex.isEmpty()) {
+        result.actual << QStringLiteral("-privacy-key-hex") << keyHex;
+        result.display << QStringLiteral("-privacy-key-hex")
+                       << QStringLiteral("<redacted:%1-bytes>").arg(keyHex.size() / 2);
+    }
+    if (!overridePath.isEmpty()) {
+        result.actual << QStringLiteral("-privacy-override-file") << overridePath;
+        result.display << QStringLiteral("-privacy-override-file") << overridePath;
+    }
+    return result;
+}
+
 qint16 readLe16(const char *data) {
     const auto lo = static_cast<quint8>(data[0]);
     const auto hi = static_cast<quint8>(data[1]);
@@ -109,9 +165,6 @@ QString compactGopherSummary(const QString &line) {
 
     const QJsonObject obj = doc.object();
     const QString type = obj.value(QStringLiteral("type")).toString(QStringLiteral("output"));
-    if (type == QLatin1String("reset")) {
-        return QStringLiteral("reset");
-    }
 
     QStringList parts;
     parts << type;
@@ -305,16 +358,38 @@ void GopherTrunkBridge::configure(bool autoStart,
                                   quint16 tcpPortValue,
                                   quint16 audioUdpPortValue,
                                   const QString &workingDirectory) {
+    const QString nextProgram = program.trimmed();
+    const quint16 nextTcpPort = tcpPortValue == 0 ? quint16(7460) : tcpPortValue;
+    const quint16 nextAudioUdpPort = audioUdpPortValue == 0 ? quint16(23456) : audioUdpPortValue;
+    const QStringList nextArguments = QStringList()
+                                      << QStringLiteral("-listen")
+                                      << QStringLiteral("127.0.0.1:%1").arg(nextTcpPort)
+                                      << QStringLiteral("-interleaved=false")
+                                      << QStringLiteral("-audio-udp")
+                                      << QStringLiteral("127.0.0.1:%1").arg(nextAudioUdpPort);
+    const bool processChanged = processAutoStart != autoStart ||
+                                processProgram != nextProgram ||
+                                processArguments != nextArguments ||
+                                processWorkingDirectory != workingDirectory;
+    const bool tcpChanged = tcpPort != nextTcpPort;
+    const bool udpChanged = audioUdpPort != nextAudioUdpPort;
+    if (bridgeEnabled) {
+        if (tcpChanged) {
+            disconnectTcp();
+        }
+        if (processChanged && managedProcess->state() != QProcess::NotRunning) {
+            stopProcess();
+        }
+        if (udpChanged) {
+            stopUdpOutput();
+        }
+    }
+
     processAutoStart = autoStart;
-    processProgram = program.trimmed();
-    tcpPort = tcpPortValue == 0 ? quint16(7460) : tcpPortValue;
-    audioUdpPort = audioUdpPortValue == 0 ? quint16(23456) : audioUdpPortValue;
-    processArguments = QStringList()
-                       << QStringLiteral("-listen")
-                       << QStringLiteral("127.0.0.1:%1").arg(tcpPort)
-                       << QStringLiteral("-interleaved=false")
-                       << QStringLiteral("-audio-udp")
-                       << QStringLiteral("127.0.0.1:%1").arg(audioUdpPort);
+    processProgram = nextProgram;
+    tcpPort = nextTcpPort;
+    audioUdpPort = nextAudioUdpPort;
+    processArguments = nextArguments;
     processWorkingDirectory = workingDirectory;
     if (!bridgeEnabled) {
         return;
@@ -369,11 +444,14 @@ void GopherTrunkBridge::configurePrivacy(const QString &mode,
                                 .arg(privacyVariant)
                                 .arg(privacyLayout)
                                 .arg(privacyFrameOffset);
-    const QString resetSummary = QStringLiteral("%1:%2:%3:%4")
+    const QString resetSummary = QStringLiteral("%1:%2:%3:%4:%5:%6:%7")
                                      .arg(privacyMode)
                                      .arg(privacyKeyId)
-                                     .arg(privacyKeyHex.isEmpty() ? QStringLiteral("empty") : QStringLiteral("set"))
-                                     .arg(privacyForwardToBackend);
+                                     .arg(privacyKeyHex)
+                                     .arg(privacyForwardToBackend)
+                                     .arg(privacyVariant)
+                                     .arg(privacyLayout)
+                                     .arg(privacyFrameOffset);
     if (summary != lastPrivacySummary) {
         lastPrivacySummary = summary;
         emitStatus(QStringLiteral("GopherTrunk privacy draft: %1, keyId %2, key %3, forward %4, %5/%6/off%7")
@@ -410,9 +488,6 @@ void GopherTrunkBridge::setEnabled(bool enabled) {
         udpOutputPacketsReceived = 0;
         streamPolarityKnown = false;
         streamPolarityFlip = false;
-        pendingPolarityKnown = false;
-        pendingPolarityFlip = false;
-        pendingPolarityConfirmCount = 0;
         lastColorCode = -1;
         startUdpOutput();
         if (processAutoStart) {
@@ -428,26 +503,49 @@ void GopherTrunkBridge::setEnabled(bool enabled) {
     }
 }
 
+QJsonObject GopherTrunkBridge::currentPrivacyObject() const {
+    QJsonObject privacy;
+    const bool forwardPrivacy =
+        privacyForwardToBackend && privacyMode != QStringLiteral("none");
+    privacy.insert(QStringLiteral("mode"),
+                   forwardPrivacy ? privacyMode : QStringLiteral("none"));
+    privacy.insert(QStringLiteral("keyId"), forwardPrivacy ? privacyKeyId : 0);
+    privacy.insert(QStringLiteral("keyHex"),
+                   forwardPrivacy ? privacyKeyHex : QString());
+    privacy.insert(QStringLiteral("variant"), privacyVariant);
+    privacy.insert(QStringLiteral("layout"), privacyLayout);
+    privacy.insert(QStringLiteral("frameOffset"), privacyFrameOffset);
+    return privacy;
+}
+
+QString GopherTrunkBridge::normalizedBurstDibits(const QString &dibits, bool dataBurst,
+                                               bool voicePolarityFlip) {
+    if (dibits.size() != 132) {
+        return {};
+    }
+    if (!dataBurst) {
+        return applyDmrVoicePolarityForGopher(dibits, voicePolarityFlip);
+    }
+    // Data syncs are the polarity-flipped twins of voice syncs. A PI burst
+    // is sliced independently, so it must not inherit the last voice polarity.
+    bool dataFlip = false;
+    if (!detectDmrVoicePolarityFlip(rotateDibitPolarity(dibits), &dataFlip)) {
+        return {};
+    }
+    return applyDmrVoicePolarityForGopher(dibits, dataFlip);
+}
+
 void GopherTrunkBridge::resetStream() {
     virtualBaseDibit = 0;
     lastColorCode = -1;
     streamPolarityKnown = false;
     streamPolarityFlip = false;
-    pendingPolarityKnown = false;
-    pendingPolarityFlip = false;
-    pendingPolarityConfirmCount = 0;
     if (!bridgeEnabled || tcpSocket->state() != QAbstractSocket::ConnectedState) {
         return;
     }
     QJsonObject packet;
     packet.insert(QStringLiteral("reset"), true);
-    QJsonObject privacy;
-    const bool forwardPrivacy =
-        privacyForwardToBackend && privacyMode != QStringLiteral("none");
-    privacy.insert(QStringLiteral("mode"), forwardPrivacy ? privacyMode : QStringLiteral("none"));
-    privacy.insert(QStringLiteral("keyId"), forwardPrivacy ? privacyKeyId : 0);
-    privacy.insert(QStringLiteral("keyHex"), forwardPrivacy ? privacyKeyHex : QString());
-    packet.insert(QStringLiteral("privacy"), privacy);
+    packet.insert(QStringLiteral("privacy"), currentPrivacyObject());
     QByteArray line = QJsonDocument(packet).toJson(QJsonDocument::Compact);
     line.append('\n');
     tcpSocket->write(line);
@@ -496,77 +594,29 @@ void GopherTrunkBridge::sendDibitBurst(const QString &dibits,
 
     const bool isDataBurst = burstKind.compare(QStringLiteral("data"), Qt::CaseInsensitive) == 0;
     bool detectedPolarityFlip = false;
-    bool resetForPolarity = false;
-    const bool privacyForwardActive =
-        privacyForwardToBackend && privacyMode != QStringLiteral("none");
-    if (!isDataBurst && detectDmrVoicePolarityFlip(dibits, &detectedPolarityFlip)) {
-        if (!streamPolarityKnown) {
-            streamPolarityKnown = true;
-            streamPolarityFlip = detectedPolarityFlip;
-            pendingPolarityKnown = false;
-            pendingPolarityConfirmCount = 0;
+    // Only burst A carries a voice sync. Embedded B-F fields can accidentally
+    // resemble one; never let them lock polarity or reset privacy alignment.
+    if (!isDataBurst && burstIndex == 0 && detectDmrVoicePolarityFlip(dibits, &detectedPolarityFlip)) {
+        if (!streamPolarityKnown || streamPolarityFlip != detectedPolarityFlip) {
             if (fobosVerboseLoggingEnabled()) {
                 qDebug() << "[GopherTrunk] stream dibit polarity"
-                         << "flip" << streamPolarityFlip
-                         << "sample" << static_cast<qulonglong>(sample)
-                         << "burst" << burstIndex
-                         << "cc" << colorCode;
-            }
-        } else if (streamPolarityFlip != detectedPolarityFlip && !privacyForwardActive) {
-            if (!pendingPolarityKnown || pendingPolarityFlip != detectedPolarityFlip) {
-                pendingPolarityKnown = true;
-                pendingPolarityFlip = detectedPolarityFlip;
-                pendingPolarityConfirmCount = 1;
-            } else {
-                ++pendingPolarityConfirmCount;
-            }
-            if (pendingPolarityConfirmCount >= 3) {
-                streamPolarityFlip = detectedPolarityFlip;
-                pendingPolarityKnown = false;
-                pendingPolarityConfirmCount = 0;
-                resetForPolarity = true;
-                if (fobosVerboseLoggingEnabled()) {
-                    qDebug() << "[GopherTrunk] confirmed stream dibit polarity change"
-                             << "flip" << streamPolarityFlip
-                             << "sample" << static_cast<qulonglong>(sample)
-                             << "burst" << burstIndex
-                             << "cc" << colorCode;
-                }
-            } else if (fobosVerboseLoggingEnabled()) {
-                qDebug() << "[GopherTrunk] pending stream dibit polarity change"
                          << "flip" << detectedPolarityFlip
-                         << "count" << pendingPolarityConfirmCount
                          << "sample" << static_cast<qulonglong>(sample)
                          << "burst" << burstIndex
                          << "cc" << colorCode;
             }
-        } else {
-            pendingPolarityKnown = false;
-            pendingPolarityConfirmCount = 0;
         }
+        streamPolarityKnown = true;
+        streamPolarityFlip = detectedPolarityFlip;
     }
     if (!streamPolarityKnown && !isDataBurst) {
         return;
     }
-    if (resetForPolarity) {
-        virtualBaseDibit = 0;
-        QJsonObject resetPacket;
-        resetPacket.insert(QStringLiteral("reset"), true);
-        QJsonObject resetPrivacy;
-        const bool forwardPrivacy =
-            privacyForwardToBackend && privacyMode != QStringLiteral("none");
-        resetPrivacy.insert(QStringLiteral("mode"), forwardPrivacy ? privacyMode : QStringLiteral("none"));
-        resetPrivacy.insert(QStringLiteral("keyId"), forwardPrivacy ? privacyKeyId : 0);
-        resetPrivacy.insert(QStringLiteral("keyHex"), forwardPrivacy ? privacyKeyHex : QString());
-        resetPacket.insert(QStringLiteral("privacy"), resetPrivacy);
-        QByteArray resetLine = QJsonDocument(resetPacket).toJson(QJsonDocument::Compact);
-        resetLine.append('\n');
-        tcpSocket->write(resetLine);
-    }
-
     const bool polarityFlipped = streamPolarityKnown && streamPolarityFlip;
-    const QString normalizedDibits =
-        streamPolarityKnown ? applyDmrVoicePolarityForGopher(dibits, polarityFlipped) : dibits;
+    const QString normalizedDibits = normalizedBurstDibits(dibits, isDataBurst, polarityFlipped);
+    if (normalizedDibits.isEmpty()) {
+        return;
+    }
     const quint64 packetBaseDibit = virtualBaseDibit;
     QJsonObject packet;
     packet.insert(QStringLiteral("baseIdx"), static_cast<double>(packetBaseDibit));
@@ -609,13 +659,7 @@ void GopherTrunkBridge::sendDibitBurst(const QString &dibits,
         }
         packet.insert(QStringLiteral("ambe49"), ambe49);
     }
-    QJsonObject privacy;
-    const bool forwardPrivacy =
-        privacyForwardToBackend && privacyMode != QStringLiteral("none");
-    privacy.insert(QStringLiteral("mode"), forwardPrivacy ? privacyMode : QStringLiteral("none"));
-    privacy.insert(QStringLiteral("keyId"), forwardPrivacy ? privacyKeyId : 0);
-    privacy.insert(QStringLiteral("keyHex"), forwardPrivacy ? privacyKeyHex : QString());
-    packet.insert(QStringLiteral("privacy"), privacy);
+    packet.insert(QStringLiteral("privacy"), currentPrivacyObject());
     if (colorCode >= 0) {
         packet.insert(QStringLiteral("colorCode"), colorCode);
     }
@@ -664,15 +708,25 @@ void GopherTrunkBridge::startProcessIfNeeded() {
     if (!privacyOverridePath.isEmpty()) {
         environment.insert(QStringLiteral("FOBOS_DMR_PRIVACY_OVERRIDE_FILE"), privacyOverridePath);
     }
+    const GopherProcessArguments arguments =
+        buildGopherProcessArguments(processArguments,
+                                    privacyMode,
+                                    privacyKeyId,
+                                    privacyKeyHex,
+                                    privacyForwardToBackend,
+                                    privacyVariant,
+                                    privacyLayout,
+                                    privacyFrameOffset,
+                                    privacyOverridePath);
     managedProcess->setProcessEnvironment(environment);
     managedProcess->setProgram(processProgram);
-    managedProcess->setArguments(processArguments);
+    managedProcess->setArguments(arguments.actual);
     if (!processWorkingDirectory.trimmed().isEmpty()) {
         managedProcess->setWorkingDirectory(processWorkingDirectory);
     }
     managedProcess->start();
     emitStatus(QStringLiteral("Starting GopherTrunk: %1 %2")
-                   .arg(processProgram, processArguments.join(QLatin1Char(' '))));
+                   .arg(processProgram, arguments.display.join(QLatin1Char(' '))));
 }
 
 void GopherTrunkBridge::stopProcess() {

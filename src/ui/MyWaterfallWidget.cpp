@@ -935,8 +935,8 @@ void MyWaterfallWidget::queueDiscontinuityRow(DiscontinuityKind kind) {
         if (lineData.empty()) return;
 
         const unsigned char red = kind == DiscontinuityKind::ProcessingQueueDrop ? 238 : 72;
-        const unsigned char green = kind == DiscontinuityKind::ProcessingQueueDrop ? 42 : 16;
-        const unsigned char blue = kind == DiscontinuityKind::ProcessingQueueDrop ? 42 : 16;
+        const unsigned char green = kind == DiscontinuityKind::ProcessingQueueDrop ? 42 : 72;
+        const unsigned char blue = kind == DiscontinuityKind::ProcessingQueueDrop ? 42 : 72;
         for (std::size_t index = 0; index + 2 < lineData.size(); index += 3) {
             lineData[index] = red;
             lineData[index + 1] = green;

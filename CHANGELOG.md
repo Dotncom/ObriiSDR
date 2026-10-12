@@ -1,5 +1,48 @@
 # Changelog
 
+## 6.0.0 - 2026-10-12
+
+### Added
+
+- Native known-key Motorola ARC4 and AES-256 DMR receive decryption with
+  per-slot PI/late-entry synchronization, key-ID checks, and synthetic tests.
+- An FT8 station manager with QSO workflow, ADIF logging, optional online/UDP
+  services, separate RX/TX routing, callsign filters, all 340 CTY/DXCC entities,
+  and explicit journal export to the QTH map.
+- A deterministic signal laboratory with analog, PSK/QAM, FSK/GFSK and OFDM
+  generation, IQ export, 2D/3D previews, and experimental clear DMR voice TX.
+- Local-terrain radio coverage and TX-RX/Fresnel profiles using free-space,
+  dominant-obstacle and NTIA ITM models, with manual NOAA HF solar information.
+- A beta TShark/Wireshark packet laboratory and future wireless-backend contracts.
+- I/Q/time 3D constellation views in Signal Lab, live IQ research and DSP widgets,
+  with camera controls and an optional filled radial-surface visualization.
+
+### Fixed And Improved
+
+- Repaired DSD-neo/Gopher transport, burst boundaries and native privacy timing;
+  native Motorola ARC4/AES-256 and Gopher ARC4 have user-confirmed RF results.
+- Reduced repeated display copies/rebuilds and channelizer work; retained VFO
+  waterfall history while changing level ranges and updating neighboring channels.
+- Preserved IQ blocks across short FFT snapshot-lock contention with a bounded
+  deferred buffer, and made diagnostic waterfall rows opt-in and clearly classified.
+- Improved live audio startup/rebuffering and callback wake-up handling.
+- Corrected signal-generator RRC normalization, matched-symbol previews,
+  short-window RBW/amplitude calculations and FFT planner synchronization.
+- Expanded English/Ukrainian help, translations, quiet logging, third-party
+  notices and release privacy allowlists. Android is unchanged and excluded.
+- Fixed Windows package-manifest evaluation, removed Windows-only HackRF
+  binaries from Raspberry source packages, and normalized tar ownership/modes
+  so extracted Linux scripts are executable.
+
+### Limits
+
+- DMR remains experimental across vendors and weak RF conditions. Hytera Basic
+  is unverified; Gopher DMR AES-256 is unsupported. Only supplied keys are used.
+- DMR TX is a clear Tier II direct/simplex beta, without privacy or trunking.
+- Wireless captures are not native Wi-Fi/Bluetooth/cellular SDR PHY decoding.
+- SDR GNSS, ATV/video, untested Soapy devices and bladeRF remain experimental
+  or unavailable. Raspberry assets are source, not a prebuilt ARM executable.
+
 ## 5.1.0 - 2026-10-11
 
 ### Added

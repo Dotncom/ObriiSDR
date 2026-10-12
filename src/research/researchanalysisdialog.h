@@ -22,6 +22,8 @@ class QSpinBox;
 class QTabWidget;
 class QTableWidget;
 class QTimer;
+class QStackedWidget;
+class SignalLabConstellation3DWidget;
 class ResearchPlotWidget;
 class SignalDensityWidget;
 class SpectrumMaskWidget;
@@ -91,6 +93,9 @@ public:
                              const std::vector<float> &levels,
                              const SpectrumScienceMetrics &metrics);
 
+protected:
+    void hideEvent(QHideEvent *event) override;
+
 private:
     struct Peak {
         int bin = -1;
@@ -104,6 +109,7 @@ private:
 
     QString trText(const QString &key, const QString &fallback) const;
     void refreshIqSnapshot();
+    void updateIqView();
     void updateInterference(const std::vector<float> &frequencies,
                             const std::vector<float> &levels);
     void updateStatistics(const std::vector<float> &levels,
@@ -154,11 +160,17 @@ private:
     qint64 statisticsStartMs = 0;
 
     ResearchPlotWidget *iqPlot = nullptr;
+    QStackedWidget *iqPlotStack = nullptr;
+    SignalLabConstellation3DWidget *iqConstellation3D = nullptr;
+    std::vector<float> iqConstellationFirst;
+    std::vector<float> iqConstellationSecond;
+    double iqConstellationRate = 0.0;
     QLabel *iqStatus = nullptr;
     QCheckBox *iqFreezeCheckbox = nullptr;
     QSpinBox *iqSampleCountSpin = nullptr;
     QComboBox *iqSourceCombo = nullptr;
     QComboBox *iqViewCombo = nullptr;
+    QCheckBox *iqSurfaceCheckbox = nullptr;
     QDoubleSpinBox *iqSymbolRateSpin = nullptr;
     QSpinBox *iqPhaseSpin = nullptr;
     QSpinBox *iqTraceCountSpin = nullptr;

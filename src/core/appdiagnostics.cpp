@@ -52,7 +52,7 @@ const char *messageTypeName(QtMsgType type) {
 }
 
 bool shouldWriteDiagnosticLogLine(QtMsgType type, const QString &message) {
-    if (type != QtDebugMsg || fobosVerboseLoggingEnabled()) {
+    if ((type != QtDebugMsg && type != QtInfoMsg) || fobosVerboseLoggingEnabled()) {
         return true;
     }
 
@@ -61,6 +61,12 @@ bool shouldWriteDiagnosticLogLine(QtMsgType type, const QString &message) {
 }
 
 void diagnosticMessageHandler(QtMsgType type, const QMessageLogContext &context, const QString &message) {
+    const bool writeDiagnosticOutput = shouldWriteDiagnosticLogLine(type, message);
+    const bool echoDebugOutput =
+        (type != QtDebugMsg && type != QtInfoMsg) || fobosVerboseLoggingEnabled();
+    if (!writeDiagnosticOutput && !echoDebugOutput) {
+        return;
+    }
     const QString line = QString("%1 [%2] [tid 0x%3] %4%5")
                              .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz"))
                              .arg(messageTypeName(type))
@@ -68,7 +74,6 @@ void diagnosticMessageHandler(QtMsgType type, const QMessageLogContext &context,
                              .arg(message)
                              .arg(context.file ? QString(" (%1:%2)").arg(context.file).arg(context.line) : QString());
 
-    const bool writeDiagnosticOutput = shouldWriteDiagnosticLogLine(type, message);
     if (writeDiagnosticOutput) {
         QMutexLocker lock(&gLogMutex);
         if (gLogFile.isOpen()) {
@@ -95,8 +100,6 @@ void diagnosticMessageHandler(QtMsgType type, const QMessageLogContext &context,
         }
     }
 
-    const bool echoDebugOutput =
-        type != QtDebugMsg || fobosVerboseLoggingEnabled();
     if (echoDebugOutput) {
         const QByteArray localLine = line.toLocal8Bit();
         std::fprintf(stderr, "%s\n", localLine.constData());

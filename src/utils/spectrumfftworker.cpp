@@ -261,7 +261,7 @@ void SpectrumFftWorker::run() {
                     historyRow.metadata = frame.metadata;
                     frame.historyRows.push_back(std::move(historyRow));
                 }
-                frame.frequencies = rowFrequencies;
+                frame.frequencies.swap(rowFrequencies);
                 frame.magnitudes = std::move(rowMagnitudes);
                 frame.referenceMagnitudes = std::move(rowReferenceMagnitudes);
                 frame.metadata = rowMetadata;
@@ -285,11 +285,14 @@ void SpectrumFftWorker::run() {
         }
 
         if (fobosVerboseLoggingEnabled() && profileLogTimer.elapsed() >= 1000) {
+            const auto delivery = IqBuffer::discontinuityStats();
             qInfo() << "[FFT worker]"
                     << "length" << settings.fftLength
                     << "batch" << batchWaterfallRows
                     << "rows" << requestedRows
                     << "skippedStaleRows" << skippedRows
+                    << "snapshotDeferred" << static_cast<qulonglong>(delivery.deferredSnapshotBlocks)
+                    << "snapshotLost" << static_cast<qulonglong>(delivery.skippedSnapshotBlocks)
                     << "elapsedMs" << requestTimer.nsecsElapsed() / 1000000.0
                     << "valid" << frame.valid;
             profileLogTimer.restart();

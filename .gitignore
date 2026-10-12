@@ -35,6 +35,9 @@ Makefile
 
 # Logs
 *.log
+*.log.*
+ObriiSDR.ini
+privacy_override.txt
 *.csv
 *.nmea
 *.ubx

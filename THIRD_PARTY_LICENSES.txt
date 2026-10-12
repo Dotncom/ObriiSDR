@@ -1,11 +1,12 @@
-FobosAPP third-party components
-Version: 4.8.0
+Obrii SDR third-party components
+Version: 6.0.0
 
-FobosAPP is prepared for publication as a GPL project. The repository root
+Obrii SDR is published as a GPL project. The repository root
 contains the GNU General Public License version 2 text in LICENSE.
 
 This file lists third-party runtime, build, and optional DMR voice components
-used by FobosAPP. Their copyrights remain owned by their respective authors.
+used by Obrii SDR. Legacy Fobos names remain in compatibility APIs and wrapper
+directories. Copyrights remain owned by their respective authors.
 
 Important DMR/AMBE note:
 DMR voice support is experimental. AMBE/AMBE+2 technologies may be
@@ -20,12 +21,15 @@ using AMBE-capable binaries.
    - Qt5Gui.dll
    - Qt5Widgets.dll
    - Qt5Network.dll
+   - Qt5SerialPort.dll
+   - Qt5Multimedia.dll and audio plugins
    - platforms/qwindows.dll
 
    Upstream: https://www.qt.io/
    License: Qt Open Source licensing terms or commercial Qt license, depending
    on how Qt is obtained and used. For open-source Qt 5.15 builds, consult the
    Qt LGPL/GPL license files distributed with your Qt installation.
+   Packaged texts and original source-module links: licenses/qt/.
 
 2. FFTW 3.3.5 single-precision runtime
    File used in the Windows package:
@@ -55,8 +59,9 @@ using AMBE-capable binaries.
    - fobos.lib
 
    Upstream/vendor: RigExpert / Fobos SDR SDK
-   License: vendor SDK terms. No explicit open-source license was found in the
-   local bundled header or readme at the time this file was written.
+   The published library source distributed in third_party/patched/libfobos
+   contains the GNU LGPL 2.1 license. Preserve its source notices and the
+   licenses/fobos/standard-COPYING.txt text when redistributing the runtime.
 
 5. RigExpert Fobos SDR agile API library
    Files used for build/runtime:
@@ -65,8 +70,9 @@ using AMBE-capable binaries.
    - fobos_sdr.lib
 
    Upstream/vendor: RigExpert / Fobos SDR agile SDK
-   License: vendor SDK terms. No explicit open-source license was found in the
-   local bundled header at the time this file was written.
+   The published library source in third_party/patched/libfobos-sdr-agile
+   contains the GNU LGPL 2.1 license. The package preserves this text in
+   licenses/fobos/agile-COPYING.txt and keeps the manufacturer's source notices.
 
 6. Microsoft Visual C++ runtime
    Files used in the Windows package:
@@ -229,8 +235,8 @@ using AMBE-capable binaries.
    - https://github.com/kgoba/ft8_lib
 
    Purpose: standards-compatible FT8 message packing and channel encoding for
-   the simulator-only transmitter laboratory. FobosAPP supplies its own
-   waveform generator and does not enable RF output through this component.
+   the transmitter laboratory. Obrii supplies its own waveform generator;
+   the selected output backend and explicit arming, not ft8_lib, control RF.
 
    Copyright: ft8_lib contributors
    License: MIT License.
@@ -249,6 +255,41 @@ using AMBE-capable binaries.
    The isolated HackRF runtime directory also contains libusb 1.0.27 under
    LGPL-2.1-or-later and pthreads4w under Apache License 2.0. Their license and
    notice files are stored beside the corresponding DLLs.
+
+Research model and catalog notices:
+DSD-neo v2.1.0 is a separate optional executable with its native Windows DLL
+dependencies, not linked into Obrii SDR. Source/release:
+https://github.com/arancormonk/dsd-neo/releases/tag/v2.1.0
+The package carries its LICENSE, COPYRIGHT, THIRD_PARTY.md and upstream SPDX
+manifest in licenses/dsd-neo/. Consult those files for its GPL and bundled
+dependency terms. The legacy DSD-FME backend is not shipped.
+
+The native Motorola DMR AES-256-OFB path uses tiny-AES-c, revision
+23856752fbd139da0b8ca6e471a13d5bcc99a08d.
+Source: https://github.com/kokke/tiny-AES-c
+License: Unlicense (public domain). Original source, license and Obrii build
+notice are in third_party/tiny_aes/. It is statically linked, not an external DLL.
+The binary package carries the license and notice in licenses/tiny_aes/.
+
+The optional GopherTrunk virtual DMR adapter is a separate external executable.
+Upstream: https://github.com/MattCheramie/GopherTrunk
+License: Apache License 2.0. Maintained adapter source and its license are in
+tools/gophertrunk_adapter/. Changes include explicit A-F burst assembly, DMR
+Golay/CRC handling and known-key ARC4 synchronization regression tests.
+Windows deployment preserves upstream LICENSE.txt and THIRD_PARTY_LICENSES.md
+beside gophertrunk/fobos-dmr-virtual.exe; Linux build scripts do the same.
+
+Radio propagation uses the NTIA Irregular Terrain Model (ITM/Longley-Rice).
+Source: https://github.com/NTIA/itm
+Revision: 183ad95bd813a8be11009df396e1c631356864b2
+U.S. Government work with the worldwide permission in licenses/ntia_itm/LICENSE.md.
+Obrii modifications (static linkage and portable include paths) are documented
+in licenses/ntia_itm/OBRII_CHANGES.md. No NTIA endorsement is implied.
+
+The embedded amateur radio CTY/DXCC catalog is by Jim Reisert AD1C, as
+distributed by WSJT-X revision 11c564e966c860a7f633e70e4704732409ce48d3.
+Source: https://www.country-files.com/ and https://github.com/WSJTX/wsjtx
+Copyright and permissive redistribution notice: licenses/dxcc/LICENSE.txt.
 
 Release/source obligation note:
 If a binary release includes GPL DMR voice backend DLLs, publish the

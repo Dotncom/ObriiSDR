@@ -149,6 +149,7 @@ foreach ($PluginName in $AudioPlugins) {
 }
 
 $DocFiles = @(
+    "LICENSE",
     "README.md",
     "CHANGELOG.md",
     "THIRD_PARTY_LICENSES.txt",
@@ -173,8 +174,12 @@ $ReleaseDocFiles = @(
     "docs\dmr_external_backend.md",
     "docs\gnss_preflight_4.1.md",
     "docs\iq_pipeline_audit.md",
-    "docs\release_notes_5.1.0.md",
-    "docs\roadmap_4.0_cleanup.md"
+    "docs\release_notes_6.0.0.md",
+    "docs\dmr_motorola_privacy.md",
+    "docs\performance_and_dmr_audit.md",
+    "docs\wireless_lab.md",
+    "docs\roadmap_4.0_cleanup.md",
+    "docs\radio_propagation_lab.md"
 )
 foreach ($DocFile in $ReleaseDocFiles) {
     $DocPath = Join-Path $Workspace $DocFile
@@ -196,6 +201,18 @@ if (Test-Path -LiteralPath $LicensePath) {
 }
 
 $DsdNeoExtractPath = Join-Path $Workspace "downloads\dsd-neo\extracted"
+$ResearchNotices = @{
+    "ntia_itm" = @("LICENSE.md", "OBRII_CHANGES.md", "ERRORS_AND_WARNINGS.md")
+    "dxcc" = @("LICENSE.txt", "README.md")
+}
+foreach ($Component in $ResearchNotices.Keys) {
+    $Destination = Join-Path $DeployPath "licenses\$Component"
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    foreach ($Name in $ResearchNotices[$Component]) {
+        Copy-Item -LiteralPath (Join-Path $Workspace "third_party\$Component\$Name") -Destination $Destination -Force
+    }
+}
+
 $DsdNeoBinPath = Join-Path $DsdNeoExtractPath "bin"
 $DsdNeoExePath = Join-Path $DsdNeoBinPath "dsd-neo.exe"
 if (Test-Path -LiteralPath $DsdNeoExePath) {
@@ -220,6 +237,19 @@ if (Test-Path -LiteralPath $GopherTrunkExePath) {
     $GopherTrunkDeployPath = Join-Path $DeployPath "gophertrunk"
     New-Item -ItemType Directory -Path $GopherTrunkDeployPath -Force | Out-Null
     Copy-Item -LiteralPath $GopherTrunkExePath -Destination (Join-Path $GopherTrunkDeployPath "fobos-dmr-virtual.exe") -Force
+
+    $GopherTrunkSourcePath = Join-Path $Workspace "downloads\gophertrunk\GopherTrunk-src\GopherTrunk-main"
+    $GopherTrunkNotices = @(
+        @{ Source = "LICENSE"; Destination = "LICENSE.txt" },
+        @{ Source = "THIRD_PARTY_LICENSES.md"; Destination = "THIRD_PARTY_LICENSES.md" }
+    )
+    foreach ($Notice in $GopherTrunkNotices) {
+        $NoticeSource = Join-Path $GopherTrunkSourcePath $Notice.Source
+        if (Test-Path -LiteralPath $NoticeSource) {
+            Copy-Item -LiteralPath $NoticeSource `
+                -Destination (Join-Path $GopherTrunkDeployPath $Notice.Destination) -Force
+        }
+    }
 }
 
 $ConfigDeployPath = Join-Path $DeployPath "config"

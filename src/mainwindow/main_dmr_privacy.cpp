@@ -9,6 +9,7 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QTabWidget>
@@ -43,6 +44,10 @@ void YourClassName::refreshDmrPrivacyKeyIdCombo() {
             ? normalizedDmrPrivacyMode(dmrPrivacyModeCombo->currentData().toInt())
             : normalizedDmrPrivacyMode(pendingSettings.dmrPrivacyMode);
     const int preferredKeyId = pendingSettings.dmrPrivacyKeyId;
+    const bool arc4 = mode == DMR_PRIVACY_ARC4;
+    if (dmrPrivacyFrameOffsetCombo) dmrPrivacyFrameOffsetCombo->setEnabled(arc4);
+    if (dmrPrivacyDropCombo) dmrPrivacyDropCombo->setEnabled(arc4);
+    if (dmrPrivacyBitLayoutCombo) dmrPrivacyBitLayoutCombo->setEnabled(arc4);
     QVector<int> keyIds;
     for (const DmrPrivacyKeyEntry &entry : std::as_const(dmrPrivacyKeys)) {
         if (normalizedDmrPrivacyMode(entry.mode) != mode) {
@@ -126,10 +131,12 @@ void YourClassName::showDmrPrivacyKeyDialog() {
     dialog.setWindowTitle(uiText(QStringLiteral("dmr_privacy_keys_title"),
                                  QStringLiteral("DMR privacy keys")));
     dialog.resize(760, 420);
+    int selectedMode = normalizedDmrPrivacyMode(pendingSettings.dmrPrivacyMode);
+    int selectedKeyId = pendingSettings.dmrPrivacyKeyId;
 
     auto *layout = new QVBoxLayout(&dialog);
     auto *hint = new QLabel(uiText(QStringLiteral("dmr_privacy_keys_hint"),
-                                   QStringLiteral("The active key is selected by Privacy mode + KID. ARC4 and AES-256 keys are stored in separate tables.")),
+                                   QStringLiteral("Select the active key by Privacy mode + KID. Basic beta uses native mbelib/OpenDMR or DSD-neo and 10/32/64 HEX characters; Full is not supported.")),
                             &dialog);
     hint->setWordWrap(true);
     layout->addWidget(hint);
@@ -137,13 +144,13 @@ void YourClassName::showDmrPrivacyKeyDialog() {
     auto *tabs = new QTabWidget(&dialog);
     layout->addWidget(tabs, 1);
 
-    const auto createTable = [&dialog]() {
+    const auto createTable = [&dialog, this]() {
         auto *table = new QTableWidget(&dialog);
         table->setColumnCount(3);
         table->setHorizontalHeaderLabels(QStringList()
                                          << QStringLiteral("KID")
-                                         << QStringLiteral("Key hex")
-                                         << QStringLiteral("Note"));
+                                         << uiText(QStringLiteral("dmr_privacy_key_hex"), QStringLiteral("Key HEX"))
+                                         << uiText(QStringLiteral("dmr_privacy_key_note"), QStringLiteral("Note")));
         table->horizontalHeader()->setStretchLastSection(true);
         table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
         table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
@@ -157,13 +164,18 @@ void YourClassName::showDmrPrivacyKeyDialog() {
 
     auto *arc4Table = createTable();
     auto *aesTable = createTable();
+    auto *hyteraTable = createTable();
     tabs->addTab(arc4Table, QStringLiteral("ARC4"));
     tabs->addTab(aesTable, QStringLiteral("AES-256"));
+    tabs->addTab(hyteraTable, uiText(QStringLiteral("dmr_privacy_hytera_basic"),
+                                    QStringLiteral("Hytera Basic (beta)")));
 
-    const auto tableForMode = [arc4Table, aesTable](int mode) {
+    const auto tableForMode = [arc4Table, aesTable, hyteraTable](int mode) {
+        if (normalizedDmrPrivacyMode(mode) == DMR_PRIVACY_HYTERA_BASIC) return hyteraTable;
         return normalizedDmrPrivacyMode(mode) == DMR_PRIVACY_AES256 ? aesTable : arc4Table;
     };
-    const auto modeForTable = [arc4Table](const QTableWidget *table) {
+    const auto modeForTable = [arc4Table, hyteraTable](const QTableWidget *table) {
+        if (table == hyteraTable) return DMR_PRIVACY_HYTERA_BASIC;
         return table == arc4Table ? DMR_PRIVACY_ARC4 : DMR_PRIVACY_AES256;
     };
     const auto appendRow = [](QTableWidget *table, const DmrPrivacyKeyEntry &entry) {
@@ -183,7 +195,7 @@ void YourClassName::showDmrPrivacyKeyDialog() {
 
     for (const DmrPrivacyKeyEntry &entry : std::as_const(dmrPrivacyKeys)) {
         const int mode = normalizedDmrPrivacyMode(entry.mode);
-        if (mode == DMR_PRIVACY_ARC4 || mode == DMR_PRIVACY_AES256) {
+        if (mode != DMR_PRIVACY_NONE) {
             appendRow(tableForMode(mode), entry);
         }
     }
@@ -215,6 +227,10 @@ void YourClassName::showDmrPrivacyKeyDialog() {
             sortByKid(aesTable);
         }
     });
+    connect(hyteraTable->horizontalHeader(), &QHeaderView::sectionClicked, &dialog,
+            [hyteraTable, sortByKid](int section) {
+                if (section == 0) sortByKid(hyteraTable);
+            });
     if (dmrPrivacyModeCombo) {
         const int mode = normalizedDmrPrivacyMode(dmrPrivacyModeCombo->currentData().toInt());
         tabs->setCurrentWidget(tableForMode(mode));
@@ -313,34 +329,55 @@ void YourClassName::showDmrPrivacyKeyDialog() {
     connect(moveDownButton, &QToolButton::clicked, &dialog, [tabs, moveSelectedRow]() {
         moveSelectedRow(qobject_cast<QTableWidget *>(tabs->currentWidget()), 1);
     });
-    connect(useSelectedButton, &QPushButton::clicked, &dialog, [this, tabs, modeForTable]() {
+    connect(useSelectedButton, &QPushButton::clicked, &dialog,
+            [tabs, modeForTable, &selectedMode, &selectedKeyId]() {
         auto *table = qobject_cast<QTableWidget *>(tabs->currentWidget());
         if (!table) {
             return;
         }
         const int row = table->currentRow();
-        if (row < 0 || !dmrPrivacyKeyIdCombo) {
+        if (row < 0) {
             return;
         }
         bool ok = false;
         const int keyId = table->item(row, 0) ? table->item(row, 0)->text().trimmed().toInt(&ok) : 0;
-        if (!ok) {
+        if (!ok || keyId < 0 || keyId > 255) {
             return;
         }
-        if (dmrPrivacyModeCombo) {
-            const int comboIndex = dmrPrivacyModeCombo->findData(modeForTable(table));
-            if (comboIndex >= 0) {
-                dmrPrivacyModeCombo->setCurrentIndex(comboIndex);
-            }
-        }
-        pendingSettings.dmrPrivacyMode = modeForTable(table);
-        pendingSettings.dmrPrivacyKeyId = (std::clamp)(keyId, 0, 255);
+        selectedMode = modeForTable(table);
+        selectedKeyId = keyId;
     });
-    connect(dialogButtons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(dialogButtons, &QDialogButtonBox::accepted, &dialog, [&dialog, hyteraTable, tabs, this]() {
+        std::array<bool, 256> used{};
+        for (int row = 0; row < hyteraTable->rowCount(); ++row) {
+            const QString key = hyteraTable->item(row, 1)
+                ? hyteraTable->item(row, 1)->text().trimmed() : QString();
+            bool ok = false;
+            const int kid = hyteraTable->item(row, 0)
+                ? hyteraTable->item(row, 0)->text().toInt(&ok) : -1;
+            if (!ok || kid < 0 || kid > 255 || used[static_cast<size_t>(kid)] ||
+                (!key.isEmpty() && !isValidHyteraBasicKey(key))) {
+                hyteraTable->selectRow(row);
+                tabs->setCurrentWidget(hyteraTable);
+                QMessageBox::warning(&dialog, dialog.windowTitle(),
+                    uiText(QStringLiteral("dmr_hytera_key_invalid"),
+                        QStringLiteral("Hytera Basic: use a unique KID (0..255) and a key of exactly 10, 32 or 64 HEX characters (40/128/256 bits).")));
+                return;
+            }
+            used[static_cast<size_t>(kid)] = true;
+        }
+        dialog.accept();
+    });
     connect(dialogButtons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
     if (dialog.exec() != QDialog::Accepted) {
         return;
+    }
+    pendingSettings.dmrPrivacyMode = selectedMode;
+    pendingSettings.dmrPrivacyKeyId = selectedKeyId;
+    if (dmrPrivacyModeCombo) {
+        const QSignalBlocker blocker(dmrPrivacyModeCombo);
+        dmrPrivacyModeCombo->setCurrentIndex(dmrPrivacyModeCombo->findData(selectedMode));
     }
 
     QVector<DmrPrivacyKeyEntry> parsedKeys;
@@ -380,6 +417,7 @@ void YourClassName::showDmrPrivacyKeyDialog() {
     };
     parseTable(arc4Table);
     parseTable(aesTable);
+    parseTable(hyteraTable);
 
     dmrPrivacyKeys = parsedKeys;
     refreshDmrPrivacyKeyIdCombo();

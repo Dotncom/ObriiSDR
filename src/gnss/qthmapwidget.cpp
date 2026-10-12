@@ -2,6 +2,7 @@
 #include "diagnosticlogging.h"
 
 #include <QDir>
+#include <QApplication>
 #include <QDebug>
 #include <QCryptographicHash>
 #include <QFile>
@@ -415,6 +416,11 @@ void QthMapWidget::setPositionVisible(bool visible) {
     update();
 }
 
+void QthMapWidget::setPositionStatusVisible(bool visible) {
+    positionStatusVisible = visible;
+    update();
+}
+
 void QthMapWidget::centerOnPosition() {
     viewCenterLatitude = (std::clamp)(latitude, -kMercatorMaxLatitude, kMercatorMaxLatitude);
     viewCenterLongitude = longitude;
@@ -427,6 +433,18 @@ void QthMapWidget::centerOn(double nextLatitude, double nextLongitude) {
     viewCenterLongitude = wrapLongitude(nextLongitude);
     viewCenterInitialized = true;
     update();
+}
+
+qth::GeoPosition QthMapWidget::mapCenter() const {
+    return {viewCenterLatitude, viewCenterLongitude};
+}
+
+bool QthMapWidget::positionAt(const QPointF &point, qth::GeoPosition *position) const {
+    const QRectF mapRect = rect().adjusted(18, 18, -18, -34);
+    if (!position || !mapRect.contains(point)) return false;
+    const QPointF geo = screenPointToGeo(point, mapRect, mapZoom);
+    *position = {geo.x(), geo.y()};
+    return true;
 }
 
 void QthMapWidget::setSearchMarker(double nextLatitude, double nextLongitude, const QString &label) {
@@ -470,6 +488,11 @@ void QthMapWidget::setUserMarkers(const QVector<qth::UserMarker> &markers) {
 
 QVector<qth::UserMarker> QthMapWidget::userMarkerList() const {
     return userMarkers;
+}
+void QthMapWidget::setUserMarkerDetailLabels(const QHash<int, QString> &labels) {
+    if (userMarkerDetailLabels == labels) return;
+    userMarkerDetailLabels = labels;
+    update();
 }
 
 void QthMapWidget::clearUserMarkers() {
@@ -789,14 +812,15 @@ void QthMapWidget::finishOnlineTileRequest(const QString &url, const QByteArray 
             lastOnlineError = QStringLiteral("invalid image response");
             onlineTileErrors.insert(url, lastOnlineError);
             if (fobosVerboseLoggingEnabled()) {
-                qDebug() << "[QTH map] online tile invalid image" << url;
+                qDebug() << "[QTH map] online tile invalid image";
             }
         }
     } else {
-        lastOnlineError = error;
+        // Network error text may contain the complete URL, including an API key.
+        lastOnlineError = QStringLiteral("tile request failed");
         onlineTileErrors.insert(url, lastOnlineError);
         if (fobosVerboseLoggingEnabled()) {
-            qDebug() << "[QTH map] online tile failed" << error << url;
+            qDebug() << "[QTH map] online tile request failed";
         }
     }
     update();
@@ -1007,7 +1031,8 @@ void QthMapWidget::drawMapMarker(QPainter &painter,
                                  double markerLongitude,
                                  const QColor &color,
                                  const QString &label,
-                                 bool drawLabel) {
+                                 bool drawLabel,
+                                 bool labelOnLeft) {
     const QPointF marker = geoToPoint(markerLatitude, markerLongitude, mapRect);
     if (!mapRect.adjusted(-32, -32, 32, 32).contains(marker)) {
         return;
@@ -1031,11 +1056,13 @@ void QthMapWidget::drawMapMarker(QPainter &painter,
         labelFont.setPointSize((std::max)(8, labelFont.pointSize() - 1));
         painter.setFont(labelFont);
         const QFontMetrics metrics(labelFont);
-        const QString text = label.trimmed().left(48);
+        const QString text = label.trimmed().left(160);
+        const QRect textBounds = metrics.boundingRect(QRect(0, 0, 600, 200), Qt::AlignLeft, text);
         QRectF labelRect(marker.x() + 10.0,
-                         marker.y() - metrics.height() - 8.0,
-                         metrics.horizontalAdvance(text) + 14.0,
-                         metrics.height() + 6.0);
+                         marker.y() - textBounds.height() - 8.0,
+                         textBounds.width() + 14.0,
+                         textBounds.height() + 6.0);
+        if (labelOnLeft) labelRect.moveRight(marker.x() - 10.0);
         if (labelRect.right() > mapRect.right() - 4.0) {
             labelRect.moveRight(marker.x() - 10.0);
         }
@@ -1046,6 +1073,7 @@ void QthMapWidget::drawMapMarker(QPainter &painter,
             labelRect.moveTop(marker.y() + 10.0);
         }
         painter.fillRect(labelRect, QColor(21, 26, 32, 190));
+        painter.setBrush(Qt::NoBrush);
         painter.setPen(QPen(color, 1));
         painter.drawRect(labelRect);
         painter.setPen(QColor(245, 248, 252));
@@ -1098,13 +1126,24 @@ bool QthMapWidget::currentPositionAtPosition(const QPointF &point, const QRectF 
 void QthMapWidget::drawUserMarkers(QPainter &painter, const QRectF &mapRect) {
     for (int i = 0; i < userMarkers.size(); ++i) {
         const qth::UserMarker &marker = userMarkers.at(i);
+        QString label = markerDisplayLabel(marker);
+        const QString detail = userMarkerDetailLabels.value(marker.number);
+        if (!detail.isEmpty()) label += QLatin1Char('\n') + detail;
+        bool labelOnLeft = false;
+        if (!detail.isEmpty() && userMarkers.size() == 2) {
+            const auto &other = userMarkers.at(1 - i);
+            const double x = geoToPoint(marker.latitude, marker.longitude, mapRect).x();
+            const double otherX = geoToPoint(other.latitude, other.longitude, mapRect).x();
+            labelOnLeft = x < otherX || (x == otherX && i == 0);
+        }
         drawMapMarker(painter,
                       mapRect,
                       marker.latitude,
                       marker.longitude,
                       QColor(255, 214, 84),
-                      markerDisplayLabel(marker),
-                      true);
+                      label,
+                      true,
+                      labelOnLeft);
     }
     if (hasSearchMarker) {
         drawMapMarker(painter,
@@ -1314,6 +1353,54 @@ void QthMapWidget::drawFooter(QPainter &painter, const QRectF &mapRect) {
                      footer);
 }
 
+void QthMapWidget::setRasterOverlay(const QImage &image, const qth::GeoBounds &bounds, double opacity) {
+    rasterOverlay = image;
+    rasterBounds = bounds;
+    rasterOpacity = std::clamp(opacity, 0.0, 1.0);
+    update();
+}
+void QthMapWidget::setPointPickingEnabled(bool enabled) {
+    pointPickingEnabled = enabled;
+    draggingMap = false;
+    setCursor(enabled ? Qt::CrossCursor : Qt::OpenHandCursor);
+}
+void QthMapWidget::setMarkerEditingEnabled(bool enabled) {
+    markerEditingEnabled = enabled;
+    if (!enabled && draggedMarkerNumber >= 0) {
+        draggedMarkerNumber = -1;
+        setCursor(pointPickingEnabled ? Qt::CrossCursor : Qt::OpenHandCursor);
+        if (draggedMarkerMoved) emit userMarkersChanged();
+        draggedMarkerMoved = false;
+    }
+}
+void QthMapWidget::setMarkerCreationEnabled(bool enabled) { markerCreationEnabled = enabled; }
+void QthMapWidget::setPathLine(const qth::GeoPosition &a, const qth::GeoPosition &b) {
+    pathStart = a; pathEnd = b; pathLineVisible = true; update();
+}
+void QthMapWidget::clearPathLine() { pathLineVisible = false; update(); }
+void QthMapWidget::drawRasterOverlay(QPainter &painter, const QRectF &mapRect) {
+    painter.save(); painter.setClipRect(mapRect);
+    if (!rasterOverlay.isNull() && rasterBounds.valid) {
+        const QPointF a = geoToPoint(rasterBounds.maxLatitude, rasterBounds.minLongitude, mapRect);
+        const double bottom = geoToPoint(rasterBounds.minLatitude, rasterBounds.minLongitude, mapRect).y();
+        const double world = double(kTileSize) * (1 << mapZoom);
+        const double width = mapZoom > 0 ? (rasterBounds.maxLongitude-rasterBounds.minLongitude)*world/360.0
+                                         : (rasterBounds.maxLongitude-rasterBounds.minLongitude)*mapRect.width()/360.0;
+        painter.setOpacity(rasterOpacity);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+        for (int shift=-1;shift<=1;++shift) {
+            const QRectF target(a.x()+shift*world,a.y(),width,bottom-a.y());
+            if(target.intersects(mapRect)) painter.drawImage(target,rasterOverlay);
+        }
+        painter.setOpacity(1.0);
+    }
+    if (pathLineVisible) {
+        painter.setPen(QPen(QColor(250,250,250),1.5,Qt::DashLine));
+        painter.drawLine(geoToPoint(pathStart.latitude,pathStart.longitude,mapRect),
+                         geoToPoint(pathEnd.latitude,pathEnd.longitude,mapRect));
+    }
+    painter.restore();
+}
 void QthMapWidget::paintEvent(QPaintEvent *event) {
     Q_UNUSED(event);
 
@@ -1330,6 +1417,7 @@ void QthMapWidget::paintEvent(QPaintEvent *event) {
     if ((tileLayerMode == TileLayerMode::LocalXyz || tileLayerMode == TileLayerMode::OnlineXyz) && drewTiles) {
         painter.fillRect(mapRect, QColor(0, 0, 0, 28));
     }
+    drawRasterOverlay(painter, mapRect);
 
     const bool drawGrid = overlayMode == OverlayMode::QthGrid ||
                           overlayMode == OverlayMode::GridAndSatellites;
@@ -1346,7 +1434,7 @@ void QthMapWidget::paintEvent(QPaintEvent *event) {
     if (drawSatellites) {
         drawSatelliteMarkers(painter, mapRect);
     }
-    drawMarkerAndTitle(painter, mapRect);
+    if (positionStatusVisible) drawMarkerAndTitle(painter, mapRect);
     drawFooter(painter, mapRect);
 }
 
@@ -1358,6 +1446,27 @@ void QthMapWidget::mousePressEvent(QMouseEvent *event) {
 
     const QRectF mapRect = rect().adjusted(18, 18, -18, -34);
     const QPointF mousePosition = event->localPos();
+    if (event->button() == Qt::RightButton && !markerEditingEnabled) {
+        event->accept(); return;
+    }
+    if (event->button() == Qt::LeftButton && markerEditingEnabled && mapRect.contains(mousePosition)) {
+        const int index = userMarkerAtPosition(mousePosition, mapRect);
+        if (index >= 0) {
+            const auto &marker = userMarkers.at(index);
+            draggedMarkerNumber = marker.number;
+            draggedMarkerMoved = false;
+            markerDragStart = mousePosition;
+            markerDragOffset = mousePosition - geoToPoint(marker.latitude, marker.longitude, mapRect);
+            draggingMap = false;
+            setCursor(Qt::ClosedHandCursor);
+            event->accept();
+            return;
+        }
+    }
+    if (event->button() == Qt::LeftButton && pointPickingEnabled && mapRect.contains(mousePosition)) {
+        const QPointF geo = screenPointToGeo(mousePosition,mapRect,mapZoom);
+        emit pointPicked(geo.x(),geo.y()); event->accept(); return;
+    }
     if (event->button() == Qt::RightButton && mapRect.contains(mousePosition)) {
         const int markerIndex = userMarkerAtPosition(mousePosition, mapRect);
         if (markerIndex >= 0 && markerIndex < userMarkers.size()) {
@@ -1385,6 +1494,7 @@ void QthMapWidget::mousePressEvent(QMouseEvent *event) {
             return;
         }
 
+        if (!markerCreationEnabled) { event->accept(); return; }
         const QPointF geo = screenPointToGeo(mousePosition, mapRect, mapZoom);
         qth::UserMarker marker;
         marker.latitude = (std::clamp)(geo.x(), -90.0, 90.0);
@@ -1414,7 +1524,36 @@ void QthMapWidget::mousePressEvent(QMouseEvent *event) {
     event->accept();
 }
 
+void QthMapWidget::moveDraggedUserMarker(const QPointF &point) {
+    if (!markerEditingEnabled || draggedMarkerNumber < 0) return;
+    if (!draggedMarkerMoved &&
+        (point - markerDragStart).manhattanLength() < QApplication::startDragDistance()) return;
+    const QRectF mapRect = rect().adjusted(18, 18, -18, -34);
+    if (mapRect.isEmpty()) return;
+    const QPointF target = point - markerDragOffset;
+    const QPointF clipped((std::clamp)(target.x(), mapRect.left(), mapRect.right()),
+                          (std::clamp)(target.y(), mapRect.top(), mapRect.bottom()));
+    const QPointF geo = screenPointToGeo(clipped, mapRect, mapZoom);
+    for (int index = 0; index < userMarkers.size(); ++index) {
+        if (userMarkers.at(index).number != draggedMarkerNumber) continue;
+        if (userMarkers.at(index).latitude == geo.x() && userMarkers.at(index).longitude == geo.y()) return;
+        userMarkers[index].latitude = geo.x();
+        userMarkers[index].longitude = geo.y();
+        draggedMarkerMoved = true;
+        // The receiver of this signal may replace the marker list synchronously.
+        const int number = draggedMarkerNumber;
+        emit userMarkerMoved(geo.x(), geo.y(), number);
+        update();
+        return;
+    }
+}
+
 void QthMapWidget::mouseMoveEvent(QMouseEvent *event) {
+    if (event && draggedMarkerNumber >= 0) {
+        moveDraggedUserMarker(event->localPos());
+        event->accept();
+        return;
+    }
     if (!event || !draggingMap) {
         QWidget::mouseMoveEvent(event);
         return;
@@ -1440,8 +1579,14 @@ void QthMapWidget::mouseReleaseEvent(QMouseEvent *event) {
         return;
     }
 
+    if (draggedMarkerNumber >= 0) {
+        moveDraggedUserMarker(event->localPos());
+        draggedMarkerNumber = -1;
+        if (draggedMarkerMoved) emit userMarkersChanged();
+        draggedMarkerMoved = false;
+    }
     draggingMap = false;
-    setCursor(Qt::OpenHandCursor);
+    setCursor(pointPickingEnabled ? Qt::CrossCursor : Qt::OpenHandCursor);
     event->accept();
 }
 

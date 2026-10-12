@@ -1034,6 +1034,7 @@ void YourClassName::loadPersistentSettings() {
     }
     showSpectrumFps = settings.value("ui/showSpectrumFps", showSpectrumFps).toBool();
     showWaterfallFps = settings.value("ui/showWaterfallFps", showWaterfallFps).toBool();
+    showAudioQueueDropRows = settings.value("diagnostics/showAudioQueueDropRows", false).toBool();
     showSpectrumPeakMeter = settings.value("ui/showSpectrumPeakMeter", showSpectrumPeakMeter).toBool();
     spectrumPeakMeterStyle = std::clamp(settings.value("ui/spectrumPeakMeterStyle", spectrumPeakMeterStyle).toInt(), 0, 1);
     showExtendedSpectrumInfo = settings.value("ui/showExtendedSpectrumInfo", showExtendedSpectrumInfo).toBool();
@@ -1189,9 +1190,6 @@ void YourClassName::loadPersistentSettings() {
     pendingSettings.dmrPrivacyKeyHex =
         normalizedDmrPrivacyKeyHex(settings.value("digital/dmrPrivacyKeyHex",
                                                  pendingSettings.dmrPrivacyKeyHex).toString());
-    pendingSettings.dmrPrivacyForwardToBackends =
-        settings.value("digital/dmrPrivacyForwardToBackends",
-                       pendingSettings.dmrPrivacyForwardToBackends).toBool();
     pendingSettings.dmrPrivacyVariant =
         settings.value("digital/dmrPrivacyVariant", pendingSettings.dmrPrivacyVariant)
             .toString()
@@ -1259,9 +1257,6 @@ void YourClassName::loadPersistentSettings() {
     setComboToData(dmrPrivacyModeCombo, pendingSettings.dmrPrivacyMode);
     refreshDmrPrivacyKeyIdCombo();
     applyDmrPrivacyKeySelection();
-    if (dmrPrivacyForwardCheckbox) {
-        dmrPrivacyForwardCheckbox->setChecked(pendingSettings.dmrPrivacyForwardToBackends);
-    }
     setComboToData(dmrPrivacyFrameOffsetCombo, pendingSettings.dmrPrivacyFrameOffset);
     setComboToData(dmrPrivacyDropCombo, pendingSettings.dmrPrivacyVariant);
     setComboToData(dmrPrivacyBitLayoutCombo, pendingSettings.dmrPrivacyLayout);
@@ -1803,6 +1798,7 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("ui/spectrumDisplayReductionMode", spectrumDisplayReductionMode);
     settings.setValue("ui/showSpectrumFps", showSpectrumFps);
     settings.setValue("ui/showWaterfallFps", showWaterfallFps);
+    settings.setValue("diagnostics/showAudioQueueDropRows", showAudioQueueDropRows);
     settings.setValue("ui/showSpectrumPeakMeter", showSpectrumPeakMeter);
     settings.setValue("ui/spectrumPeakMeterStyle", spectrumPeakMeterStyle);
     settings.setValue("ui/showExtendedSpectrumInfo", showExtendedSpectrumInfo);
@@ -1886,10 +1882,7 @@ void YourClassName::savePersistentSettings() {
                       pendingSettings.dmrPrivacyKeyId);
     settings.setValue("digital/dmrPrivacyKeyHex",
                       normalizedDmrPrivacyKeyHex(pendingSettings.dmrPrivacyKeyHex));
-    settings.setValue("digital/dmrPrivacyForwardToBackends",
-                      dmrPrivacyForwardCheckbox
-                          ? dmrPrivacyForwardCheckbox->isChecked()
-                          : pendingSettings.dmrPrivacyForwardToBackends);
+    settings.remove("digital/dmrPrivacyForwardToBackends");
     settings.setValue("digital/dmrPrivacyVariant",
                       dmrPrivacyDropCombo
                           ? dmrPrivacyDropCombo->currentData().toString()
@@ -1907,7 +1900,8 @@ void YourClassName::savePersistentSettings() {
     for (const DmrPrivacyKeyEntry &entry : std::as_const(dmrPrivacyKeys)) {
         const int mode = normalizedDmrPrivacyMode(entry.mode);
         const QString keyHex = normalizedDmrPrivacyKeyHex(entry.keyHex);
-        if ((mode != DMR_PRIVACY_ARC4 && mode != DMR_PRIVACY_AES256) ||
+        if ((mode != DMR_PRIVACY_ARC4 && mode != DMR_PRIVACY_AES256 &&
+             mode != DMR_PRIVACY_HYTERA_BASIC) ||
             (keyHex.isEmpty() && entry.note.trimmed().isEmpty())) {
             continue;
         }

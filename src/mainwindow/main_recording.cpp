@@ -89,7 +89,7 @@ QJsonObject YourClassName::recordingLabMetadata() const {
     lab["privacyKeyId"] = pendingSettings.dmrPrivacyKeyId;
     lab["privacyKeySet"] = !pendingSettings.dmrPrivacyKeyHex.isEmpty();
     lab["privacyKeyHexLen"] = pendingSettings.dmrPrivacyKeyHex.size();
-    lab["privacyForward"] = pendingSettings.dmrPrivacyForwardToBackends;
+    lab["privacyEnabled"] = pendingSettings.dmrPrivacyMode != DMR_PRIVACY_NONE;
     lab["privacyVariant"] = pendingSettings.dmrPrivacyVariant;
     lab["privacyLayout"] = pendingSettings.dmrPrivacyLayout;
     lab["privacyFrameOffset"] = pendingSettings.dmrPrivacyFrameOffset;
@@ -327,7 +327,31 @@ bool YourClassName::spectrumEventIqChannelized() const {
     return spectrumEventCaptureMode == 1;
 }
 
+bool YourClassName::dmrAudioIqProducerNeeded() const {
+    return audioProcessor && pendingSettings.audioEnabled &&
+           pendingSettings.modulationType == MOD_DMR && pendingSettings.inputMode == INPUT_RF &&
+           !isNetworkClientMode() &&
+           !(networkMode == NetworkMode::Server && isClientIqProcessingMode()) &&
+           (isChannelIqRecordingActive() ||
+            (spectrumEventIqProducerNeeded() && spectrumEventIqChannelized())) &&
+           !(spectrumEventIqProducerNeeded() && spectrumEventCaptureMode == 2);
+}
+
+void YourClassName::handleLocalIqFrame(const QByteArray &iqData, double sampleRate,
+                                      int sampleCount, bool channelized) {
+    if (channelized && isChannelIqRecordingActive()) {
+        recordingManager->appendIqFrame(iqData, sampleRate, sampleCount);
+    }
+    handleSpectrumEventIqFrame(iqData, sampleRate, sampleCount, channelized);
+    if (channelized) processVideoIqFrame(iqData, sampleRate, sampleCount);
+    if (channelized == isChannelIqProcessingMode()) {
+        sendNetworkIqFrame(iqData, sampleRate, sampleCount);
+    }
+}
+
 void YourClassName::updateIqFrameProducerSettings() {
+    const bool dmrAudioIq = dmrAudioIqProducerNeeded();
+    if (audioProcessor) audioProcessor->setDmrChannelIqEnabled(dmrAudioIq);
     if (!processor) {
         return;
     }
@@ -342,7 +366,8 @@ void YourClassName::updateIqFrameProducerSettings() {
     const bool atvChannelIq = isVideoDecodeActive() &&
                               pendingSettings.modulationType == MOD_ATV;
     processor->configureNetworkIqStreaming(pendingSettings,
-                                           serverIqStreaming || channelIqRecording || eventIq || atvChannelIq,
+                                           serverIqStreaming || atvChannelIq ||
+                                               (!dmrAudioIq && (channelIqRecording || eventIq)),
                                            !serverFullIqStreaming &&
                                                !eventFullIq &&
                                                (serverChannelIqStreaming || channelIqRecording ||
@@ -355,6 +380,15 @@ void YourClassName::updateRecordingStatus(const QString &status) {
         const QString localized = localizedStatusText(status);
         recordingStatusLabel->setText(localized);
         recordingStatusLabel->setToolTip(localized);
+    }
+    if (recordingManager && !recordingManager->isRecording() &&
+        recordButton && recordButton->isChecked()) {
+        QSignalBlocker blocker(recordButton);
+        recordButton->setChecked(false);
+        recordButton->setText(uiText(QStringLiteral("record"), QStringLiteral("Record")));
+        if (recordingModeCombo) recordingModeCombo->setEnabled(true);
+        momentaryRecordingActive = false;
+        updateIqFrameProducerSettings();
     }
 }
 
@@ -662,9 +696,8 @@ void YourClassName::startRecording(bool momentary) {
 
     const RecordingManager::Mode mode = selectedRecordingMode();
     if (mode == RecordingManager::Mode::ChannelIqWav &&
-        networkMode != NetworkMode::Disabled &&
-        isFullIqProcessingMode() &&
-        runState == RadioRunState::Running) {
+        ((networkMode != NetworkMode::Disabled && isFullIqProcessingMode()) ||
+         (spectrumEventIqProducerNeeded() && spectrumEventCaptureMode == 2))) {
         updateRecordingStatus(QStringLiteral("Recording blocked: Channel IQ cannot run during Full IQ streaming"));
         if (recordButton) {
             QSignalBlocker blocker(recordButton);
@@ -709,17 +742,7 @@ void YourClassName::startRecording(bool momentary) {
         recordingModeCombo->setEnabled(false);
     }
     if (mode == RecordingManager::Mode::ChannelIqWav) {
-        if (runState == RadioRunState::Running && !isNetworkClientMode()) {
-            qDebug() << "[Recording] restarting receiver to apply Channel IQ recording policy";
-            if (!restartStreamForHardwareChange()) {
-                qDebug() << "[Recording] Channel IQ recording restart failed; stopping recording";
-                stopRecording(false);
-                updateRecordingStatus(QStringLiteral("Recording failed: receiver restart failed"));
-                return;
-            }
-        } else {
-            updateIqFrameProducerSettings();
-        }
+        updateIqFrameProducerSettings();
     }
 }
 
@@ -752,12 +775,7 @@ void YourClassName::stopRecording(bool momentaryRelease) {
         recordingModeCombo->setEnabled(true);
     }
     if (wasChannelIqRecording) {
-        if (runState == RadioRunState::Running && !isNetworkClientMode()) {
-            qDebug() << "[Recording] restarting receiver to restore live audio after Channel IQ recording";
-            restartStreamForHardwareChange();
-        } else {
-            updateIqFrameProducerSettings();
-        }
+        updateIqFrameProducerSettings();
     }
 }
 

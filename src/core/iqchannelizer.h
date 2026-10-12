@@ -36,6 +36,7 @@ public:
                           bool applyAgc = true);
 
 private:
+    friend struct IqChannelizerTestAccess;
     static constexpr int FrontDecimatorOrder = 3;
     static constexpr int FrontDecimatorMaxFactor = 64;
     static constexpr int ResamplerPhases = 64;

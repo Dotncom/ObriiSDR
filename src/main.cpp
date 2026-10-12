@@ -26,6 +26,7 @@
 #include "zoomspectrumdialog.h"
 #include "zoomdensitydialog.h"
 #include "transmitdialog.h"
+#include "ft8stationdialog.h"
 #include "dspflowpanel.h"
 
 #include <QApplication>
@@ -247,16 +248,17 @@ YourClassName::YourClassName(QWidget *parent)
     dmrPrivacyModeCombo->addItem(uiText(QStringLiteral("dmr_privacy_none"), QStringLiteral("No privacy")), DMR_PRIVACY_NONE);
     dmrPrivacyModeCombo->addItem(QStringLiteral("ARC4"), DMR_PRIVACY_ARC4);
     dmrPrivacyModeCombo->addItem(QStringLiteral("AES-256"), DMR_PRIVACY_AES256);
+    dmrPrivacyModeCombo->addItem(uiText(QStringLiteral("dmr_privacy_hytera_basic"),
+        QStringLiteral("Hytera Basic (beta)")), DMR_PRIVACY_HYTERA_BASIC);
     dmrPrivacyModeCombo->setToolTip(uiText(QStringLiteral("dmr_privacy_mode_tooltip"),
-                                           QStringLiteral("Known-key DMR privacy draft path. This config is passed to external backends; it does not brute-force keys.")));
+                                           QStringLiteral("The selected mode and saved key automatically apply to the selected decoder. No privacy disables decryption. No key guessing is performed.")));
     dmrPrivacyKeyIdCombo = new QComboBox(digitalWidget);
     dmrPrivacyKeyIdCombo->setToolTip(uiText(QStringLiteral("dmr_privacy_key_id_tooltip"),
                                             QStringLiteral("DMR privacy key ID from the selected ARC4/AES-256 key table.")));
-    dmrPrivacyForwardCheckbox = new QCheckBox("Backend decrypt", digitalWidget);
-    markTranslatable(dmrPrivacyForwardCheckbox, QStringLiteral("dmr_privacy_forward"), QStringLiteral("Backend decrypt"));
-    dmrPrivacyForwardCheckbox->setChecked(true);
-    dmrPrivacyForwardCheckbox->setToolTip(uiText(QStringLiteral("dmr_privacy_forward_tooltip"),
-                                                 QStringLiteral("Master switch for known-key decryption in external DMR backends. Disable to force privacy:none without changing saved keys.")));
+    dmrPrivacyCapabilityLabel = new QLabel(digitalWidget);
+    dmrPrivacyCapabilityLabel->setWordWrap(true);
+    dmrPrivacyCapabilityLabel->setMinimumWidth(0);
+    dmrPrivacyCapabilityLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     dmrPrivacyKeysButton = new QPushButton("Keys...", digitalWidget);
     markTranslatable(dmrPrivacyKeysButton, QStringLiteral("dmr_privacy_keys"), QStringLiteral("Keys..."));
     dmrPrivacyKeysButton->setToolTip(uiText(QStringLiteral("dmr_privacy_keys_tooltip"),
@@ -308,7 +310,7 @@ YourClassName::YourClassName(QWidget *parent)
     dsdNeoAutoStartCheckbox = new QCheckBox("Auto start", digitalWidget);
     markTranslatable(dsdNeoAutoStartCheckbox, QStringLiteral("auto_start"), QStringLiteral("Auto start"));
     dsdNeoAutoStartCheckbox->setToolTip(uiText(QStringLiteral("dsd_neo_autostart_tooltip"),
-                                               QStringLiteral("Start dsd-neo automatically with UDP PCM input and UDP decoded-audio output.")));
+                                               QStringLiteral("Start dsd-neo automatically with PCM input through stdin and UDP decoded-audio output.")));
     dsdNeoProgramEdit = new QLineEdit(digitalWidget);
     dsdNeoProgramEdit->setPlaceholderText(defaultDsdNeoProgramPath());
     dsdNeoProgramEdit->setToolTip(uiText(QStringLiteral("dsd_neo_program_tooltip"),
@@ -318,7 +320,7 @@ YourClassName::YourClassName(QWidget *parent)
     dsdNeoInputPortSpin->setValue(7355);
     dsdNeoInputPortSpin->setPrefix(QStringLiteral("UDP in "));
     dsdNeoInputPortSpin->setToolTip(uiText(QStringLiteral("dsd_neo_tcp_tooltip"),
-                                           QStringLiteral("Local UDP port where dsd-neo listens for raw PCM16LE DMR input from Obrii SDR.")));
+                                           QStringLiteral("PCM input port for a manually started decoder. Auto start uses stdin instead of UDP.")));
     dsdNeoUdpOutputPortSpin = new QSpinBox(digitalWidget);
     dsdNeoUdpOutputPortSpin->setRange(1024, 65535);
     dsdNeoUdpOutputPortSpin->setValue(23456);
@@ -355,6 +357,8 @@ YourClassName::YourClassName(QWidget *parent)
     dsdNeoUdpOutputPortSpin->setMaximumWidth(82);
     QPushButton *digitalClearButton = new QPushButton("Clear", digitalWidget);
     markTranslatable(digitalClearButton, QStringLiteral("clear"), QStringLiteral("Clear"));
+    ft8StationButton = new QPushButton(QStringLiteral("FT8 Station..."), digitalWidget);
+    markTranslatable(ft8StationButton, QStringLiteral("ft8_station"), QStringLiteral("FT8 Station..."));
     digitalStatusLabel = new QLabel(uiText(QStringLiteral("digital_audio_idle"), QStringLiteral("Digital audio decoder idle")), digitalWidget);
     digitalStatusLabel->setWordWrap(false);
     digitalStatusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -466,8 +470,7 @@ YourClassName::YourClassName(QWidget *parent)
     dmrLabLayout->addWidget(dmrPrivacyLabel, 5, 0);
     dmrLabLayout->addWidget(dmrPrivacyModeCombo, 5, 1);
     dmrLabLayout->addWidget(dmrPrivacyKeyIdCombo, 5, 2);
-    dmrLabLayout->addWidget(dmrPrivacyForwardCheckbox, 5, 3);
-    dmrLabLayout->addWidget(dmrPrivacyKeysButton, 5, 4);
+    dmrLabLayout->addWidget(dmrPrivacyKeysButton, 5, 3, 1, 2);
     QLabel *dmrPrivacyArc4Label = new QLabel("ARC4 test:", digitalWidget);
     markTranslatable(dmrPrivacyArc4Label, QStringLiteral("dmr_privacy_arc4_test"), QStringLiteral("ARC4 test:"));
     dmrLabLayout->addWidget(dmrPrivacyArc4Label, 6, 0);
@@ -488,8 +491,10 @@ YourClassName::YourClassName(QWidget *parent)
     digitalHeaderLayout->addWidget(dmrBackendLabel);
     digitalHeaderLayout->addWidget(dmrBackendCombo);
     digitalHeaderLayout->addStretch();
+    digitalHeaderLayout->addWidget(ft8StationButton);
     digitalHeaderLayout->addWidget(digitalClearButton);
     digitalLayout->addLayout(digitalHeaderLayout);
+    digitalLayout->addWidget(dmrPrivacyCapabilityLabel);
     digitalLayout->addLayout(digitalModeLayout);
     digitalLayout->addWidget(cwDecoderControlsWidget);
     digitalLayout->addLayout(dmrLabLayout);
@@ -869,7 +874,12 @@ YourClassName::YourClassName(QWidget *parent)
     digitalDecoder->moveToThread(digitalDecoderThread);
     connect(digitalDecoderThread, &QThread::finished, digitalDecoder, &QObject::deleteLater);
     digitalDecoderThread->start();
-    dsdNeoBridge = new DsdNeoBridge(this);
+    dsdNeoThread = new QThread(this);
+    dsdNeoThread->setObjectName(QStringLiteral("DsdNeoTransportThread"));
+    dsdNeoBridge = new DsdNeoBridge();
+    dsdNeoBridge->moveToThread(dsdNeoThread);
+    connect(dsdNeoThread, &QThread::finished, dsdNeoBridge, &QObject::deleteLater);
+    dsdNeoThread->start();
     gopherTrunkBridge = new GopherTrunkBridge(this);
     videoProcessorThread = new QThread(this);
     videoProcessorThread->setObjectName(QStringLiteral("VideoProcessorThread"));
@@ -1803,6 +1813,14 @@ YourClassName::YourClassName(QWidget *parent)
     spectrumScienceActionLayout->addWidget(zeroSpanButton, 1, 0);
     spectrumScienceActionLayout->addWidget(researchToolsButton, 1, 1);
     spectrumScienceActionLayout->addWidget(waterfallAreaMeasurementCheckbox, 2, 0, 1, 2);
+    auto *wirelessLabButton = new QPushButton("Wireless lab (beta)...", spectrumMeasurementBox);
+    markTranslatable(wirelessLabButton, QStringLiteral("wireless_lab"), QStringLiteral("Wireless lab (beta)..."));
+    spectrumScienceActionLayout->addWidget(wirelessLabButton, 3, 0, 1, 2);
+    connect(wirelessLabButton, &QPushButton::clicked, this, &YourClassName::openWirelessLab);
+    auto *propagationButton = new QPushButton("Radio propagation...", spectrumMeasurementBox);
+    markTranslatable(propagationButton, QStringLiteral("radio_propagation"), QStringLiteral("Radio propagation..."));
+    spectrumScienceActionLayout->addWidget(propagationButton, 4, 0, 1, 2);
+    connect(propagationButton, &QPushButton::clicked, this, &YourClassName::openPropagationLab);
     spectrumScienceActionLayout->setColumnStretch(0, 1);
     spectrumScienceActionLayout->setColumnStretch(1, 1);
     spectrumSciencePanelLayout->setContentsMargins(0, 0, 0, 0);
@@ -3791,6 +3809,7 @@ YourClassName::YourClassName(QWidget *parent)
             controlsToggleButton->setChecked(visible);
         }
     });
+    connect(ft8StationButton, &QPushButton::clicked, this, &YourClassName::openFt8StationDialog);
     connect(digitalClearButton, &QPushButton::clicked, this, [this]() {
         if (digitalTextEdit) {
             digitalTextEdit->clear();
@@ -3861,7 +3880,6 @@ YourClassName::YourClassName(QWidget *parent)
             dmrAdaptiveSlicerCheckbox,
             dmrPrivacyModeCombo,
             dmrPrivacyKeyIdCombo,
-            dmrPrivacyForwardCheckbox,
             dmrPrivacyKeysButton,
             dmrBackendCombo,
             dsdNeoAutoStartCheckbox,
@@ -3913,7 +3931,7 @@ YourClassName::YourClassName(QWidget *parent)
                  << "privacyMode" << dmrPrivacyModeId(pendingSettings.dmrPrivacyMode)
                  << "privacyKeyId" << pendingSettings.dmrPrivacyKeyId
                  << "privacyKeySet" << !pendingSettings.dmrPrivacyKeyHex.isEmpty()
-                 << "privacyForward" << pendingSettings.dmrPrivacyForwardToBackends;
+                 << "privacyEnabled" << (pendingSettings.dmrPrivacyMode != DMR_PRIVACY_NONE);
     };
     connect(dmrBasebandRateCombo,
             QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -4027,8 +4045,6 @@ YourClassName::YourClassName(QWidget *parent)
             refreshDmrPrivacyKeyIdCombo();
         }
         applyDmrPrivacyKeySelection();
-        pendingSettings.dmrPrivacyForwardToBackends =
-            !dmrPrivacyForwardCheckbox || dmrPrivacyForwardCheckbox->isChecked();
         pendingSettings.dmrPrivacyFrameOffset =
             dmrPrivacyFrameOffsetCombo
                 ? (std::clamp)(dmrPrivacyFrameOffsetCombo->currentData().toInt(), 0, 17)
@@ -4057,7 +4073,7 @@ YourClassName::YourClassName(QWidget *parent)
                  << "mode" << dmrPrivacyModeId(pendingSettings.dmrPrivacyMode)
                  << "keyId" << pendingSettings.dmrPrivacyKeyId
                  << "keyHexLen" << pendingSettings.dmrPrivacyKeyHex.size()
-                 << "forward" << pendingSettings.dmrPrivacyForwardToBackends
+                 << "enabled" << (pendingSettings.dmrPrivacyMode != DMR_PRIVACY_NONE)
                  << "variant" << pendingSettings.dmrPrivacyVariant
                  << "layout" << pendingSettings.dmrPrivacyLayout
                  << "offset" << pendingSettings.dmrPrivacyFrameOffset;
@@ -4071,10 +4087,6 @@ YourClassName::YourClassName(QWidget *parent)
             QOverload<int>::of(&QComboBox::currentIndexChanged),
             this,
             [updateDmrPrivacyDraft](int) { updateDmrPrivacyDraft("privacyKeyId"); });
-    connect(dmrPrivacyForwardCheckbox,
-            &QCheckBox::toggled,
-            this,
-            [updateDmrPrivacyDraft](bool) { updateDmrPrivacyDraft("privacyForward"); });
     connect(dmrPrivacyFrameOffsetCombo,
             QOverload<int>::of(&QComboBox::currentIndexChanged),
             this,
@@ -4097,7 +4109,7 @@ YourClassName::YourClassName(QWidget *parent)
             dsdNeoProgramEdit->setEnabled(enabled && dsdNeoAutoStartCheckbox && dsdNeoAutoStartCheckbox->isChecked());
         }
         if (dsdNeoInputPortSpin) {
-            dsdNeoInputPortSpin->setEnabled(enabled);
+            dsdNeoInputPortSpin->setEnabled(enabled && dsdNeoAutoStartCheckbox && !dsdNeoAutoStartCheckbox->isChecked());
         }
         if (dsdNeoUdpOutputPortSpin) {
             dsdNeoUdpOutputPortSpin->setEnabled(enabled);
@@ -4128,7 +4140,7 @@ YourClassName::YourClassName(QWidget *parent)
                 &DsdNeoBridge::decodedPcmReady,
                 audioProcessor,
                 &AudioProcessor::enqueueExternalPcm,
-                Qt::QueuedConnection);
+                Qt::DirectConnection);
     }
     if (gopherTrunkBridge) {
         connect(gopherTrunkBridge, &GopherTrunkBridge::statusChanged, this, [this](const QString &status) {
@@ -4150,6 +4162,7 @@ YourClassName::YourClassName(QWidget *parent)
     updateDsdNeoUi();
     updateDmrLabControls(dmrLabCaptureCheckbox && dmrLabCaptureCheckbox->isChecked());
     connect(digitalDecoder, &DigitalDecoder::textDecoded, this, &YourClassName::onDigitalTextDecoded);
+    connect(digitalDecoder, &DigitalDecoder::ft8Decoded, this, &YourClassName::onFt8Decoded);
     connect(digitalDecoder, &DigitalDecoder::statusChanged, this, &YourClassName::onDigitalDecoderStatusChanged);
     connect(digitalDecoder, &DigitalDecoder::dmrMetadataDetected, this, &YourClassName::onDmrMetadataDetected);
     connect(digitalDecoder,
@@ -4318,16 +4331,22 @@ YourClassName::YourClassName(QWidget *parent)
             Qt::QueuedConnection);
     connect(audioProcessor,
             &AudioProcessor::dmrBasebandFrameReady,
+            dsdNeoBridge,
+            &DsdNeoBridge::submitInputPcm,
+            Qt::DirectConnection);
+    connect(audioProcessor,
+            &AudioProcessor::dmrBasebandFrameReady,
             this,
             [this](const QByteArray &pcmData, int sampleRate) {
                 if (pendingSettings.modulationType == MOD_DMR) {
-                    if (dsdNeoBridge && dsdNeoBridge->isEnabled()) {
-                        dsdNeoBridge->sendInputPcm(pcmData, sampleRate);
-                    }
                     processDigitalAudioFrame(pcmData, sampleRate);
                 }
             },
             Qt::QueuedConnection);
+    connect(audioProcessor, &AudioProcessor::dmrChannelIqFrameReady, this,
+            [this](const QByteArray &iqData, double rate, int count) {
+                if (dmrAudioIqProducerNeeded()) handleLocalIqFrame(iqData, rate, count, true);
+            }, Qt::QueuedConnection);
     connect(audioProcessor,
             &AudioProcessor::audioFrameReady,
             this,
@@ -5453,6 +5472,17 @@ YourClassName::~YourClassName() {
         processor->finalizeStopped();
     }
 
+    if (dsdNeoThread) {
+        // The receiver worker is stopped above; no more direct PCM submissions.
+        disconnect(dsdNeoBridge, nullptr, audioProcessor, nullptr);
+        QMetaObject::invokeMethod(dsdNeoBridge, [bridge = dsdNeoBridge]() {
+            bridge->setEnabled(false);
+            QThread::currentThread()->quit();
+        }, Qt::QueuedConnection);
+        dsdNeoThread->wait();
+        dsdNeoBridge = nullptr;
+        dsdNeoThread = nullptr;
+    }
     if (digitalDecoderThread) {
         digitalDecoderThread->quit();
         if (!digitalDecoderThread->wait(3000)) {
@@ -5747,6 +5777,11 @@ static void logIqBufferRetuneState(const char *stage,
                                    double actualFrequency);
 
 bool YourClassName::restartStreamForHardwareChange() {
+    QElapsedTimer restartTimer;
+    restartTimer.start();
+    qint64 audioStopMs = 0;
+    qint64 readerStopMs = 0;
+    qint64 settingsApplyMs = 0;
     if (isChannelIqRecordingActive() &&
         networkMode != NetworkMode::Disabled &&
         isFullIqProcessingMode()) {
@@ -5767,7 +5802,8 @@ bool YourClassName::restartStreamForHardwareChange() {
         if (stopPollTimer) stopPollTimer->stop();
         if (updateTimer) updateTimer->stop();
         pendingAudioStartAfterStreamReady = false;
-        if (audioProcessor) audioProcessor->stopDemodulation();
+        if (audioProcessor) audioProcessor->stopDemodulationForStreamRestart();
+        audioStopMs = restartTimer.elapsed();
         digitalDecoderGeneration.fetch_add(1, std::memory_order_relaxed);
         pendingDmrDecoderPcm.clear();
         pendingDmrDecoderSampleRate = 48000;
@@ -5796,10 +5832,16 @@ bool YourClassName::restartStreamForHardwareChange() {
             }
         }
         processor->finalizeStopped();
+        readerStopMs = restartTimer.elapsed() - audioStopMs;
         deviceOpened = false;
         runState = RadioRunState::Idle;
         updateUiForRunState();
         QTimer::singleShot(0, this, &YourClassName::startFobosProcessing);
+        if (fobosVerboseLoggingEnabled()) {
+            qDebug() << "[LiveHardware timing] external restart prepared"
+                     << "audioStopMs" << audioStopMs << "readerStopMs" << readerStopMs
+                     << "totalMs" << restartTimer.elapsed();
+        }
         return true;
     }
 
@@ -5831,7 +5873,8 @@ bool YourClassName::restartStreamForHardwareChange() {
     if (stopPollTimer) stopPollTimer->stop();
     if (updateTimer) updateTimer->stop();
     pendingAudioStartAfterStreamReady = false;
-    if (audioProcessor) audioProcessor->stopDemodulation();
+    if (audioProcessor) audioProcessor->stopDemodulationForStreamRestart();
+    audioStopMs = restartTimer.elapsed();
     digitalDecoderGeneration.fetch_add(1, std::memory_order_relaxed);
     pendingDmrDecoderPcm.clear();
     pendingDmrDecoderSampleRate = 48000;
@@ -5863,6 +5906,8 @@ bool YourClassName::restartStreamForHardwareChange() {
 
     clearLiveSpectrumSnapshot(false);
 
+    readerStopMs = restartTimer.elapsed() - audioStopMs;
+
     runState = RadioRunState::Starting;
     updateUiForRunState();
     if (!applyFobosSettings()) {
@@ -5876,6 +5921,7 @@ bool YourClassName::restartStreamForHardwareChange() {
     }
 
     updateSpectrumTimerInterval();
+    settingsApplyMs = restartTimer.elapsed() - audioStopMs - readerStopMs;
     settingRange();
     spectrumTuningDebugFramesRemaining = fobosVerboseLoggingEnabled() ? 8 : 0;
 
@@ -5884,34 +5930,25 @@ bool YourClassName::restartStreamForHardwareChange() {
     const bool serverChannelIqStreaming = networkMode == NetworkMode::Server && isChannelIqProcessingMode();
     const bool channelIqRecording = isChannelIqRecordingActive();
     const bool eventIq = spectrumEventIqProducerNeeded();
-    const bool eventFullIq = eventIq && spectrumEventCaptureMode == 2;
-    const bool eventChannelIq = eventIq && spectrumEventIqChannelized();
     const bool suppressServerLocalOutput =
         networkMode == NetworkMode::Server &&
         serverDisableLocalVisualAudio &&
         networkController &&
         networkController->isControlReady();
     const bool serverAudioStreamingForFullIq = serverFullIqStreaming && pendingSettings.audioEnabled;
-    const bool channelIqRecordingOnly = channelIqRecording && !serverIqStreaming;
     const bool serverLocalAudioEnabled =
         pendingSettings.audioEnabled &&
-        !channelIqRecordingOnly &&
         (!serverIqStreaming || serverAudioStreamingForFullIq);
     const bool queueAudioBlocks =
-        !channelIqRecordingOnly &&
         (!serverIqStreaming || serverAudioStreamingForFullIq);
-    const bool publishIqSnapshot = !channelIqRecordingOnly;
+    const bool publishIqSnapshot = true;
     if (audioProcessor) {
         audioProcessor->setLocalPlaybackEnabled(!suppressServerLocalOutput);
     }
 
-    if ((serverIqStreaming || channelIqRecording || eventIq) && processor) {
-        processor->configureNetworkIqStreaming(pendingSettings,
-                                               true,
-                                               !serverFullIqStreaming &&
-                                                   !eventFullIq &&
-                                                   (serverChannelIqStreaming || channelIqRecording || eventChannelIq));
-    }
+    const bool emitProcessorIqFrames = serverIqStreaming ||
+        (!dmrAudioIqProducerNeeded() && (channelIqRecording || eventIq));
+    updateIqFrameProducerSettings();
 
     processor->startProcessing(makeFobosStreamDescriptor(activeFobosDevice(),
                                                          activeFobosApiKind,
@@ -5920,7 +5957,7 @@ bool YourClassName::restartStreamForHardwareChange() {
                                                          pendingSettings.centerFrequency,
                                                          queueAudioBlocks,
                                                          publishIqSnapshot,
-                                                         serverIqStreaming || channelIqRecording,
+                                                         emitProcessorIqFrames,
                                                          agileScanEnabled &&
                                                              !standardScanEnabled &&
                                                              activeFobosApiKind == FobosApiKind::Agile,
@@ -5955,6 +5992,13 @@ bool YourClassName::restartStreamForHardwareChange() {
     runState = RadioRunState::Running;
     updateUiForRunState();
     applyServerLocalOutputPolicy();
+    if (fobosVerboseLoggingEnabled()) {
+        qDebug() << "[LiveHardware timing] restart done"
+                 << "audioStopMs" << audioStopMs << "readerStopMs" << readerStopMs
+                 << "settingsApplyMs" << settingsApplyMs
+                 << "startMs" << (restartTimer.elapsed() - audioStopMs - readerStopMs - settingsApplyMs)
+                 << "totalMs" << restartTimer.elapsed();
+    }
     return true;
 }
 
@@ -6142,9 +6186,6 @@ void YourClassName::refreshSettingsFromUi() {
             normalizedDmrPrivacyMode(pendingSettings.dmrPrivacyMode);
     }
     applyDmrPrivacyKeySelection();
-    if (dmrPrivacyForwardCheckbox) {
-        pendingSettings.dmrPrivacyForwardToBackends = dmrPrivacyForwardCheckbox->isChecked();
-    }
     if (dmrPrivacyFrameOffsetCombo) {
         pendingSettings.dmrPrivacyFrameOffset =
             (std::clamp)(dmrPrivacyFrameOffsetCombo->currentData().toInt(), 0, 17);
@@ -6501,20 +6542,14 @@ void YourClassName::connectDataProcessorSignals() {
     connect(processor,
             &DataProcessor::iqFrameReady,
             this,
-            [this](const QByteArray &iqData, double sampleRate, int sampleCount) {
-                if (recordingManager &&
-                    recordingManager->isRecording() &&
-                    recordingManager->mode() == RecordingManager::Mode::ChannelIqWav) {
-                    recordingManager->appendIqFrame(iqData, sampleRate, sampleCount);
+            [this, connectedProcessor](const QByteArray &iqData, double sampleRate, int sampleCount,
+                                       bool channelizedFrame) {
+                if (connectedProcessor != processor) {
+                    return;
                 }
-                const bool channelizedFrame =
-                    !isFullIqProcessingMode() &&
-                    (isChannelIqRecordingActive() ||
-                     (networkMode == NetworkMode::Server && isChannelIqProcessingMode()) ||
-                     spectrumEventIqChannelized());
-                handleSpectrumEventIqFrame(iqData, sampleRate, sampleCount, channelizedFrame);
-                processVideoIqFrame(iqData, sampleRate, sampleCount);
-                sendNetworkIqFrame(iqData, sampleRate, sampleCount);
+                if (!dmrAudioIqProducerNeeded()) {
+                    handleLocalIqFrame(iqData, sampleRate, sampleCount, channelizedFrame);
+                }
             },
             Qt::QueuedConnection);
 }
@@ -7959,33 +7994,24 @@ void YourClassName::startFobosProcessing() {
     const bool serverChannelIqStreaming = networkMode == NetworkMode::Server && isChannelIqProcessingMode();
     const bool channelIqRecording = isChannelIqRecordingActive();
     const bool eventIq = spectrumEventIqProducerNeeded();
-    const bool eventFullIq = eventIq && spectrumEventCaptureMode == 2;
-    const bool eventChannelIq = eventIq && spectrumEventIqChannelized();
     const bool suppressServerLocalOutput =
         networkMode == NetworkMode::Server &&
         serverDisableLocalVisualAudio &&
         networkController &&
         networkController->isControlReady();
     const bool serverAudioStreamingForFullIq = serverFullIqStreaming && pendingSettings.audioEnabled;
-    const bool channelIqRecordingOnly = channelIqRecording && !serverIqStreaming;
     const bool serverLocalAudioEnabled =
         pendingSettings.audioEnabled &&
-        !channelIqRecordingOnly &&
         (!serverIqStreaming || serverAudioStreamingForFullIq);
     const bool queueAudioBlocks =
-        !channelIqRecordingOnly &&
         (!serverIqStreaming || serverAudioStreamingForFullIq);
-    const bool publishIqSnapshot = !channelIqRecordingOnly;
+    const bool publishIqSnapshot = true;
     if (audioProcessor) {
         audioProcessor->setLocalPlaybackEnabled(!suppressServerLocalOutput);
     }
-    if ((serverIqStreaming || channelIqRecording || eventIq) && processor) {
-        processor->configureNetworkIqStreaming(pendingSettings,
-                                               true,
-                                               !serverFullIqStreaming &&
-                                                   !eventFullIq &&
-                                                   (serverChannelIqStreaming || channelIqRecording || eventChannelIq));
-    }
+    const bool emitProcessorIqFrames = serverIqStreaming ||
+        (!dmrAudioIqProducerNeeded() && (channelIqRecording || eventIq));
+    updateIqFrameProducerSettings();
     qDebug() << "[FobosLifecycle] starting DataProcessor"
              << "backend" << (hackRfNativeSelected ? "hackrf-native" :
                               (bladeRfNativeSelected ? "bladerf-native" :
@@ -8005,23 +8031,23 @@ void YourClassName::startFobosProcessing() {
     if (rtlSdrNativeSelected) {
         processor->startProcessing(makeRtlSdrNativeStreamDescriptor(queueAudioBlocks,
                                                                     publishIqSnapshot,
-                                                                    serverIqStreaming || channelIqRecording || eventIq));
+                                                                    emitProcessorIqFrames));
     } else if (rtlTcpSelected) {
         processor->startProcessing(makeRtlTcpStreamDescriptor(queueAudioBlocks,
                                                               publishIqSnapshot,
-                                                              serverIqStreaming || channelIqRecording || eventIq));
+                                                              emitProcessorIqFrames));
     } else if (soapySdrSelected) {
         processor->startProcessing(makeSoapySdrStreamDescriptor(queueAudioBlocks,
                                                                 publishIqSnapshot,
-                                                                serverIqStreaming || channelIqRecording || eventIq));
+                                                                emitProcessorIqFrames));
     } else if (bladeRfNativeSelected) {
         processor->startProcessing(makeBladeRfNativeStreamDescriptor(queueAudioBlocks,
                                                                      publishIqSnapshot,
-                                                                     serverIqStreaming || channelIqRecording || eventIq));
+                                                                     emitProcessorIqFrames));
     } else if (hackRfNativeSelected) {
         processor->startProcessing(makeHackRfNativeStreamDescriptor(queueAudioBlocks,
                                                                     publishIqSnapshot,
-                                                                    serverIqStreaming || channelIqRecording || eventIq));
+                                                                    emitProcessorIqFrames));
     } else {
         processor->startProcessing(makeFobosStreamDescriptor(activeFobosDevice(),
                                                              activeFobosApiKind,
@@ -8030,7 +8056,7 @@ void YourClassName::startFobosProcessing() {
                                                              pendingSettings.centerFrequency,
                                                              queueAudioBlocks,
                                                              publishIqSnapshot,
-                                                             serverIqStreaming || channelIqRecording || eventIq,
+                                                             emitProcessorIqFrames,
                                                              agileScanEnabled &&
                                                                  !standardScanEnabled &&
                                                                  activeFobosApiKind == FobosApiKind::Agile,
@@ -8161,6 +8187,11 @@ void YourClassName::openTransmitDialog() {
     if (!transmitDialog) {
         transmitDialog = new TransmitDialog(uiLanguage, this);
     }
+    transmitDialog->setHackRfReceiverUseChecker([this](int deviceIndex) {
+        return runState != RadioRunState::Idle &&
+               isHackRfNativeSelected() &&
+               selectedHackRfNativeIndex() == deviceIndex;
+    });
     transmitDialog->setLanguage(uiLanguage);
     transmitDialog->show();
     transmitDialog->raise();

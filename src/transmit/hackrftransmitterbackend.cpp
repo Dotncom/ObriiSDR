@@ -2,7 +2,9 @@
 
 #include "hackrfbackend.h"
 
+#include <QElapsedTimer>
 #include <QMutexLocker>
+#include <QThread>
 #include <QDebug>
 
 #include <algorithm>
@@ -118,10 +120,13 @@ bool HackRfTransmitterBackend::writeIq(const std::complex<float> *samples,
     }
     {
         QMutexLocker locker(&queueMutex);
-        const int maximumSamples = currentConfiguration.sampleRate *
-                                   (currentConfiguration.liveSource ? 30 : 180);
-        const int unread = (std::max)(0, sourceQueue.size() - static_cast<int>(sourcePosition));
-        if (unread + count > maximumSamples) {
+        const qint64 maximumSamples =
+            static_cast<qint64>(currentConfiguration.sampleRate) *
+            (currentConfiguration.liveSource ? 30 : 180);
+        const qint64 unread = (std::max<qint64>)(
+            0, static_cast<qint64>(sourceQueue.size()) -
+                   static_cast<qint64>(sourcePosition));
+        if (unread + static_cast<qint64>(count) > maximumSamples) {
             if (error) *error = QStringLiteral("HackRF TX source queue exceeded the 30 second limit");
             return false;
         }
@@ -136,6 +141,24 @@ bool HackRfTransmitterBackend::writeIq(const std::complex<float> *samples,
         if (prebuffered && !beginStreaming(error)) {
             return false;
         }
+    }
+    if (error) error->clear();
+    return true;
+}
+
+bool HackRfTransmitterBackend::drain(int timeoutMs, QString *error) {
+    if (!running.load(std::memory_order_acquire)) {
+        if (error) *error = QStringLiteral("HackRF TX backend is not running");
+        return false;
+    }
+    QElapsedTimer timer;
+    timer.start();
+    while (bufferedSourceSamples() > 1) {
+        if (timeoutMs >= 0 && timer.elapsed() >= timeoutMs) {
+            if (error) *error = QStringLiteral("Timed out while draining the HackRF TX queue");
+            return false;
+        }
+        QThread::msleep(5);
     }
     if (error) error->clear();
     return true;

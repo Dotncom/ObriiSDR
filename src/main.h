@@ -40,6 +40,7 @@
 #include <QStringList>
 #include <QVector>
 #include <QApplication>
+#include <QDateTime>
 #include <QCoreApplication>
 #include <QDebug>
 #include <cmath>
@@ -94,9 +95,12 @@
 
 class ZeroSpanDialog;
 class ResearchAnalysisDialog;
+class WirelessLabDialog;
+class PropagationLabDialog;
 class ZoomSpectrumDialog;
 class ZoomDensityDialog;
 class TransmitDialog;
+class Ft8StationDialog;
 class AudioFilterChainWidget;
 class DspFlowPanel;
 class MultiVfoWidget;
@@ -209,6 +213,14 @@ private slots:
     void onAudioEnabledChanged(bool checked);
     void onDigitalTextDecoded(const QString &text);
     void onDigitalDecoderStatusChanged(const QString &status);
+    void onFt8Decoded(const QDateTime &utc,
+                      double rfFrequencyHz,
+                      double audioFrequencyHz,
+                      double dtSeconds,
+                      int snrDbEstimate,
+                      double qualityDb,
+                      int costasHits,
+                      const QString &message);
     void onDmrMetadataDetected(int colorCode,
                                int timeslot,
                                quint32 targetId,
@@ -337,6 +349,8 @@ private:
     void exportSpectrumScienceCsv();
     void openZeroSpanDialog();
     void openResearchAnalysis(int tabIndex = 0);
+    void openWirelessLab();
+    void openPropagationLab();
     void updateFpvHunter(const std::vector<float> &frequencies,
                          const std::vector<float> &magnitudes);
     void updateFpvHunterControls();
@@ -390,6 +404,7 @@ private:
     void openZoomSpectrum();
     void openZoomDensity();
     void openTransmitDialog();
+    void openFt8StationDialog();
     void openApplicationSettings();
     bool isAnyVideoOutputVisible() const;
     void openDspBlockReference(const QString &type, const QString &id);
@@ -590,6 +605,9 @@ private:
     RadioSettings spectrumProcessingSettings() const;
     RecordingManager::Mode selectedRecordingMode() const;
     bool isChannelIqRecordingActive() const;
+    bool dmrAudioIqProducerNeeded() const;
+    void handleLocalIqFrame(const QByteArray &iqData, double sampleRate, int sampleCount,
+                            bool channelized);
     void updateIqFrameProducerSettings();
     void updateRecordingStatus(const QString &status);
     void handlePlaybackAudioFrame(const QByteArray &pcmData);
@@ -673,7 +691,7 @@ private:
     QCheckBox *waterfall3DVncSliceInputCheckbox = nullptr;
     QCheckBox *dmrAdaptiveSlicerCheckbox = nullptr;
     QCheckBox *cwDecoderAdaptiveCheckbox = nullptr;
-    QCheckBox *dmrPrivacyForwardCheckbox = nullptr;
+    QLabel *dmrPrivacyCapabilityLabel = nullptr;
     QCheckBox *dsdNeoAutoStartCheckbox = nullptr;
     QWidget *cwDecoderControlsWidget = nullptr;
     QSpinBox *dsdNeoInputPortSpin = nullptr;
@@ -688,6 +706,7 @@ private:
     QPushButton *zoomSpectrumButton = nullptr;
     QPushButton *zoomDensityButton = nullptr;
     QPushButton *transmitButton = nullptr;
+    QPushButton *ft8StationButton = nullptr;
     QPushButton *appSettingsButton = nullptr;
     QPushButton *dspPathButton = nullptr;
     QPushButton *controlsToggleButton = nullptr;
@@ -927,8 +946,10 @@ private:
     ZoomSpectrumDialog *zoomSpectrumDialog = nullptr;
     ZoomDensityDialog *zoomDensityDialog = nullptr;
     TransmitDialog *transmitDialog = nullptr;
+    Ft8StationDialog *ft8StationDialog = nullptr;
     QTableWidget *gnssSatelliteTable = nullptr;
     QLabel *dsdNeoStatusLabel = nullptr;
+    QString lastDmrPrivacyCapabilityWarning;
 
     FrequencyControl *frequencyControl = nullptr;
     FrequencyControl *listeningFrequencyControl = nullptr;
@@ -955,6 +976,7 @@ private:
     QHash<QString, QPointer<QDialog>> dspBlockEditors;
     DigitalDecoder *digitalDecoder = nullptr;
     DsdNeoBridge *dsdNeoBridge = nullptr;
+    QThread *dsdNeoThread = nullptr;
     GopherTrunkBridge *gopherTrunkBridge = nullptr;
     QThread *digitalDecoderThread = nullptr;
     VideoProcessor *videoProcessor = nullptr;
@@ -1102,6 +1124,7 @@ private:
     bool experimentalGpuWaterfall = false;
     bool showSpectrumFps = false;
     bool showWaterfallFps = false;
+    bool showAudioQueueDropRows = false;
     bool showSpectrumPeakMeter = false;
     int spectrumPeakMeterStyle = 0;
     bool showExtendedSpectrumInfo = false;
@@ -1166,6 +1189,8 @@ private:
     QCheckBox *spectrumScienceAverageCheckbox = nullptr;
     ZeroSpanDialog *zeroSpanDialog = nullptr;
     ResearchAnalysisDialog *researchAnalysisDialog = nullptr;
+    WirelessLabDialog *wirelessLabDialog = nullptr;
+    PropagationLabDialog *propagationLabDialog = nullptr;
     DmrHunterSettings dmrHunterSettings;
     DmrHunterResult dmrHunterLastResult;
     std::vector<DmrHunterCandidate> dmrHunterCandidates;

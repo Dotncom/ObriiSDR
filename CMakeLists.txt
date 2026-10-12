@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 5.1.0)
+project(ObriiSDR VERSION 6.0.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -112,6 +112,39 @@ else()
     message(STATUS "VkFFT source not found or disabled; GPU FFT will fall back to FFTW.")
 endif()
 
+set_source_files_properties(third_party/tiny_aes/aes.c PROPERTIES LANGUAGE CXX)
+add_library(ObriiDmrCrypto STATIC src/digital/dmrprivacycodec.cpp third_party/tiny_aes/aes.c)
+target_compile_definitions(ObriiDmrCrypto PRIVATE AES256=1 CBC=0 CTR=0 ECB=1)
+target_include_directories(ObriiDmrCrypto PRIVATE src/digital src/utils third_party/tiny_aes)
+target_link_libraries(ObriiDmrCrypto PRIVATE Qt5::Core)
+
+add_library(ObriiItm STATIC
+    third_party/ntia_itm/src/ComputeDeltaH.cpp
+    third_party/ntia_itm/src/DiffractionLoss.cpp
+    third_party/ntia_itm/src/FindHorizons.cpp
+    third_party/ntia_itm/src/FreeSpaceLoss.cpp
+    third_party/ntia_itm/src/FresnelIntegral.cpp
+    third_party/ntia_itm/src/H0Function.cpp
+    third_party/ntia_itm/src/InitializeArea.cpp
+    third_party/ntia_itm/src/InitializePointToPoint.cpp
+    third_party/ntia_itm/src/InverseComplementaryCumulativeDistributionFunction.cpp
+    third_party/ntia_itm/src/itm_area.cpp
+    third_party/ntia_itm/src/itm_p2p.cpp
+    third_party/ntia_itm/src/KnifeEdgeDiffraction.cpp
+    third_party/ntia_itm/src/LinearLeastSquaresFit.cpp
+    third_party/ntia_itm/src/LineOfSightLoss.cpp
+    third_party/ntia_itm/src/LongleyRice.cpp
+    third_party/ntia_itm/src/QuickPfl.cpp
+    third_party/ntia_itm/src/SigmaHFunction.cpp
+    third_party/ntia_itm/src/SmoothEarthDiffraction.cpp
+    third_party/ntia_itm/src/TerrainRoughness.cpp
+    third_party/ntia_itm/src/TroposcatterLoss.cpp
+    third_party/ntia_itm/src/ValidateInputs.cpp
+    third_party/ntia_itm/src/Variability.cpp
+)
+set_target_properties(ObriiItm PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_include_directories(ObriiItm PUBLIC ${CMAKE_SOURCE_DIR}/third_party/ntia_itm/include)
+
 set(SOURCES
     src/main.cpp
     src/main.h
@@ -119,6 +152,7 @@ set(SOURCES
     src/mainwindow/main_controls.cpp
     src/mainwindow/main_devices.cpp
     src/mainwindow/main_digital.cpp
+    src/mainwindow/main_ft8.cpp
     src/mainwindow/main_dmr.cpp
     src/mainwindow/main_dmr_privacy.cpp
     src/mainwindow/main_dspflow.cpp
@@ -133,6 +167,21 @@ set(SOURCES
     src/mainwindow/main_localization.cpp
     src/mainwindow/main_localization_translations.cpp
     src/mainwindow/main_measurements.cpp
+    src/mainwindow/main_wireless.cpp
+    src/mainwindow/main_propagation.cpp
+    src/research/radiopropagation.cpp
+    src/research/radiopropagation.h
+    src/research/propagationlabdialog.cpp
+    src/research/propagationlabdialog.h
+    src/research/solarconditionswidget.cpp
+    src/research/solarconditionswidget.h
+    src/wireless/wirelesspackettools.cpp
+    src/wireless/wirelesspackettools.h
+    src/wireless/wirelesscaptureworker.cpp
+    src/wireless/wirelesscaptureworker.h
+    src/wireless/wirelesslabdialog.cpp
+    src/wireless/wirelesslabdialog.h
+    src/core/dmrcicdecimator.h
     src/mainwindow/main_network.cpp
     src/mainwindow/main_network_audio.cpp
     src/mainwindow/main_network_dialog.cpp
@@ -180,6 +229,14 @@ set(SOURCES
     src/digital/digitalvideohunterdetector.h
     src/digital/digitaldecoder.cpp
     src/digital/digitaldecoder.h
+    src/digital/dmrprivacyprocessor.cpp
+    src/digital/dmrprivacyprocessor.h
+    src/digital/ft8stationutils.cpp
+    src/digital/ft8countrycatalog.cpp
+    src/digital/ft8stationutils.h
+    src/digital/ft8stationdialog.cpp
+    src/digital/ft8stationservices.cpp
+    src/digital/ft8stationdialog.h
     src/digital/cwaudiodecoder.cpp
     src/digital/cwaudiodecoder.h
     src/backends/bladerfbackend.cpp
@@ -220,6 +277,8 @@ set(SOURCES
     src/research/receivercalibrationtable.h
     src/research/researchanalysisdialog.cpp
     src/research/researchanalysisdialog.h
+    src/research/iqconstellationpreview.cpp
+    src/research/iqconstellationpreview.h
     src/research/scientificsessiontools.cpp
     src/research/scientificsessiontools.h
     src/research/spectrumpersistencetools.cpp
@@ -238,6 +297,16 @@ set(SOURCES
     src/transmit/hackrftransmitterbackend.h
     src/transmit/transmitwaveformgenerator.cpp
     src/transmit/transmitwaveformgenerator.h
+    src/transmit/signallabgenerator.cpp
+    src/transmit/signallabgenerator.h
+    src/transmit/signallabdialog.cpp
+    src/transmit/signallabdialog.h
+    src/transmit/signallabpreview.cpp
+    src/transmit/signallabpreview.h
+    src/transmit/signallabconstellation3d.cpp
+    src/transmit/signallabconstellation3d.h
+    src/transmit/dmrtransmitencoder.cpp
+    src/transmit/dmrtransmitencoder.h
     src/transmit/transmitmediagenerator.cpp
     src/transmit/transmitmediagenerator.h
     src/transmit/sstvimageeditordialog.cpp
@@ -346,6 +415,7 @@ target_include_directories(ObriiSDR PRIVATE
     ${CMAKE_SOURCE_DIR}/src/ui
     ${CMAKE_SOURCE_DIR}/src/utils
     ${CMAKE_SOURCE_DIR}/src/transmit
+    ${CMAKE_SOURCE_DIR}/src/wireless
     ${CMAKE_SOURCE_DIR}/third_party/ft8_lib
     ${CMAKE_SOURCE_DIR}/FobosDMRVoiceBackend-gpl/include
     ${FOBOS_STANDARD_INCLUDE_DIR}
@@ -354,6 +424,8 @@ target_include_directories(ObriiSDR PRIVATE
 )
 
 target_link_libraries(ObriiSDR PRIVATE
+    ObriiDmrCrypto
+    ObriiItm
     ${FOBOS_STANDARD_LIBRARY}
     ${FOBOS_AGILE_LIBRARY}
     ${FFTW_FLOAT_LIBRARY}
@@ -417,6 +489,137 @@ if(FOBOS_HAS_VKFFT AND FOBOS_BUILD_GPU_FFT_SELFTEST)
 endif()
 
 if(FOBOS_BUILD_CW_SELFTEST)
+    add_executable(ObriiDiagnosticLoggingSelfTest
+        tools/diagnostic_logging_selftest.cpp src/core/appdiagnostics.cpp)
+    target_include_directories(ObriiDiagnosticLoggingSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+    target_link_libraries(ObriiDiagnosticLoggingSelfTest PRIVATE Qt5::Core)
+    if(WIN32)
+        target_link_libraries(ObriiDiagnosticLoggingSelfTest PRIVATE psapi)
+    endif()
+
+    add_executable(ObriiPropagationSelfTest
+        tools/propagation_selftest.cpp
+        src/research/radiopropagation.cpp
+        src/research/propagationlabdialog.cpp src/research/propagationlabdialog.h
+        src/utils/appsettingsutils.cpp
+        src/research/solarconditionswidget.cpp src/research/solarconditionswidget.h
+        src/digital/ft8stationutils.cpp src/digital/ft8countrycatalog.cpp
+        src/gnss/qthmapwidget.cpp src/gnss/qthmapwidget.h src/gnss/qthlocator.cpp
+        src/app_resources.qrc)
+    target_include_directories(ObriiPropagationSelfTest PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/core
+        ${CMAKE_SOURCE_DIR}/src/research ${CMAKE_SOURCE_DIR}/src/digital ${CMAKE_SOURCE_DIR}/src/gnss)
+    target_include_directories(ObriiPropagationSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src/utils)
+    target_link_libraries(ObriiPropagationSelfTest PRIVATE ObriiItm Qt5::Widgets Qt5::Network)
+    if(WIN32)
+        target_link_libraries(ObriiPropagationSelfTest PRIVATE winhttp)
+    endif()
+    if(MSVC)
+        target_compile_options(ObriiPropagationSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiDspFlowSelfTest
+        tools/dsp_flow_selftest.cpp
+        src/ui/dspflowpanel.cpp src/ui/dspflowpanel.h
+        src/ui/multivfowidget.cpp src/ui/multivfowidget.h
+        src/ui/dspresearchwidget.cpp
+        src/research/iqconstellationpreview.cpp
+        src/transmit/signallabconstellation3d.cpp
+        src/ui/finetunewidget.cpp src/ui/finetunewidget.h
+        src/ui/MyWaterfallWidget.cpp src/ui/MyWaterfallWidget.h
+        src/ui/waterfall3drenderer.cpp
+        src/utils/appsettingsutils.cpp
+        src/core/iqbuffer.cpp
+        src/scan/scanvisualassembler.cpp)
+    get_target_property(OBRII_DSP_TEST_INCLUDES ObriiSDR INCLUDE_DIRECTORIES)
+    target_include_directories(ObriiDspFlowSelfTest PRIVATE ${OBRII_DSP_TEST_INCLUDES})
+    target_link_libraries(ObriiDspFlowSelfTest PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets)
+    target_compile_definitions(ObriiDspFlowSelfTest PRIVATE OBRII_VFO_SELFTEST=1)
+    if(WIN32)
+        target_link_libraries(ObriiDspFlowSelfTest PRIVATE opengl32)
+    else()
+        target_link_libraries(ObriiDspFlowSelfTest PRIVATE OpenGL::GL Threads::Threads)
+    endif()
+    if(MSVC)
+        target_compile_options(ObriiDspFlowSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiSpectrumPipelineSelfTest
+        tools/spectrum_pipeline_selftest.cpp
+        src/utils/spectrumdisplayreducer.cpp)
+    target_include_directories(ObriiSpectrumPipelineSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src/utils)
+
+    add_executable(ObriiIqChannelizerSelfTest tools/iq_channelizer_selftest.cpp
+        src/core/iqchannelizer.cpp src/core/channelizerutils.cpp src/core/iqbuffer.cpp)
+    target_include_directories(ObriiIqChannelizerSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src/core ${CMAKE_SOURCE_DIR}/src/utils)
+    target_link_libraries(ObriiIqChannelizerSelfTest PRIVATE Qt5::Core)
+    target_compile_definitions(ObriiIqChannelizerSelfTest PRIVATE OBRII_IQBUFFER_SELFTEST=1)
+    if(NOT WIN32)
+        target_link_libraries(ObriiIqChannelizerSelfTest PRIVATE Threads::Threads)
+    endif()
+
+    add_executable(ObriiWirelessDmrSelfTest
+        tools/wireless_dmr_selftest.cpp
+        src/wireless/wirelesspackettools.cpp
+        src/wireless/wirelesscaptureworker.cpp
+        src/wireless/wirelesscaptureworker.h
+        src/wireless/wirelesslabdialog.cpp
+        src/wireless/wirelesslabdialog.h
+        src/digital/dsdneobridge.cpp
+        src/digital/dsdneobridge.h
+        src/utils/dmrprivacyutils.cpp
+    )
+    target_include_directories(ObriiWirelessDmrSelfTest PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/core ${CMAKE_SOURCE_DIR}/src/wireless
+        ${CMAKE_SOURCE_DIR}/src/digital)
+    target_include_directories(ObriiWirelessDmrSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src/utils)
+    target_link_libraries(ObriiWirelessDmrSelfTest PRIVATE Qt5::Core Qt5::Widgets Qt5::Network)
+    if(MSVC)
+        target_compile_options(ObriiWirelessDmrSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiGopherDmrSelfTest
+        tools/gopher_dmr_selftest.cpp
+        src/digital/gophertrunkbridge.cpp src/digital/gophertrunkbridge.h
+        src/digital/dmrdecoder.cpp src/digital/dmrdecoder.h)
+    target_include_directories(ObriiGopherDmrSelfTest PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/core ${CMAKE_SOURCE_DIR}/src/digital)
+    target_link_libraries(ObriiGopherDmrSelfTest PRIVATE Qt5::Core Qt5::Network)
+    if(MSVC)
+        target_compile_options(ObriiGopherDmrSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiDmrPipelineSelfTest
+        tools/dmr_pipeline_selftest.cpp
+        src/audio/audioprocessor.cpp src/audio/audioprocessor.h
+        src/audio/audiofilterchain.cpp
+        src/audio/recordingmanager.cpp src/audio/recordingmanager.h
+        src/audio/playbackmanager.cpp src/audio/playbackmanager.h
+        src/core/iqbuffer.cpp src/core/iqchannelizer.cpp src/core/channelizerutils.cpp)
+    get_target_property(OBRII_DMR_TEST_INCLUDES ObriiSDR INCLUDE_DIRECTORIES)
+    target_include_directories(ObriiDmrPipelineSelfTest PRIVATE ${OBRII_DMR_TEST_INCLUDES})
+    target_link_libraries(ObriiDmrPipelineSelfTest PRIVATE Qt5::Core ${FFTW_FLOAT_LIBRARY})
+    if(WIN32)
+        target_link_libraries(ObriiDmrPipelineSelfTest PRIVATE winmm)
+    else()
+        target_link_libraries(ObriiDmrPipelineSelfTest PRIVATE Threads::Threads)
+    endif()
+    if(MSVC)
+        target_compile_options(ObriiDmrPipelineSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiDmrPrivacySelfTest
+        tools/dmr_privacy_selftest.cpp
+        src/digital/dmrprivacyprocessor.cpp src/utils/dmrprivacyutils.cpp
+        src/digital/dmrdecoder.cpp)
+    target_include_directories(ObriiDmrPrivacySelfTest PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/digital ${CMAKE_SOURCE_DIR}/src/utils ${CMAKE_SOURCE_DIR}/src/core)
+    target_compile_definitions(ObriiDmrPrivacySelfTest PRIVATE OBRII_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(ObriiDmrPrivacySelfTest PRIVATE Qt5::Core ObriiDmrCrypto)
+    if(MSVC)
+        target_compile_options(ObriiDmrPrivacySelfTest PRIVATE /utf-8)
+    endif()
+
     add_executable(FobosCwDecoderSelfTest
         tools/cw_decoder_selftest.cpp
         src/digital/cwaudiodecoder.cpp
@@ -432,10 +635,22 @@ if(FOBOS_BUILD_CW_SELFTEST)
 
     add_executable(FobosTransmitSelfTest
         tools/transmit_waveform_selftest.cpp
+        src/digital/ft8stationutils.cpp
+        src/digital/ft8countrycatalog.cpp
+        src/app_resources.qrc
+        src/gnss/qthlocator.cpp
+        src/digital/ft8stationutils.h
         src/transmit/transmitwaveformgenerator.cpp
         src/transmit/transmitwaveformgenerator.h
+        src/transmit/signallabgenerator.cpp
+        src/transmit/signallabgenerator.h
+        src/transmit/dmrtransmitencoder.cpp
+        src/transmit/dmrtransmitencoder.h
+        src/digital/dmrvocoder.cpp
+        src/digital/dmrvocoder.h
         src/transmit/transmitmediagenerator.cpp
         src/transmit/transmitmediagenerator.h
+        src/transmit/transmitterbackend.cpp
         src/transmit/transmitterbackend.h
         src/digital/videoprocessor.cpp
         src/digital/videoprocessor.h
@@ -446,16 +661,36 @@ if(FOBOS_BUILD_CW_SELFTEST)
         third_party/ft8_lib/ft8/text.c
     )
     target_include_directories(FobosTransmitSelfTest PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/gnss
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/src/core
         ${CMAKE_SOURCE_DIR}/src/digital
         ${CMAKE_SOURCE_DIR}/src/transmit
         ${CMAKE_SOURCE_DIR}/src/utils
         ${CMAKE_SOURCE_DIR}/third_party/ft8_lib
+        ${CMAKE_SOURCE_DIR}/FobosDMRVoiceBackend-gpl/include
+        ${FFTW_INCLUDE_DIR}
     )
-    target_link_libraries(FobosTransmitSelfTest PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets)
+    target_link_libraries(FobosTransmitSelfTest PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets ${FFTW_FLOAT_LIBRARY})
+    if(NOT WIN32)
+        target_link_libraries(FobosTransmitSelfTest PRIVATE Threads::Threads)
+    endif()
     if(MSVC)
         target_compile_options(FobosTransmitSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiSignalLabSelfTest tools/signal_lab_selftest.cpp
+        src/transmit/signallabgenerator.cpp src/transmit/signallabpreview.cpp
+        src/transmit/signallabconstellation3d.cpp
+        src/research/iqconstellationpreview.cpp)
+    target_include_directories(ObriiSignalLabSelfTest PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/core ${CMAKE_SOURCE_DIR}/src/transmit ${CMAKE_SOURCE_DIR}/src/research ${FFTW_INCLUDE_DIR})
+    target_link_libraries(ObriiSignalLabSelfTest PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets ${FFTW_FLOAT_LIBRARY})
+    if(NOT WIN32)
+        target_link_libraries(ObriiSignalLabSelfTest PRIVATE Threads::Threads)
+    endif()
+    if(MSVC)
+        target_compile_options(ObriiSignalLabSelfTest PRIVATE /utf-8)
     endif()
 
     add_executable(FobosSstvDecoderSelfTest

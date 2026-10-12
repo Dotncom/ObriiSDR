@@ -2177,6 +2177,8 @@ bool typeHasInput(const QString &type) {
         QStringLiteral("standard_scan"), QStringLiteral("listening_scan"), QStringLiteral("qth_map"),
         QStringLiteral("gpio"), QStringLiteral("transmitter"), QStringLiteral("presets"),
         QStringLiteral("calibration"), QStringLiteral("spectrum_replay"),
+        QStringLiteral("wireless_lab"),
+        QStringLiteral("radio_propagation"),
         QStringLiteral("application_settings")
     };
     return !noInput.contains(type);
@@ -2192,6 +2194,8 @@ bool typeHasOutput(const QString &type) {
         QStringLiteral("fft"), QStringLiteral("decoder"), QStringLiteral("second_spectrum"),
         QStringLiteral("spectrum_measurement"), QStringLiteral("zoom_spectrum"), QStringLiteral("zero_span"),
         QStringLiteral("research_analysis"), QStringLiteral("oscilloscope_view"),
+        QStringLiteral("wireless_lab"),
+        QStringLiteral("radio_propagation"),
         QStringLiteral("constellation_view"), QStringLiteral("eye_diagram_view"),
         QStringLiteral("digital_sync_view"),
         QStringLiteral("spur_suppression"),
@@ -2242,6 +2246,8 @@ QStringList allBlockTypes() {
             QStringLiteral("listening_scan"), QStringLiteral("spectrum_measurement"),
             QStringLiteral("zoom_spectrum"), QStringLiteral("zoom_density"), QStringLiteral("zero_span"),
             QStringLiteral("research_analysis"), QStringLiteral("research_interference"),
+            QStringLiteral("wireless_lab"),
+            QStringLiteral("radio_propagation"),
             QStringLiteral("research_statistics"), QStringLiteral("research_iq"),
             QStringLiteral("research_dual_input"), QStringLiteral("research_analyzer"),
             QStringLiteral("research_density"), QStringLiteral("research_masks"),
@@ -2523,6 +2529,11 @@ public:
         return settings_.value(QStringLiteral("workspaceGroupLocked")).toBool(grouped);
     }
     bool isVisualBlock() const { return miniVfoDisplay_ || researchDisplay_ || workspaceDisplay_; }
+    bool researchCameraAt(const QPointF &scenePosition) const {
+        return researchDisplay_ && researchProxy_ &&
+               !researchDisplay_->testAttribute(Qt::WA_TransparentForMouseEvents) &&
+               researchProxy_->contains(researchProxy_->mapFromScene(scenePosition));
+    }
     qreal blockWidth() const {
         if (type_ == QStringLiteral("fine_tune_control")) return kFineTuneBlockWidth;
         if (isVisualBlock()) return visualWidth_;
@@ -3540,6 +3551,7 @@ public:
                                        [this](double deltaHz) { if (fineTuneDelta) fineTuneDelta(deltaHz); },
                                        vfoIndex, workspaceCallbacks);
         addItem(block);
+        frameRoutesDirty_ = true;
         if (block->isWorkspaceDisplayBlock()) {
             block->setWorkspaceAnalogPeakMeterEnabled(workspaceAnalogPeakMeterEnabled_);
             block->setWorkspaceAnalogPeakMeterStyle(workspaceAnalogPeakMeterStyle_);
@@ -3582,6 +3594,7 @@ public:
         for (DspConnectionItem *edge : oldInputs) delete edge;
         auto *edge = new DspConnectionItem(source, target);
         addItem(edge);
+        frameRoutesDirty_ = true;
         updateConnectionContainer(edge);
         refreshResearchDisplays(); refreshWorkspaceDisplayBindings();
         if (notify) notifyChanged();
@@ -3630,6 +3643,10 @@ public:
     }
 
     void clearGraph(bool notify = true) {
+        frameRoutesDirty_ = true;
+        workspaceFrameBlocks_.clear();
+        vfoFrameBlocks_.clear();
+        vfoFrameChannels_.clear();
         cancelPendingConnection();
         const auto dockedPanels = dockedSettingsPanels_;
         dockedSettingsPanels_.clear();
@@ -3812,7 +3829,21 @@ public:
         relayoutSectorWidgets();
         notifyChanged();
     }
-    bool hasWorkspaceDisplayFrames() const { return hasWorkspaceDisplayBlocks(); }
+    bool hasWorkspaceDisplayFrames() const {
+        ensureFrameRoutes();
+        return !workspaceFrameBlocks_.isEmpty();
+    }
+    int workspaceSpectrumTargetBins() const {
+        ensureFrameRoutes();
+        int width = 512;
+        for (DspBlockItem *block : workspaceFrameBlocks_) {
+            const int blockWidth = nativeWorkspaceView_
+                ? nativeWorkspaceView_->mapFromScene(block->sceneBoundingRect()).boundingRect().width()
+                : int(block->visualWidth());
+            width = (std::max)(width, blockWidth);
+        }
+        return std::clamp(width, 512, 16384);
+    }
 
     void updateWorkspaceSpectrum(const std::vector<float> &frequencies,
                                  const std::vector<float> &levels,
@@ -3821,12 +3852,10 @@ public:
                                  double sampleRate,
                                  double bandwidthHz,
                                  int modulationType) {
-        for (QGraphicsItem *item : items()) {
-            auto *block = dynamic_cast<DspBlockItem *>(item);
-            if (block && block->blockType().startsWith(QStringLiteral("workspace_"))) {
-                block->setWorkspaceSpectrum(frequencies, levels, centerHz, listeningHz, sampleRate,
-                                            bandwidthHz, modulationType);
-            }
+        ensureFrameRoutes();
+        for (DspBlockItem *block : workspaceFrameBlocks_) {
+            block->setWorkspaceSpectrum(frequencies, levels, centerHz, listeningHz, sampleRate,
+                                        bandwidthHz, modulationType);
         }
     }
 
@@ -4231,36 +4260,23 @@ public:
     }
 
     bool hasMultiVfoDisplayBlocks() const {
-        for (QGraphicsItem *item : items()) {
-            const auto *block = dynamic_cast<const DspBlockItem *>(item);
-            if (block && (block->blockType() == QStringLiteral("vfo_spectrum") ||
-                          block->blockType() == QStringLiteral("vfo_waterfall"))) {
-                return true;
-            }
-        }
-        return false;
+        ensureFrameRoutes();
+        return !vfoFrameBlocks_.isEmpty();
     }
 
     void updateMultiVfoSpectrum(const QString &configurationJson,
                                 const std::vector<float> &frequencies,
                                 const std::vector<float> &levels) {
-        const QJsonDocument document = QJsonDocument::fromJson(configurationJson.toUtf8());
-        const QJsonArray channels = document.object().value(QStringLiteral("channels")).toArray();
+        if (configurationJson != cachedVfoConfiguration_) {
+            cachedVfoConfiguration_ = configurationJson;
+            cachedVfoChannels_ = QJsonDocument::fromJson(configurationJson.toUtf8())
+                                     .object().value(QStringLiteral("channels")).toArray();
+        }
+        const QJsonArray &channels = cachedVfoChannels_;
         if (channels.isEmpty()) return;
-        for (QGraphicsItem *item : items()) {
-            auto *display = dynamic_cast<DspBlockItem *>(item);
-            if (!display || (display->blockType() != QStringLiteral("vfo_spectrum") &&
-                             display->blockType() != QStringLiteral("vfo_waterfall"))) continue;
-            int channelIndex = -1;
-            for (QGraphicsItem *edgeItem : items()) {
-                auto *edge = dynamic_cast<DspConnectionItem *>(edgeItem);
-                if (edge && !edge->isControlConnection() && edge->target() == display && edge->source() &&
-                    edge->source()->blockType() == QStringLiteral("vfo_channel")) {
-                    channelIndex = edge->source()->vfoIndex();
-                    break;
-                }
-            }
-            if (channelIndex < 0) channelIndex = display->vfoIndex();
+        ensureFrameRoutes();
+        for (DspBlockItem *display : vfoFrameBlocks_) {
+            const int channelIndex = vfoFrameChannels_.value(display, display->vfoIndex());
             if (channelIndex < 0) {
                 display->setMiniVfoStatus(ukrainian
                     ? QStringLiteral("Під'єднайте блок Канал VFO")
@@ -4611,6 +4627,17 @@ protected:
         painter->drawLines(majorLines.constData(), majorLines.size());
     }
     void mousePressEvent(QGraphicsSceneMouseEvent *event) override {
+        if (event->modifiers().testFlag(Qt::ControlModifier)) {
+            for (QGraphicsItem *item = itemAt(event->scenePos(), QTransform()); item; item = item->parentItem()) {
+                auto *block = dynamic_cast<DspBlockItem *>(item);
+                if (block && block->researchCameraAt(event->scenePos())) {
+                    draggedBlock_ = nullptr;
+                    dragSelection_.clear();
+                    QGraphicsScene::mousePressEvent(event);
+                    return;
+                }
+            }
+        }
         if (event->button() == Qt::LeftButton && beginWorkspaceGroupDividerDrag(event->scenePos())) {
             clearSelection();
             event->accept();
@@ -4751,6 +4778,10 @@ protected:
 
     void mouseDoubleClickEvent(QGraphicsSceneMouseEvent *event) override {
         if (auto *block = blockAtBody(event->scenePos())) {
+            if (event->modifiers().testFlag(Qt::ControlModifier) && block->researchCameraAt(event->scenePos())) {
+                QGraphicsScene::mouseDoubleClickEvent(event);
+                return;
+            }
             if (block->isMiniControlBlock()) {
                 event->accept();
                 return;
@@ -6020,13 +6051,47 @@ private:
         pendingSource_ = nullptr;
         if (temporaryConnection_) { delete temporaryConnection_; temporaryConnection_ = nullptr; }
     }
-    void notifyChanged() { if (changed) changed(); }
+    void ensureFrameRoutes() const {
+        if (!frameRoutesDirty_) return;
+        workspaceFrameBlocks_.clear();
+        vfoFrameBlocks_.clear();
+        vfoFrameChannels_.clear();
+        const auto snapshot = items();
+        for (QGraphicsItem *item : snapshot) {
+            auto *block = dynamic_cast<DspBlockItem *>(item);
+            if (!block) continue;
+            if (block->isWorkspaceDisplayBlock()) workspaceFrameBlocks_.append(block);
+            if (block->blockType() == QStringLiteral("vfo_spectrum") ||
+                block->blockType() == QStringLiteral("vfo_waterfall"))
+                vfoFrameBlocks_.append(block);
+        }
+        for (QGraphicsItem *item : snapshot) {
+            auto *edge = dynamic_cast<DspConnectionItem *>(item);
+            if (edge && !edge->isControlConnection() && edge->target() && edge->source() &&
+                edge->source()->blockType() == QStringLiteral("vfo_channel") &&
+                !vfoFrameChannels_.contains(edge->target())) {
+                const int index = edge->source()->vfoIndex();
+                if (index >= 0) vfoFrameChannels_.insert(edge->target(), index);
+            }
+        }
+        frameRoutesDirty_ = false;
+    }
+    void notifyChanged() {
+        frameRoutesDirty_ = true;
+        if (changed) changed();
+    }
     void setStatus(const QString &status) { if (statusChanged) statusChanged(status); }
 
     DspBlockItem *pendingSource_ = nullptr;
     DspBlockItem *pressedControl_ = nullptr;
     QPointF controlPressPosition_;
     QGraphicsPathItem *temporaryConnection_ = nullptr;
+    mutable bool frameRoutesDirty_ = true;
+    mutable QList<DspBlockItem *> workspaceFrameBlocks_;
+    mutable QList<DspBlockItem *> vfoFrameBlocks_;
+    mutable QHash<DspBlockItem *, int> vfoFrameChannels_;
+    QString cachedVfoConfiguration_;
+    QJsonArray cachedVfoChannels_;
     QRectF workspaceRect_{-800.0, -450.0, 1600.0, 900.0};
     int sectorColumns_ = 1;
     QVector<int> columnRowCounts_{1};
@@ -6527,7 +6592,7 @@ void DspFlowPanel::setFineTuneRangeHz(double rangeHz) {
 }
 
 bool DspFlowPanel::shouldUpdateMultiVfoSpectrum() {
-    if (!scene_ || !isVisible() || !scene_->hasMultiVfoDisplayBlocks()) {
+    if (!scene_ || !isVisible() || isMinimized()) {
         return false;
     }
     constexpr qint64 MinimumUpdateIntervalMs = 33;
@@ -6536,16 +6601,20 @@ bool DspFlowPanel::shouldUpdateMultiVfoSpectrum() {
         return false;
     }
     multiVfoSpectrumUpdateTimer_.restart();
-    return true;
+    return scene_->hasMultiVfoDisplayBlocks();
 }
 
 bool DspFlowPanel::shouldUpdateWorkspaceSpectrum() {
-    if (!scene_ || !isVisible() || !scene_->hasWorkspaceDisplayFrames()) return false;
+    if (!scene_ || !isVisible() || isMinimized()) return false;
     constexpr qint64 MinimumUpdateIntervalMs = 16;
     if (workspaceSpectrumUpdateTimer_.isValid() &&
         workspaceSpectrumUpdateTimer_.elapsed() < MinimumUpdateIntervalMs) return false;
     workspaceSpectrumUpdateTimer_.restart();
-    return true;
+    return scene_->hasWorkspaceDisplayFrames();
+}
+
+int DspFlowPanel::workspaceSpectrumTargetBins() const {
+    return scene_ && isVisible() && !isMinimized() ? scene_->workspaceSpectrumTargetBins() : 0;
 }
 
 void DspFlowPanel::updateWorkspaceSpectrum(const std::vector<float> &frequencies,
@@ -6555,7 +6624,7 @@ void DspFlowPanel::updateWorkspaceSpectrum(const std::vector<float> &frequencies
                                            double sampleRate,
                                            double bandwidthHz,
                                            int modulationType) {
-    if (scene_ && isVisible()) {
+    if (scene_ && isVisible() && !isMinimized()) {
         scene_->updateWorkspaceSpectrum(frequencies, levels, centerHz, listeningHz, sampleRate,
                                         bandwidthHz, modulationType);
     }
@@ -6564,7 +6633,8 @@ void DspFlowPanel::updateWorkspaceSpectrum(const std::vector<float> &frequencies
 void DspFlowPanel::updateMultiVfoSpectrum(const QString &configurationJson,
                                           const std::vector<float> &frequencies,
                                           const std::vector<float> &levels) {
-    if (scene_ && isVisible()) scene_->updateMultiVfoSpectrum(configurationJson, frequencies, levels);
+    if (scene_ && isVisible() && !isMinimized())
+        scene_->updateMultiVfoSpectrum(configurationJson, frequencies, levels);
 }
 
 void DspFlowPanel::addMultiVfoBranch(int channelIndex) {
@@ -6716,6 +6786,8 @@ QString DspFlowPanel::blockTitle(const QString &type) const {
     if (type == QStringLiteral("zoom_density")) return ukrainian_ ? QStringLiteral("Щільність виділеної смуги") : QStringLiteral("Selected-band density");
     if (type == QStringLiteral("zero_span")) return QStringLiteral("Zero-span");
     if (type == QStringLiteral("research_analysis")) return ukrainian_ ? QStringLiteral("Дослідницький аналіз") : QStringLiteral("Research analysis");
+    if (type == QStringLiteral("wireless_lab")) return ukrainian_ ? QStringLiteral("Бездротова лабораторія (бета)") : QStringLiteral("Wireless lab (beta)");
+    if (type == QStringLiteral("radio_propagation")) return ukrainian_ ? QStringLiteral("Радіопоширення / КХ") : QStringLiteral("Radio propagation / HF");
     if (type == QStringLiteral("research_interference")) return ukrainian_ ? QStringLiteral("Гребінки та завади") : QStringLiteral("Interference and combs");
     if (type == QStringLiteral("research_statistics")) return ukrainian_ ? QStringLiteral("Статистика сигналу") : QStringLiteral("Signal statistics");
     if (type == QStringLiteral("research_iq")) return ukrainian_ ? QStringLiteral("Контроль IQ") : QStringLiteral("IQ diagnostics");

@@ -7,6 +7,7 @@
 #include <vector>
 
 class QTimer;
+class SignalLabConstellation3DWidget;
 
 class DspResearchWidget final : public QWidget {
 public:
@@ -27,6 +28,7 @@ protected:
 
 private:
     void refreshSnapshot();
+    void updateConstellationView();
     void drawGrid(QPainter &painter, const QRectF &plot) const;
     void drawOscilloscope(QPainter &painter, const QRectF &plot) const;
     void drawConstellation(QPainter &painter, const QRectF &plot) const;
@@ -36,6 +38,7 @@ private:
 
     Mode mode_;
     QTimer *timer_ = nullptr;
+    SignalLabConstellation3DWidget *constellation3D_ = nullptr;
     QJsonObject settings_;
     std::vector<float> iSamples_;
     std::vector<float> qSamples_;

@@ -1859,13 +1859,25 @@ void DataProcessor::updateNetworkIqSettings(const RadioSettings &settings, bool 
 }
 
 void DataProcessor::configureNetworkIqStreaming(const RadioSettings &settings, bool emitFrames, bool channelizeFrames) {
+    bool reset;
     {
         std::lock_guard<std::mutex> lock(networkIqSettingsMutex);
+        const RadioSettings &old = networkIqSettings;
+        reset = old.sampleRate != settings.sampleRate || old.centerFrequency != settings.centerFrequency ||
+                old.listeningFrequency != settings.listeningFrequency || old.inputMode != settings.inputMode ||
+                old.modulationType != settings.modulationType || old.bandwidth != settings.bandwidth ||
+                old.dmrBasebandSampleRate != settings.dmrBasebandSampleRate ||
+                old.hfNoiseCancelDepth != settings.hfNoiseCancelDepth ||
+                old.hfNoiseCancelRefGainDb != settings.hfNoiseCancelRefGainDb ||
+                old.hfNoiseCancelRefDelayNs != settings.hfNoiseCancelRefDelayNs ||
+                old.hfNoiseCancelRefTiltDb != settings.hfNoiseCancelRefTiltDb;
         networkIqSettings = settings;
     }
-    requestedEmitIqFrames = emitFrames;
-    requestedChannelizeIqFrames = channelizeFrames;
-    networkIqResetRequested = true;
+    const bool wasEnabled = requestedEmitIqFrames.exchange(emitFrames);
+    const bool wasChannelized = requestedChannelizeIqFrames.exchange(channelizeFrames);
+    if (reset || (!wasEnabled && emitFrames) || wasChannelized != channelizeFrames) {
+        networkIqResetRequested = true;
+    }
 }
 
 void DataProcessor::resetNetworkIqState() {
@@ -1923,7 +1935,7 @@ void DataProcessor::emitFullIqFrame(const float *samples, std::size_t floatCount
 
     emit iqFrameReady(quantized,
                       requestedSampleRate.load(),
-                      static_cast<int>(floatCount / FLOATS_PER_IQ_SAMPLE));
+                      static_cast<int>(floatCount / FLOATS_PER_IQ_SAMPLE), false);
 }
 
 void DataProcessor::emitChannelIqFrame(const float *samples,
@@ -1959,7 +1971,7 @@ void DataProcessor::emitChannelIqFrame(const float *samples,
                 emit iqFrameReady(networkIqFrameBuffer,
                                   result.outputRate,
                                   networkIqFrameBuffer.size() /
-                                      (FLOATS_PER_IQ_SAMPLE * static_cast<int>(sizeof(qint16))));
+                                      (FLOATS_PER_IQ_SAMPLE * static_cast<int>(sizeof(qint16))), true);
                 networkIqFrameBuffer.clear();
             }
         }
@@ -2171,7 +2183,7 @@ void DataProcessor::emitChannelIqFrame(const float *samples,
         if (networkIqFrameBuffer.size() >= frameSamples * FLOATS_PER_IQ_SAMPLE * static_cast<int>(sizeof(qint16))) {
             emit iqFrameReady(networkIqFrameBuffer,
                               outputRate,
-                              networkIqFrameBuffer.size() / (FLOATS_PER_IQ_SAMPLE * static_cast<int>(sizeof(qint16))));
+                              networkIqFrameBuffer.size() / (FLOATS_PER_IQ_SAMPLE * static_cast<int>(sizeof(qint16))), true);
             networkIqFrameBuffer.clear();
         }
     }

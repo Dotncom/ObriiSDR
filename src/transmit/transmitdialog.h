@@ -4,6 +4,7 @@
 #include "transmitterbackend.h"
 #include "hackrftransmitterbackend.h"
 #include "transmitwaveformgenerator.h"
+#include "signallabgenerator.h"
 
 #include <QDialog>
 #include <QElapsedTimer>
@@ -11,10 +12,13 @@
 #include <QVector>
 
 #include <complex>
+#include <functional>
+#include <memory>
 
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
+class QGroupBox;
 class QLabel;
 class QPlainTextEdit;
 class QProgressBar;
@@ -24,6 +28,8 @@ class QTimer;
 class QToolButton;
 class QIODevice;
 class TxWaveformPreviewWidget;
+class DmrTransmitEncoder;
+class SignalLabDialog;
 
 #ifdef FOBOSAPP_HAS_QT_MULTIMEDIA
 class QAudioInput;
@@ -34,7 +40,14 @@ public:
     explicit TransmitDialog(const QString &language, QWidget *parent = nullptr);
     ~TransmitDialog() override;
 
+    using HackRfReceiverUseChecker = std::function<bool(int)>;
+
     void setLanguage(const QString &language);
+    void setHackRfReceiverUseChecker(HackRfReceiverUseChecker checker);
+    void prepareFt8Message(const QString &message, double dialFrequencyHz,
+                           double audioFrequencyHz, int slotParity);
+    bool startPreparedFt8Automatically(QString *error = nullptr);
+    void cancelAutomaticFt8();
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -53,18 +66,26 @@ private:
     void populateAudioInputs();
     void populateHackRfDevices();
     void updateModeUi();
+    void applyModulationPreset(TxModulation modulation);
     void updateTexts();
     void loadSettings();
     void saveSettings() const;
     void startTransmission();
+    void startLaboratoryTransmission(const SignalLabGenerationResult &result);
     void stopTransmission(const QString &reason = QString());
     void startTextSimulation(const TxConfiguration &configuration);
+    void beginTextWaveform();
     void startMicrophoneSimulation(TxConfiguration configuration);
     void startManualCw(TxConfiguration configuration);
     void startAudioFile(TxConfiguration configuration);
     void startImageTransmission(TxConfiguration configuration);
     void readMicrophone();
     void processLiveSource();
+    QVector<std::complex<float>> modulateActiveAudio(const QVector<float> &audio,
+                                                     QString *error);
+    bool configureDmrEncoder(const TxConfiguration &configuration, QString *error);
+    bool beginDmrCall(QString *error);
+    bool finishDmrCall(QString *error);
     void setLiveKey(bool pressed);
     void chooseMediaFile();
     void editMediaImage();
@@ -72,9 +93,11 @@ private:
     void exportIq();
     void setStatus(const QString &message, bool error = false);
     bool hackRfSelected() const;
+    bool selectedHackRfBusyForReception() const;
     TransmitterBackend *selectedBackend();
 
     QString language;
+    HackRfReceiverUseChecker hackRfReceiverUseChecker;
     SimulatorTransmitterBackend simulator;
     HackRfTransmitterBackend hackRf;
     TransmitterBackend *activeBackend = nullptr;
@@ -82,6 +105,9 @@ private:
     TxModulatorState modulatorState;
     TxBandwidthLimiterState bandwidthLimiterState;
     QVector<std::complex<float>> bandwidthLimitedIq;
+    std::unique_ptr<DmrTransmitEncoder> dmrEncoder;
+    bool dmrCallActive = false;
+    bool dmrFinishing = false;
 
     QComboBox *backendCombo = nullptr;
     QComboBox *deviceCombo = nullptr;
@@ -89,6 +115,7 @@ private:
     QComboBox *sourceCombo = nullptr;
     QComboBox *mediaModeCombo = nullptr;
     QComboBox *audioInputCombo = nullptr;
+    QComboBox *ft8SlotCombo = nullptr;
     QToolButton *audioRefreshButton = nullptr;
     QComboBox *sampleRateCombo = nullptr;
     QComboBox *deviceSampleRateCombo = nullptr;
@@ -103,11 +130,22 @@ private:
     QDoubleSpinBox *deviationSpin = nullptr;
     QDoubleSpinBox *toneSpin = nullptr;
     QSpinBox *cwWpmSpin = nullptr;
+    QDoubleSpinBox *symbolRateSpin = nullptr;
+    QDoubleSpinBox *gaussianBtSpin = nullptr;
+    QSpinBox *askDepthSpin = nullptr;
+    QCheckBox *invertDataCheck = nullptr;
     QCheckBox *ft8UtcCheck = nullptr;
+    QGroupBox *dmrBox = nullptr;
+    QSpinBox *dmrColorCodeSpin = nullptr;
+    QComboBox *dmrTimeslotCombo = nullptr;
+    QSpinBox *dmrSourceIdSpin = nullptr;
+    QSpinBox *dmrDestinationIdSpin = nullptr;
+    QComboBox *dmrCallTypeCombo = nullptr;
     QPlainTextEdit *messageEdit = nullptr;
     QPushButton *startButton = nullptr;
     QPushButton *stopButton = nullptr;
     QPushButton *exportButton = nullptr;
+    QPushButton *signalLabButton = nullptr;
     QPushButton *mediaBrowseButton = nullptr;
     QPushButton *mediaEditButton = nullptr;
     QPushButton *mediaPlayButton = nullptr;
@@ -133,15 +171,27 @@ private:
     QLabel *signalBandwidthLabel = nullptr;
     QLabel *toneLabel = nullptr;
     QLabel *cwSpeedLabel = nullptr;
+    QLabel *symbolRateLabel = nullptr;
+    QLabel *gaussianBtLabel = nullptr;
+    QLabel *askDepthLabel = nullptr;
+    QLabel *dmrColorCodeLabel = nullptr;
+    QLabel *dmrTimeslotLabel = nullptr;
+    QLabel *dmrSourceIdLabel = nullptr;
+    QLabel *dmrDestinationIdLabel = nullptr;
+    QLabel *dmrCallTypeLabel = nullptr;
     QLabel *statusLabel = nullptr;
     QLabel *statsLabel = nullptr;
     QProgressBar *progressBar = nullptr;
     TxWaveformPreviewWidget *preview = nullptr;
+    SignalLabDialog *signalLabDialog = nullptr;
     QTimer *progressTimer = nullptr;
+    QTimer *ft8StartTimer = nullptr;
     QTimer *sourceTimer = nullptr;
     QElapsedTimer elapsedTimer;
     double plannedDurationSeconds = 0.0;
+    QVector<std::complex<float>> pendingTextIq;
     bool textSimulation = false;
+    bool automaticFt8Active = false;
     bool pttMode = false;
     bool liveKeyPressed = false;
     bool mediaPaused = false;

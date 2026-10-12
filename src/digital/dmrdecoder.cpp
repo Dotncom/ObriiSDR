@@ -1766,21 +1766,7 @@ DmrDecoder::Result DmrDecoder::processPcmFrame(const QByteArray &pcmData, int sa
 
     if (hit.pattern && std::strcmp(hit.pattern->kind, "voice") == 0) {
         scheduleVoiceEmbBursts(hit, cach);
-        PendingEmb syncPayload;
-        syncPayload.anchorSample = hit.absoluteSample;
-        syncPayload.absoluteSample = hit.absoluteSample;
-        syncPayload.burstIndex = 0;
-        syncPayload.cadenceSymbols = DMR_SAME_TIMESLOT_CADENCE_SYMBOLS;
-        syncPayload.inverted = hit.inverted;
-        syncPayload.cachDecoded = cach.decoded;
-        syncPayload.cachChannel = cach.channel;
-        syncPayload.cachLcss = cach.lcss;
-        syncPayload.cachMapName = cach.mapName;
-        syncPayload.cachPayloadBits = cach.payloadBits;
-        if (acceptsKnownVoicePayloadCadence(syncPayload) &&
-            measureSyncLevels(hit, syncPayload.minLevel, syncPayload.maxLevel)) {
-            queueVoicePayloadFrames(syncPayload, hit.inverted, 0, 0.625f);
-        }
+        processPendingVoiceEmb();
     }
     if (hit.score > bestScoreSinceReport || hit.qualityDb > bestQualitySinceReport) {
         bestScoreSinceReport = hit.score;
@@ -3260,7 +3246,8 @@ void DmrDecoder::scheduleVoiceEmbBursts(const SyncHit &hit, const CachInfo &anch
     const std::array<int, 1> cadenceCandidates = {DMR_SAME_TIMESLOT_CADENCE_SYMBOLS};
 
     for (int cadenceSymbols : cadenceCandidates) {
-        for (int i = 1; i <= voiceEmbBurstsAfterSync; ++i) {
+        // A's trailing payload may arrive in the next PCM block, just like B-F.
+        for (int i = 0; i <= voiceEmbBurstsAfterSync; ++i) {
             PendingEmb pending;
             pending.anchorSample = hit.absoluteSample;
             pending.absoluteSample =
@@ -3322,6 +3309,11 @@ void DmrDecoder::processPendingVoiceEmb() {
             continue;
         }
 
+        if (pending.burstIndex == 0) {
+            // A contains voice sync, not EMB. The validated anchor supplies timing.
+            queueVoicePayloadFrames(pending, pending.inverted, 0, 0.625f);
+            continue;
+        }
         const EmbInfo emb = decodeVoiceEmbAt(pending);
         if (!emb.decoded) {
             ++embFailSinceReport;
@@ -4470,6 +4462,7 @@ void DmrDecoder::queueVoicePayloadFrames(const PendingEmb &pending,
                                          bool inverted,
                                          int timingOffset,
                                          float slicerRatio) {
+    if (!voicePayloadEnabled) return;
     if (shouldRejectVoicePayloadCadence(pending.cadenceSymbols)) {
         return;
     }
@@ -5000,6 +4993,20 @@ void DmrDecoder::queueVoicePayloadFrames(const PendingEmb &pending,
                                            DMR_INVALID_AMBE_FEC_ERRORS});
             ++ambeFecDecodeFailSinceReport;
         }
+        DmrAmbePayload &payload = pendingAmbePayloads.back();
+        payload.burstIndex = pending.burstIndex;
+        payload.frameIndex = i;
+        payload.superframeSample = pending.anchorSample;
+        payload.superframeSamples = quint64(6 * pending.cadenceSymbols * samplesPerSymbol);
+        // Use trusted Voice LC service options. EMB PI is not a reliable
+        // clear/encrypted discriminator for Motorola enhanced privacy.
+        if (lastVoiceService.valid && pending.absoluteSample >= lastVoiceService.absoluteSample &&
+            pending.absoluteSample - lastVoiceService.absoluteSample <= payload.superframeSamples * 2)
+            payload.privacyIndicator = (lastVoiceService.serviceOptions & 0x40) != 0 ? 1 : 0;
+        payload.timeslot = pending.cachDecoded ? pending.cachChannel : currentServiceTimeslot();
+        if (labHintsEnabled && labExpectedTimeslot >= 1 && labExpectedTimeslot <= 2)
+            payload.timeslot = labExpectedTimeslot;
+        if (payload.timeslot < 1 || payload.timeslot > 2) payload.timeslot = 0;
     }
     while (pendingAmbeFrames.size() > 360) {
         pendingAmbeFrames.pop_front();

@@ -4,21 +4,29 @@ Obrii SDR is a wideband SDR receiver and research workstation, optimized first
 for RigExpert Fobos SDR hardware while also supporting additional receiver
 backends.
 The current packaged release is Windows-first, with active Linux/Raspberry Pi
-support and a separately maintained Android USB/network client. Version 5.1.0
-adds experimental native HackRF transmission, a substantially expanded DSP
-workspace, selected-band density and scientific-session tools, while retaining
+support and a separately maintained Android USB/network client. Version 6.0.0
+adds RF-tested known-key Motorola ARC4/AES-256 receive decryption, repaired DMR
+backend transport, an FT8 station manager, a parametric signal generator,
+terrain-based radio propagation and a beta wireless packet laboratory, while retaining
 the graphical DSP path designer, live audio-filter chain, Multi-VFO views, and
-hardware-tested native HackRF RX backend. It keeps
+hardware-tested native HackRF RX backend. Live I/Q/time 3D constellations and
+optional radial surfaces are available in Signal Lab, research and DSP widgets.
+It keeps
 the high-rate Fobos path, native RTL-SDR/rtl_tcp, optional SoapySDR, external
 NMEA/u-blox GNSS, SDR GNSS acquisition diagnostics, 2D/3D waterfall and replay,
 Zoom FFT, CW/SSTV decoding, DMR experiments, and a hardware-independent transmit
-laboratory with simulator/IQ export and an experimental, explicitly armed native
-HackRF output. FFTW/VkFFT selection, exact Hz-per-point FFT sizes, stale-frame
+laboratory with simulator/IQ export, experimental DMR Tier II direct voice generation,
+and an experimental, explicitly armed native HackRF output. FFTW/VkFFT selection, exact Hz-per-point FFT sizes, stale-frame
 dropping, and multistage channel extraction keep the wideband desktop and
 Raspberry paths responsive. Android is released separately only when its
 package changes.
 
 ## Windows Release Package
+
+Release 6.0.0 provides a Windows x64 ZIP and a Raspberry/Linux source tar.gz.
+Extract the Linux source with `tar -xzf ObriiSDR-v6.0.0-raspberry-source.tar.gz`;
+the build/run shell scripts have executable permissions. Android packages are
+maintained and released separately.
 
 Use the packaged `release/bin` folder as a self-contained runtime directory.
 Keep `ObriiSDR.exe`, the Qt DLLs, Fobos DLLs, FFTW DLL, libusb DLL, VC runtime
@@ -37,7 +45,10 @@ map providers, and UI settings. The desktop app provides
 `Settings... -> Settings backup -> Export settings... / Import settings...` for
 making a separate backup or moving settings to another computer.
 
-DMR voice remains experimental. Windows packages may include optional
+DMR voice remains experimental. The transmitter can generate clear Tier II direct/simplex
+voice bursts from microphone/PTT/WAV with Color Code, time slot and radio IDs; it does not
+yet implement TX privacy, repeater wake-up or trunk signaling. AMBE+2 encoding requires
+the optional OpenDMR backend. Windows packages may include optional
 `dmr_voice_backends/fobos_dmr_voice_*.dll` GPL backend modules. See
 `THIRD_PARTY_LICENSES.txt` and `licenses/dmr_voice_backend/` before
 redistributing AMBE-capable binaries.
@@ -116,27 +127,32 @@ On Linux/Raspberry Pi the same backend project builds shared libraries with
 `libfobos_dmr_voice_opendmr.so`; place them in the application runtime
 `dmr_voice_backends/` directory.
 
-## Optional DSD-neo DMR Bridge
+## Optional External DMR Bridges
 
 The Digital Audio dock has a `DMR backend` selector:
 
 - `Obrii SDR + mbelib`
 - `Obrii SDR + OpenDMR/OP25`
 - `DSD-neo`
-- `GopherTrunk (future)` reserved for later work
+- `GopherTrunk bridge` through the bundled virtual-dibit adapter
 
-The optional DSD-neo bridge is disabled by default. When selected, Obrii SDR
-forwards the selected DMR discriminator PCM as raw mono PCM16LE over local UDP and
-can accept decoded DMR voice audio back over UDP.
+The optional DSD-neo and GopherTrunk bridges are disabled by default. DSD-neo
+receives selected DMR discriminator PCM as raw mono PCM16LE and can return decoded
+voice over local UDP. GopherTrunk receives complete DMR dibit bursts through the
+local virtual-source adapter. Native mbelib/OpenDMR and DSD-neo support supplied
+Motorola ARC4/AES-256 keys; GopherTrunk supports ARC4 only, not DMR AES-256.
+Decryption follows the selected mode and saved KID automatically, without a
+separate forwarding checkbox. Diagnostic commands redact key material.
+See `docs/dmr_motorola_privacy.md` for synchronization and compatibility limits.
 
 Manual DSD-neo command matching the default ports:
 
 ```powershell
-.\dsd-neo\dsd-neo.exe -fs -i udp:127.0.0.1:7355 -s 48000 -o udp:127.0.0.1:23456 -nm
+.\dsd-neo\dsd-neo.exe -fs -i udp:127.0.0.1:7355 -s 24000 -o udp:127.0.0.1:23456 -mc
 ```
 
 See `docs/dmr_external_backend.md` and `config/dmr_backends.example.json` for
-the full bridge contract. DSD-neo is an external optional tool; it is not
+the full bridge contract. Both decoders are optional external tools and are not
 required for normal SDR, scan, GNSS, or internal DMR metadata use.
 
 ## Main Features
@@ -145,10 +161,22 @@ required for normal SDR, scan, GNSS, or internal DMR metadata use.
   WEFAX, Meteor LRPT beta, and DMR beta mode selection.
 - Digital Audio dock with FT8/RTTY/FSK/PSK decoding work, DMR beta
   sync/activity monitoring, and an optional DSD-neo lab bridge.
+- FT8 Station workspace with structured decodes, standard QSO sequencing, true UTC-slot scheduling, local ADIF logbook, optional WSJT-X UDP interoperability, PSK Reporter, QRZ Logbook, and external TQSL/LoTW workflow.
 - DMR Lab Capture metadata fields and JSON sidecar files for controlled audio
   and Channel IQ recordings.
 - Video dock with analog TV, SSTV, NOAA APT, HF WEFAX, and Meteor LRPT beta
   monitor/test modes.
+- Hardware-independent TX laboratory with AM/NFM/WFM/DSB/USB/LSB audio, CW,
+  FT8, standard ITA2 RTTY, laboratory OOK/ASK/FSK/GFSK/GMSK/BPSK/QPSK,
+  SSTV/ATV, IQ export, and guarded experimental native HackRF output.
+- Separate arbitrary-signal laboratory for repeatable carrier/basic-waveform,
+  chirp, multi-tone, noise, PSK/QAM/FSK and configurable OFDM generation, with
+  I/Q/constellation plus 2D/3D waterfall previews, peak/RMS/PAPR metrics, up to
+  250 Msps and 20 million IQ samples per generation, .cf32 plus JSON export,
+  and routing through the selected guarded TX backend.
+- Concurrent receive and transmit are supported when they use separate devices.
+  The native HackRF backend blocks only the same physical HackRF index because
+  HackRF is half-duplex; future backends expose their own duplex capability.
 - Correct `HF1 + HF2` direct-sampling spectrum layout from `-Fs/2` through
   zero to `+Fs/2`.
 - Stable async Fobos streaming path with safer start, stop, and retune handling.
@@ -371,8 +399,10 @@ export FOBOSAPP_ANDROID_KEY_PASSWORD=...
 
 ## Current Limitations
 
-- DMR is currently a beta sync/activity monitor, not a complete DMR voice or
-  payload decoder.
+- DMR clear voice and supplied-key Motorola ARC4/AES-256 reception have been
+  tested on real signals. Compatibility and weak-signal quality still vary;
+  Hytera Basic remains unverified, Hytera Full and complete Tier III grant
+  following are not implemented. DMR TX is an unverified clear Tier II direct beta.
 - The new WEFAX, LRPT, and analog video paths are beta features and need more
   testing with real signals.
 - Meteor LRPT currently provides a QPSK IQ monitor, not a final decoded image.

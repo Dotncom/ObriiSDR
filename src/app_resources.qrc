@@ -1,4 +1,7 @@
 <RCC>
+    <qresource prefix="/ft8">
+        <file alias="cty.dat">../third_party/dxcc/cty.dat</file>
+    </qresource>
     <qresource prefix="/icons">
         <file alias="obriisdr.png">../packaging/icons/fobosapp.png</file>
     </qresource>

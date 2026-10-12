@@ -290,7 +290,6 @@ struct RadioSettings {
     int dmrPrivacyMode = 0;
     int dmrPrivacyKeyId = 0;
     QString dmrPrivacyKeyHex;
-    bool dmrPrivacyForwardToBackends = true;
     QString dmrPrivacyVariant = QStringLiteral("dmra");
     QString dmrPrivacyLayout = QStringLiteral("normal");
     int dmrPrivacyFrameOffset = 0;

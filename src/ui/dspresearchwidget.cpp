@@ -1,10 +1,16 @@
 #include "dspresearchwidget.h"
 
 #include "iqbuffer.h"
+#include "iqconstellationpreview.h"
+#include "signallabconstellation3d.h"
 
 #include <QPainter>
 #include <QPaintEvent>
 #include <QTimer>
+#include <QVBoxLayout>
+#include <QGraphicsProxyWidget>
+#include <QGraphicsScene>
+#include <QGraphicsView>
 
 #include <algorithm>
 #include <cmath>
@@ -34,25 +40,52 @@ DspResearchWidget::DspResearchWidget(Mode mode, QWidget *parent)
     : QWidget(parent), mode_(mode), timer_(new QTimer(this)) {
     setAttribute(Qt::WA_OpaquePaintEvent);
     setMinimumSize(200, 110);
+    if (mode_ == Mode::Constellation) {
+        auto *layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        constellation3D_ = new SignalLabConstellation3DWidget(this);
+        constellation3D_->setObjectName(QStringLiteral("dspResearchConstellation3D"));
+        constellation3D_->setMinimumSize(200, 110);
+        layout->addWidget(constellation3D_);
+        constellation3D_->hide();
+    }
     timer_->setInterval(40);
     connect(timer_, &QTimer::timeout, this, [this]() { refreshSnapshot(); });
     timer_->start();
 }
 
 void DspResearchWidget::setSettings(const QJsonObject &settings) {
+    if (settings_ == settings) return;
     settings_ = settings;
     timer_->setInterval(std::clamp(settings_.value(QStringLiteral("refreshMs")).toInt(40), 10, 1000));
+    updateConstellationView();
     update();
 }
 
 void DspResearchWidget::setConnected(bool connected, bool ukrainian) {
+    if (connected_ == connected && ukrainian_ == ukrainian) return;
     connected_ = connected;
     ukrainian_ = ukrainian;
+    if (constellation3D_) constellation3D_->setLanguage(ukrainian ? QStringLiteral("uk") : QStringLiteral("en"));
+    updateConstellationView();
     update();
 }
 
 void DspResearchWidget::refreshSnapshot() {
-    if (!isVisible() || !connected_) return;
+    if (!isVisible() || window()->isMinimized() || !connected_) return;
+    // Embedded widgets can stay QWidget-visible while their board is hidden.
+    if (const auto *proxy = graphicsProxyWidget()) {
+        if (!proxy->isVisible() || !proxy->scene()) return;
+        bool presented = false;
+        for (const auto *view : proxy->scene()->views()) {
+            if (view->isVisible() && !view->window()->isMinimized() &&
+                view->viewport()->rect().intersects(view->mapFromScene(proxy->sceneBoundingRect()).boundingRect())) {
+                presented = true;
+                break;
+            }
+        }
+        if (!presented) return;
+    }
     std::vector<float> raw;
     std::uint64_t sequence = 0;
     const std::size_t requestedFloats = static_cast<std::size_t>(boundedSamples(settings_)) * 2U;
@@ -78,7 +111,26 @@ void DspResearchWidget::refreshSnapshot() {
         qSamples_[index] -= static_cast<float>(meanQ);
     }
     sampleRate_ = IqBuffer::sampleRateEstimate();
+    updateConstellationView();
     update();
+}
+
+void DspResearchWidget::updateConstellationView() {
+    if (!constellation3D_) return;
+    const bool threeD = settings_.value(QStringLiteral("constellation3D")).toBool(false);
+    constellation3D_->setSurfaceEnabled(settings_.value(QStringLiteral("constellationSurface")).toBool(false));
+    constellation3D_->setVisible(threeD);
+    setAttribute(Qt::WA_TransparentForMouseEvents, !threeD);
+    if (!threeD) return;
+    if (!connected_) {
+        constellation3D_->clear();
+        return;
+    }
+    auto data = buildResearchIqConstellation(iSamples_, qSamples_, sampleRate_,
+        settings_.value(QStringLiteral("symbolRate")).toDouble(4800.0),
+        settings_.value(QStringLiteral("phasePercent")).toDouble(50.0)/100.0);
+    data.amplitudeScale /= std::clamp(settings_.value(QStringLiteral("gain")).toDouble(1.0), 0.1, 20.0);
+    constellation3D_->setData(data);
 }
 
 void DspResearchWidget::paintEvent(QPaintEvent *) {

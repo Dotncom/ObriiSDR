@@ -8,6 +8,7 @@
 #include "scanvisualutils.h"
 #include "spectrumfftworker.h"
 #include "tuningutils.h"
+#include "wirelesslabdialog.h"
 
 #include <QAbstractSocket>
 #include <QByteArray>
@@ -389,17 +390,26 @@ void YourClassName::displayNetworkSpectrumFrame(const QJsonObject &frame) {
         const std::vector<float> measurementOverlay =
             scanMeasurementOverlay(measurementFrequencies, graphTargetCount);
 
-        if (spectrumScienceAnalysisRequired()) {
+        const bool scienceRequired = spectrumScienceAnalysisRequired();
+        const bool wirelessRequired = wirelessLabDialog && wirelessLabDialog->isVisible() &&
+                                      frameScanSegments.isEmpty();
+        if (scienceRequired || wirelessRequired) {
             std::vector<float> orderedScienceLevels(static_cast<std::size_t>(graphTargetCount), -160.0f);
             for (int i = 0; i < graphTargetCount; ++i) {
                 orderedScienceLevels[static_cast<std::size_t>(i)] =
                     graphMagnitudes[static_cast<std::size_t>((i + graphTargetCount / 2) % graphTargetCount)];
             }
-            updateSpectrumScience(measurementFrequencies, orderedScienceLevels);
-            if (frameScanSegments.isEmpty()) {
-                feedZeroSpanFrame(frequencies, magnitudes, true);
-            } else {
-                feedZeroSpanFrame(measurementFrequencies, orderedScienceLevels, false);
+            if (scienceRequired) {
+                updateSpectrumScience(measurementFrequencies, orderedScienceLevels);
+                if (frameScanSegments.isEmpty()) {
+                    feedZeroSpanFrame(frequencies, magnitudes, true);
+                } else {
+                    feedZeroSpanFrame(measurementFrequencies, orderedScienceLevels, false);
+                }
+            }
+            if (wirelessRequired) {
+                wirelessLabDialog->appendSpectrum(graphFrequencies, orderedScienceLevels,
+                    frame.value("sampleRate").toDouble(pendingSettings.sampleRate));
             }
         }
 
@@ -588,17 +598,26 @@ void YourClassName::displayNetworkSpectrumFrameBinary(const QJsonObject &frame, 
         const std::vector<float> measurementOverlay =
             scanMeasurementOverlay(measurementFrequencies, graphTargetCount);
 
-        if (spectrumScienceAnalysisRequired()) {
+        const bool scienceRequired = spectrumScienceAnalysisRequired();
+        const bool wirelessRequired = wirelessLabDialog && wirelessLabDialog->isVisible() &&
+                                      frameScanSegments.isEmpty();
+        if (scienceRequired || wirelessRequired) {
             std::vector<float> orderedScienceLevels(static_cast<std::size_t>(graphTargetCount), -160.0f);
             for (int i = 0; i < graphTargetCount; ++i) {
                 orderedScienceLevels[static_cast<std::size_t>(i)] =
                     graphMagnitudes[static_cast<std::size_t>((i + graphTargetCount / 2) % graphTargetCount)];
             }
-            updateSpectrumScience(measurementFrequencies, orderedScienceLevels);
-            if (frameScanSegments.isEmpty()) {
-                feedZeroSpanFrame(frequencies, magnitudes, true);
-            } else {
-                feedZeroSpanFrame(measurementFrequencies, orderedScienceLevels, false);
+            if (scienceRequired) {
+                updateSpectrumScience(measurementFrequencies, orderedScienceLevels);
+                if (frameScanSegments.isEmpty()) {
+                    feedZeroSpanFrame(frequencies, magnitudes, true);
+                } else {
+                    feedZeroSpanFrame(measurementFrequencies, orderedScienceLevels, false);
+                }
+            }
+            if (wirelessRequired) {
+                wirelessLabDialog->appendSpectrum(graphFrequencies, orderedScienceLevels,
+                    frame.value("sampleRate").toDouble(pendingSettings.sampleRate));
             }
         }
 

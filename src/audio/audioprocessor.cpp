@@ -5,6 +5,7 @@
 #include "audioprocessor.h"
 #include "iqbuffer.h"
 #include "diagnosticlogging.h"
+#include <limits>
 
 #ifdef _MSC_VER
 #pragma comment(lib, "winmm.lib")
@@ -20,7 +21,7 @@ constexpr double FM_MAX_CHANNEL_RATE = 768000.0;
 constexpr double FM_DEEMPHASIS_SECONDS = 50e-6;
 constexpr double NFM_DEEMPHASIS_SECONDS = 300e-6;
 constexpr size_t MAX_AUDIO_BUFFER_SAMPLES = BUFFER_SIZE * 10;
-constexpr size_t EXTERNAL_AUDIO_START_BUFFER_SAMPLES = BUFFER_SIZE * 2;
+constexpr size_t AUDIO_START_BUFFER_SAMPLES = BUFFER_SIZE * 2;
 constexpr double SSB_LOW_CUT_HZ = 250.0;
 constexpr double SSB_MAX_AUDIO_HZ = 3600.0;
 constexpr double SAM_LOCK_RANGE_HZ = 1500.0;
@@ -35,7 +36,7 @@ constexpr double DMR_FOURFSK_OUTER_DEVIATION_HZ = 1944.0;
 constexpr double DMR_FOURFSK_OUTPUT_OUTER_LEVEL = 0.15;
 constexpr float DMR_FOURFSK_LIMIT_INPUT = 4.0f;
 constexpr float DMR_FOURFSK_SOFT_LIMIT_DRIVE = 0.85f;
-constexpr int DMR_CHANNEL_CIC_STAGES = 4;
+constexpr int DMR_CHANNEL_CIC_STAGES = 5;
 
 double clampDouble(double value, double low, double high) {
     return (std::max)(low, (std::min)(value, high));
@@ -350,7 +351,7 @@ void AudioProcessor::enqueueExternalPcm(const QByteArray &pcmData) {
         compactAudioBufferIfNeeded();
         const size_t afterInsertSamples = queuedAudioSamples();
         if (!externalAudioPrimed) {
-            externalAudioPrimed = afterInsertSamples >= EXTERNAL_AUDIO_START_BUFFER_SAMPLES;
+            externalAudioPrimed = afterInsertSamples >= AUDIO_START_BUFFER_SAMPLES;
         }
         notifyPlayback = externalAudioPrimed;
         if (fobosVerboseLoggingEnabled()) {
@@ -422,6 +423,14 @@ void AudioProcessor::startDemodulation() {
 
 
 void AudioProcessor::stopDemodulation() {
+    stopDemodulationImpl(true);
+}
+
+void AudioProcessor::stopDemodulationForStreamRestart() {
+    stopDemodulationImpl(false);
+}
+
+void AudioProcessor::stopDemodulationImpl(bool closeOutputDevice) {
     const bool runningNow = running.load();
 #ifdef _WIN32
     const bool audioDeviceOpen = hWaveOut != nullptr;
@@ -434,6 +443,7 @@ void AudioProcessor::stopDemodulation() {
 
     if (fobosVerboseLoggingEnabled()) {
         qDebug() << "[Audio] stopDemodulation enter"
+                 << "closeOutputDevice" << closeOutputDevice
                  << "running" << runningNow
 #ifdef _WIN32
                  << "hWaveOut" << hWaveOut
@@ -460,12 +470,16 @@ void AudioProcessor::stopDemodulation() {
             qDebug() << "[Audio] stopDemodulation audio device reset";
         }
     }
-    if (fobosVerboseLoggingEnabled()) {
-        qDebug() << "[Audio] stopDemodulation closing audio device";
-    }
-    closeAudioDevice();
-    if (fobosVerboseLoggingEnabled()) {
-        qDebug() << "[Audio] stopDemodulation audio device closed";
+    if (closeOutputDevice) {
+        if (fobosVerboseLoggingEnabled()) {
+            qDebug() << "[Audio] stopDemodulation closing audio device";
+        }
+        closeAudioDevice();
+        if (fobosVerboseLoggingEnabled()) {
+            qDebug() << "[Audio] stopDemodulation audio device closed";
+        }
+    } else if (fobosVerboseLoggingEnabled()) {
+        qDebug() << "[Audio] stopDemodulation output retained for stream restart";
     }
 
     {
@@ -621,16 +635,11 @@ void AudioProcessor::resetDemodulatorState() {
     cwTonePhase = 0.0;
     amDcEstimate = 0.0f;
     amAgcLevel = 0.05f;
-    for (auto &buffer : dmrCicBuffers) {
-        buffer.clear();
-    }
-    dmrCicSums.fill(std::complex<float>(0.0f, 0.0f));
-    dmrCicIndex = 0;
-    dmrCicLength = 0;
+    dmrCicDecimator.reset();
+    dmrRecordingAgcLevel = 0.01f;
+    dmrPcmPending.clear();
     dmrResamplePhase = 0.0;
     dmrLowPassState = std::complex<float>(0.0f, 0.0f);
-    dmrDecimationSum = std::complex<float>(0.0f, 0.0f);
-    dmrDecimationCount = 0;
     dmrPreviousSample = std::complex<float>(1.0f, 0.0f);
     dmrPreviousValid = false;
     dmrDiscriminatorDc = 0.0f;
@@ -786,21 +795,7 @@ void AudioProcessor::processDmrIqDemodulatorBlock(const std::vector<float>& iqBl
     float rotQ = static_cast<float>(std::sin(ncoPhase));
     const float rotStepI = static_cast<float>(std::cos(phaseIncrement));
     const float rotStepQ = static_cast<float>(std::sin(phaseIncrement));
-    if (dmrCicLength != decimationFactor) {
-        for (auto &buffer : dmrCicBuffers) {
-            buffer.assign(static_cast<std::size_t>(decimationFactor),
-                          std::complex<float>(0.0f, 0.0f));
-        }
-        dmrCicSums.fill(std::complex<float>(0.0f, 0.0f));
-        dmrCicIndex = 0;
-        dmrCicLength = decimationFactor;
-        dmrDecimationSum = std::complex<float>(0.0f, 0.0f);
-        dmrDecimationCount = 0;
-    }
-    const float cicInvLength =
-        1.0f / static_cast<float>((std::max)(1, dmrCicLength));
-    std::complex<float> decimationSum = dmrDecimationSum;
-    int decimationCount = dmrDecimationCount;
+    dmrCicDecimator.configure(decimationFactor);
     std::complex<float> channelLowPass = dmrLowPassState;
     std::complex<float> previousSample = dmrPreviousSample;
     bool previousValid = dmrPreviousValid;
@@ -843,15 +838,17 @@ void AudioProcessor::processDmrIqDemodulatorBlock(const std::vector<float>& iqBl
         previousOutputSample = normalizedSample;
     };
 
+    const bool captureChannelIq = settings.inputMode == INPUT_RF && dmrChannelIqEnabled.load();
+    QByteArray channelIq;
+    std::size_t capturedSamples = 0;
+    if (captureChannelIq) {
+        channelIq.resize(static_cast<int>((iqSamples / std::size_t(decimationFactor) + 1) * 4));
+    }
     for (std::size_t n = 0; n < iqSamples; ++n) {
         float iSample = iqBlock[2 * n];
         float qSample = iqBlock[2 * n + 1];
-        if (!std::isfinite(iSample)) {
-            iSample = 0.0f;
-        }
-        if (!std::isfinite(qSample)) {
-            qSample = 0.0f;
-        }
+        if (!std::isfinite(iSample)) iSample = 0.0f;
+        if (!std::isfinite(qSample)) qSample = 0.0f;
 
         if (settings.inputMode == INPUT_HF_COMBINED) {
             if (fShift < 0.0) {
@@ -869,59 +866,49 @@ void AudioProcessor::processDmrIqDemodulatorBlock(const std::vector<float>& iqBl
 
         const float mixedI = iSample * rotI - qSample * rotQ;
         const float mixedQ = iSample * rotQ + qSample * rotI;
-        std::complex<float> mixedSample(mixedI, mixedQ);
-        if (decimationFactor > 1) {
-            std::complex<float> cicSample = mixedSample;
-            for (int stage = 0; stage < DMR_CHANNEL_CIC_STAGES; ++stage) {
-                auto &buffer = dmrCicBuffers[static_cast<std::size_t>(stage)];
-                const std::complex<float> delayed =
-                    buffer[static_cast<std::size_t>(dmrCicIndex)];
-                buffer[static_cast<std::size_t>(dmrCicIndex)] = cicSample;
-                dmrCicSums[static_cast<std::size_t>(stage)] += cicSample - delayed;
-                cicSample = dmrCicSums[static_cast<std::size_t>(stage)] * cicInvLength;
-            }
-            ++dmrCicIndex;
-            if (dmrCicIndex >= dmrCicLength) {
-                dmrCicIndex = 0;
-            }
-            mixedSample = cicSample;
-        }
-        decimationSum += mixedSample;
-        ++decimationCount;
-
+        std::complex<float> channelSample;
+        const bool channelSampleReady = dmrCicDecimator.push({mixedI, mixedQ}, channelSample);
         const float nextRotI = rotI * rotStepI - rotQ * rotStepQ;
         const float nextRotQ = rotI * rotStepQ + rotQ * rotStepI;
         rotI = nextRotI;
         rotQ = nextRotQ;
         if ((n & 4095) == 4095) {
             const float norm = std::sqrt(rotI * rotI + rotQ * rotQ);
-            if (norm > 0.0f) {
-                rotI /= norm;
-                rotQ /= norm;
-            }
+            if (norm > 0.0f) { rotI /= norm; rotQ /= norm; }
         }
-
-        if (decimationCount < decimationFactor) {
-            continue;
-        }
-
-        const std::complex<float> channelSample =
-            decimationSum * (1.0f / static_cast<float>(decimationCount));
-        decimationSum = std::complex<float>(0.0f, 0.0f);
-        decimationCount = 0;
+        if (!channelSampleReady) continue;
 
         channelLowPass += channelLowPassAlpha * (channelSample - channelLowPass);
         std::complex<float> limited = channelLowPass;
-        const float magnitude = std::abs(limited);
-        if (magnitude > 0.000001f) {
-            limited *= (1.0f / magnitude);
+        if (captureChannelIq) {
+            const float magnitude = std::abs(limited);
+            const float agcAlpha = magnitude > dmrRecordingAgcLevel ? 0.01f : 0.0002f;
+            dmrRecordingAgcLevel += agcAlpha * (magnitude - dmrRecordingAgcLevel);
+            const float gain = 0.2f / (std::max)(dmrRecordingAgcLevel, 0.00001f);
+            const auto quantize = [gain](float value) {
+                return static_cast<quint16>(static_cast<qint16>(std::lrint(
+                    (std::clamp)(value * gain, -1.0f, 1.0f) * 32767.0f)));
+            };
+            const quint16 i = quantize(channelLowPass.real()), q = quantize(channelLowPass.imag());
+            char *dst = channelIq.data() + capturedSamples++ * 4;
+            dst[0] = char(i & 255); dst[1] = char(i >> 8);
+            dst[2] = char(q & 255); dst[3] = char(q >> 8);
+        }
+        // Phase must not depend on receiver gain. Scale before the conjugate
+        // product to avoid underflow, without fabricating a phase for zero IQ.
+        const float componentScale = (std::max)(std::abs(limited.real()),
+                                                std::abs(limited.imag()));
+        if (componentScale >= (std::numeric_limits<float>::min)()) {
+            limited /= componentScale;
         } else {
-            limited = std::complex<float>(1.0f, 0.0f);
+            limited = std::complex<float>(0.0f, 0.0f);
         }
 
         if (previousValid) {
             const std::complex<float> delta = limited * std::conj(previousSample);
-            const float phase = std::atan2(std::imag(delta), std::real(delta));
+            const float phase = delta == std::complex<float>(0.0f, 0.0f)
+                                    ? 0.0f
+                                    : std::atan2(std::imag(delta), std::real(delta));
             const float instantaneousHz =
                 static_cast<float>(static_cast<double>(phase) * channelRate / TWO_PI);
             discriminatorDc += dcAlpha * (instantaneousHz - discriminatorDc);
@@ -935,8 +922,6 @@ void AudioProcessor::processDmrIqDemodulatorBlock(const std::vector<float>& iqBl
     }
 
     ncoPhase = std::remainder(ncoPhase + phaseIncrement * static_cast<double>(iqSamples), TWO_PI);
-    dmrDecimationSum = decimationSum;
-    dmrDecimationCount = decimationCount;
     dmrLowPassState = channelLowPass;
     dmrPreviousSample = previousSample;
     dmrPreviousValid = previousValid;
@@ -948,6 +933,10 @@ void AudioProcessor::processDmrIqDemodulatorBlock(const std::vector<float>& iqBl
     dmrResamplePhase = std::remainder(resamplePhase, 1.0);
     if (dmrResamplePhase < 0.0) {
         dmrResamplePhase += 1.0;
+    }
+    if (capturedSamples > 0) {
+        channelIq.resize(static_cast<int>(capturedSamples * 4));
+        emit dmrChannelIqFrameReady(channelIq, channelRate, static_cast<int>(capturedSamples));
     }
 }
 
@@ -1543,6 +1532,7 @@ void AudioProcessor::SDRThread() {
         }
         if (previousIqSequence != 0 && iqBlockSequence > previousIqSequence + 1) {
             healthSequenceGaps += iqBlockSequence - previousIqSequence - 1;
+            if (settings.modulationType == MOD_DMR) resetDemodulatorState();
         }
         previousIqSequence = iqBlockSequence;
 
@@ -1557,7 +1547,8 @@ void AudioProcessor::SDRThread() {
         const double demodMs = std::chrono::duration<double, std::milli>(demodEnd - demodStart).count();
         ++healthBlocks;
         healthIqSamples += static_cast<std::uint64_t>(iqBlock.size() / 2U);
-        healthAudioSamples += static_cast<std::uint64_t>(audioSamples.size());
+        healthAudioSamples += static_cast<std::uint64_t>(
+            settings.modulationType == MOD_DMR ? dmrBasebandSamples.size() : audioSamples.size());
         healthDemodMs += demodMs;
         healthMaxDemodMs = (std::max)(healthMaxDemodMs, demodMs);
 
@@ -1572,19 +1563,20 @@ void AudioProcessor::SDRThread() {
                     : iqStats.droppedQueuedBlocks;
             const double elapsedSeconds = healthElapsedMs / 1000.0;
             const double producedRatio =
-                settings.modulationType == MOD_DMR
-                    ? 1.0
-                    : static_cast<double>(healthAudioSamples) /
-                          ((std::max)(0.001, elapsedSeconds) * AUDIO_OUTPUT_RATE);
+                static_cast<double>(healthAudioSamples) /
+                    ((std::max)(0.001, elapsedSeconds) *
+                     (settings.modulationType == MOD_DMR ? activeDmrBasebandSampleRate : AUDIO_OUTPUT_RATE));
             const double queuedMs = settings.sampleRate > 0.0
                                         ? static_cast<double>(iqStats.queuedFloatCount) * 500.0 /
                                               settings.sampleRate
                                         : 0.0;
-            const bool unhealthy = droppedBlocks > 0 || healthSequenceGaps > 0 || producedRatio < 0.90;
-            if (unhealthy || fobosVerboseLoggingEnabled()) {
-                qWarning() << "[Audio health]"
+            if (fobosVerboseLoggingEnabled()) {
+                qDebug() << "[Audio health]"
                            << "channelizer"
-                           << (settings.simplifiedAudioChannelizer ? "simplified" : "multistage")
+                           << (settings.modulationType == MOD_DMR ?
+                               (dmrLastLoggedDecimationFactor <= DmrCicDecimator::MaxFixedPointFactor ?
+                                    "dmr-cic5" : "dmr-box5") :
+                               (settings.simplifiedAudioChannelizer ? "simplified" : "multistage"))
                            << "realtimeRatio" << producedRatio
                            << "configuredRate" << settings.sampleRate
                            << "estimatedRate" << iqStats.sampleRateEstimate
@@ -1594,7 +1586,7 @@ void AudioProcessor::SDRThread() {
                                                    settings.sampleRate
                                              : 0.0)
                            << "pcmMs" << static_cast<double>(healthAudioSamples) * 1000.0 /
-                                             AUDIO_OUTPUT_RATE
+                                             (settings.modulationType == MOD_DMR ? activeDmrBasebandSampleRate : AUDIO_OUTPUT_RATE)
                            << "demodMs" << healthDemodMs
                            << "maxDemodMs" << healthMaxDemodMs
                            << "queuedMs" << queuedMs
@@ -1611,10 +1603,14 @@ void AudioProcessor::SDRThread() {
             previousDroppedBlocks = iqStats.droppedQueuedBlocks;
         }
         if (!dmrBasebandSamples.empty() && dmrBasebandSampleRate > 0) {
-            const QByteArray dmrBasebandFrame(
+            dmrPcmPending.append(
                 reinterpret_cast<const char *>(dmrBasebandSamples.data()),
                 static_cast<int>(dmrBasebandSamples.size() * sizeof(short)));
-            emit dmrBasebandFrameReady(dmrBasebandFrame, dmrBasebandSampleRate);
+            const int packetBytes = dmrBasebandSampleRate / 50 * int(sizeof(short));
+            while (dmrPcmPending.size() >= packetBytes) {
+                emit dmrBasebandFrameReady(dmrPcmPending.left(packetBytes), dmrBasebandSampleRate);
+                dmrPcmPending.remove(0, packetBytes);
+            }
         }
         if (audioSamples.empty()) {
             continue;
@@ -1694,23 +1690,60 @@ void AudioProcessor::startAudioOutput() {
 #ifdef _WIN32
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 #endif
+    bool playbackPrimed = false;
+    bool deviceFramesQueued = false;
+    std::uint64_t rebufferEvents = 0;
+    std::uint64_t outputFrames = 0;
+    std::uint64_t writeErrors = 0;
+    auto outputHealthStart = std::chrono::steady_clock::now();
+    auto lastWriteErrorLog = outputHealthStart - std::chrono::seconds(1);
     while (running.load()) {
         std::unique_lock<std::mutex> lock(audioMutex);
-        cv.wait(lock, [this] {
+        // waveOut notifies without taking audioMutex. A bounded wait also
+        // covers a callback arriving between the predicate and the wait.
+        const bool ready = cv.wait_for(lock, std::chrono::milliseconds(10), [&] {
             if (!running.load()) {
                 return true;
             }
-            const size_t queuedSamples = queuedAudioSamples();
-            if (queuedSamples < static_cast<size_t>(BUFFER_SIZE)) {
-                return false;
-            }
+            bool freeBuffer = false;
+            bool inFlight = false;
             for (int i = 0; i < NUM_BUFFERS; ++i) {
-                if (bufferReady[i]) return true;
+                if (bufferReady[i].load()) freeBuffer = true;
+                else inFlight = true;
             }
-            return false;
+            if (deviceFramesQueued && !inFlight) {
+                playbackPrimed = false;
+                deviceFramesQueued = false;
+                ++rebufferEvents;
+            }
+            if (!freeBuffer) return false;
+            const size_t queuedSamples = queuedAudioSamples();
+            if (!playbackPrimed) {
+                if (queuedSamples < AUDIO_START_BUFFER_SAMPLES) return false;
+                playbackPrimed = true;
+            }
+            return queuedSamples >= static_cast<size_t>(BUFFER_SIZE);
         });
 
         if (!running.load()) break;
+        const auto now = std::chrono::steady_clock::now();
+        if (fobosVerboseLoggingEnabled() && now - outputHealthStart >= std::chrono::seconds(1)) {
+            const auto queuedSamples = queuedAudioSamples();
+            int inFlightBuffers = 0;
+            for (int i = 0; i < NUM_BUFFERS; ++i) if (!bufferReady[i].load()) ++inFlightBuffers;
+            lock.unlock();
+            qDebug() << "[Audio output health]"
+                     << "pcmQueuedMs" << queuedSamples * 1000.0 / AUDIO_OUTPUT_RATE
+                     << "inFlightBuffers" << inFlightBuffers
+                     << "primed" << playbackPrimed
+                     << "rebufferEvents" << static_cast<qulonglong>(rebufferEvents)
+                     << "outputFrames" << static_cast<qulonglong>(outputFrames)
+                     << "writeErrors" << static_cast<qulonglong>(writeErrors);
+            lock.lock();
+            outputHealthStart = now;
+            outputFrames = 0;
+        }
+        if (!ready || !running.load()) continue;
         for (int i = 0; i < NUM_BUFFERS; ++i) {
             if (!bufferReady[i]) continue;
 
@@ -1747,20 +1780,27 @@ void AudioProcessor::startAudioOutput() {
             lock.unlock();
 
             emit audioFrameReady(pcmFrame);
+            ++outputFrames;
 
 #ifdef _WIN32
             MMRESULT result = MMSYSERR_NOERROR;
+            bool submitted = false;
             {
                 std::lock_guard<std::mutex> waveLock(waveOutMutex);
-                if (!hWaveOut || audioDeviceClosing.load()) {
-                    bufferReady[i] = true;
-                    lock.lock();
-                    continue;
+                if (hWaveOut && !audioDeviceClosing.load()) {
+                    result = waveOutWrite(hWaveOut, &waveHdrs[i], sizeof(WAVEHDR));
+                    submitted = result == MMSYSERR_NOERROR;
                 }
-                result = waveOutWrite(hWaveOut, &waveHdrs[i], sizeof(WAVEHDR));
             }
+            if (submitted) deviceFramesQueued = true;
+            else bufferReady[i] = true;
             if (result != MMSYSERR_NOERROR) {
-                qDebug() << "waveOutWrite failed!";
+                ++writeErrors;
+                const auto errorTime = std::chrono::steady_clock::now();
+                if (errorTime - lastWriteErrorLog >= std::chrono::seconds(1)) {
+                    qWarning() << "[Audio] waveOutWrite failed" << result;
+                    lastWriteErrorLog = errorTime;
+                }
             }
 #else
             bufferReady[i] = true;

@@ -11,6 +11,7 @@ extern "C" {
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 namespace {
 constexpr double Pi = 3.14159265358979323846;
@@ -65,6 +66,136 @@ float gfskPulse(float bt, float t) {
     const float arg2 = K * bt * (t - 0.5f);
     return 0.5f * (std::erf(arg1) - std::erf(arg2));
 }
+
+struct TimedBit {
+    int bit = 0;
+    double durationSymbols = 1.0;
+};
+
+void appendByteBits(QVector<int> *bits, std::uint8_t value, bool invert) {
+    for (int shift = 7; shift >= 0; --shift) {
+        bits->append(((value >> shift) & 1U) ^ (invert ? 1 : 0));
+    }
+}
+
+std::uint16_t crc16Ccitt(const QByteArray &data) {
+    std::uint16_t crc = 0xFFFFU;
+    for (unsigned char byte : data) {
+        crc ^= static_cast<std::uint16_t>(byte) << 8U;
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc & 0x8000U) != 0U
+                      ? static_cast<std::uint16_t>((crc << 1U) ^ 0x1021U)
+                      : static_cast<std::uint16_t>(crc << 1U);
+        }
+    }
+    return crc;
+}
+
+QVector<int> framedPacketBits(const QByteArray &payload, bool invert) {
+    QVector<int> bits;
+    bits.reserve((payload.size() + 16) * 8);
+    for (int byte = 0; byte < 8; ++byte) appendByteBits(&bits, 0x55U, invert);
+    appendByteBits(&bits, 0xD3U, invert);
+    appendByteBits(&bits, 0x91U, invert);
+    appendByteBits(&bits, static_cast<std::uint8_t>((payload.size() >> 8) & 0xFF), invert);
+    appendByteBits(&bits, static_cast<std::uint8_t>(payload.size() & 0xFF), invert);
+    for (unsigned char byte : payload) appendByteBits(&bits, byte, invert);
+    const std::uint16_t crc = crc16Ccitt(payload);
+    appendByteBits(&bits, static_cast<std::uint8_t>(crc >> 8U), invert);
+    appendByteBits(&bits, static_cast<std::uint8_t>(crc & 0xFFU), invert);
+    for (int bit = 0; bit < 8; ++bit) bits.append(invert ? 1 : 0);
+    return bits;
+}
+
+bool baudotCode(QChar character, int *code, bool *figures) {
+    static const QHash<QChar, int> letters = {
+        {'A', 3}, {'B', 25}, {'C', 14}, {'D', 9}, {'E', 1}, {'F', 13},
+        {'G', 26}, {'H', 20}, {'I', 6}, {'J', 11}, {'K', 15}, {'L', 18},
+        {'M', 28}, {'N', 12}, {'O', 24}, {'P', 22}, {'Q', 23}, {'R', 10},
+        {'S', 5}, {'T', 16}, {'U', 7}, {'V', 30}, {'W', 19}, {'X', 29},
+        {'Y', 21}, {'Z', 17}, {' ', 4}, {'\r', 8}, {'\n', 2}
+    };
+    static const QHash<QChar, int> numbers = {
+        {'0', 22}, {'1', 23}, {'2', 19}, {'3', 1}, {'4', 10}, {'5', 16},
+        {'6', 21}, {'7', 7}, {'8', 6}, {'9', 24}, {'-', 3}, {'?', 25},
+        {':', 14}, {'$', 9}, {'!', 13}, {'&', 26}, {'#', 20}, {'\'', 11},
+        {'(', 15}, {')', 18}, {'.', 28}, {',', 12}, {'/', 29}, {'+', 17},
+        {'=', 30}, {' ', 4}, {'\r', 8}, {'\n', 2}
+    };
+    const QChar upper = character.toUpper();
+    const auto letter = letters.constFind(upper);
+    if (letter != letters.cend()) {
+        *code = letter.value();
+        *figures = false;
+        return true;
+    }
+    const auto number = numbers.constFind(upper);
+    if (number != numbers.cend()) {
+        *code = number.value();
+        *figures = true;
+        return true;
+    }
+    return false;
+}
+
+void appendRttyCode(QVector<TimedBit> *symbols, int code, bool invert) {
+    const auto append = [symbols, invert](int bit, double duration = 1.0) {
+        symbols->append({bit ^ (invert ? 1 : 0), duration});
+    };
+    append(0);
+    for (int bit = 0; bit < 5; ++bit) append((code >> bit) & 1);
+    append(1, 1.5);
+}
+
+QVector<TimedBit> rttySymbols(const QString &text, bool invert) {
+    QVector<TimedBit> symbols;
+    const auto append = [&symbols, invert](int bit, double duration = 1.0) {
+        symbols.append({bit ^ (invert ? 1 : 0), duration});
+    };
+    for (int bit = 0; bit < 12; ++bit) append(1);
+    bool figuresMode = false;
+    for (QChar character : text.toUpper()) {
+        int code = 0;
+        bool figures = false;
+        if (!baudotCode(character, &code, &figures)) continue;
+        if (!character.isSpace() && character != QLatin1Char('\r') &&
+            character != QLatin1Char('\n') && figures != figuresMode) {
+            appendRttyCode(&symbols, figures ? 27 : 31, invert);
+            figuresMode = figures;
+        }
+        appendRttyCode(&symbols, code, invert);
+    }
+    for (int bit = 0; bit < 12; ++bit) append(1);
+    return symbols;
+}
+
+double smoothTransition(double fraction) {
+    const double position = (std::clamp)(fraction / 0.20, 0.0, 1.0);
+    return 0.5 - 0.5 * std::cos(Pi * position);
+}
+
+double qpskPhase(int first, int second) {
+    if (first == 0 && second == 0) return Pi * 0.25;
+    if (first == 0 && second == 1) return Pi * 0.75;
+    if (first == 1 && second == 1) return -Pi * 0.75;
+    return -Pi * 0.25;
+}
+
+double gaussianSymbolControl(const QVector<int> &bits, double symbolPosition, double bt) {
+    if (bits.isEmpty()) return 0.0;
+    const int center = static_cast<int>(std::floor(symbolPosition));
+    double weighted = 0.0;
+    double weightSum = 0.0;
+    for (int offset = -3; offset <= 3; ++offset) {
+        const int symbol = (std::clamp)(center + offset, 0, bits.size() - 1);
+        const double weight = gfskPulse(static_cast<float>((std::clamp)(bt, 0.20, 1.0)),
+                                        static_cast<float>(symbolPosition -
+                                                           (center + offset + 0.5)));
+        weighted += (bits.at(symbol) != 0 ? 1.0 : -1.0) * weight;
+        weightSum += weight;
+    }
+    return weightSum > 1.0e-9 ? weighted / weightSum : 0.0;
+}
 }
 
 void TxModulatorState::resetAudioFilter() {
@@ -98,12 +229,7 @@ bool TransmitWaveformGenerator::limitSignalBandwidth(
     const double sampleRate = static_cast<double>(configuration.sampleRate);
     const double bandwidth = (std::min)(configuration.signalBandwidthHz, sampleRate * 0.90);
 
-    double centerHz = 0.0;
-    if (configuration.modulation == TxModulation::Cw) {
-        centerHz = configuration.toneHz;
-    } else if (configuration.modulation == TxModulation::Ft8) {
-        centerHz = configuration.toneHz + 3.5 / FT8_SYMBOL_PERIOD;
-    }
+    const double centerHz = signalCenterHz(configuration);
     if (state->sampleRate != configuration.sampleRate ||
         std::abs(state->bandwidthHz - bandwidth) > 0.01 ||
         std::abs(state->centerHz - centerHz) > 0.01) {
@@ -172,7 +298,24 @@ bool TransmitWaveformGenerator::limitSignalBandwidth(
     return true;
 }
 bool TransmitWaveformGenerator::isTextMode(TxModulation modulation) {
-    return modulation == TxModulation::Cw || modulation == TxModulation::Ft8;
+    return modulation == TxModulation::Cw || modulation == TxModulation::Ft8 ||
+           isDigitalTextMode(modulation);
+}
+
+bool TransmitWaveformGenerator::isDigitalTextMode(TxModulation modulation) {
+    switch (modulation) {
+    case TxModulation::Ook:
+    case TxModulation::Ask:
+    case TxModulation::Fsk:
+    case TxModulation::Gfsk:
+    case TxModulation::Gmsk:
+    case TxModulation::Bpsk:
+    case TxModulation::Qpsk:
+    case TxModulation::Rtty:
+        return true;
+    default:
+        return false;
+    }
 }
 
 double TransmitWaveformGenerator::effectiveFmDeviationHz(
@@ -183,6 +326,28 @@ double TransmitWaveformGenerator::effectiveFmDeviationHz(
     if (configuration.modulation == TxModulation::Nfm) {
         return (std::max)(100.0, configuration.deviationHz);
     }
+    return 0.0;
+}
+
+double TransmitWaveformGenerator::effectiveFskDeviationHz(
+    const TxConfiguration &configuration) {
+    if (configuration.modulation == TxModulation::Gmsk) {
+        return (std::max)(1.0, configuration.symbolRate * 0.25);
+    }
+    if (configuration.modulation == TxModulation::Fsk ||
+        configuration.modulation == TxModulation::Gfsk ||
+        configuration.modulation == TxModulation::Rtty) {
+        return (std::max)(1.0, configuration.deviationHz);
+    }
+    return 0.0;
+}
+
+double TransmitWaveformGenerator::signalCenterHz(const TxConfiguration &configuration) {
+    if (configuration.modulation == TxModulation::Cw) return configuration.toneHz;
+    if (configuration.modulation == TxModulation::Ft8) {
+        return configuration.toneHz + 3.5 / FT8_SYMBOL_PERIOD;
+    }
+    if (isDigitalTextMode(configuration.modulation)) return configuration.toneHz;
     return 0.0;
 }
 
@@ -205,6 +370,15 @@ double TransmitWaveformGenerator::audioLowPassCutoffHz(
                                   effectiveFmDeviationHz(configuration));
     case TxModulation::Cw:
     case TxModulation::Ft8:
+    case TxModulation::Ook:
+    case TxModulation::Ask:
+    case TxModulation::Fsk:
+    case TxModulation::Gfsk:
+    case TxModulation::Gmsk:
+    case TxModulation::Bpsk:
+    case TxModulation::Qpsk:
+    case TxModulation::Rtty:
+    case TxModulation::Dmr:
         return 0.0;
     }
     return 0.0;
@@ -220,6 +394,15 @@ QString TransmitWaveformGenerator::modulationName(TxModulation modulation) {
     case TxModulation::Lsb: return QStringLiteral("LSB");
     case TxModulation::Cw: return QStringLiteral("CW / Morse");
     case TxModulation::Ft8: return QStringLiteral("FT8");
+    case TxModulation::Ook: return QStringLiteral("OOK (raw frame)");
+    case TxModulation::Ask: return QStringLiteral("2-ASK (raw frame)");
+    case TxModulation::Fsk: return QStringLiteral("2-FSK (raw frame)");
+    case TxModulation::Gfsk: return QStringLiteral("GFSK (raw frame)");
+    case TxModulation::Gmsk: return QStringLiteral("GMSK (raw frame)");
+    case TxModulation::Bpsk: return QStringLiteral("BPSK (raw frame)");
+    case TxModulation::Qpsk: return QStringLiteral("QPSK (raw frame)");
+    case TxModulation::Rtty: return QStringLiteral("RTTY 45.45 / ITA2");
+    case TxModulation::Dmr: return QStringLiteral("DMR voice (Tier II direct)");
     }
     return QStringLiteral("Unknown");
 }
@@ -232,6 +415,9 @@ TxGenerationResult TransmitWaveformGenerator::generateText(
     }
     if (configuration.modulation == TxModulation::Ft8) {
         return generateFt8(configuration, text);
+    }
+    if (isDigitalTextMode(configuration.modulation)) {
+        return generateDigitalText(configuration, text);
     }
     TxGenerationResult result;
     result.error = QStringLiteral("The selected modulation requires microphone audio");
@@ -329,6 +515,15 @@ QVector<std::complex<float>> TransmitWaveformGenerator::modulateAudio(
         }
         case TxModulation::Cw:
         case TxModulation::Ft8:
+        case TxModulation::Ook:
+        case TxModulation::Ask:
+        case TxModulation::Fsk:
+        case TxModulation::Gfsk:
+        case TxModulation::Gmsk:
+        case TxModulation::Bpsk:
+        case TxModulation::Qpsk:
+        case TxModulation::Rtty:
+        case TxModulation::Dmr:
             result[i] = std::complex<float>(0.0f, 0.0f);
             break;
         }
@@ -339,6 +534,144 @@ QVector<std::complex<float>> TransmitWaveformGenerator::modulateAudio(
     return result;
 }
 
+TxGenerationResult TransmitWaveformGenerator::generateDigitalText(
+    const TxConfiguration &configuration,
+    const QString &text) {
+    TxGenerationResult result;
+    const QByteArray payload = text.toUtf8();
+    if (payload.trimmed().isEmpty()) {
+        result.error = QStringLiteral("Enter text or packet payload");
+        return result;
+    }
+    if (payload.size() > 1024) {
+        result.error = QStringLiteral("Digital text payload is limited to 1024 UTF-8 bytes");
+        return result;
+    }
+    const int sampleRate = configuration.sampleRate;
+    const double symbolRate = configuration.symbolRate;
+    if (sampleRate <= 0 || !std::isfinite(symbolRate) || symbolRate <= 0.0 ||
+        symbolRate > sampleRate * 0.25) {
+        result.error = QStringLiteral("Symbol rate must be positive and no more than one quarter of the generator rate");
+        return result;
+    }
+
+    const float level = (std::clamp)(configuration.level, 0.0f, 0.95f);
+    const double centerHz = signalCenterHz(configuration);
+    const double samplesPerSymbol = static_cast<double>(sampleRate) / symbolRate;
+    double phase = 0.0;
+
+    if (configuration.modulation == TxModulation::Rtty) {
+        const QVector<TimedBit> symbols = rttySymbols(text, configuration.invertData);
+        if (symbols.size() <= 24) {
+            result.error = QStringLiteral("The RTTY text contains no supported ITA2 characters");
+            return result;
+        }
+        double totalSymbols = 0.0;
+        for (const TimedBit &symbol : symbols) totalSymbols += symbol.durationSymbols;
+        const qint64 totalSamples = qRound64(totalSymbols * samplesPerSymbol);
+        if (totalSamples <= 0 || totalSamples > static_cast<qint64>(sampleRate) * 180 ||
+            totalSamples > std::numeric_limits<int>::max()) {
+            result.error = QStringLiteral("Generated RTTY waveform is too long");
+            return result;
+        }
+        result.iq.resize(static_cast<int>(totalSamples));
+        const double deviation = effectiveFskDeviationHz(configuration);
+        double symbolCursor = 0.0;
+        for (const TimedBit &symbol : symbols) {
+            const int start = qRound(symbolCursor * samplesPerSymbol);
+            symbolCursor += symbol.durationSymbols;
+            const int end = (std::min)(result.iq.size(), qRound(symbolCursor * samplesPerSymbol));
+            const double control = symbol.bit != 0 ? -1.0 : 1.0;
+            const double step = 2.0 * Pi * (centerHz + deviation * control) / sampleRate;
+            for (int sample = start; sample < end; ++sample) {
+                phase += step;
+                result.iq[sample] = std::polar(level, static_cast<float>(phase));
+                if (std::abs(phase) > 2.0 * Pi) phase = std::fmod(phase, 2.0 * Pi);
+            }
+        }
+        result.durationSeconds = static_cast<double>(result.iq.size()) / sampleRate;
+        result.summary = QStringLiteral("RTTY ITA2: %1 symbols, %2 samples, %3 s, %4 Bd, %5 Hz shift")
+                             .arg(symbols.size())
+                             .arg(result.iq.size())
+                             .arg(result.durationSeconds, 0, 'f', 3)
+                             .arg(symbolRate, 0, 'f', 2)
+                             .arg(2.0 * deviation, 0, 'f', 0);
+        return result;
+    }
+
+    const QVector<int> bits = framedPacketBits(payload, configuration.invertData);
+    const bool qpsk = configuration.modulation == TxModulation::Qpsk;
+    const int symbolCount = qpsk ? (bits.size() + 1) / 2 : bits.size();
+    const qint64 totalSamples = qRound64(symbolCount * samplesPerSymbol);
+    if (totalSamples <= 0 || totalSamples > static_cast<qint64>(sampleRate) * 180 ||
+        totalSamples > std::numeric_limits<int>::max()) {
+        result.error = QStringLiteral("Generated digital waveform is too long");
+        return result;
+    }
+    result.iq.resize(static_cast<int>(totalSamples));
+    const double carrierStep = 2.0 * Pi * centerHz / sampleRate;
+    const double deviation = effectiveFskDeviationHz(configuration);
+    const double askDepth = (std::clamp)(static_cast<double>(configuration.askDepth), 0.0, 1.0);
+    const double bt = (std::clamp)(configuration.gaussianBt, 0.20, 1.0);
+
+    const auto bitAt = [&bits](int index) {
+        return bits.at((std::clamp)(index, 0, bits.size() - 1));
+    };
+    const auto phaseAt = [&bitAt, qpsk](int symbol) {
+        if (!qpsk) return bitAt(symbol) != 0 ? Pi : 0.0;
+        return qpskPhase(bitAt(symbol * 2), bitAt(symbol * 2 + 1));
+    };
+
+    for (int sample = 0; sample < result.iq.size(); ++sample) {
+        const double position = static_cast<double>(sample) / samplesPerSymbol;
+        const int symbol = (std::min)(symbolCount - 1, static_cast<int>(std::floor(position)));
+        const double local = position - std::floor(position);
+        if (configuration.modulation == TxModulation::Fsk ||
+            configuration.modulation == TxModulation::Gfsk ||
+            configuration.modulation == TxModulation::Gmsk) {
+            const double control = configuration.modulation == TxModulation::Fsk
+                                       ? (bitAt(symbol) != 0 ? 1.0 : -1.0)
+                                       : gaussianSymbolControl(bits, position, bt);
+            phase += 2.0 * Pi * (centerHz + deviation * control) / sampleRate;
+            result.iq[sample] = std::polar(level, static_cast<float>(phase));
+        } else if (configuration.modulation == TxModulation::Ook ||
+                   configuration.modulation == TxModulation::Ask) {
+            const double previousTarget = symbol > 0
+                                              ? (bitAt(symbol - 1) != 0 ? 1.0 :
+                                                 (configuration.modulation == TxModulation::Ook
+                                                      ? 0.0 : 1.0 - askDepth))
+                                              : 0.0;
+            const double currentTarget = bitAt(symbol) != 0
+                                             ? 1.0
+                                             : (configuration.modulation == TxModulation::Ook
+                                                    ? 0.0 : 1.0 - askDepth);
+            const double amplitude = previousTarget +
+                                     (currentTarget - previousTarget) * smoothTransition(local);
+            phase += carrierStep;
+            result.iq[sample] = std::polar(static_cast<float>(level * amplitude),
+                                           static_cast<float>(phase));
+        } else {
+            const double currentPhase = phaseAt(symbol);
+            const double previousPhase = symbol > 0 ? phaseAt(symbol - 1) : currentPhase;
+            const double dataPhase = previousPhase +
+                                     std::remainder(currentPhase - previousPhase, 2.0 * Pi) *
+                                         smoothTransition(local);
+            phase += carrierStep;
+            result.iq[sample] = std::polar(level, static_cast<float>(phase + dataPhase));
+        }
+        if (std::abs(phase) > 2.0 * Pi) phase = std::fmod(phase, 2.0 * Pi);
+    }
+
+    result.durationSeconds = static_cast<double>(result.iq.size()) / sampleRate;
+    result.summary = QStringLiteral("%1: %2 payload bytes, %3 symbols, %4 samples, %5 s, %6 Bd")
+                         .arg(modulationName(configuration.modulation))
+                         .arg(payload.size())
+                         .arg(symbolCount)
+                         .arg(result.iq.size())
+                         .arg(result.durationSeconds, 0, 'f', 3)
+                         .arg(symbolRate, 0, 'f', 2);
+    return result;
+}
 TxGenerationResult TransmitWaveformGenerator::generateCw(
     const TxConfiguration &configuration,
     const QString &text) {

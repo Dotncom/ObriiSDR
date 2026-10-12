@@ -46,7 +46,10 @@ struct TxBandwidthLimiterState {
 class TransmitWaveformGenerator {
 public:
     static bool isTextMode(TxModulation modulation);
+    static bool isDigitalTextMode(TxModulation modulation);
     static double effectiveFmDeviationHz(const TxConfiguration &configuration);
+    static double effectiveFskDeviationHz(const TxConfiguration &configuration);
+    static double signalCenterHz(const TxConfiguration &configuration);
     static double audioLowPassCutoffHz(const TxConfiguration &configuration);
     static QString modulationName(TxModulation modulation);
     static TxGenerationResult generateText(const TxConfiguration &configuration,
@@ -65,6 +68,8 @@ private:
                                          const QString &text);
     static TxGenerationResult generateFt8(const TxConfiguration &configuration,
                                           const QString &text);
+    static TxGenerationResult generateDigitalText(const TxConfiguration &configuration,
+                                                   const QString &text);
 };
 
 #endif // TRANSMITWAVEFORMGENERATOR_H

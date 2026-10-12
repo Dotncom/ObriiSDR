@@ -36,6 +36,7 @@ public:
                                 const std::vector<float> &frequencies,
                                 const std::vector<float> &levels);
     bool shouldUpdateWorkspaceSpectrum();
+    int workspaceSpectrumTargetBins() const;
     void updateWorkspaceSpectrum(const std::vector<float> &frequencies,
                                  const std::vector<float> &levels,
                                  double centerHz,

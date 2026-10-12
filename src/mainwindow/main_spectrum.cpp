@@ -7,6 +7,7 @@
 #include "iqbuffer.h"
 #include "receiverdeviceutils.h"
 #include "researchanalysisdialog.h"
+#include "wirelesslabdialog.h"
 #include "scanvisualutils.h"
 #include "spectrumfftworker.h"
 #include "spectrumdisplayreducer.h"
@@ -690,13 +691,6 @@ void YourClassName::updateSpectrum() {
         return;
     }
 
-    const bool channelIqRecordingOnly =
-        isChannelIqRecordingActive() &&
-        !(networkMode == NetworkMode::Server && isClientIqProcessingMode());
-    if (channelIqRecordingOnly) {
-        return;
-    }
-
     const bool verboseLogging = fobosVerboseLoggingEnabled();
     if (!verboseLogging) {
         spectrumDebugFramesRemaining = 0;
@@ -839,6 +833,7 @@ void YourClassName::updateSpectrum() {
         scanVisualSource == QStringLiteral("none") &&
         !networkSpectrumFrameMetadataValid;
     const bool batchWaterfallRows =
+        waterfallWidget && waterfallWidget->isVisible() && !isMinimized() &&
         spectrumSettings.fftLength < 8388608 &&
         !spectrumSettings.simplifiedAudioChannelizer;
 
@@ -1358,7 +1353,9 @@ void YourClassName::updateSpectrum() {
         networkController &&
         networkController->isControlReady();
     if (!suppressLocalVisual) {
-        if (scaleWidget) {
+        const bool presentMainSpectrum = graphWidget && graphWidget->isVisible() && !isMinimized();
+        const bool presentMainWaterfall = waterfallWidget && waterfallWidget->isVisible() && !isMinimized();
+        if (scaleWidget && scaleWidget->isVisible() && !isMinimized()) {
             double scaleListening = pendingSettings.listeningFrequency;
             if (!displayScanSegments.isEmpty()) {
                 if (!scanListeningLockEnabled &&
@@ -1392,8 +1389,9 @@ void YourClassName::updateSpectrum() {
         }
 
         const int displayTargetBins = (std::max)({512,
-                                                  graphWidget ? graphWidget->width() : 0,
-                                                  waterfallWidget ? waterfallWidget->width() : 0});
+                                                  presentMainSpectrum ? graphWidget->width() : 0,
+                                                  presentMainWaterfall ? waterfallWidget->width() : 0,
+                                                  dspFlowPanel ? dspFlowPanel->workspaceSpectrumTargetBins() : 0});
         static SpectrumDisplayFrame preparedDisplayFrame;
         const qint64 preReduceNs = profileDisplayFrame
                                        ? displayProfileTimer.nsecsElapsed()
@@ -1431,12 +1429,14 @@ void YourClassName::updateSpectrum() {
                                                      visualMagnitudes);
             }
         }
-        const std::vector<float> scienceFrequencies =
-            !displayScanSegments.isEmpty()
-                ? actualFrequenciesFromScanSegments(preparedDisplayFrame.frequencies,
-                                                    displayScanSegments)
-                : std::vector<float>();
+        if (wirelessLabDialog && wirelessLabDialog->isVisible() && displayScanSegments.isEmpty())
+            wirelessLabDialog->appendSpectrum(preparedDisplayFrame.frequencies,
+                                               preparedDisplayFrame.levels, spectrumSettings.sampleRate);
         if (refreshAnalysis) {
+            const std::vector<float> scienceFrequencies =
+                !displayScanSegments.isEmpty()
+                    ? actualFrequenciesFromScanSegments(preparedDisplayFrame.frequencies, displayScanSegments)
+                    : std::vector<float>();
             updateSpectrumScience(scienceFrequencies.size() == preparedDisplayFrame.frequencies.size()
                                       ? scienceFrequencies
                                       : preparedDisplayFrame.frequencies,
@@ -1455,7 +1455,7 @@ void YourClassName::updateSpectrum() {
                                          ? displayProfileTimer.nsecsElapsed()
                                          : 0;
 
-        if (refreshAuxiliaryUi) {
+        if (refreshAuxiliaryUi && presentMainSpectrum) {
             graphWidget->setLevelRange(displayLevelMin, displayLevelMax);
             graphWidget->setSpectrumMetadata(displayCenterFrequency,
                                              pendingSettings.listeningFrequency,
@@ -1478,7 +1478,7 @@ void YourClassName::updateSpectrum() {
         if (traceFrame) {
             qDebug() << "[Spectrum] before waterfall" << "elapsedMs" << traceTimer.elapsed();
         }
-        if (updateWaterfallFrame) {
+        if (updateWaterfallFrame && presentMainWaterfall) {
             waterfallWidget->setSpectrumMetadata(displayCenterFrequency,
                                                  pendingSettings.listeningFrequency,
                                                  spectrumSettings.sampleRate,
@@ -1490,12 +1490,16 @@ void YourClassName::updateSpectrum() {
                 lastIqDroppedQueuedBlocks = discontinuity.droppedQueuedBlocks;
                 lastIqSkippedSnapshotBlocks = discontinuity.skippedSnapshotBlocks;
             } else {
-                if (discontinuity.droppedQueuedBlocks > lastIqDroppedQueuedBlocks) {
-                    waterfallWidget->queueDiscontinuityRow(
-                        MyWaterfallWidget::DiscontinuityKind::ProcessingQueueDrop);
-                } else if (discontinuity.skippedSnapshotBlocks > lastIqSkippedSnapshotBlocks) {
-                    waterfallWidget->queueDiscontinuityRow(
-                        MyWaterfallWidget::DiscontinuityKind::VisualSnapshotSkip);
+                // Both kinds of diagnostic row are opt-in. Audio overflow alone
+                // does not discard the independent FFT snapshot.
+                if (showAudioQueueDropRows) {
+                    if (discontinuity.droppedQueuedBlocks > lastIqDroppedQueuedBlocks) {
+                        waterfallWidget->queueDiscontinuityRow(
+                            MyWaterfallWidget::DiscontinuityKind::ProcessingQueueDrop);
+                    } else if (discontinuity.skippedSnapshotBlocks > lastIqSkippedSnapshotBlocks) {
+                        waterfallWidget->queueDiscontinuityRow(
+                            MyWaterfallWidget::DiscontinuityKind::VisualSnapshotSkip);
+                    }
                 }
                 lastIqDroppedQueuedBlocks = discontinuity.droppedQueuedBlocks;
                 lastIqSkippedSnapshotBlocks = discontinuity.skippedSnapshotBlocks;
@@ -1574,8 +1578,10 @@ void YourClassName::updateSpectrum() {
                                      displayLevelMax,
                                      true);
         }
-        waterfallWidget->setScanSegments(displayScanSegments);
-        waterfallWidget->setScanSegmentMarkersVisible(displayScanSegmentMarkers);
+        if (presentMainWaterfall) {
+            waterfallWidget->setScanSegments(displayScanSegments);
+            waterfallWidget->setScanSegmentMarkersVisible(displayScanSegmentMarkers);
+        }
         if (profileDisplayFrame) {
             const qint64 afterWidgetsNs = displayProfileTimer.nsecsElapsed();
             recordSpectrumDisplayProfile(spectrumSettings.fftLength,

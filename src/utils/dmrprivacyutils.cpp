@@ -8,6 +8,8 @@ QString dmrPrivacyModeId(int mode) {
         return QStringLiteral("arc4");
     case DMR_PRIVACY_AES256:
         return QStringLiteral("aes256");
+    case DMR_PRIVACY_HYTERA_BASIC:
+        return QStringLiteral("hytera-bp");
     case DMR_PRIVACY_NONE:
     default:
         return QStringLiteral("none");
@@ -16,6 +18,11 @@ QString dmrPrivacyModeId(int mode) {
 
 int dmrPrivacyModeFromText(const QString &text) {
     const QString normalized = text.trimmed().toLower();
+    if (normalized == QStringLiteral("hytera-bp") ||
+        normalized == QStringLiteral("hytera-basic") ||
+        normalized == QStringLiteral("hytera basic")) {
+        return DMR_PRIVACY_HYTERA_BASIC;
+    }
     if (normalized.contains(QStringLiteral("aes"))) {
         return DMR_PRIVACY_AES256;
     }
@@ -30,6 +37,7 @@ int normalizedDmrPrivacyMode(int mode) {
     switch (mode) {
     case DMR_PRIVACY_ARC4:
     case DMR_PRIVACY_AES256:
+    case DMR_PRIVACY_HYTERA_BASIC:
         return mode;
     case DMR_PRIVACY_NONE:
     default:
@@ -39,12 +47,22 @@ int normalizedDmrPrivacyMode(int mode) {
 
 QString normalizedDmrPrivacyKeyHex(const QString &text) {
     QString key = text.trimmed();
+    if (key.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) key.remove(0, 2);
     key.remove(QRegularExpression(QStringLiteral("[^0-9A-Fa-f]")));
     key = key.toUpper();
     if (key.size() > 64) {
         key.truncate(64);
     }
     return key;
+}
+
+bool isValidHyteraBasicKey(const QString &text) {
+    QString key = text.trimmed();
+    if (key.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) key.remove(0, 2);
+    key.remove(QRegularExpression(QStringLiteral("[\\s:_-]")));
+    static const QRegularExpression hex(QStringLiteral("^[0-9A-Fa-f]+$"));
+    return (key.size() == 10 || key.size() == 32 || key.size() == 64) &&
+           hex.match(key).hasMatch();
 }
 
 int findDmrPrivacyKeyIndexById(const QVector<DmrPrivacyKeyEntry> &keys, int keyId) {

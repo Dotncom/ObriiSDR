@@ -83,7 +83,11 @@ public:
                                     !qFuzzyCompare(bandwidthHz_ + 1.0, bandwidthHz + 1.0);
         channelId_ = channelId; row_ = row; name_ = name;
         centerHz_ = centerHz; bandwidthHz_ = bandwidthHz;
-        if (mappingChanged && mode_ != 0) waterfall_.fill(QColor(4, 7, 12));
+        if (mappingChanged && mode_ != 0) {
+            waterfallRows_ = 0;
+            waterfallHead_ = 0;
+            waterfall_.fill(QColor(4, 7, 12));
+        }
         update();
     }
     int channelRow() const { return row_; }
@@ -96,7 +100,7 @@ public:
             qFuzzyCompare(maximumDbfs_ + 201.0f, maximumDbfs + 201.0f)) return;
         minimumDbfs_ = minimumDbfs;
         maximumDbfs_ = maximumDbfs;
-        waterfall_.fill(QColor(4, 7, 12));
+        recolorWaterfall();
         update();
     }
     void setSpectrum(const std::vector<float> &frequencies, const std::vector<float> &levels) {
@@ -123,25 +127,31 @@ public:
             }
         }
         if (mode_ != 0) {
+            if (waterfallLevels_.empty()) {
+                waterfallLevels_.resize(static_cast<std::size_t>(waterfall_.width() * waterfall_.height()));
+            }
+            waterfallHead_ = (waterfallHead_ + waterfall_.height() - 1) % waterfall_.height();
+            std::copy(levels_.begin(), levels_.end(),
+                      waterfallLevels_.begin() + waterfallHead_ * waterfall_.width());
+            waterfallRows_ = (std::min)(waterfallRows_ + 1, waterfall_.height());
             for (int y = waterfall_.height() - 1; y > 0; --y) {
                 std::memcpy(waterfall_.scanLine(y), waterfall_.constScanLine(y - 1),
                             static_cast<std::size_t>(waterfall_.bytesPerLine()));
             }
             QRgb *line = reinterpret_cast<QRgb *>(waterfall_.scanLine(0));
             for (int x = 0; x < waterfall_.width(); ++x) {
-                const float value = std::clamp(
-                    (levels_[static_cast<std::size_t>(x)] - minimumDbfs_) /
-                        (maximumDbfs_ - minimumDbfs_),
-                    0.0f,
-                    1.0f);
-                const int red = int(255.0f * std::clamp((value - 0.50f) * 2.0f, 0.0f, 1.0f));
-                const int green = int(255.0f * std::clamp(1.0f - std::abs(value - 0.55f) * 2.2f, 0.0f, 1.0f));
-                const int blue = int(255.0f * std::clamp(1.0f - value * 1.35f, 0.0f, 1.0f));
-                line[x] = qRgb(red, green, blue);
+                line[x] = colorForLevel(levels_[static_cast<std::size_t>(x)]);
             }
         }
         update();
     }
+
+#ifdef OBRII_VFO_SELFTEST
+    const QImage &historyImageForTest() const { return waterfall_; }
+    const std::vector<float> &historyLevelsForTest() const { return waterfallLevels_; }
+    int historyRowsForTest() const { return waterfallRows_; }
+    int historyHeadForTest() const { return waterfallHead_; }
+#endif
 
 protected:
     void paintEvent(QPaintEvent *) override {
@@ -194,6 +204,26 @@ protected:
     }
 
 private:
+    QRgb colorForLevel(float level) const {
+        const float value = std::clamp((level - minimumDbfs_) / (maximumDbfs_ - minimumDbfs_), 0.0f, 1.0f);
+        const int red = int(255.0f * std::clamp((value - 0.50f) * 2.0f, 0.0f, 1.0f));
+        const int green = int(255.0f * std::clamp(1.0f - std::abs(value - 0.55f) * 2.2f, 0.0f, 1.0f));
+        const int blue = int(255.0f * std::clamp(1.0f - value * 1.35f, 0.0f, 1.0f));
+        return qRgb(red, green, blue);
+    }
+    void recolorWaterfall() {
+        if (mode_ == 0) return;
+        for (int y = 0; y < waterfall_.height(); ++y) {
+            QRgb *line = reinterpret_cast<QRgb *>(waterfall_.scanLine(y));
+            if (y >= waterfallRows_) {
+                std::fill(line, line + waterfall_.width(), qRgb(4, 7, 12));
+                continue;
+            }
+            const auto offset = (waterfallHead_ + y) % waterfall_.height() * waterfall_.width();
+            for (int x = 0; x < waterfall_.width(); ++x)
+                line[x] = colorForLevel(waterfallLevels_[static_cast<std::size_t>(offset + x)]);
+        }
+    }
     int mode_ = 2;
     int row_ = -1;
     QString channelId_;
@@ -203,10 +233,82 @@ private:
     std::vector<float> levels_;
     std::function<void(int)> editRequested_;
     QImage waterfall_;
+    std::vector<float> waterfallLevels_;
+    int waterfallHead_ = 0;
+    int waterfallRows_ = 0;
     float minimumDbfs_ = -140.0f;
     float maximumDbfs_ = -40.0f;
 };
 }
+
+#ifdef OBRII_VFO_SELFTEST
+bool multiVfoPreviewHistorySelfTest() {
+    const std::vector<float> frequencies{100, 101, 102, 103};
+    for (int mode : {1, 2}) {
+        MultiVfoPreview preview(mode, {}), other(mode, {});
+        preview.setChannel(QStringLiteral("one"), 0, QStringLiteral("One"), 101.5, 4);
+        other.setChannel(QStringLiteral("two"), 1, QStringLiteral("Two"), 101.5, 4);
+        for (int row = 0; row < 130; ++row) {
+            const std::vector<float> levels(4, -130.0f + row % 50);
+            preview.setSpectrum(frequencies, levels);
+            other.setSpectrum(frequencies, levels);
+        }
+        const QImage original = preview.historyImageForTest();
+        const QImage otherOriginal = other.historyImageForTest();
+        const auto history = preview.historyLevelsForTest();
+        const int head = preview.historyHeadForTest();
+        preview.setDbfsRange(-155, -30);
+        if (preview.historyRowsForTest() != 92 || preview.historyHeadForTest() != head ||
+            preview.historyLevelsForTest() != history || preview.historyImageForTest() == original ||
+            other.historyImageForTest() != otherOriginal) return false;
+        preview.setDbfsRange(-140, -40);
+        if (preview.historyImageForTest() != original) return false;
+        preview.setChannel(QStringLiteral("one"), 0, QStringLiteral("Renamed"), 101.5, 4);
+        if (preview.historyImageForTest() != original) return false;
+        preview.setChannel(QStringLiteral("one"), 0, QStringLiteral("Retuned"), 102.5, 4);
+        if (preview.historyRowsForTest() != 0) return false;
+        preview.setDbfsRange(-160, -20);
+        for (int y = 0; y < 92; ++y)
+            if (preview.historyImageForTest().pixel(0, y) != qRgb(4, 7, 12)) return false;
+    }
+    MultiVfoWidget host;
+    QJsonArray channels{
+        QJsonObject{{"id", "first"}, {"frequencyHz", 100000000}, {"bandwidthHz", 12500}},
+        QJsonObject{{"id", "second"}, {"frequencyHz", 101000000}, {"bandwidthHz", 12500}}};
+    const auto configure = [&] {
+        return host.setConfigurationJson(QString::fromUtf8(QJsonDocument(
+            QJsonObject{{"enabled", true}, {"viewMode", 2}, {"channels", channels}}).toJson()));
+    };
+    if (!configure()) return false;
+    for (auto *button : host.findChildren<QPushButton *>())
+        if (button->text() == QStringLiteral("Mosaic")) button->click();
+    QHash<QString, MultiVfoPreview *> views;
+    for (auto *widget : host.findChildren<QWidget *>()) {
+        if (auto *preview = dynamic_cast<MultiVfoPreview *>(widget)) {
+            views.insert(preview->channelId(), preview);
+            preview->setSpectrum(frequencies, std::vector<float>(4, -90));
+        }
+    }
+    if (views.size() != 2) return false;
+    auto *first = views.value(QStringLiteral("first"));
+    auto *second = views.value(QStringLiteral("second"));
+    const auto firstHistory = first->historyLevelsForTest();
+    const QImage secondHistory = second->historyImageForTest();
+    QJsonObject updated = channels[0].toObject();
+    updated.insert(QStringLiteral("minimumDbfs"), -155);
+    channels[0] = updated;
+    if (!configure() || first->historyLevelsForTest() != firstHistory ||
+        first->historyRowsForTest() != 1 || second->historyImageForTest() != secondHistory) return false;
+    const QImage firstImage = first->historyImageForTest();
+    const QJsonValue originalFirst = channels[0];
+    channels[0] = channels[1];
+    channels[1] = originalFirst;
+    if (!configure() || first->channelRow() != 1 || first->historyImageForTest() != firstImage) return false;
+    channels.removeAt(0);
+    if (!configure() || first->channelRow() != 0 || first->historyImageForTest() != firstImage) return false;
+    return true;
+}
+#endif
 
 MultiVfoWidget::MultiVfoWidget(QWidget *parent)
     : QWidget(parent) {
@@ -329,6 +431,9 @@ void MultiVfoWidget::setReceiverContext(double centerFrequencyHz,
                                         double listeningFrequencyHz,
                                         double bandwidthHz,
                                         int modulationType) {
+    if (receiverCenterHz == centerFrequencyHz && receiverSampleRate == sampleRate &&
+        receiverListeningHz == listeningFrequencyHz && receiverBandwidthHz == bandwidthHz &&
+        receiverModulationType == modulationType) return;
     receiverCenterHz = centerFrequencyHz;
     receiverSampleRate = sampleRate;
     receiverListeningHz = listeningFrequencyHz;
@@ -546,6 +651,7 @@ int MultiVfoWidget::monitoredRow() const {
 
 void MultiVfoWidget::updateSpectrum(const std::vector<float> &frequencies,
                                     const std::vector<float> &levels) {
+    if (!isVisible() && (!mosaicDialog || !mosaicDialog->isVisible())) return;
     if (!enabledCheckBox->isChecked() || frequencies.empty() || frequencies.size() != levels.size()) return;
     if (spectrumUpdateTimer.isValid() && spectrumUpdateTimer.elapsed() < kUiUpdateIntervalMs) return;
     spectrumUpdateTimer.restart();
@@ -784,17 +890,24 @@ void MultiVfoWidget::openMosaicLevelEditor(int row) {
         minimumLabel->setText(QStringLiteral("%1 dBFS").arg(minimumSlider->value()));
         maximumLabel->setText(QStringLiteral("%1 dBFS").arg(maximumSlider->value()));
     };
-    const auto apply = [this, row, minimumSlider, maximumSlider]() {
-        if (row < 0 || row >= table->rowCount()) return;
-        if (QTableWidgetItem *channelName = table->item(row, NameColumn)) {
-            channelName->setData(kMinimumDbfsRole, minimumSlider->value());
-            channelName->setData(kMaximumDbfsRole, maximumSlider->value());
+    const QString editedChannelId = name->data(kChannelIdRole).toString();
+    const auto apply = [this, editedChannelId, minimumSlider, maximumSlider]() {
+        for (int channelRow = 0; channelRow < table->rowCount(); ++channelRow) {
+            QTableWidgetItem *channelName = table->item(channelRow, NameColumn);
+            if (!channelName || channelName->data(kChannelIdRole).toString() != editedChannelId) continue;
+            {
+                const QSignalBlocker blocker(table);
+                channelName->setData(kMinimumDbfsRole, minimumSlider->value());
+                channelName->setData(kMaximumDbfsRole, maximumSlider->value());
+            }
             emitConfigurationChanged();
+            return;
         }
     };
     connect(minimumSlider, &QSlider::valueChanged, dialog,
             [minimumSlider, maximumSlider, updateLabels, apply](int value) {
                 if (value >= maximumSlider->value()) {
+                    const QSignalBlocker blocker(maximumSlider);
                     maximumSlider->setValue((std::min)(maximumSlider->maximum(), value + 1));
                 }
                 updateLabels();
@@ -803,6 +916,7 @@ void MultiVfoWidget::openMosaicLevelEditor(int row) {
     connect(maximumSlider, &QSlider::valueChanged, dialog,
             [minimumSlider, maximumSlider, updateLabels, apply](int value) {
                 if (value <= minimumSlider->value()) {
+                    const QSignalBlocker blocker(minimumSlider);
                     minimumSlider->setValue((std::max)(minimumSlider->minimum(), value - 1));
                 }
                 updateLabels();
@@ -896,6 +1010,30 @@ void MultiVfoWidget::updateMosaicConfiguration() {
         return;
     }
 
+    const auto configurePreview = [this](MultiVfoPreview *preview, const ChannelView &channel) {
+        QTableWidgetItem *name = table->item(channel.row, NameColumn);
+        QDoubleSpinBox *frequency = doubleSpinAt(table, channel.row, FrequencyColumn);
+        QDoubleSpinBox *bandwidth = doubleSpinAt(table, channel.row, BandwidthColumn);
+        if (!name || !frequency || !bandwidth) return;
+        preview->setChannel(channel.id, channel.row, name->text(),
+                            frequency->value() * 1.0e6, bandwidth->value() * 1000.0);
+        preview->setDbfsRange(
+            name->data(kMinimumDbfsRole).isValid()
+                ? static_cast<float>(name->data(kMinimumDbfsRole).toInt()) : -140.0f,
+            name->data(kMaximumDbfsRole).isValid()
+                ? static_cast<float>(name->data(kMaximumDbfsRole).toInt()) : -40.0f);
+    };
+    bool unchangedLayout = mosaicViews.size() == enabledChannels.size();
+    for (std::size_t index = 0; unchangedLayout && index < enabledChannels.size(); ++index) {
+        auto *preview = dynamic_cast<MultiVfoPreview *>(mosaicViews[index]);
+        unchangedLayout = preview && preview->channelId() == enabledChannels[index].id;
+    }
+    if (unchangedLayout) {
+        for (std::size_t index = 0; index < enabledChannels.size(); ++index)
+            configurePreview(static_cast<MultiVfoPreview *>(mosaicViews[index]), enabledChannels[index]);
+        return;
+    }
+
     while (QLayoutItem *item = mosaicLayout->takeAt(0)) delete item;
     std::vector<QWidget *> updatedViews;
     updatedViews.reserve((std::max)(std::size_t(1), enabledChannels.size()));
@@ -917,15 +1055,7 @@ void MultiVfoWidget::updateMosaicConfiguration() {
                 ? QStringLiteral("Подвійний клік: налаштувати Min/Max dBFS")
                 : QStringLiteral("Double-click: adjust Min/Max dBFS"));
         }
-        preview->setChannel(channel.id, channel.row, name->text(),
-                            frequency->value() * 1.0e6, bandwidth->value() * 1000.0);
-        preview->setDbfsRange(
-            name->data(kMinimumDbfsRole).isValid()
-                ? static_cast<float>(name->data(kMinimumDbfsRole).toInt())
-                : -140.0f,
-            name->data(kMaximumDbfsRole).isValid()
-                ? static_cast<float>(name->data(kMaximumDbfsRole).toInt())
-                : -40.0f);
+        configurePreview(preview, channel);
         mosaicLayout->addWidget(preview, viewIndex / 2, viewIndex % 2);
         updatedViews.push_back(preview);
         ++viewIndex;

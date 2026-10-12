@@ -31,6 +31,7 @@
 #include "radiosettings.h"
 #include "audiofilterchain.h"
 #include "iqchannelizer.h"
+#include "dmrcicdecimator.h"
 
 class AudioProcessor : public QObject {
     Q_OBJECT
@@ -42,6 +43,8 @@ public:
     void resetHfNoiseCancelState();
     void setAudioDevice(int deviceID);
     void setLocalPlaybackEnabled(bool enabled);
+    void setDmrChannelIqEnabled(bool enabled) { dmrChannelIqEnabled.store(enabled); }
+    void stopDemodulationForStreamRestart();
     void startAudioOutput();
     void processAudioBuffer();
 public:
@@ -58,8 +61,10 @@ signals:
     void audioFrameReady(const QByteArray &pcmData);
     void demodulatorFrameReady(const QByteArray &pcmData);
     void dmrBasebandFrameReady(const QByteArray &pcmData, int sampleRate);
+    void dmrChannelIqFrameReady(const QByteArray &iqData, double sampleRate, int sampleCount);
 
 private:
+    friend struct AudioProcessorTestAccess;
     static constexpr int HF_NOISE_CANCEL_TAP_COUNT = 9;
 
     void SDRThread();
@@ -69,6 +74,7 @@ private:
     void prepareWaveHeaders();
     void unprepareWaveHeaders();
     void joinWorkerThreads();
+    void stopDemodulationImpl(bool closeOutputDevice);
     void resetDemodulatorState();
     RadioSettings currentSettingsSnapshot() const;
     void processDemodulatorBlock(const std::vector<float>& iqBlock,
@@ -142,13 +148,11 @@ private:
     float amDcEstimate = 0.0f;
     float amAgcLevel = 0.05f;
     double dmrResamplePhase = 0.0;
-    std::array<std::vector<std::complex<float>>, 4> dmrCicBuffers = {};
-    std::array<std::complex<float>, 4> dmrCicSums = {};
-    int dmrCicIndex = 0;
-    int dmrCicLength = 0;
+    DmrCicDecimator dmrCicDecimator;
+    std::atomic<bool> dmrChannelIqEnabled{false};
+    float dmrRecordingAgcLevel = 0.01f;
+    QByteArray dmrPcmPending;
     std::complex<float> dmrLowPassState = {0.0f, 0.0f};
-    std::complex<float> dmrDecimationSum = {0.0f, 0.0f};
-    int dmrDecimationCount = 0;
     std::complex<float> dmrPreviousSample = {1.0f, 0.0f};
     bool dmrPreviousValid = false;
     float dmrDiscriminatorDc = 0.0f;

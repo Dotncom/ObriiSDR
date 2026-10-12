@@ -14,15 +14,27 @@ struct BinAccumulator {
     double sampleDistance = std::numeric_limits<double>::infinity();
     int count = 0;
 
-    void add(float value, double distance) {
+    void add(float value, double distance, SpectrumDisplayReduction reduction) {
         if (!std::isfinite(value)) return;
-        peak = (std::max)(peak, value);
-        minimum = (std::min)(minimum, value);
-        sumDb += value;
-        sumPower += std::pow(10.0, static_cast<double>(value) / 10.0);
-        if (distance < sampleDistance) {
-            sampleDistance = distance;
-            sample = value;
+        switch (reduction) {
+        case SpectrumDisplayReduction::AverageDb:
+            sumDb += value;
+            break;
+        case SpectrumDisplayReduction::AveragePower:
+            sumPower += std::pow(10.0, static_cast<double>(value) / 10.0);
+            break;
+        case SpectrumDisplayReduction::Minimum:
+            minimum = (std::min)(minimum, value);
+            break;
+        case SpectrumDisplayReduction::Sample:
+            if (distance < sampleDistance) {
+                sampleDistance = distance;
+                sample = value;
+            }
+            break;
+        default:
+            peak = (std::max)(peak, value);
+            break;
         }
         ++count;
     }
@@ -117,7 +129,7 @@ void prepareSpectrumDisplayFrame(const std::vector<float> &sourceFrequencies,
         return;
     }
 
-    const int binCount = std::clamp(targetBins, 2, availableCount);
+    const int binCount = (std::min)(availableCount, (std::max)(targetBins, 2));
     output.frequencies.resize(static_cast<std::size_t>(binCount));
     output.levels.assign(static_cast<std::size_t>(binCount),
                          -std::numeric_limits<float>::infinity());
@@ -155,13 +167,14 @@ void prepareSpectrumDisplayFrame(const std::vector<float> &sourceFrequencies,
             for (int index = firstIndex; index < lastIndex; ++index) {
                 const int shiftedIndex = (index + availableCount / 2) % availableCount;
                 const float level = sourceLevels[static_cast<std::size_t>(shiftedIndex)];
-                const double distance = std::abs(
-                    static_cast<double>(sourceFrequencies[static_cast<std::size_t>(index)]) - centerFrequency);
-                levelAccumulator.add(level, distance);
+                const double distance = reduction == SpectrumDisplayReduction::Sample
+                    ? std::abs(static_cast<double>(sourceFrequencies[static_cast<std::size_t>(index)]) - centerFrequency)
+                    : 0.0;
+                levelAccumulator.add(level, distance, reduction);
                 if (includeOverlay) {
                     const float overlayLevel =
                         (*sourceOverlayLevels)[static_cast<std::size_t>(shiftedIndex)];
-                    overlayAccumulator.add(overlayLevel, distance);
+                    overlayAccumulator.add(overlayLevel, distance, reduction);
                 }
             }
             output.levels[static_cast<std::size_t>(bin)] = levelAccumulator.value(reduction);
@@ -186,14 +199,15 @@ void prepareSpectrumDisplayFrame(const std::vector<float> &sourceFrequencies,
             const int bin = std::clamp(static_cast<int>(position * binCount), 0, binCount - 1);
             const double centerFrequency = minFrequency +
                                            (static_cast<double>(bin) + 0.5) * span / binCount;
-            const double distance = std::abs(static_cast<double>(frequency) - centerFrequency);
+            const double distance = reduction == SpectrumDisplayReduction::Sample
+                ? std::abs(static_cast<double>(frequency) - centerFrequency) : 0.0;
             const int shiftedIndex = (index + availableCount / 2) % availableCount;
             const float level = sourceLevels[static_cast<std::size_t>(shiftedIndex)];
-            levelAccumulators[static_cast<std::size_t>(bin)].add(level, distance);
+            levelAccumulators[static_cast<std::size_t>(bin)].add(level, distance, reduction);
             if (includeOverlay) {
                 const float overlayLevel =
                     (*sourceOverlayLevels)[static_cast<std::size_t>(shiftedIndex)];
-                overlayAccumulators[static_cast<std::size_t>(bin)].add(overlayLevel, distance);
+                overlayAccumulators[static_cast<std::size_t>(bin)].add(overlayLevel, distance, reduction);
             }
         }
         for (int bin = 0; bin < binCount; ++bin) {

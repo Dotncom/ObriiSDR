@@ -23,6 +23,7 @@ public:
     bool start(const TxConfiguration &configuration, QString *error) override;
     bool writeIq(const std::complex<float> *samples, int count, QString *error) override;
     bool setOutputEnabled(bool enabled, QString *error) override;
+    bool drain(int timeoutMs, QString *error) override;
     void stop() override;
     bool isRunning() const override;
 

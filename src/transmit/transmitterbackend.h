@@ -15,7 +15,16 @@ enum class TxModulation {
     Usb,
     Lsb,
     Cw,
-    Ft8
+    Ft8,
+    Ook,
+    Ask,
+    Fsk,
+    Gfsk,
+    Gmsk,
+    Bpsk,
+    Qpsk,
+    Rtty,
+    Dmr
 };
 
 struct TxConfiguration {
@@ -27,7 +36,17 @@ struct TxConfiguration {
     double signalBandwidthHz = 0.0;
     double toneHz = 700.0;
     int cwWpm = 18;
+    double symbolRate = 1200.0;
+    double gaussianBt = 0.5;
+    float askDepth = 0.70f;
+    bool invertData = false;
     bool alignFt8ToUtcSlot = true;
+    int ft8SlotParity = -1;
+    int dmrColorCode = 1;
+    int dmrTimeslot = 1;
+    std::uint32_t dmrSourceId = 1;
+    std::uint32_t dmrDestinationId = 9;
+    bool dmrPrivateCall = false;
     int deviceIndex = 0;
     int deviceSampleRate = 2000000;
     std::uint32_t bandwidthHz = 0;
@@ -47,6 +66,7 @@ public:
     virtual bool start(const TxConfiguration &configuration, QString *error) = 0;
     virtual bool writeIq(const std::complex<float> *samples, int count, QString *error) = 0;
     virtual bool setOutputEnabled(bool enabled, QString *error) = 0;
+    virtual bool drain(int timeoutMs, QString *error) = 0;
     virtual void stop() = 0;
     virtual bool isRunning() const = 0;
 };
@@ -59,6 +79,7 @@ public:
     bool start(const TxConfiguration &configuration, QString *error) override;
     bool writeIq(const std::complex<float> *samples, int count, QString *error) override;
     bool setOutputEnabled(bool enabled, QString *error) override;
+    bool drain(int timeoutMs, QString *error) override;
     void stop() override;
     bool isRunning() const override;
 

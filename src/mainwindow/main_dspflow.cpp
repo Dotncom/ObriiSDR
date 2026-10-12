@@ -622,6 +622,8 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
     if (type == QStringLiteral("zoom_density")) { openZoomDensity(); return; }
     if (type == QStringLiteral("zero_span")) { openZeroSpanDialog(); return; }
     if (type == QStringLiteral("research_analysis")) { openResearchAnalysis(0); return; }
+    if (type == QStringLiteral("wireless_lab")) { openWirelessLab(); return; }
+    if (type == QStringLiteral("radio_propagation")) { openPropagationLab(); return; }
     static const QHash<QString, ResearchAnalysisDialog::Tab> researchTabs = {
         {QStringLiteral("research_interference"), ResearchAnalysisDialog::InterferenceTab},
         {QStringLiteral("research_statistics"), ResearchAnalysisDialog::StatisticsTab},
@@ -830,7 +832,18 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         QDoubleSpinBox *symbolRate = nullptr;
         QDoubleSpinBox *phase = nullptr;
         QSpinBox *traces = nullptr;
-        if (type == QStringLiteral("eye_diagram") || type == QStringLiteral("digital_sync_lab")) {
+        QCheckBox *constellation3D = nullptr;
+        QCheckBox *constellationSurface = nullptr;
+        if (type == QStringLiteral("constellation")) {
+            constellation3D = new QCheckBox(text("3D-сузір'я", "3D constellation"), dialog);
+            constellation3D->setChecked(settings.value(QStringLiteral("constellation3D")).toBool(false));
+            form->addRow(constellation3D);
+            constellationSurface = new QCheckBox(text("Радіальна поверхня", "Radial surface"), dialog);
+            constellationSurface->setChecked(settings.value(QStringLiteral("constellationSurface")).toBool(false));
+            constellationSurface->setToolTip(text("Інтерполяція лише для відображення, не відновлення IQ.", "Visual interpolation only, not IQ reconstruction."));
+            form->addRow(constellationSurface);
+        }
+        if (type == QStringLiteral("constellation") || type == QStringLiteral("eye_diagram") || type == QStringLiteral("digital_sync_lab")) {
             symbolRate = new QDoubleSpinBox(dialog);
             symbolRate->setRange(1.0, 5000000.0);
             symbolRate->setDecimals(1);
@@ -838,20 +851,22 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
             symbolRate->setValue(settings.value(QStringLiteral("symbolRate")).toDouble(4800.0));
             form->addRow(text("Символьна швидкість:", "Symbol rate:"), symbolRate);
         }
-        if (type == QStringLiteral("eye_diagram")) {
+        if (type == QStringLiteral("constellation") || type == QStringLiteral("eye_diagram")) {
             phase = new QDoubleSpinBox(dialog);
             phase->setRange(0.0, 100.0);
             phase->setDecimals(1);
             phase->setSuffix(QStringLiteral(" %"));
             phase->setValue(settings.value(QStringLiteral("phasePercent")).toDouble(50.0));
-            traces = new QSpinBox(dialog);
-            traces->setRange(1, 256);
-            traces->setValue(settings.value(QStringLiteral("traces")).toInt(32));
             form->addRow(text("Фаза:", "Phase:"), phase);
-            form->addRow(text("Траси:", "Traces:"), traces);
+            if (type == QStringLiteral("eye_diagram")) {
+                traces = new QSpinBox(dialog);
+                traces->setRange(1, 256);
+                traces->setValue(settings.value(QStringLiteral("traces")).toInt(32));
+                form->addRow(text("Траси:", "Traces:"), traces);
+            }
         }
 
-        const auto applyResearchSettings = [this, id, samples, refresh, gain, symbolRate, phase, traces]() {
+        const auto applyResearchSettings = [this, id, samples, refresh, gain, symbolRate, phase, traces, constellation3D, constellationSurface]() {
             if (!dspFlowPanel) return;
             QJsonObject value;
             value.insert(QStringLiteral("samples"), samples->value());
@@ -860,6 +875,8 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
             if (symbolRate) value.insert(QStringLiteral("symbolRate"), symbolRate->value());
             if (phase) value.insert(QStringLiteral("phasePercent"), phase->value());
             if (traces) value.insert(QStringLiteral("traces"), traces->value());
+            if (constellation3D) value.insert(QStringLiteral("constellation3D"), constellation3D->isChecked());
+            if (constellationSurface) value.insert(QStringLiteral("constellationSurface"), constellationSurface->isChecked());
             dspFlowPanel->setBlockSettings(id, value);
         };
         connect(samples, QOverload<int>::of(&QSpinBox::valueChanged), dialog,
@@ -874,16 +891,30 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
                            [applyResearchSettings](double) { applyResearchSettings(); });
         if (traces) connect(traces, QOverload<int>::of(&QSpinBox::valueChanged), dialog,
                             [applyResearchSettings](int) { applyResearchSettings(); });
+        if (constellation3D) {
+            symbolRate->setEnabled(constellation3D->isChecked());
+            phase->setEnabled(constellation3D->isChecked());
+            constellationSurface->setEnabled(constellation3D->isChecked());
+            connect(constellationSurface, &QCheckBox::toggled, dialog,
+                    [applyResearchSettings](bool) { applyResearchSettings(); });
+            connect(constellation3D, &QCheckBox::toggled, dialog,
+                    [applyResearchSettings, symbolRate, phase, constellationSurface](bool enabled) {
+                        symbolRate->setEnabled(enabled);
+                        phase->setEnabled(enabled);
+                        constellationSurface->setEnabled(enabled);
+                        applyResearchSettings();
+                    });
+        }
 
         auto *fullAnalysis = new QPushButton(text("Повне вікно аналізу", "Open full analysis"), dialog);
-        connect(fullAnalysis, &QPushButton::clicked, dialog, [this, type]() {
+        connect(fullAnalysis, &QPushButton::clicked, dialog, [this, type, constellation3D]() {
             const bool synchronization = type == QStringLiteral("digital_sync_lab");
             openResearchAnalysis(static_cast<int>(synchronization
                 ? ResearchAnalysisDialog::SynchronizationTab : ResearchAnalysisDialog::IqTab));
             if (!synchronization && researchAnalysisDialog) {
                 const int viewMode = type == QStringLiteral("oscilloscope")
                                          ? 1
-                                         : (type == QStringLiteral("constellation") ? 2 : 3);
+                                         : (type == QStringLiteral("constellation") ? (constellation3D && constellation3D->isChecked() ? 4 : 2) : 3);
                 researchAnalysisDialog->setIqView(viewMode);
             }
         });
@@ -2081,6 +2112,7 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         form->addRow(QString(), linkedCheckBox(digitalDecodeCheckbox, text("Декодувати", "Decode"),
                                                dialog, syncTimer));
         form->addRow(text("DMR backend:", "DMR backend:"), linkedCombo(dmrBackendCombo, dialog, syncTimer));
+        form->addRow(QString(), linkedLabel(dmrPrivacyCapabilityLabel, dialog, syncTimer));
         form->addRow(text("4FSK rate:", "4FSK rate:"), linkedCombo(dmrBasebandRateCombo, dialog, syncTimer));
         form->addRow(text("Канал:", "Channel:"), linkedCombo(dmrChannelRateCombo, dialog, syncTimer));
         form->addRow(QString(), commandButton(text("Відкрити текстовий вихід", "Open text output"),
@@ -2089,6 +2121,7 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         title = QStringLiteral("DMR");
         form->addRow(QString(), linkedCheckBox(digitalDecodeCheckbox, text("Декодувати", "Decode"), dialog, syncTimer));
         form->addRow(text("Backend:", "Backend:"), linkedCombo(dmrBackendCombo, dialog, syncTimer));
+        form->addRow(QString(), linkedLabel(dmrPrivacyCapabilityLabel, dialog, syncTimer));
         form->addRow(text("Baseband:", "Baseband:"), linkedCombo(dmrBasebandRateCombo, dialog, syncTimer));
         form->addRow(text("Канал:", "Channel:"), linkedCombo(dmrChannelRateCombo, dialog, syncTimer));
         form->addRow(text("AMBE layout:", "AMBE layout:"), linkedCombo(dmrAmbeLayoutCombo, dialog, syncTimer));

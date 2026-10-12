@@ -9,6 +9,8 @@
 #include <QTcpSocket>
 #include <QUdpSocket>
 
+class QJsonObject;
+
 class GopherTrunkBridge : public QObject {
     Q_OBJECT
 
@@ -32,6 +34,8 @@ public:
     bool isEnabled() const { return bridgeEnabled; }
 
     void resetStream();
+    static QString normalizedBurstDibits(const QString &dibits, bool dataBurst,
+                                         bool voicePolarityFlip);
     void sendDibitBurst(const QString &dibits,
                         const QString &burstKind,
                         int dataType,
@@ -68,6 +72,7 @@ private:
     void emitStatus(const QString &status);
     bool processRestartBackoffActive() const;
     void armProcessRestartBackoff(const QString &reason);
+    QJsonObject currentPrivacyObject() const;
     QByteArray pcm16ToMono(const QByteArray &pcmData, int channels) const;
     QByteArray normalizeOutputPcmForPlayback(const QByteArray &pcmData, quint64 packetIndex) const;
     QByteArray upsample8kMonoTo48k(const QByteArray &pcmData) const;
@@ -102,9 +107,6 @@ private:
     quint64 tcpOutputLines = 0;
     bool streamPolarityKnown = false;
     bool streamPolarityFlip = false;
-    bool pendingPolarityKnown = false;
-    bool pendingPolarityFlip = false;
-    int pendingPolarityConfirmCount = 0;
     int lastColorCode = -1;
     QString lastPrivacySummary;
     QString lastPrivacyResetSummary;

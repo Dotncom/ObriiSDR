@@ -95,7 +95,6 @@ QJsonObject YourClassName::settingsToJson() const {
     settings["dmrPrivacyMode"] = pendingSettings.dmrPrivacyMode;
     settings["dmrPrivacyKeyId"] = pendingSettings.dmrPrivacyKeyId;
     settings["dmrPrivacyKeyHex"] = pendingSettings.dmrPrivacyKeyHex;
-    settings["dmrPrivacyForwardToBackends"] = pendingSettings.dmrPrivacyForwardToBackends;
     settings["dmrPrivacyVariant"] = pendingSettings.dmrPrivacyVariant;
     settings["dmrPrivacyLayout"] = pendingSettings.dmrPrivacyLayout;
     settings["dmrPrivacyFrameOffset"] = pendingSettings.dmrPrivacyFrameOffset;
@@ -399,8 +398,6 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
     pendingSettings.dmrPrivacyKeyHex =
         normalizedDmrPrivacyKeyHex(settingsJson.value(QStringLiteral("dmrPrivacyKeyHex"))
                                        .toString(pendingSettings.dmrPrivacyKeyHex));
-    pendingSettings.dmrPrivacyForwardToBackends =
-        readBool("dmrPrivacyForwardToBackends", pendingSettings.dmrPrivacyForwardToBackends);
     pendingSettings.dmrPrivacyVariant =
         settingsJson.value(QStringLiteral("dmrPrivacyVariant"))
             .toString(pendingSettings.dmrPrivacyVariant)

@@ -4,6 +4,9 @@
 #include "radiosettings.h"
 #include "scientificsessiontools.h"
 #include "spectrumpersistencetools.h"
+#include "iqconstellationpreview.h"
+#include "signallabconstellation3d.h"
+#include "appsettingsutils.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -11,12 +14,16 @@
 #include <QDoubleSpinBox>
 #include <QGridLayout>
 #include <QHeaderView>
+#include <QHideEvent>
+#include <QJsonDocument>
 #include <QImage>
 #include <QLabel>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QSettings>
+#include <QStackedWidget>
 #include <QStringList>
 #include <QTabWidget>
 #include <QTableWidget>
@@ -749,6 +756,11 @@ ResearchAnalysisDialog::ResearchAnalysisDialog(Translator translator,
         trText(QStringLiteral("research_iq_view_constellation"), QStringLiteral("Constellation")), 2);
     iqViewCombo->addItem(
         trText(QStringLiteral("research_iq_view_eye"), QStringLiteral("Eye diagram")), 3);
+    iqViewCombo->addItem(
+        trText(QStringLiteral("research_iq_view_constellation_3d"), QStringLiteral("3D constellation")), 4);
+    iqSurfaceCheckbox = new QCheckBox(trText(QStringLiteral("research_iq_constellation_surface"), QStringLiteral("Radial surface")), iqPage);
+    iqSurfaceCheckbox->setToolTip(trText(QStringLiteral("research_iq_surface_hint"),
+        QStringLiteral("Fill from I=Q=0 to displayed samples. Interpolation is visual only, not reconstructed IQ.")));
     iqSampleCountSpin = new QSpinBox(iqPage);
     iqSampleCountSpin->setRange(1024, 262144);
     iqSampleCountSpin->setSingleStep(1024);
@@ -772,6 +784,7 @@ ResearchAnalysisDialog::ResearchAnalysisDialog(Translator translator,
     iqControls->addWidget(new QLabel(
         trText(QStringLiteral("research_iq_view"), QStringLiteral("View:")), iqPage), 0, 3);
     iqControls->addWidget(iqViewCombo, 0, 4);
+    iqControls->addWidget(iqSurfaceCheckbox, 0, 5, 1, 3);
     iqControls->addWidget(new QLabel(
         trText(QStringLiteral("research_iq_samples"), QStringLiteral("Samples:")), iqPage), 1, 0);
     iqControls->addWidget(iqSampleCountSpin, 1, 1);
@@ -790,7 +803,23 @@ ResearchAnalysisDialog::ResearchAnalysisDialog(Translator translator,
     iqStatus->setWordWrap(true);
     iqLayout->addWidget(iqStatus);
     iqPlot = new ResearchPlotWidget(ResearchPlotWidgetImpl::Iq, iqPage);
-    iqLayout->addWidget(iqPlot, 1);
+    iqPlotStack = new QStackedWidget(iqPage);
+    iqPlotStack->addWidget(iqPlot);
+    iqConstellation3D = new SignalLabConstellation3DWidget(iqPage);
+    QSettings researchSettings(persistentSettingsFilePath(), QSettings::IniFormat);
+    iqSurfaceCheckbox->setChecked(researchSettings.value(QStringLiteral("research/iq/constellationSurface"), false).toBool());
+    iqConstellation3D->setLanguage(researchSettings.value(QStringLiteral("ui/language"), QStringLiteral("en")).toString());
+    iqConstellation3D->setCameraState(QJsonDocument::fromJson(researchSettings.value(
+        QStringLiteral("research/iq/constellation3DCamera")).toByteArray()).object());
+    iqPlotStack->addWidget(iqConstellation3D);
+    iqLayout->addWidget(iqPlotStack, 1);
+    const int savedView = iqViewCombo->findData(researchSettings.value(QStringLiteral("research/iq/view"), 0).toInt());
+    if (savedView >= 0) iqViewCombo->setCurrentIndex(savedView);
+    updateIqView();
+    connect(iqViewCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() { updateIqView(); });
+    connect(iqSurfaceCheckbox, &QCheckBox::toggled, this, [this]() { updateIqView(); });
+    connect(iqSymbolRateSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this]() { updateIqView(); });
+    connect(iqPhaseSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this]() { updateIqView(); });
     tabs->addTab(iqPage, trText(QStringLiteral("research_iq_tab"), QStringLiteral("IQ analysis")));
 
     QWidget *syncPage = new QWidget(tabs);
@@ -1089,11 +1118,31 @@ void ResearchAnalysisDialog::selectTab(Tab tab) {
 
 void ResearchAnalysisDialog::setIqView(int viewMode) {
     if (!iqViewCombo) return;
-    const int index = iqViewCombo->findData((std::clamp)(viewMode, 0, 3));
+    const int index = iqViewCombo->findData((std::clamp)(viewMode, 0, 4));
     if (index >= 0) {
         iqViewCombo->setCurrentIndex(index);
     }
     selectTab(IqTab);
+}
+
+void ResearchAnalysisDialog::updateIqView() {
+    if (!iqPlotStack) return;
+    const bool threeD = iqViewCombo->currentData().toInt() == 4;
+    iqSurfaceCheckbox->setEnabled(threeD);
+    iqConstellation3D->setSurfaceEnabled(iqSurfaceCheckbox->isChecked());
+    iqPlotStack->setCurrentIndex(threeD ? 1 : 0);
+    if (threeD) iqConstellation3D->setData(buildResearchIqConstellation(
+        iqConstellationFirst, iqConstellationSecond, iqConstellationRate,
+        iqSymbolRateSpin->value(), iqPhaseSpin->value()/100.0));
+}
+
+void ResearchAnalysisDialog::hideEvent(QHideEvent *event) {
+    QSettings settings(persistentSettingsFilePath(), QSettings::IniFormat);
+    settings.setValue(QStringLiteral("research/iq/view"), iqViewCombo->currentData());
+    settings.setValue(QStringLiteral("research/iq/constellationSurface"), iqSurfaceCheckbox->isChecked());
+    settings.setValue(QStringLiteral("research/iq/constellation3DCamera"),
+                      QJsonDocument(iqConstellation3D->cameraState()).toJson(QJsonDocument::Compact));
+    QDialog::hideEvent(event);
 }
 
 bool ResearchAnalysisDialog::hasActiveMeasurementSession() const {
@@ -1430,7 +1479,7 @@ void ResearchAnalysisDialog::updateStatistics(const std::vector<float> &levels,
 }
 
 void ResearchAnalysisDialog::refreshIqSnapshot() {
-    if (!isVisible() || !tabs) return;
+    if (!isVisible() || isMinimized() || !tabs) return;
     const int activeTab = tabs->currentIndex();
     if (activeTab != IqTab && activeTab != SynchronizationTab &&
         activeTab != DualInputTab) return;
@@ -1884,8 +1933,9 @@ void ResearchAnalysisDialog::refreshIqSnapshot() {
     }
 
     if (activeTab == IqTab) {
+        const int viewMode = iqViewCombo ? iqViewCombo->currentData().toInt() : 0;
         std::vector<float> autocorrelation(129, 0.0f);
-        for (int lag = 0; lag < static_cast<int>(autocorrelation.size()); ++lag) {
+        for (int lag = 0; viewMode != 4 && lag < static_cast<int>(autocorrelation.size()); ++lag) {
             double sum = 0.0;
             int count = 0;
             for (std::size_t i = 0; i + static_cast<std::size_t>(lag) < sampleCount; i += 4) {
@@ -1952,7 +2002,7 @@ void ResearchAnalysisDialog::refreshIqSnapshot() {
 
         std::vector<float> constellationFirst;
         std::vector<float> constellationSecond;
-        if (samplesPerSymbol >= 2.0) {
+        if (viewMode != 4 && samplesPerSymbol >= 2.0) {
             const double phaseSamples = phaseFraction * samplesPerSymbol;
             for (double position = phaseSamples;
                  position + 1.0 < static_cast<double>(sampleCount) &&
@@ -1962,7 +2012,7 @@ void ResearchAnalysisDialog::refreshIqSnapshot() {
                 constellationSecond.push_back(interpolated(centeredSecond, position));
             }
         }
-        if (constellationFirst.empty()) {
+        if (viewMode != 4 && constellationFirst.empty()) {
             const std::size_t stride =
                 (std::max<std::size_t>)(1U, sampleCount / 2000U);
             for (std::size_t i = 0; i < sampleCount; i += stride) {
@@ -1975,7 +2025,7 @@ void ResearchAnalysisDialog::refreshIqSnapshot() {
         std::vector<float> eyeFirst;
         std::vector<float> eyeSecond;
         int eyeTraceCount = 0;
-        if (samplesPerSymbol >= 2.0) {
+        if (viewMode != 4 && samplesPerSymbol >= 2.0) {
             const int requestedTraces = iqTraceCountSpin
                                             ? iqTraceCountSpin->value()
                                             : 32;
@@ -1999,7 +2049,6 @@ void ResearchAnalysisDialog::refreshIqSnapshot() {
             }
         }
 
-        const int viewMode = iqViewCombo ? iqViewCombo->currentData().toInt() : 0;
         const QString viewName = iqViewCombo
                                      ? iqViewCombo->currentText()
                                      : QStringLiteral("Combined");
@@ -2027,7 +2076,11 @@ void ResearchAnalysisDialog::refreshIqSnapshot() {
                 .arg(bufferStats.queuedBlocks)
                 .arg(100.0 * clippedCount / (std::max<std::size_t>)(1, sampleCount), 0, 'f', 3)
                 .arg(100.0 * nonFiniteCount / (std::max<std::size_t>)(1, sampleCount), 0, 'f', 4));
-        iqPlot->setIq(first,
+        iqConstellationFirst = std::move(centeredFirst);
+        iqConstellationSecond = std::move(centeredSecond);
+        iqConstellationRate = analysisSampleRate;
+        if (viewMode == 4) updateIqView();
+        else iqPlot->setIq(first,
                       second,
                       autocorrelation,
                       constellationFirst,

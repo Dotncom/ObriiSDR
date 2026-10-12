@@ -6,7 +6,7 @@ docs/release_stability_handoff.md.
 
 ## Current Baseline
 
-The v5.1.0 release baseline provides:
+The v6.0.0 release baseline provides:
 
 1. First-class Fobos Standard and Agile receive paths, native RTL-SDR, and a
    hardware-tested native HackRF receive path. SoapySDR remains optional and
@@ -28,8 +28,8 @@ The v5.1.0 release baseline provides:
 7. Frequency/amplitude calibration tables with interpolation, uncertainty,
    external-chain correction, and a guided live-spectrum calibration wizard.
 8. IQ diagnostics for sequence/epoch/queue state, measured arrival rate,
-   clipping, invalid samples, DC/IQ imbalance estimates, and visible waterfall
-   rows for known internal queue drops or skipped visual snapshots.
+   clipping, invalid samples, DC/IQ imbalance estimates, and opt-in waterfall
+   rows for known internal audio/FFT losses, not asserted USB/driver losses.
 9. A configurable audio-filter chain, graphical DSP board, saved DSP layouts,
    interface profiles, scanning/hunting tools, presets, network operation,
    serial NMEA/UBX GNSS, QTH mapping, and experimental digital decoders.
@@ -45,7 +45,8 @@ Usable but still requiring explicit qualification:
    local legal limits. Fobos hardware remains receive-only.
 3. Vulkan/VkFFT performance varies by GPU, driver, FFT length, and platform.
    Auto and CPU fallback must remain available.
-4. Known internal IQ discontinuities are marked. A true USB/driver loss marker
+4. Known internal discontinuities can be marked by the optional diagnostic rows.
+   A true USB/driver loss marker
    still depends on each backend exposing trustworthy transfer-loss data.
 
 Experimental, not a stable-release claim:
@@ -56,6 +57,15 @@ Experimental, not a stable-release claim:
 4. SoapySDR across untested hardware and all bladeRF support.
 
 ## Remaining Priorities
+
+### Wireless Laboratory (Beta)
+
+TShark capture/import, Wi-Fi packet/network tables, SDR channel-energy inspection
+and a packet/IQ/timed-TX capability interface are implemented.
+Bluetooth/GSM/LTE selectors inspect packet captures, not SDR PHY decoding.
+Next: validate monitor-mode hardware, connect gr-ieee802-11, then BLE advertising
+and GSM broadcast/GSMTAP adapters. Real-time MAC/TX, Bluetooth hopping, UMTS and
+LTE PHY/link stacks remain future work. Review: docs/wireless_lab.md.
 
 ### P0: Stability And Release Hygiene
 
@@ -79,6 +89,9 @@ Experimental, not a stable-release claim:
    current firmware and libraries before changing the proven startup sequence.
 4. Profile Raspberry audio continuity while optional scientific windows,
    multi-VFO views, and high FFT lengths are active.
+   The current display/DSP audit and deterministic test results are recorded in
+   docs/performance_and_dmr_audit.md. Known-key Motorola voice now has RF
+   confirmation; repeatable weak-signal and broader hardware testing remain.
 
 ### P2: Architecture Extensions
 
@@ -92,11 +105,16 @@ Experimental, not a stable-release claim:
 4. Add HDF5 only when a real large-series workflow justifies the runtime and
    packaging cost. CSV, JSON, SigMF, raw IQ, and spectrum-frame files remain
    the portable baseline.
+5. Separate exact full-resolution measurements from optional overview/selected-
+   band FFT modes. First evaluate linear-power display reduction before dB
+   conversion; preserve calibration, detectors, recording and RBW semantics.
+   Do not silently replace a requested long FFT with a shorter display FFT.
 
 ### P3: Deferred Signal Work
 
-1. Build deterministic offline DMR fixtures before further live AMBE/privacy
-   tuning.
+1. Validate Hytera Basic on HP785 and extend repeatable weak-signal/timeslot
+   coverage. Native Motorola ARC4/AES-256 speech is RF-confirmed;
+   cipher/PI/late-entry fixtures pass. Gopher DMR AES remains unsupported.
 2. Compare saved GNSS IQ against a mature reference receiver before changing
    acquisition thresholds or adding more constellations.
 3. Resume video-decoder work only with repeatable captures and expected output.
@@ -125,6 +143,14 @@ blocks alter the real processing path. This boundary prevents a visual layout
 from silently adding copies or latency to the Fobos hot path.
 
 ## Release Checklist
+Radio propagation planning is implemented as an independent, manually started
+tool: local SRTM HGT, dominant knife-edge / NTIA ITM / free-space models,
+coverage raster, link budget and terrain/Fresnel profile. HF solar conditions
+are a separate manual NOAA F10.7/Kp panel, not an ionospheric path predictor.
+FT8 filters now use the complete 340-entity CTY/DXCC catalog, with local CTY
+import and explicit callsign-labeled journal export to the QTH map.
+See docs/radio_propagation_lab.md for limits and privacy behavior.
+
 
 1. Build Windows x64 and smoke-test the staged release/bin directory.
 2. Package Raspberry/Linux source and verify build/run/dependency scripts.

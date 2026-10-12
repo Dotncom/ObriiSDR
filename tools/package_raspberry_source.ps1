@@ -33,6 +33,7 @@ $excludePrefixes = @(
     "src.Fobos.example/",
     "third_party/patched/libfobos/showimg/",
     "third_party/patched/libfobos-sdr-agile/showimg/",
+    "third_party/runtime/hackrf/windows-x64/",
     "sandbox/",
     "tools/fobos_proxy_logger/",
     "tools/rtlsdr_proxy_logger/"

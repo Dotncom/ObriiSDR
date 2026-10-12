@@ -143,8 +143,17 @@ void RecordingManager::appendAudioFrame(const QByteArray &pcmData) {
 }
 
 void RecordingManager::appendIqFrame(const QByteArray &iqData, double sampleRate, int sampleCount) {
-    Q_UNUSED(sampleCount);
     if (!recording || activeMode != Mode::ChannelIqWav || iqData.isEmpty()) {
+        return;
+    }
+    // Full IQ uses two int8 values per pair; channel WAV needs two int16 values.
+    if (!std::isfinite(sampleRate) || sampleRate < 1.0 || sampleRate > 1000000000.0 ||
+        sampleCount <= 0 || static_cast<qint64>(sampleCount) * 4 != iqData.size()) {
+        return;
+    }
+    if (waveOpen && std::abs(std::round(sampleRate) - waveSampleRate) > 0.5) {
+        stop();
+        updateStatus(QStringLiteral("IQ recording stopped: sample rate changed"));
         return;
     }
 
@@ -199,7 +208,7 @@ bool RecordingManager::openWaveFile(int sampleRate, int channels, int bitsPerSam
 
 void RecordingManager::writeWaveHeader(int sampleRate, int channels, int bitsPerSample) {
     const quint16 blockAlign = static_cast<quint16>(channels * bitsPerSample / 8);
-    const quint32 byteRate = static_cast<quint32>(sampleRate * blockAlign);
+    const quint32 byteRate = static_cast<quint32>(static_cast<quint64>(sampleRate) * blockAlign);
 
     QByteArray header;
     appendFourCc(header, "RIFF");

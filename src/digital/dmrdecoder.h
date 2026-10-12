@@ -73,6 +73,7 @@ public:
                      bool adaptiveSlicer = true,
                      int ambeLayout = DMR_DEFAULT_AMBE_LAYOUT);
     void setLiveTimingHint(bool enabled, double phaseFraction, double confidence);
+    void setVoicePayloadEnabled(bool enabled) { voicePayloadEnabled = enabled; }
     Result processPcmFrame(const QByteArray &pcmData, int sampleRate, double rfFrequencyHz = 0.0);
 
     struct SyncPattern {
@@ -83,6 +84,7 @@ public:
     };
 
 private:
+    bool voicePayloadEnabled = true;
     struct SyncHit {
         const SyncPattern *pattern = nullptr;
         int score = 0;

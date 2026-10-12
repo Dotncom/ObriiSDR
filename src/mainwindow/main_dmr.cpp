@@ -56,22 +56,10 @@ QStringList YourClassName::dsdNeoProcessArguments() const {
         dmrBasebandRateCombo
             ? normalizedDmrBasebandSampleRate(dmrBasebandRateCombo->currentData().toInt())
             : normalizedDmrBasebandSampleRate(pendingSettings.dmrBasebandSampleRate);
-    const quint16 inputPort =
-        dsdNeoInputPortSpin ? static_cast<quint16>(dsdNeoInputPortSpin->value()) : quint16(7355);
     const quint16 outputPort =
         dsdNeoUdpOutputPortSpin ? static_cast<quint16>(dsdNeoUdpOutputPortSpin->value()) : quint16(23456);
 
-    return {
-        QStringLiteral("-fs"),
-        QStringLiteral("-i"),
-        QStringLiteral("udp:127.0.0.1:%1").arg(inputPort),
-        QStringLiteral("-s"),
-        QString::number(sampleRate),
-        QStringLiteral("-o"),
-        QStringLiteral("udp:127.0.0.1:%1").arg(outputPort),
-        QStringLiteral("-mc"),
-        QStringLiteral("-nm")
-    };
+    return DsdNeoBridge::dmrProcessArguments(sampleRate, outputPort);
 }
 
 void YourClassName::updateDsdNeoBridgeSettings() {
@@ -119,20 +107,26 @@ void YourClassName::updateDsdNeoBridgeSettings() {
         dsdNeoProgramEdit->setEnabled(enabled && autoStart);
     }
     if (dsdNeoInputPortSpin) {
-        dsdNeoInputPortSpin->setEnabled(enabled);
+        dsdNeoInputPortSpin->setEnabled(enabled && !autoStart);
     }
     if (dsdNeoUdpOutputPortSpin) {
         dsdNeoUdpOutputPortSpin->setEnabled(enabled);
     }
 
-    dsdNeoBridge->configureInputServer(true, inputPort);
-    dsdNeoBridge->configureUdpOutput(true, outputPort, 2);
-    dsdNeoBridge->configurePrivacy(dmrPrivacyModeId(pendingSettings.dmrPrivacyMode),
-                                   pendingSettings.dmrPrivacyKeyId,
-                                   pendingSettings.dmrPrivacyKeyHex,
-                                   pendingSettings.dmrPrivacyForwardToBackends);
-    dsdNeoBridge->configureProcess(autoStart, program, dsdNeoProcessArguments(), workingDirectory);
-    dsdNeoBridge->setEnabled(enabled);
+    const QString privacyMode = dmrPrivacyModeId(pendingSettings.dmrPrivacyMode);
+    const int keyId = pendingSettings.dmrPrivacyKeyId;
+    const QString keyHex = pendingSettings.dmrPrivacyKeyHex;
+    const bool forward = pendingSettings.dmrPrivacyMode != DMR_PRIVACY_NONE;
+    const QStringList arguments = dsdNeoProcessArguments();
+    QMetaObject::invokeMethod(dsdNeoBridge,
+        [bridge = dsdNeoBridge, inputPort, outputPort, privacyMode, keyId, keyHex,
+         forward, autoStart, program, arguments, workingDirectory, enabled]() {
+            bridge->configureInputServer(true, inputPort);
+            bridge->configureUdpOutput(true, outputPort, 2);
+            bridge->configurePrivacy(privacyMode, keyId, keyHex, forward);
+            bridge->configureProcess(autoStart, program, arguments, workingDirectory);
+            bridge->setEnabled(enabled);
+        }, Qt::QueuedConnection);
 
     if (dsdNeoStatusLabel && !enabled) {
         dsdNeoStatusLabel->setText(uiText(QStringLiteral("dsd_neo_idle"),
@@ -155,7 +149,7 @@ void YourClassName::updateGopherTrunkBridgeSettings() {
     gopherTrunkBridge->configurePrivacy(dmrPrivacyModeId(pendingSettings.dmrPrivacyMode),
                                         pendingSettings.dmrPrivacyKeyId,
                                         pendingSettings.dmrPrivacyKeyHex,
-                                        pendingSettings.dmrPrivacyForwardToBackends,
+                                        pendingSettings.dmrPrivacyMode != DMR_PRIVACY_NONE,
                                         pendingSettings.dmrPrivacyVariant,
                                         pendingSettings.dmrPrivacyLayout,
                                         pendingSettings.dmrPrivacyFrameOffset);
@@ -220,7 +214,6 @@ void YourClassName::processDigitalAudioFrame(const QByteArray &pcmData, int samp
     settings.dmrPrivacyMode = pendingSettings.dmrPrivacyMode;
     settings.dmrPrivacyKeyId = pendingSettings.dmrPrivacyKeyId;
     settings.dmrPrivacyKeyHex = pendingSettings.dmrPrivacyKeyHex;
-    settings.dmrPrivacyForwardToBackends = pendingSettings.dmrPrivacyForwardToBackends;
     settings.dmrPrivacyVariant = pendingSettings.dmrPrivacyVariant;
     settings.dmrPrivacyLayout = pendingSettings.dmrPrivacyLayout;
     settings.dmrPrivacyFrameOffset = pendingSettings.dmrPrivacyFrameOffset;
@@ -362,22 +355,69 @@ void YourClassName::updateDigitalDecoderMode() {
     settings.dmrPrivacyMode = pendingSettings.dmrPrivacyMode;
     settings.dmrPrivacyKeyId = pendingSettings.dmrPrivacyKeyId;
     settings.dmrPrivacyKeyHex = pendingSettings.dmrPrivacyKeyHex;
-    settings.dmrPrivacyForwardToBackends = pendingSettings.dmrPrivacyForwardToBackends;
     settings.dmrPrivacyVariant = pendingSettings.dmrPrivacyVariant;
     settings.dmrPrivacyLayout = pendingSettings.dmrPrivacyLayout;
     settings.dmrPrivacyFrameOffset = pendingSettings.dmrPrivacyFrameOffset;
     const int decoderSampleRate =
         settings.modulationType == MOD_DMR ? settings.dmrBasebandSampleRate : 48000;
+    QString privacyWarning;
+    if (settings.modulationType == MOD_DMR &&
+        settings.dmrPrivacyMode == DMR_PRIVACY_HYTERA_BASIC &&
+        dmrBackend == DMR_BACKEND_GOPHERTRUNK) {
+        privacyWarning = uiText(QStringLiteral("dmr_hytera_backend_required"),
+            QStringLiteral("GopherTrunk does not support Hytera Basic. Select DSD-neo or native mbelib/OpenDMR. Full is not supported."));
+    } else if (settings.modulationType == MOD_DMR &&
+        settings.dmrPrivacyMode == DMR_PRIVACY_AES256 && dmrBackend == DMR_BACKEND_GOPHERTRUNK) {
+        privacyWarning = uiText(QStringLiteral("dmr_gopher_aes_unsupported"),
+            QStringLiteral("GopherTrunk does not decrypt DMR AES-256. Select DSD-neo or a native decoder."));
+    } else if (settings.modulationType == MOD_DMR && internalDmrVoiceOutput &&
+        (settings.dmrPrivacyMode == DMR_PRIVACY_ARC4 || settings.dmrPrivacyMode == DMR_PRIVACY_AES256)) {
+        privacyWarning = uiText(QStringLiteral("dmr_native_privacy_beta"),
+            QStringLiteral("Native Motorola ARC4 is RF-tested; AES-256 is beta. Uses the saved key and PI/late-entry MI."));
+    }
+    QString capability;
+    if (internalDmrVoiceOutput) {
+        capability = uiText(QStringLiteral("dmr_capability_native"),
+            QStringLiteral("Own decryption: ARC4, AES-256 (beta). mbelib/OpenDMR converts voice to audio."));
+    } else if (dmrBackend == DMR_BACKEND_DSD_NEO) {
+        capability = uiText(QStringLiteral("dmr_capability_dsd"),
+            QStringLiteral("DSD-neo decryption: ARC4 and AES-256."));
+    } else {
+        capability = uiText(QStringLiteral("dmr_capability_gopher"),
+            QStringLiteral("GopherTrunk decryption: ARC4 only; DMR AES-256 is not supported."));
+    }
+    if (dmrPrivacyCapabilityLabel && dmrPrivacyCapabilityLabel->text() != capability)
+        dmrPrivacyCapabilityLabel->setText(capability);
+    if (privacyWarning != lastDmrPrivacyCapabilityWarning) {
+        lastDmrPrivacyCapabilityWarning = privacyWarning;
+        if (!privacyWarning.isEmpty()) {
+            qWarning().noquote() << "[DMR voice backend]" << privacyWarning;
+        }
+        if (dsdNeoStatusLabel && (internalDmrVoiceOutput || !privacyWarning.isEmpty())) {
+            dsdNeoStatusLabel->setText(privacyWarning.isEmpty()
+                ? uiText(QStringLiteral("dsd_neo_idle"), QStringLiteral("Idle")) : privacyWarning);
+        }
+    }
+    if (dmrPrivacyKeyIdCombo) {
+        dmrPrivacyKeyIdCombo->setToolTip(!privacyWarning.isEmpty() ? privacyWarning :
+            settings.dmrPrivacyMode == DMR_PRIVACY_HYTERA_BASIC
+                ? uiText(QStringLiteral("dmr_hytera_beta_hint"),
+                         QStringLiteral("Hytera Basic beta: native mbelib/OpenDMR or DSD-neo; 10/32/64 HEX characters. Full is not supported."))
+                : uiText(QStringLiteral("dmr_privacy_key_id_tooltip"),
+                         QStringLiteral("Select a saved key from the active privacy table.")));
+    }
     QMetaObject::invokeMethod(digitalDecoder,
                               [decoder = digitalDecoder,
                                enabled,
                                settings,
                                decoderSampleRate,
                                preferredDmrVoiceBackendId,
+                               dmrBackend,
                                internalDmrVoiceOutput]() {
                                   decoder->setEnabled(enabled);
                                   decoder->setDmrVoiceBackendId(preferredDmrVoiceBackendId);
                                   decoder->setDmrVoiceOutputEnabled(internalDmrVoiceOutput);
+                                  decoder->setDmrVoicePayloadEnabled(dmrBackend != DMR_BACKEND_DSD_NEO);
                                   decoder->configure(settings, decoderSampleRate);
                               },
                               Qt::QueuedConnection);

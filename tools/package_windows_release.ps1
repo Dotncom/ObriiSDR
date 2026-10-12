@@ -5,97 +5,86 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-
 $Workspace = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
-$RuntimePath = [System.IO.Path]::GetFullPath((Join-Path $Workspace $RuntimeDir))
-if (-not $RuntimePath.StartsWith($Workspace, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "RuntimeDir must stay inside the workspace: $Workspace"
+$WorkspacePrefix = $Workspace.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+function Assert-WorkspacePath([string]$Path) {
+    $FullPath = [System.IO.Path]::GetFullPath($Path)
+    if (-not $FullPath.StartsWith($WorkspacePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Path must stay inside the workspace: $FullPath"
+    }
+    $Current = $FullPath
+    while ($Current -ne $Workspace) {
+        if (Test-Path -LiteralPath $Current) {
+            if ((Get-Item -LiteralPath $Current -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Packaging must not follow a reparse point: $Current"
+            }
+        }
+        $Current = Split-Path -Parent $Current
+    }
+    return $FullPath
 }
-if (-not (Test-Path -LiteralPath $RuntimePath)) {
+$RuntimePath = Assert-WorkspacePath (Join-Path $Workspace $RuntimeDir)
+if (-not (Test-Path -LiteralPath $RuntimePath -PathType Container)) {
     throw "Runtime directory not found: $RuntimePath"
 }
-
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    $cmakeLists = Get-Content -LiteralPath (Join-Path $Workspace "CMakeLists.txt") -Raw
-    $match = [regex]::Match($cmakeLists, "project\s*\([^)]*VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)", "IgnoreCase, Singleline")
-    if (-not $match.Success) {
-        throw "Could not infer version from CMakeLists.txt. Pass -Version explicitly."
-    }
-    $Version = $match.Groups[1].Value
+    $CmakeLists = Get-Content -LiteralPath (Join-Path $Workspace "CMakeLists.txt") -Raw
+    $Match = [regex]::Match($CmakeLists, "project\s*\([^)]*VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)", "IgnoreCase, Singleline")
+    if (-not $Match.Success) { throw "Could not infer the release version." }
+    $Version = $Match.Groups[1].Value
 }
-
-$ReleaseDir = Join-Path $Workspace "release"
-New-Item -ItemType Directory -Path $ReleaseDir -Force | Out-Null
-
-$Stage = Join-Path $ReleaseDir "ObriiSDR-v$Version-windows-x64"
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid release version: $Version" }
+$ReleaseDir = Assert-WorkspacePath (Join-Path $Workspace "release")
+$Stage = Assert-WorkspacePath (Join-Path $ReleaseDir "ObriiSDR-v$Version-windows-x64")
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = Join-Path $ReleaseDir "ObriiSDR-v$Version-windows-x64.zip"
 }
-$OutputFullPath = [System.IO.Path]::GetFullPath($OutputPath)
-if (-not $OutputFullPath.StartsWith($Workspace, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "OutputPath must stay inside the workspace: $Workspace"
-}
-
-if (Test-Path -LiteralPath $Stage) {
-    Remove-Item -LiteralPath $Stage -Recurse -Force
-}
+$OutputFullPath = Assert-WorkspacePath $OutputPath
+if (Test-Path -LiteralPath $Stage) { Remove-Item -LiteralPath $Stage -Recurse -Force }
 New-Item -ItemType Directory -Path $Stage -Force | Out-Null
 
-$excludedNames = @(
-    "FobosAPP.ini",
-    "FobosAPP_diagnostic.log",
-    "FobosAPP-backup.exe",
-    "FobosAPP.exe",
-    "OBRII.png",
-    "ObriiSDR.ini",
-    "ObriiSDR_diagnostic.log",
-    "ObriiSDR-backup.exe",
-    "dmr_lab_replay.exe",
-    "dmr_lab_replay.md",
-    "bladerf_native_beta.md"
+# Explicit runtime manifest: a development folder also contains private overrides,
+# rotated logs, captures and screenshots. Unknown files never enter a release.
+$RootFiles = @(
+    'ObriiSDR.exe', 'LICENSE', 'README.md', 'CHANGELOG.md', 'THIRD_PARTY_LICENSES.txt',
+    'translations.json', 'fobos.dll', 'fobos_sdr.dll', 'libfftw3f-3.dll', 'libusb-1.0.dll',
+    'rtlsdr.dll', 'Qt5Core.dll', 'Qt5Gui.dll', 'Qt5Widgets.dll', 'Qt5Network.dll',
+    'Qt5SerialPort.dll', 'Qt5Multimedia.dll', 'MSVCP140.dll', 'MSVCP140_1.dll',
+    'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll'
 )
-$excludedExtensions = @(
-    ".bmp",
-    ".csv",
-    ".iq",
-    ".log",
-    ".nmea",
-    ".raw",
-    ".ubx",
-    ".wav"
+$PublicDocs = @(
+    'hackrf_native_beta.md', 'dmr_external_backend.md', 'dmr_motorola_privacy.md',
+    'gnss_preflight_4.1.md', 'iq_pipeline_audit.md', 'performance_and_dmr_audit.md',
+    'radio_propagation_lab.md', 'wireless_lab.md', 'roadmap_4.0_cleanup.md',
+    "release_notes_$Version.md"
 )
-$excludedDirs = @(
-    "recordings",
-    "bladerf"
-)
-
-$runtimeRoot = $RuntimePath.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
-Get-ChildItem -LiteralPath $RuntimePath -Recurse -Force | ForEach-Object {
-    $relative = $_.FullName.Substring($runtimeRoot.Length).TrimStart("\", "/")
-    $parts = $relative -split "[\\/]"
-    if ($parts | Where-Object { $excludedDirs -contains $_ }) {
-        return
+$RuntimeRoot = $RuntimePath.TrimEnd('\', '/')
+Get-ChildItem -LiteralPath $RuntimePath -Recurse -File -Force | ForEach-Object {
+    $File = $_
+    $Relative = $File.FullName.Substring($RuntimeRoot.Length).TrimStart('\', '/') -replace '\\', '/'
+    $Allowed = $false
+    switch -Regex ($Relative) {
+        '^[^/]+$' { $Allowed = $RootFiles -contains $File.Name }
+        '^docs/[^/]+$' { $Allowed = $PublicDocs -contains $File.Name }
+        '^licenses/' { $Allowed = $File.Extension -in @('', '.txt', '.md', '.json') }
+        '^config/' { $Allowed = $Relative -in @('config/dmr_backends.example.json', 'config/fobosapp_defaults_4.2.json') }
+        '^platforms/' { $Allowed = $Relative -eq 'platforms/qwindows.dll' }
+        '^imageformats/' { $Allowed = $File.Name -in @('qgif.dll', 'qico.dll', 'qjpeg.dll', 'qtiff.dll', 'qwebp.dll') }
+        '^audio/' { $Allowed = $File.Name -in @('qtaudio_windows.dll', 'qtaudio_wasapi.dll') }
+        '^dmr_voice_backends/' { $Allowed = $File.Name -in @('fobos_dmr_voice_mbelib.dll', 'fobos_dmr_voice_opendmr.dll') }
+        '^rtlsdr/' { $Allowed = $File.Name -in @('rtlsdr.dll', 'libusb-1.0.dll', 'rtl_test.exe') }
+        '^dsd-neo/[^/]+$' { $Allowed = $File.Extension -ieq '.dll' -or $File.Name -in @('dsd-neo.exe', 'dlls-manifest.txt') }
+        '^gophertrunk/' { $Allowed = $File.Name -in @('fobos-dmr-virtual.exe', 'LICENSE.txt', 'THIRD_PARTY_LICENSES.md') }
+        '^hackrf/' { $Allowed = $File.Name -in @('hackrf.dll', 'hackrf_info.exe', 'libusb-1.0.dll', 'pthreadVC3.dll', 'COPYING-hackrf.txt', 'COPYING-libusb.txt', 'LICENSE-pthreads4w.txt', 'NOTICE-pthreads4w.txt', 'run_hackrf_probe.cmd') }
     }
-
-    if ($_.PSIsContainer) {
-        New-Item -ItemType Directory -Path (Join-Path $Stage $relative) -Force | Out-Null
-        return
-    }
-
-    if ($excludedNames -contains $_.Name) {
-        return
-    }
-    if ($excludedExtensions -contains $_.Extension.ToLowerInvariant()) {
-        return
-    }
-
-    $dest = Join-Path $Stage $relative
-    $destDir = Split-Path -Parent $dest
-    if (-not (Test-Path -LiteralPath $destDir)) {
-        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-    }
-    Copy-Item -LiteralPath $_.FullName -Destination $dest -Force
+    if (-not $Allowed) { return }
+    $Source = Assert-WorkspacePath $File.FullName
+    $Destination = Join-Path $Stage $Relative
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Destination) -Force | Out-Null
+    Copy-Item -LiteralPath $Source -Destination $Destination -Force
 }
-
-Compress-Archive -Path (Join-Path $Stage "*") -DestinationPath $OutputFullPath -Force
+foreach ($Required in @('ObriiSDR.exe', 'LICENSE', 'translations.json', 'platforms/qwindows.dll')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Stage $Required))) { throw "Missing release file: $Required" }
+}
+Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $OutputFullPath -Force
 Get-Item -LiteralPath $OutputFullPath | Select-Object FullName, Length, LastWriteTime
