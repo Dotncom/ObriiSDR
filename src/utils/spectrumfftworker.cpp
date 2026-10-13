@@ -2,6 +2,7 @@
 
 #include "diagnosticlogging.h"
 #include "fft.h"
+#include "remotespectrumworker.h"
 
 #include <QElapsedTimer>
 #include <QDebug>
@@ -36,11 +37,10 @@ std::size_t maxRowsPerFftBatch(int fftLength) {
 }
 }
 
-SpectrumFftWorker::SpectrumFftWorker()
-    : workerThread(&SpectrumFftWorker::run, this) {
-}
+SpectrumFftWorker::SpectrumFftWorker() { workerThread = std::thread(&SpectrumFftWorker::run, this); }
 
 SpectrumFftWorker::~SpectrumFftWorker() {
+    remoteWorker.reset();
     {
         std::lock_guard<std::mutex> lock(mutex);
         stopping = true;
@@ -61,6 +61,11 @@ void SpectrumFftWorker::request(const RadioSettings &settings,
                                 int updateIntervalMs,
                                 int overlapPercent,
                                 bool batchWaterfallRows) {
+    if (remoteEnabled()) {
+        if (!remoteWorker) remoteWorker = std::make_unique<RemoteSpectrumWorker>();
+        remoteWorker->request(settings, remoteEndpoint, remoteOptions, updateIntervalMs, overlapPercent, fftBackendPreference);
+        return;
+    }
     bool expected = false;
     if (!requestOutstanding.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         return;
@@ -80,6 +85,7 @@ void SpectrumFftWorker::request(const RadioSettings &settings,
 }
 
 bool SpectrumFftWorker::takeLatest(SpectrumFftFrame &frame) {
+    if (remoteEnabled()) return remoteWorker && remoteWorker->takeLatest(frame);
     std::lock_guard<std::mutex> lock(mutex);
     if (!hasResult) {
         return false;
@@ -91,6 +97,7 @@ bool SpectrumFftWorker::takeLatest(SpectrumFftFrame &frame) {
 }
 
 void SpectrumFftWorker::resetHfNoiseCancelState() {
+    if (remoteWorker) remoteWorker->cancel();
     {
         std::lock_guard<std::mutex> lock(mutex);
         hasRequest = false;
@@ -103,13 +110,21 @@ void SpectrumFftWorker::resetHfNoiseCancelState() {
     wakeCondition.notify_one();
 }
 
+void SpectrumFftWorker::configureRemote(const DspStreamEndpoint &endpoint, const SpectrumComputeOptions &options) {
+    if (remoteEndpoint == endpoint && remoteOptions == options) return;
+    releaseLocalPlan.store(options.mode != SpectrumComputeMode::Local, std::memory_order_release);
+    resetHfNoiseCancelState();
+    remoteEndpoint = endpoint; remoteOptions = options;
+}
+QString SpectrumFftWorker::remoteStatus() const { return remoteWorker ? remoteWorker->status() : QString(); }
+
 void SpectrumFftWorker::run() {
 #ifdef __linux__
     // Keep live audio responsive on small ARM systems. Linux applies nice
     // values per thread, so only the background FFT worker is deprioritized.
     setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 5);
 #endif
-    FFTResult fft(true);
+    std::unique_ptr<FFTResult> fft;
     QElapsedTimer profileLogTimer;
     profileLogTimer.start();
 
@@ -135,7 +150,8 @@ void SpectrumFftWorker::run() {
             doReset = resetRequested;
             resetRequested = false;
             if (doReset) {
-                fft.resetHfNoiseCancelState();
+                if (releaseLocalPlan.exchange(false)) fft.reset();
+                else if (fft) fft->resetHfNoiseCancelState();
                 lastProducedEndFloatCount = 0;
                 lastProducedEpoch = 0;
                 lastProducedFftLength = 0;
@@ -168,9 +184,10 @@ void SpectrumFftWorker::run() {
         std::size_t requestedRows = 0;
 
         try {
-            fft.setBackendPreference(backendPreference);
+            if (!fft) fft = std::make_unique<FFTResult>(true);
+            fft->setBackendPreference(backendPreference);
             if (!batchWaterfallRows) {
-                frame.valid = fft.storeFFTResults(settings,
+                frame.valid = fft->storeFFTResults(settings,
                                                   frame.frequencies,
                                                   frame.magnitudes,
                                                   &frame.referenceMagnitudes,
@@ -246,7 +263,7 @@ void SpectrumFftWorker::run() {
                 std::vector<float> rowMagnitudes;
                 std::vector<float> rowReferenceMagnitudes;
                 IqBuffer::BlockMetadata rowMetadata;
-                if (!fft.storeFFTResults(settings,
+                if (!fft->storeFFTResults(settings,
                                          rowFrequencies,
                                          rowMagnitudes,
                                          &rowReferenceMagnitudes,

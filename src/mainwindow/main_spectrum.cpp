@@ -369,6 +369,10 @@ void YourClassName::populateSampleRates() {
     int ret = FOBOS_ERR_OK;
     if (!sampleRateDevice) {
         const FobosDeviceInfo selectedInfo = selectedFobosDeviceInfo();
+        if (!selectedInfo.present) {
+            addDefaultSampleRates();
+            return;
+        }
         sampleRateApiKind = selectedInfo.apiKind;
         if (selectedInfo.apiKind == FobosApiKind::Agile) {
             fobos_sdr_dev_t *openedDevice = nullptr;
@@ -684,6 +688,29 @@ void YourClassName::updateSpectrum() {
         !agileScanRunning &&
         !standardScanRunning &&
         !networkSpectrumFrameMetadataValid;
+    SpectrumComputeOptions computeOptions;
+    DspStreamEndpoint computeEndpoint;
+    if (dspFlowPanel) {
+        computeOptions = dspFlowPanel->spectrumComputeOptions();
+        computeEndpoint = dspFlowPanel->externalEndpoint();
+        if (computeOptions.mode != SpectrumComputeMode::Local &&
+            (!asynchronousFftMode || pendingSettings.inputMode != INPUT_RF)) {
+            dspFlowPanel->setSpectrumComputeStatus(normalizedUiLanguage(uiLanguage) == "uk"
+                ? QString::fromUtf8("Штатний тракт: для делегування FFT потрібний RF IQ без сканування.")
+                : QStringLiteral("Existing pipeline: FFT offload requires RF IQ without scanning."));
+            computeOptions.mode = SpectrumComputeMode::Local;
+        } else if (computeOptions.mode == SpectrumComputeMode::Local) {
+            dspFlowPanel->setSpectrumComputeStatus(normalizedUiLanguage(uiLanguage) == "uk"
+                ? QString::fromUtf8("Локальний FFT") : QStringLiteral("Local FFT"));
+        }
+    }
+    if (!spectrumFftWorker && asynchronousFftMode)
+        spectrumFftWorker = std::make_unique<SpectrumFftWorker>();
+    if (spectrumFftWorker) {
+        spectrumFftWorker->configureRemote(computeEndpoint, computeOptions);
+        if (spectrumFftWorker->remoteEnabled() && dspFlowPanel)
+            dspFlowPanel->setSpectrumComputeStatus(spectrumFftWorker->remoteStatus());
+    }
     if (asynchronousFftMode &&
         spectrumFftWorker &&
         spectrumFftWorker->workOutstanding() &&
@@ -857,6 +884,15 @@ void YourClassName::updateSpectrum() {
                                        spectrumFftOverlapPercent,
                                        batchWaterfallRows);
             finishTrace("fft_worker_pending", spectrumFrequencies, spectrumMagnitudes);
+            return;
+        }
+
+        if (spectrumFftWorker->remoteEnabled() && !frame.error.isEmpty()) {
+            if (dspFlowPanel) dspFlowPanel->setSpectrumComputeStatus(frame.error);
+            spectrumFftWorker->request(spectrumSettings, fftBackendPreference,
+                                      updateTimer ? updateTimer->interval() : 0,
+                                      spectrumFftOverlapPercent, batchWaterfallRows);
+            finishTrace("remote_fft_unavailable", spectrumFrequencies, spectrumMagnitudes);
             return;
         }
 

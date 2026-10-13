@@ -6,7 +6,7 @@ docs/release_stability_handoff.md.
 
 ## Current Baseline
 
-The v6.0.0 release baseline provides:
+The v6.2.0 release baseline provides:
 
 1. First-class Fobos Standard and Agile receive paths, native RTL-SDR, and a
    hardware-tested native HackRF receive path. SoapySDR remains optional and
@@ -33,6 +33,9 @@ The v6.0.0 release baseline provides:
 9. A configurable audio-filter chain, graphical DSP board, saved DSP layouts,
    interface profiles, scanning/hunting tools, presets, network operation,
    serial NMEA/UBX GNSS, QTH mapping, and experimental digital decoders.
+10. Optional native LAN computation for DDC branches and main RF FFT, a bounded
+    GNU Radio bridge, branch IQ recording, and a cancellable connection preflight.
+    These are experimental; full-rate two-computer performance is not qualified.
 
 ## Release-Grade Boundaries
 
@@ -98,11 +101,15 @@ Bluetooth hopping and cellular links remain future work. See docs/wireless_lab.m
 
 ### P2: Architecture Extensions
 
-1. Add GNU Radio interoperability as an optional external bridge described in
-   docs/gnu_radio_compatibility.md. Do not link GNU Radio into the core app.
-2. If simultaneous independent channel demodulators/recorders become necessary,
-   implement a measured polyphase filter-bank output stage. The current
-   Multi-VFO path deliberately shares one FFT and one proven audio monitor.
+1. Qualify the new optional stream manager on Raspberry-to-laptop LAN. Native
+   compute workers and the external GNU Radio adapter now process DDC IQ and
+   return FFT/IQ, with bounded queues and explicit gaps. Main RF FFT now supports
+   individual windows or continuous full-band IQ on the native worker. DDC and
+   audio remain local; Wi-Fi/GNSS offload is not implemented. See
+   docs/dsp_stream_manager.md and docs/gnu_radio_compatibility.md.
+2. Independent bounded DDC recorders are implemented. Independent demodulator/
+   audio sinks and a measured PFB stage remain future work. The existing
+   Multi-VFO path still shares one FFT and one proven audio monitor.
 3. Add backend-specific USB/driver discontinuity counters only where the
    underlying API can report them reliably.
 4. Streaming HDF5 spectrum export, condition-bound calibration, up to 64
@@ -151,12 +158,15 @@ The board now also executes an explicit Source -> DDC -> branch FFT/display
 grammar alongside the unchanged main pipeline. Two DDC branches and two FFTs
 per branch are supported; research views can consume DDC IQ. Processing uses
 one bounded worker, snapshot reads (never audio-queue consumption), generation
-checks and gap counters. Hidden/offscreen consumers stop requesting work.
+checks and gap counters. Hidden/offscreen consumers stop requesting work unless
+an independent recorder is explicitly armed. Optional external FFT/IQ processing
+uses the stream manager, not a replacement of the main pipeline. Simplified
+operating mode suppresses all these optional DDC branches and recordings.
 Typed links distinguish data, controls, bindings and legacy diagram-only links.
 New board audio filters start disabled and deletion removes their matching
 table stage. Existing saved stages retain their activation state.
 
-Remaining graph work: independent demodulator/recorder sinks, an explicit
+Remaining graph work: independent demodulator/audio sinks, an explicit
 opt-in audio-filter order compiler, configurable FIR quality/transition bands,
 and a measured PFB stage for many channels. There is no arbitrary IQ scheduler
 and no graph-controlled replacement of the main RX/audio/DMR pipeline.
@@ -173,7 +183,7 @@ import and explicit callsign-labeled journal export to the QTH map.
 See docs/radio_propagation_lab.md for limits and privacy behavior.
 
 
-1. Build Windows x64 and smoke-test the staged release/bin directory.
+1. Build Windows x64 and smoke-test build/runtime; use clean packages for release.
 2. Package Raspberry/Linux source and verify build/run/dependency scripts.
 3. Do not publish Android unless it was rebuilt and tested on its Android
    development machine.

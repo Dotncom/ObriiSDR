@@ -433,24 +433,12 @@ void FFTResult::performFFTInThread() {
     QtConcurrent::run(this, &FFTResult::storeFFTResults);
 }
 
-bool FFTResult::storeFFTResults(const RadioSettings &settings,
-                                std::vector<float> &outFrequencies,
-                                std::vector<float> &outMagnitudes,
-                                std::vector<float> *outReferenceMagnitudes,
-                                IqBuffer::BlockMetadata *outMetadata,
-                                std::uint64_t snapshotEndFloatCount) {
+bool FFTResult::prepareSnapshotComputation(const RadioSettings &settings,
+                                           std::vector<float> &outFrequencies,
+                                           std::vector<float> &outMagnitudes,
+                                           bool &profileFrame) {
     const int currentFftLength = settings.fftLength;
     const double sampleRate = settings.sampleRate;
-    double centerFrequency = settings.centerFrequency;
-    const int inputMode = settings.inputMode;
-    auto processBins = [&](int count, auto function) {
-        if (settings.simplifiedAudioChannelizer) {
-            function(0, count);
-        } else {
-            parallelForBins(count, function);
-        }
-    };
-
     if (currentFftLength <= 0 || sampleRate <= 0.0) {
         outMagnitudes.clear();
         outFrequencies.clear();
@@ -464,9 +452,41 @@ bool FFTResult::storeFFTResults(const RadioSettings &settings,
         return false;
     }
 
-    const bool profileFrame = fobosVerboseLoggingEnabled() &&
-                              optimizeLargePlans && planWasReady &&
-                              currentFftLength >= FFT_PROFILE_MIN_LENGTH;
+    profileFrame = fobosVerboseLoggingEnabled() &&
+                   optimizeLargePlans && planWasReady &&
+                   currentFftLength >= FFT_PROFILE_MIN_LENGTH;
+    return true;
+}
+
+bool FFTResult::computeSnapshot(const RadioSettings &settings,
+                                const std::vector<float> &interleavedIq,
+                                std::vector<float> &frequencies,
+                                std::vector<float> &magnitudes,
+                                std::vector<float> *referenceMagnitudes,
+                                const IqBuffer::BlockMetadata *metadata) {
+    bool profileFrame = false;
+    if (!prepareSnapshotComputation(settings, frequencies, magnitudes, profileFrame)) {
+        return false;
+    }
+    magnitudes.resize(static_cast<std::size_t>(settings.fftLength));
+    if (referenceMagnitudes) {
+        referenceMagnitudes->clear();
+    }
+    return computePreparedSnapshot(settings, interleavedIq, frequencies, magnitudes,
+                                   referenceMagnitudes, metadata, profileFrame, 0);
+}
+
+bool FFTResult::storeFFTResults(const RadioSettings &settings,
+                                std::vector<float> &outFrequencies,
+                                std::vector<float> &outMagnitudes,
+                                std::vector<float> *outReferenceMagnitudes,
+                                IqBuffer::BlockMetadata *outMetadata,
+                                std::uint64_t snapshotEndFloatCount) {
+    bool profileFrame = false;
+    if (!prepareSnapshotComputation(settings, outFrequencies, outMagnitudes, profileFrame)) {
+        return false;
+    }
+    const int currentFftLength = settings.fftLength;
     QElapsedTimer profileTimer;
     if (profileFrame) {
         profileTimer.start();
@@ -495,20 +515,49 @@ bool FFTResult::storeFFTResults(const RadioSettings &settings,
     if (outMetadata) {
         *outMetadata = snapshotMetadata;
     }
-    if (snapshotMetadata.valid &&
-        std::isfinite(snapshotMetadata.centerFrequencyHz) &&
-        snapshotMetadata.centerFrequencyHz > 0.0) {
-        centerFrequency = snapshotMetadata.centerFrequencyHz;
+    return computePreparedSnapshot(settings, iqSnapshotScratch, outFrequencies, outMagnitudes,
+                                   outReferenceMagnitudes, &snapshotMetadata, profileFrame,
+                                   snapshotNs);
+}
+
+bool FFTResult::computePreparedSnapshot(const RadioSettings &settings,
+                                        const std::vector<float> &interleavedIq,
+                                        std::vector<float> &outFrequencies,
+                                        std::vector<float> &outMagnitudes,
+                                        std::vector<float> *outReferenceMagnitudes,
+                                        const IqBuffer::BlockMetadata *metadata,
+                                        bool profileFrame,
+                                        qint64 snapshotNs) {
+    const int currentFftLength = settings.fftLength;
+    const double sampleRate = settings.sampleRate;
+    double centerFrequency = settings.centerFrequency;
+    const int inputMode = settings.inputMode;
+    auto processBins = [&](int count, auto function) {
+        if (settings.simplifiedAudioChannelizer) {
+            function(0, count);
+        } else {
+            parallelForBins(count, function);
+        }
+    };
+    QElapsedTimer profileTimer;
+    if (profileFrame) {
+        profileTimer.start();
+    }
+    if (metadata && metadata->valid &&
+        std::isfinite(metadata->centerFrequencyHz) &&
+        metadata->centerFrequencyHz > 0.0) {
+        centerFrequency = metadata->centerFrequencyHz;
     }
     outFrequencies.resize(currentFftLength);
 
-    const int availableIqSamples = static_cast<int>(iqSnapshotScratch.size() / 2);
-    if (availableIqSamples <= 0) {
+    const std::size_t availableIqSamples = interleavedIq.size() / 2;
+    if (availableIqSamples == 0) {
         return false;
     }
 
-    const int samplesToCopy = std::min(currentFftLength, availableIqSamples);
-    const int sourceStart = availableIqSamples - samplesToCopy;
+    const int samplesToCopy = static_cast<int>((std::min)(
+        static_cast<std::size_t>(currentFftLength), availableIqSamples));
+    const std::size_t sourceStart = availableIqSamples - samplesToCopy;
     ensureWindow(currentFftLength, settings.fftWindowType);
 
     const float normalizationDb =
@@ -536,8 +585,8 @@ bool FFTResult::storeFFTResults(const RadioSettings &settings,
             fftIn[i][1] = 0.0f;
         }
         for (int i = 0; i < samplesToCopy; ++i) {
-            const int sourceIndex = sourceStart + i;
-            const float iValue = iqSnapshotScratch[2 * sourceIndex];
+            const std::size_t sourceIndex = sourceStart + i;
+            const float iValue = interleavedIq[2 * sourceIndex];
             fftIn[i][0] = std::isfinite(iValue) ? iValue * windowCoefficient(i) : 0.0f;
         }
         executeTransform(currentFftLength);
@@ -550,8 +599,8 @@ bool FFTResult::storeFFTResults(const RadioSettings &settings,
             fftIn[i][1] = 0.0f;
         }
         for (int i = 0; i < samplesToCopy; ++i) {
-            const int sourceIndex = sourceStart + i;
-            const float qValue = iqSnapshotScratch[2 * sourceIndex + 1];
+            const std::size_t sourceIndex = sourceStart + i;
+            const float qValue = interleavedIq[2 * sourceIndex + 1];
             fftIn[i][0] = std::isfinite(qValue) ? qValue * windowCoefficient(i) : 0.0f;
         }
         executeTransform(currentFftLength);
@@ -583,8 +632,8 @@ bool FFTResult::storeFFTResults(const RadioSettings &settings,
             fftIn[i][1] = 0.0f;
         }
         for (int i = 0; i < samplesToCopy; ++i) {
-            const int sourceIndex = sourceStart + i;
-            const float iValue = iqSnapshotScratch[2 * sourceIndex];
+            const std::size_t sourceIndex = sourceStart + i;
+            const float iValue = interleavedIq[2 * sourceIndex];
             fftIn[i][0] = std::isfinite(iValue) ? iValue * windowCoefficient(i) : 0.0f;
         }
         executeTransform(currentFftLength);
@@ -598,8 +647,8 @@ bool FFTResult::storeFFTResults(const RadioSettings &settings,
             fftIn[i][1] = 0.0f;
         }
         for (int i = 0; i < samplesToCopy; ++i) {
-            const int sourceIndex = sourceStart + i;
-            const float qValue = iqSnapshotScratch[2 * sourceIndex + 1];
+            const std::size_t sourceIndex = sourceStart + i;
+            const float qValue = interleavedIq[2 * sourceIndex + 1];
             fftIn[i][0] = std::isfinite(qValue) ? qValue * windowCoefficient(i) : 0.0f;
         }
         executeTransform(currentFftLength);
@@ -704,19 +753,19 @@ bool FFTResult::storeFFTResults(const RadioSettings &settings,
     }
     processBins(samplesToCopy, [&](int begin, int end) {
         for (int i = begin; i < end; ++i) {
-            const int sourceIndex = sourceStart + i;
+            const std::size_t sourceIndex = sourceStart + i;
             const float coefficient = windowCoefficient(i);
             if (inputMode == INPUT_HF1) {
-                const float iValue = iqSnapshotScratch[2 * sourceIndex];
+                const float iValue = interleavedIq[2 * sourceIndex];
                 fftIn[i][0] = std::isfinite(iValue) ? iValue * coefficient : 0.0f;
                 fftIn[i][1] = 0.0f;
             } else if (inputMode == INPUT_HF2) {
-                const float qValue = iqSnapshotScratch[2 * sourceIndex + 1];
+                const float qValue = interleavedIq[2 * sourceIndex + 1];
                 fftIn[i][0] = 0.0f;
                 fftIn[i][1] = std::isfinite(qValue) ? qValue * coefficient : 0.0f;
             } else {
-                const float iValue = iqSnapshotScratch[2 * sourceIndex];
-                const float qValue = iqSnapshotScratch[2 * sourceIndex + 1];
+                const float iValue = interleavedIq[2 * sourceIndex];
+                const float qValue = interleavedIq[2 * sourceIndex + 1];
                 fftIn[i][0] = std::isfinite(iValue) ? iValue * coefficient : 0.0f;
                 fftIn[i][1] = std::isfinite(qValue) ? qValue * coefficient : 0.0f;
             }

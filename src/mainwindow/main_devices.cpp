@@ -18,7 +18,9 @@ void YourClassName::buildLocalReceiverDeviceChoices(QStringList &labels, QVector
     values.clear();
 
     for (int i = 0; i < availableFobosDevices.size(); ++i) {
-        labels << availableFobosDevices.at(i).label;
+        const auto &info = availableFobosDevices.at(i);
+        labels << (info.present ? info.label : info.label + QStringLiteral(" - ") +
+            uiText(QStringLiteral("receiver_not_detected"), QStringLiteral("not detected")));
         values << i;
     }
     if (hasActiveFobosDevice()) {
@@ -122,12 +124,6 @@ void YourClassName::rebuildReceiverDeviceCombo() {
             values << remoteReceiverComboValue(remoteReceiverDeviceValues.at(i));
         }
     } else {
-        if (!isNetworkClientMode() &&
-            !deviceOpened &&
-            !(processor && processor->isRunning()) &&
-            availableFobosDevices.isEmpty()) {
-            refreshFobosDeviceList();
-        }
         buildLocalReceiverDeviceChoices(labels, values);
     }
 
@@ -154,13 +150,14 @@ void YourClassName::rebuildReceiverDeviceCombo() {
             ? remoteReceiverComboValue(pendingSettings.deviceIndex)
             : pendingSettings.deviceIndex;
     int selectedIndex = comboBox->findData(selectedComboValue);
-    if (selectedIndex < 0 &&
-        pendingSettings.deviceIndex >= 0 &&
-        pendingSettings.deviceIndex < comboBox->count()) {
-        selectedIndex = pendingSettings.deviceIndex;
-    }
-    if (selectedIndex < 0 && comboBox->count() > 0) {
-        selectedIndex = 0;
+    if (selectedIndex < 0) {
+        // A transiently empty list must not silently select RTL-SDR (or another radio).
+        const QString name = pendingSettings.deviceIndex >= 0
+            ? QStringLiteral("Fobos") : uiText(QStringLiteral("receiver"), QStringLiteral("Receiver"));
+        comboBox->addItem(name + QStringLiteral(" - ") +
+                         uiText(QStringLiteral("receiver_not_detected"), QStringLiteral("not detected")),
+                         selectedComboValue);
+        selectedIndex = comboBox->count() - 1;
     }
     if (selectedIndex >= 0) {
         comboBox->setCurrentIndex(selectedIndex);
@@ -177,7 +174,9 @@ QJsonArray YourClassName::receiverDeviceListToJson() const {
     QVector<int> values;
 
     for (int i = 0; i < availableFobosDevices.size(); ++i) {
-        labels << availableFobosDevices.at(i).label;
+        const auto &info = availableFobosDevices.at(i);
+        labels << (info.present ? info.label : info.label + QStringLiteral(" - ") +
+            uiText(QStringLiteral("receiver_not_detected"), QStringLiteral("not detected")));
         values << i;
     }
     if (hasActiveFobosDevice()) {
@@ -264,99 +263,57 @@ QString YourClassName::formatFobosDeviceLabel(const FobosDeviceInfo &info) const
         .arg(fw);
 }
 
-void YourClassName::refreshFobosDeviceList(bool recoverUsb) {
-    if (recoverUsb) {
-        qDebug() << "[FobosDevices] USB recovery refresh requested"
-                 << "runState" << static_cast<int>(runState)
-                 << "deviceOpened" << deviceOpened
-                 << "processorRunning" << (processor && processor->isRunning())
-                 << "device" << activeFobosDevice();
+void YourClassName::requestUsbDeviceRefresh() {
+    if (isNetworkClientMode()) {
+        sendRemoteControlCommand(QStringLiteral("requestServerState"));
+        return;
+    }
+    if (closeShutdownInProgress || !isIdle() || (processor && processor->isRunning())) {
+        return;
+    }
+    if (!usbDeviceRefreshTimer) {
+        usbDeviceRefreshTimer = new QTimer(this);
+        usbDeviceRefreshTimer->setInterval(1000);
+        connect(usbDeviceRefreshTimer, &QTimer::timeout, this, &YourClassName::continueUsbDeviceRefresh);
+    }
+    usbDeviceRefreshPassesRemaining = 11;
+    usbDeviceRefreshTimer->start();
+    continueUsbDeviceRefresh();
+}
 
-        if (isRunningOrTransitioning() || (processor && processor->isRunning())) {
-            qDebug() << "[FobosDevices] USB recovery skipped because Fobos is active or transitioning";
-        } else {
-            bool resetIssued = false;
+void YourClassName::continueUsbDeviceRefresh() {
+    if (closeShutdownInProgress || isNetworkClientMode() || !isIdle() ||
+        (processor && processor->isRunning())) {
+        usbDeviceRefreshTimer->stop();
+        return;
+    }
+    refreshFobosDeviceList();
+    rebuildReceiverDeviceCombo();
+    updateAgileScanControls();
+    if (networkMode == NetworkMode::Server) {
+        sendServerStateToClients();
+    }
+    const bool found = std::any_of(availableFobosDevices.cbegin(), availableFobosDevices.cend(),
+                                  [](const FobosDeviceInfo &info) { return info.present; });
+    const bool selectedMissing = pendingSettings.deviceIndex >= 0 && !selectedFobosDeviceInfo().present;
+    if (hasActiveFobosDevice() || (found && !selectedMissing) || --usbDeviceRefreshPassesRemaining <= 0) {
+        usbDeviceRefreshTimer->stop();
+    }
+}
 
-            if (device) {
-                qDebug() << "[FobosDevices] resetting idle standard session" << device;
-                const int resetResult = resetFobosDeviceSafely(device);
-                qDebug() << "[FobosDevices] idle standard reset result" << resetResult;
-                device = nullptr;
-                resetIssued = true;
-            }
-            if (agileDevice) {
-                if (agileScanRunning) {
-                    const int stopResult = stopFobosAgileScanSafely(agileDevice);
-                    qDebug() << "[FobosDevices] idle agile scan stop before reset result" << stopResult;
-                    agileScanRunning = false;
-                    activeAgileScanFrequencies.clear();
-                }
-                qDebug() << "[FobosDevices] resetting idle agile session" << agileDevice;
-                const int resetResult = resetFobosAgileDeviceSafely(agileDevice);
-                qDebug() << "[FobosDevices] idle agile reset result" << resetResult;
-                agileDevice = nullptr;
-                resetIssued = true;
-            }
-
-            if (resetIssued) {
-                deviceOpened = false;
-                openedDeviceIndex = -1;
-                openedNativeDeviceIndex = -1;
-                appliedSampleRate = 0.0;
-                appliedHardwareSettings = RadioSettings{};
-                hardwareSettingsApplied = false;
-                sampleRateReopenRequired = false;
-                fobosCloseKnownUnsafe = false;
-                activeFobosApiKind = FobosApiKind::Standard;
-                openedDeviceApiKind = FobosApiKind::Standard;
-                QThread::msleep(700);
-            }
-
-            const int standardResetCount = getFobosStandardDeviceCountSafely();
-            for (int i = 0; i < standardResetCount; ++i) {
-                fobos_dev_t *resetDevice = nullptr;
-                const int openResult = openFobosDeviceSafely(&resetDevice, static_cast<uint32_t>(i));
-                if (openResult != FOBOS_ERR_OK || !resetDevice) {
-                    qDebug() << "[FobosDevices] standard recovery open failed"
-                             << "index" << i << "result" << openResult;
-                    continue;
-                }
-                const int resetResult = resetFobosDeviceSafely(resetDevice);
-                qDebug() << "[FobosDevices] standard recovery reset"
-                         << "index" << i << "result" << resetResult;
-                resetIssued = true;
-            }
-
-            const int agileResetCount = getFobosAgileDeviceCountSafely();
-            for (int i = 0; i < agileResetCount; ++i) {
-                fobos_sdr_dev_t *resetDevice = nullptr;
-                const int openResult = openFobosAgileDeviceSafely(&resetDevice, static_cast<uint32_t>(i));
-                if (openResult != FOBOS_ERR_OK || !resetDevice) {
-                    qDebug() << "[FobosDevices] agile recovery open failed"
-                             << "index" << i << "result" << openResult;
-                    continue;
-                }
-                const int resetResult = resetFobosAgileDeviceSafely(resetDevice);
-                qDebug() << "[FobosDevices] agile recovery reset"
-                         << "index" << i << "result" << resetResult;
-                resetIssued = true;
-            }
-
-            if (resetIssued) {
-                qDebug() << "[FobosDevices] waiting after USB recovery reset before enumeration";
-                QThread::msleep(1200);
-            } else {
-                qDebug() << "[FobosDevices] no Fobos handles were available for USB recovery reset";
-            }
-        }
+void YourClassName::refreshFobosDeviceList() {
+    // Enumeration opens temporary handles. Never contend with an owned USB session.
+    if (hasActiveFobosDevice() || deviceOpened || (processor && processor->isRunning()) ||
+        isNetworkClientMode() || closeShutdownInProgress) {
+        return;
     }
 
-    availableFobosDevices.clear();
+    QVector<FobosDeviceInfo> discovered;
 
-    auto addDevice = [this](const FobosDeviceInfo &info) {
+    auto addDevice = [&discovered](const FobosDeviceInfo &info) {
         if (!info.serial.isEmpty()) {
-            for (int i = 0; i < availableFobosDevices.size(); ++i) {
-                FobosDeviceInfo &existing = availableFobosDevices[i];
+            for (int i = 0; i < discovered.size(); ++i) {
+                FobosDeviceInfo &existing = discovered[i];
                 if (existing.serial != info.serial) {
                     continue;
                 }
@@ -370,7 +327,7 @@ void YourClassName::refreshFobosDeviceList(bool recoverUsb) {
                 return;
             }
         }
-        availableFobosDevices.append(info);
+        discovered.append(info);
     };
 
     const int standardCount = getFobosStandardDeviceCountSafely();
@@ -439,12 +396,14 @@ void YourClassName::refreshFobosDeviceList(bool recoverUsb) {
         addDevice(info);
     }
 
-    qDebug() << "[FobosDevices] refreshed"
+    const int detectedCount = discovered.size();
+    preserveFobosDeviceSelection(availableFobosDevices, discovered, pendingSettings.deviceIndex);
+    availableFobosDevices = std::move(discovered);
+    qDebug() << "[FobosDevices] refreshed without USB reset"
              << "standardCount" << standardCount
              << "agileCount" << agileCount
-             << "usable" << availableFobosDevices.size()
+             << "usable" << detectedCount
              << "rtlNativeLazy" << true;
-    updateAgileScanControls();
 }
 
 QStringList YourClassName::getFobosDevices() {
@@ -458,7 +417,7 @@ QStringList YourClassName::getFobosDevices() {
     return deviceList;
 }
 
-YourClassName::FobosDeviceInfo YourClassName::selectedFobosDeviceInfo() const {
+FobosDeviceInfo YourClassName::selectedFobosDeviceInfo() const {
     int selected = pendingSettings.deviceIndex;
     if (comboBox) {
         bool ok = false;
@@ -472,6 +431,7 @@ YourClassName::FobosDeviceInfo YourClassName::selectedFobosDeviceInfo() const {
     }
 
     FobosDeviceInfo fallback;
+    fallback.present = false;
     fallback.apiKind = FobosApiKind::Standard;
     fallback.nativeIndex = std::max(0, selected);
     fallback.label = QString("Standard device #%1").arg(fallback.nativeIndex);
@@ -745,9 +705,13 @@ void YourClassName::listFobosDevices() {
         !isRunningOrTransitioning();
     if (canRefreshUsbList) {
         refreshFobosDeviceList();
+        rebuildReceiverDeviceCombo();
+        updateAgileScanControls();
     }
 
     QVector<FobosDeviceInfo> devicesForReport = availableFobosDevices;
+    devicesForReport.erase(std::remove_if(devicesForReport.begin(), devicesForReport.end(),
+        [](const FobosDeviceInfo &info) { return !info.present; }), devicesForReport.end());
     if (devicesForReport.isEmpty() && hasActiveFobosDevice()) {
         FobosDeviceInfo activeInfo;
         activeInfo.apiKind = activeFobosApiKind;

@@ -333,6 +333,7 @@ void YourClassName::startNetworkClientProcessing() {
 }
 
 void YourClassName::stopNetworkClientProcessing() {
+    if (spectrumFftWorker) spectrumFftWorker->resetHfNoiseCancelState();
     if (updateTimer) {
         updateTimer->stop();
     }

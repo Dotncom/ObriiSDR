@@ -63,6 +63,15 @@ class FFTResult : public QObject {
 public:
     explicit FFTResult(bool optimizeLargePlans = false, QObject *parent = nullptr);
     ~FFTResult();
+    // Uses the newest complete IQ pairs, zero-padding short snapshots. Magnitudes
+    // stay in natural FFT order; frequencies retain the centered display axis.
+    // The caller owns the input (distinct from outputs) and serializes this instance.
+    bool computeSnapshot(const RadioSettings &settings,
+                         const std::vector<float> &interleavedIq,
+                         std::vector<float> &frequencies,
+                         std::vector<float> &magnitudes,
+                         std::vector<float> *referenceMagnitudes = nullptr,
+                         const IqBuffer::BlockMetadata *metadata = nullptr);
     bool storeFFTResults(const RadioSettings &settings,
                          std::vector<float> &outFrequencies,
                          std::vector<float> &outMagnitudes,
@@ -75,6 +84,18 @@ public:
     std::mutex fftMutex;
 	void performFFTInThread();
 private:
+    bool prepareSnapshotComputation(const RadioSettings &settings,
+                                    std::vector<float> &outFrequencies,
+                                    std::vector<float> &outMagnitudes,
+                                    bool &profileFrame);
+    bool computePreparedSnapshot(const RadioSettings &settings,
+                                 const std::vector<float> &interleavedIq,
+                                 std::vector<float> &outFrequencies,
+                                 std::vector<float> &outMagnitudes,
+                                 std::vector<float> *outReferenceMagnitudes,
+                                 const IqBuffer::BlockMetadata *metadata,
+                                 bool profileFrame,
+                                 qint64 snapshotNs);
     bool ensurePlan(int length);
     void ensureWindow(int length, int windowType);
     float windowCoefficient(int index) const;

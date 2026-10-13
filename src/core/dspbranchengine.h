@@ -4,10 +4,12 @@
 #include "radiosettings.h"
 #include <memory>
 #include <vector>
+struct DspStreamEndpoint;
 
 struct DspBranchFrame {
     QString id;
     QString error;
+    QString recordingStatus;
     double centerHz = 0.0;
     double sampleRateHz = 0.0;
     double binWidthHz = 0.0;
@@ -30,6 +32,8 @@ public:
     DspBranchEngine(const DspBranchEngine &) = delete;
     DspBranchEngine &operator=(const DspBranchEngine &) = delete;
     void configure(const DspGraphPlan &plan, const RadioSettings &source, bool active);
+    void setExternalEndpoint(const DspStreamEndpoint &endpoint);
+    void setRecording(const QString &branchId, const QString &directory);
     std::vector<DspBranchFrame> takeFrames();
 private:
     struct Impl;

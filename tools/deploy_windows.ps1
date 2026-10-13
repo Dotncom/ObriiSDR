@@ -56,6 +56,7 @@ $RootFiles = @(
     @{ Source = Join-Path $Workspace "fftw-3.3.5-dll64\libfftw3f-3.dll"; Name = "libfftw3f-3.dll" },
     @{ Source = if (Test-Path -LiteralPath (Join-Path $Workspace "fobos_agile\libusb-1.0.dll")) { Join-Path $Workspace "fobos_agile\libusb-1.0.dll" } else { Join-Path $Workspace "libusb-1.0.27\VS2022\MS64\dll\libusb-1.0.dll" }; Name = "libusb-1.0.dll" },
     @{ Source = Join-Path $QtRoot "bin\Qt5Core.dll"; Name = "Qt5Core.dll" },
+    @{ Source = Join-Path $QtRoot "bin\Qt5Concurrent.dll"; Name = "Qt5Concurrent.dll" },
     @{ Source = Join-Path $QtRoot "bin\Qt5Gui.dll"; Name = "Qt5Gui.dll" },
     @{ Source = Join-Path $QtRoot "bin\Qt5Widgets.dll"; Name = "Qt5Widgets.dll" },
     @{ Source = Join-Path $QtRoot "bin\Qt5Network.dll"; Name = "Qt5Network.dll" },
@@ -176,7 +177,7 @@ $ReleaseDocFiles = @(
     "docs\dmr_external_backend.md",
     "docs\gnss_preflight_4.1.md",
     "docs\iq_pipeline_audit.md",
-    "docs\release_notes_6.1.1.md",
+    "docs\release_notes_6.2.0.md",
     "docs\dmr_motorola_privacy.md",
     "docs\performance_and_dmr_audit.md",
     "docs\wireless_lab.md",
@@ -185,7 +186,10 @@ $ReleaseDocFiles = @(
     "docs\research_backends.md",
     "docs\psk31_decoder.md",
     "docs\hf_prediction.md",
-    "docs\wireless_addon.md"
+    "docs\wireless_addon.md",
+    "docs\dsp_stream_protocol.md",
+    "docs\dsp_stream_manager.md",
+    "docs\gnu_radio_bridge_usage.md"
 )
 foreach ($DocFile in $ReleaseDocFiles) {
     $DocPath = Join-Path $Workspace $DocFile
@@ -197,6 +201,9 @@ foreach ($DocFile in $ReleaseDocFiles) {
 }
 
 $WirelessScripts = Join-Path $DeployPath 'wireless'
+$DspScripts = Join-Path $DeployPath 'dsp'
+New-Item -ItemType Directory -Path $DspScripts -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $Workspace 'tools/obrii_gr_bridge.py') -Destination $DspScripts -Force
 if (Test-Path -LiteralPath (Join-Path $DeployPath 'wifi-phy/python.exe')) {
     New-Item -ItemType Directory -Path $WirelessScripts -Force | Out-Null
     foreach ($Script in @('wifi_phy_decoder.py', 'wifi_packet_bus.py', 'wifi_extcap.py')) {

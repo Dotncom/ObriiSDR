@@ -25,6 +25,7 @@ struct DspBranchConfig {
     double outputRateHz = 192000.0;
     int decimation = 0;
     bool enabled = false;
+    bool external = false;
     bool iqConsumer = false;
     int iqSamples = 4096;
     QVector<DspBranchFftConfig> ffts;
@@ -34,7 +35,11 @@ struct DspGraphPlan {
     QVector<DspBranchConfig> branches;
     QHash<QString, QString> spectrumRoutes;
     QHash<QString, QString> researchRoutes;
+    // Bindings to the one existing main FFT, not independent FFT workers.
+    QHash<QString, QString> mainFftSources; // FFT block -> Receiver/IQ source block.
+    QHash<QString, QString> mainSpectrumRoutes; // Workspace view -> connected main FFT block.
     QStringList errors;
+    // DDC execution only; main FFT bindings must not restart branch workers.
     QByteArray executionKey;
 };
 

@@ -36,6 +36,46 @@ DMR demodulation filters, or the full-spectrum data supplied to other tools.
    full axis for each row. Scan-axis conversion for the scientific display runs
    only when that display is due for refresh.
 
+## Simplified Operating Mode And Manager Overhead
+
+Main RF FFT offload is now an explicit optional mode, separate from DDC branches.
+It remains selectable in simplified mode. A dormant remote worker is not created
+on the local path; switching to remote releases the local FFT plan after any
+in-flight frame finishes. Audio keeps its own queue. Shared-kernel and loopback
+tests cover numerical equivalence, reconnect/cancellation and queue preservation;
+actual Raspberry-to-laptop throughput still requires hardware measurement.
+
+The UI name is now "Simplified operating mode". The underlying
+`simplifiedAudioChannelizer` setting and `simplified_audio_channelizer`
+translation keys are retained for backward compatibility. The mode uses the
+lower-cost existing audio path and disables optional DSP branch/stream-manager
+work, including DDC and network research branches. Main spectrum/waterfall,
+audio and DMR remain available; ordinary filters and demodulators are not
+disabled. The server is started explicitly by the user on the compute laptop,
+independently of this mode; the mode neither starts nor stops the server.
+
+On this Windows host, Release tests used 9,830,400 synthetic complex samples
+per run in 4096-sample blocks, warm-up plus seven alternating runs per path.
+Median direct processor / local manager time was 68.92 / 68.29 ms without IQ
+return and 70.50 / 70.85 ms with IQ return. The routing difference is around
+measurement noise (about 0-1%), not evidence of acceleration. These tests isolate
+local routing, validation and optional IQ copying, not channelization or a full
+receiver workload. The manager's local path does not serialize or use sockets.
+
+Tests also verify simplified-mode suppression, unchanged audio-queue size,
+native loopback DDC/FFT delivery, hidden explicitly armed recording, bounded
+recording limits, and stopping recording on simplified-mode entry. GNU adapter
+tests cover persistent filter state, malformed input, authentication, gaps and
+slow consumers. A constructor startup race was corrected by starting the worker
+only after every field has been initialized. Repeated board teardown exposed a
+use-after-free: QGraphicsScene could destroy nodes before edges. The scene now
+removes connections first, verified by an explicit 32-cycle teardown regression.
+
+Actual Raspberry/laptop CPU load, allocations, queue gaps, network throughput
+and audio continuity still need hardware comparison with identical RX/FFT/filter
+settings. No device-independent speed or loss-free real-time guarantee is made.
+The explicit compute service must be evaluated separately from local idle mode.
+
 ## Verification And Limits
 
 The deterministic spectrum test compares all five reduction modes against an

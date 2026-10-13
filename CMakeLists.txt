@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 6.1.1)
+project(ObriiSDR VERSION 6.2.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,7 +16,7 @@ if(WIN32 AND NOT DEFINED Qt5_DIR AND EXISTS "C:/Qt/5.15.2/msvc2019_64/lib/cmake/
     set(Qt5_DIR "C:/Qt/5.15.2/msvc2019_64/lib/cmake/Qt5" CACHE PATH "Qt5 CMake package directory")
 endif()
 
-find_package(Qt5 REQUIRED COMPONENTS Core Widgets Network SerialPort)
+find_package(Qt5 REQUIRED COMPONENTS Core Widgets Network SerialPort Concurrent)
 find_package(Qt5 COMPONENTS Multimedia QUIET)
 if(NOT WIN32)
     find_package(OpenGL REQUIRED)
@@ -215,6 +215,20 @@ set(SOURCES
     src/core/dspgraphmodel.h
     src/core/dspbranchengine.cpp
     src/core/dspbranchengine.h
+    src/core/dspstreamprocessor.cpp
+    src/core/dspstreamprocessor.h
+    src/core/dspstreammanager.cpp
+    src/core/dspstreammanager.h
+    src/core/dspconnectionprobe.cpp
+    src/core/dspconnectionprobe.h
+    src/core/dspstreamtransport_p.h
+    src/core/spectrumcomputeoptions.h
+    src/core/spectrumcomputesession.cpp
+    src/core/spectrumcomputesession.h
+    src/core/dspstreamrecorder.cpp
+    src/core/dspstreamrecorder.h
+    src/ui/dspcomputedialog.cpp
+    src/ui/dspcomputedialog.h
     src/core/fftplannermutex.cpp
     src/utils/appconstants.h
     src/utils/appsettingsutils.cpp
@@ -369,6 +383,8 @@ set(SOURCES
     src/backends/receiverbackendregistry.h
     src/utils/receiverdeviceutils.cpp
     src/utils/receiverdeviceutils.h
+    src/utils/fobosdevicecatalog.cpp
+    src/utils/fobosdevicecatalog.h
     src/backends/rtlsdrbackend.cpp
     src/backends/rtlsdrbackend.h
     src/utils/samplefileutils.cpp
@@ -391,6 +407,8 @@ set(SOURCES
     src/core/gpufftbackend.h
     src/utils/spectrumfftworker.cpp
     src/utils/spectrumfftworker.h
+    src/utils/remotespectrumworker.cpp
+    src/utils/remotespectrumworker.h
     src/utils/spectrumdisplayreducer.cpp
     src/utils/spectrumdisplayreducer.h
     src/audio/audioprocessor.cpp
@@ -474,6 +492,7 @@ target_link_libraries(ObriiSDR PRIVATE
     Qt5::Widgets
     Qt5::Network
     Qt5::SerialPort
+    Qt5::Concurrent
 )
 
 if(FOBOS_HAS_VKFFT)
@@ -538,6 +557,11 @@ if(OBRII_HDF5_INCLUDE_DIR)
 endif()
 
 if(FOBOS_BUILD_CW_SELFTEST)
+    add_executable(ObriiReceiverRefreshSelfTest tools/receiver_refresh_selftest.cpp
+        src/utils/fobosdevicecatalog.cpp src/utils/receiverdeviceutils.cpp)
+    target_include_directories(ObriiReceiverRefreshSelfTest PRIVATE src/core src/utils)
+    target_link_libraries(ObriiReceiverRefreshSelfTest PRIVATE Qt5::Core)
+
     add_executable(ObriiScienceSelfTest tools/science_selftest.cpp
         src/research/tonalspectrum.cpp src/research/receivercalibrationtable.cpp
         src/research/spectrumscienceanalyzer.cpp src/research/spectrumframerecorder.cpp
@@ -607,6 +631,38 @@ if(FOBOS_BUILD_CW_SELFTEST)
         target_compile_options(ObriiPropagationSelfTest PRIVATE /utf-8)
     endif()
 
+    add_executable(ObriiFftSnapshotSelfTest tools/fft_snapshot_selftest.cpp tools/fft_test_globals.cpp
+        src/core/fft.cpp src/core/fft.h src/core/gpufftbackend.cpp src/core/iqbuffer.cpp src/core/fftplannermutex.cpp)
+    target_include_directories(ObriiFftSnapshotSelfTest PRIVATE src/core ${FFTW_INCLUDE_DIR})
+    target_link_libraries(ObriiFftSnapshotSelfTest PRIVATE Qt5::Core Qt5::Concurrent ${FFTW_FLOAT_LIBRARY})
+    if(MSVC)
+        target_compile_options(ObriiFftSnapshotSelfTest PRIVATE /utf-8)
+    else()
+        target_link_libraries(ObriiFftSnapshotSelfTest PRIVATE Threads::Threads)
+    endif()
+
+    add_executable(ObriiSpectrumComputeSelfTest tools/spectrum_compute_selftest.cpp tools/fft_test_globals.cpp
+        src/core/spectrumcomputesession.cpp src/core/dspstreammanager.cpp src/core/dspstreamprocessor.cpp src/core/dspconnectionprobe.cpp
+        src/core/fft.cpp src/core/fft.h src/core/gpufftbackend.cpp src/core/iqbuffer.cpp src/core/fftplannermutex.cpp
+        src/utils/remotespectrumworker.cpp src/utils/spectrumfftworker.cpp)
+    target_include_directories(ObriiSpectrumComputeSelfTest PRIVATE src/core src/utils ${FFTW_INCLUDE_DIR})
+    target_link_libraries(ObriiSpectrumComputeSelfTest PRIVATE Qt5::Core Qt5::Network Qt5::Concurrent ${FFTW_FLOAT_LIBRARY})
+    if(MSVC)
+        target_compile_options(ObriiSpectrumComputeSelfTest PRIVATE /utf-8)
+    else()
+        target_link_libraries(ObriiSpectrumComputeSelfTest PRIVATE Threads::Threads)
+    endif()
+
+    add_executable(ObriiDspStreamSelfTest tools/dsp_stream_selftest.cpp tools/dsp_stream_recorder_test.cpp tools/dsp_connection_probe_selftest.cpp
+        src/core/dspstreamprocessor.cpp src/core/dspstreammanager.cpp src/core/dspconnectionprobe.cpp src/core/dspstreamrecorder.cpp src/core/fftplannermutex.cpp
+        src/core/spectrumcomputesession.cpp src/core/fft.cpp src/core/gpufftbackend.cpp src/core/iqbuffer.cpp tools/fft_test_globals.cpp)
+    target_include_directories(ObriiDspStreamSelfTest PRIVATE src/core ${FFTW_INCLUDE_DIR})
+    target_link_libraries(ObriiDspStreamSelfTest PRIVATE Qt5::Core Qt5::Network Qt5::Concurrent ${FFTW_FLOAT_LIBRARY})
+    if(MSVC)
+        target_compile_options(ObriiDspStreamSelfTest PRIVATE /utf-8)
+    else()
+        target_link_libraries(ObriiDspStreamSelfTest PRIVATE Threads::Threads)
+    endif()
     add_executable(ObriiDspFlowSelfTest
         tools/dsp_flow_selftest.cpp
         tools/dsp_branch_selftest.cpp
@@ -621,13 +677,17 @@ if(FOBOS_BUILD_CW_SELFTEST)
         src/utils/appsettingsutils.cpp
         src/core/iqbuffer.cpp
         src/core/dspgraphmodel.cpp src/core/dspbranchengine.cpp
+        src/core/dspstreamprocessor.cpp src/core/dspstreammanager.cpp src/core/dspconnectionprobe.cpp
+        src/core/dspstreamrecorder.cpp
+        src/core/spectrumcomputesession.cpp src/core/fft.cpp src/core/gpufftbackend.cpp tools/fft_test_globals.cpp
+        src/ui/dspcomputedialog.cpp src/ui/dspcomputedialog.h
         src/core/iqchannelizer.cpp src/core/channelizerutils.cpp
         src/core/fftplannermutex.cpp
         src/ui/audiofilterchainwidget.cpp src/audio/audiofilterchain.cpp
         src/scan/scanvisualassembler.cpp)
     get_target_property(OBRII_DSP_TEST_INCLUDES ObriiSDR INCLUDE_DIRECTORIES)
     target_include_directories(ObriiDspFlowSelfTest PRIVATE ${OBRII_DSP_TEST_INCLUDES})
-    target_link_libraries(ObriiDspFlowSelfTest PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets ${FFTW_FLOAT_LIBRARY})
+    target_link_libraries(ObriiDspFlowSelfTest PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets Qt5::Network Qt5::Concurrent ${FFTW_FLOAT_LIBRARY})
     target_compile_definitions(ObriiDspFlowSelfTest PRIVATE OBRII_VFO_SELFTEST=1)
     if(WIN32)
         target_link_libraries(ObriiDspFlowSelfTest PRIVATE opengl32)
@@ -636,6 +696,9 @@ if(FOBOS_BUILD_CW_SELFTEST)
     endif()
     if(MSVC)
         target_compile_options(ObriiDspFlowSelfTest PRIVATE /utf-8)
+        target_compile_options(ObriiDspFlowSelfTest PRIVATE /Zi)
+        target_link_options(ObriiDspFlowSelfTest PRIVATE /DEBUG)
+        target_link_libraries(ObriiDspFlowSelfTest PRIVATE dbghelp)
     endif()
 
     add_executable(ObriiSpectrumPipelineSelfTest

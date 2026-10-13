@@ -11,7 +11,11 @@
 #include <QSet>
 #include "radiosettings.h"
 #include "dspgraphmodel.h"
+#include "dspstreammanager.h"
+#include "spectrumcomputeoptions.h"
+#include <QPointer>
 class DspBranchEngine;
+class DspComputeDialog;
 
 class DspFlowScene;
 class QCloseEvent;
@@ -68,10 +72,23 @@ public:
     bool setBlockSettings(const QString &blockId, const QJsonObject &settings);
     int workspaceSectorCount() const;
     bool dockSettingsDialog(const QString &blockId, QDialog *dialog, int sectorIndex = -1);
-    void setBranchSourceContext(const RadioSettings &settings, bool running);
+    void setBranchSourceContext(const RadioSettings &settings, bool running, int updateMs = 100, int overlapPercent = 0);
     QString branchStatus(const QString &blockId) const;
+    void setExternalEndpoint(const DspStreamEndpoint &endpoint);
+    DspStreamEndpoint externalEndpoint() const { return externalEndpoint_; }
+    SpectrumComputeOptions spectrumComputeOptions() const { return spectrumComputeOptions_; }
+    void setSpectrumComputeOptions(const SpectrumComputeOptions &options);
+    QString spectrumComputeStatus() const { return spectrumComputeStatus_; }
+    void setSpectrumComputeStatus(const QString &status);
+    void showComputeDialog();
+    bool startBranchRecording(const QString &id, const QString &directory);
+    void stopBranchRecording(const QString &id);
+    bool branchRecordingRequested(const QString &id) const;
 
 signals:
+    void externalEndpointChanged();
+    void spectrumComputeOptionsChanged();
+    void spectrumComputeStatusChanged(const QString &status);
     void configurationChanged(const QString &json);
     void blockActivated(const QString &type, const QString &id);
     void blockCreated(const QString &type, const QString &id);
@@ -147,6 +164,12 @@ private:
     DspGraphPlan branchPlan_;
     RadioSettings branchSource_;
     bool branchSourceRunning_ = false;
+    int mainFftUpdateMs_ = 100, mainFftOverlapPercent_ = 0;
     bool branchPlanDirty_ = true;
+    DspStreamEndpoint externalEndpoint_;
+    SpectrumComputeOptions spectrumComputeOptions_;
+    QString spectrumComputeStatus_;
+    QPointer<DspComputeDialog> computeDialog_;
+    QHash<QString, QString> branchRecordings_;
     double analogPeakMeterTargetHz_ = 0.0;
 };

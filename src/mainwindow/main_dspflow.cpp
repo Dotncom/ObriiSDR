@@ -4,6 +4,7 @@
 #include "audiofilterchainwidget.h"
 #include "appsettingsutils.h"
 #include "dspflowpanel.h"
+#include "dspcomputedialog.h"
 #include "frequencycontrol.h"
 #include "tuningutils.h"
 #include "researchanalysisdialog.h"
@@ -18,6 +19,7 @@
 #include <QDoubleSpinBox>
 #include <QDockWidget>
 #include <QFormLayout>
+#include <QFileDialog>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QJsonArray>
@@ -472,7 +474,8 @@ void YourClassName::registerDspFilterBlock(const QString &type, const QString &i
 
 void YourClassName::refreshDspControlStates() {
     if (!dspFlowPanel) return;
-    dspFlowPanel->setBranchSourceContext(pendingSettings, runState == RadioRunState::Running);
+    dspFlowPanel->setBranchSourceContext(pendingSettings, runState == RadioRunState::Running,
+                                        updateTimer ? updateTimer->interval() : 100, spectrumFftOverlapPercent);
     const auto checked = [](const QCheckBox *box) { return box && box->isChecked(); };
     QHash<QString, bool> states;
     states.insert(QStringLiteral("multi_vfo_channelizer"), multiVfoWidget && QJsonDocument::fromJson(
@@ -837,6 +840,11 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         if (type == QStringLiteral("ddc_channelizer")) {
             auto *enabled = new QCheckBox(text("Увімкнути гілку", "Enable branch"), dialog);
             enabled->setChecked(stored.value("enabled").toBool(false)); form->addRow(enabled);
+            auto *execution = new QComboBox(dialog);
+            execution->addItem(text("На цьому ПК", "On this PC"), false);
+            execution->addItem(text("Зовнішній обробник / GNU Radio", "External processor / GNU Radio"), true);
+            execution->setCurrentIndex(stored.value("externalProcessing").toBool(false) ? 1 : 0);
+            form->addRow(text("Обробка каналу:", "Channel processing:"), execution);
             auto *follow = new QCheckBox(text("Частота основного прослуховування", "Follow main listening frequency"), dialog);
             follow->setChecked(stored.value("frequencyHz").toDouble(0.0) == 0.0); form->addRow(follow);
             auto *frequency = number(text("Частота:", "Frequency:"),
@@ -851,20 +859,35 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
             decimation->setKeyboardTracking(false); decimation->setValue(stored.value("decimation").toInt(0));
             form->addRow(text("Децимація до ресемплера:", "Decimation before resampler:"), decimation);
             form->addRow(text("Фільтр:", "Filter:"), new QLabel(QStringLiteral("3-stage prefilter + 32-tap / 64-phase Blackman FIR"), dialog));
-            const auto apply = [this, id, enabled, follow, frequency, bandwidth, rate, decimation]() {
+            const auto apply = [this, id, enabled, follow, frequency, bandwidth, rate, decimation, execution]() {
                 auto value = dspFlowPanel->blockSettings(id);
                 value.insert("enabled", enabled->isChecked());
                 value.insert("frequencyHz", follow->isChecked() ? 0.0 : frequency->value()*1.0e6);
                 value.insert("bandwidthHz", bandwidth->value()*1000.0);
                 value.insert("outputRateHz", rate->value()*1000.0);
                 value.insert("decimation", decimation->value());
+                value.insert("externalProcessing", execution->currentData().toBool());
                 frequency->setEnabled(!follow->isChecked());
                 dspFlowPanel->setBlockSettings(id, value);
             };
             connect(enabled, &QCheckBox::toggled, dialog, [apply](bool) { apply(); });
+            connect(execution, QOverload<int>::of(&QComboBox::currentIndexChanged), dialog, [apply](int) { apply(); });
             connect(follow, &QCheckBox::toggled, dialog, [apply](bool) { apply(); });
             for (auto *spin : {frequency, bandwidth, rate}) connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), dialog, [apply](double) { apply(); });
             connect(decimation, QOverload<int>::of(&QSpinBox::valueChanged), dialog, [apply](int) { apply(); });
+            auto *record = new QPushButton(text("Запис IQ гілки", "Record branch IQ"), dialog);
+            auto *stopRecord = new QPushButton(text("Зупинити запис", "Stop recording"), dialog);
+            form->addRow(buttonRow({record, stopRecord}));
+            connect(record, &QPushButton::clicked, dialog, [this, id, dialog, status, text]() {
+                const QString folder = QFileDialog::getExistingDirectory(dialog, text("Папка запису IQ гілки", "Branch IQ recording directory"));
+                if (!folder.isEmpty() && !dspFlowPanel->startBranchRecording(id, folder))
+                    status->setText(text("Увімкніть приймач і гілку; вимкніть спрощений режим", "Enable receiver and branch; disable simplified mode"));
+            });
+            connect(stopRecord, &QPushButton::clicked, dialog, [this, id]() { dspFlowPanel->stopBranchRecording(id); });
+            connect(syncTimer, &QTimer::timeout, dialog, [this, id, record, stopRecord]() {
+                const bool recording = dspFlowPanel->branchRecordingRequested(id);
+                record->setEnabled(!recording); stopRecord->setEnabled(recording);
+            });
         } else if (type == QStringLiteral("branch_fft")) {
             auto *fft = new QComboBox(dialog);
             for (int n = 512; n <= 65536; n *= 2) fft->addItem(QString::number(n), n);
@@ -1048,6 +1071,23 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
                                          [this]() { onListeningFrequencyEntered(); }));
     } else if (type == QStringLiteral("fft")) {
         title = text("FFT і роздільність", "FFT and resolution");
+        if (dspFlowPanel) {
+            auto *compute = new SpectrumComputeControls(ukrainian, dialog);
+            compute->setOptions(dspFlowPanel->spectrumComputeOptions());
+            compute->setStatus(dspFlowPanel->spectrumComputeStatus());
+            form->addRow(compute);
+            connect(compute, &SpectrumComputeControls::applyRequested, dialog, [this, compute]() {
+                if (dspFlowPanel) dspFlowPanel->setSpectrumComputeOptions(compute->options());
+            });
+            connect(dspFlowPanel, &DspFlowPanel::spectrumComputeOptionsChanged, compute, [this, compute]() {
+                if (dspFlowPanel) compute->setOptions(dspFlowPanel->spectrumComputeOptions());
+            });
+            connect(dspFlowPanel, &DspFlowPanel::spectrumComputeStatusChanged,
+                    compute, &SpectrumComputeControls::setStatus);
+            form->addRow(QString(), commandButton(text("Менеджер потоків DSP", "DSP stream manager"), [this]() {
+                if (dspFlowPanel) dspFlowPanel->showComputeDialog();
+            }));
+        }
         form->addRow(QStringLiteral("FFT:"), linkedCombo(fftComboBox, dialog, syncTimer));
         form->addRow(QString(), linkedCheckBox(fftBinWidthModeCheckbox, QStringLiteral("Hz/point"), dialog, syncTimer));
         form->addRow(QStringLiteral("Hz/point:"), linkedDoubleSpin(fftBinWidthSpin, dialog, syncTimer));

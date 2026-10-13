@@ -1,6 +1,7 @@
 param([string]$ArchivePath = '')
 
 $ErrorActionPreference = 'Stop'
+# The unchanged 6.1.1 wireless runtime is also used by the 6.2.0 core package.
 $Version = '6.1.1'
 $ExpectedSha256 = '743DA16E234B9A237DBED3E0C7906506A99DCC0C6C5251C3B2E35CB6AC588495'
 $AssetName = "ObriiSDR-v$Version-wireless-windows-x64.zip"

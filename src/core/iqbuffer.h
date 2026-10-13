@@ -7,6 +7,8 @@
 
 namespace IqBuffer {
 
+constexpr std::size_t MaxSnapshotComplexSamples = 8 * 1024 * 1024;
+
 struct Stats {
     std::uint64_t epoch = 0;
     std::uint64_t sequence = 0;

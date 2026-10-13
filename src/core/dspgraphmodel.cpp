@@ -35,6 +35,8 @@ DspLinkKind dspLinkKind(const QString &source, const QString &target) {
         (source == "eye_diagram" && target == "eye_diagram_view") ||
         (source == "digital_sync_lab" && target == "digital_sync_view")) return DspLinkKind::Settings;
     if (source == "vfo_channel" && (target == "vfo_spectrum" || target == "vfo_waterfall")) return DspLinkKind::Vfo;
+    if ((source == "receiver_source" || source == "iq_source") && target == "fft") return DspLinkKind::Iq;
+    if (source == "fft" && (target == "workspace_spectrum" || target == "workspace_waterfall")) return DspLinkKind::Spectrum;
     if ((rawSource(source) && target == "ddc_channelizer") ||
         (source == "ddc_channelizer" && (target == "branch_fft" || researchSettings(target)))) return DspLinkKind::Iq;
     if (source == "branch_fft" && (target == "branch_spectrum" || target == "branch_waterfall")) return DspLinkKind::Spectrum;
@@ -47,8 +49,8 @@ QString dspLinkDescription(DspLinkKind kind, bool uk) {
     case DspLinkKind::Control: return uk ? QStringLiteral("Керування штатним трактом") : QStringLiteral("Controls the existing pipeline");
     case DspLinkKind::Settings: return uk ? QStringLiteral("Прив'язка налаштувань віджета") : QStringLiteral("Widget settings binding");
     case DspLinkKind::Vfo: return uk ? QStringLiteral("Відображення каналу спільного FFT") : QStringLiteral("Channel display from the shared FFT");
-    case DspLinkKind::Iq: return uk ? QStringLiteral("Потік IQ додаткової гілки") : QStringLiteral("Additional branch IQ stream");
-    case DspLinkKind::Spectrum: return uk ? QStringLiteral("Спектральні кадри додаткової гілки") : QStringLiteral("Additional branch spectrum frames");
+    case DspLinkKind::Iq: return uk ? QStringLiteral("Потік IQ") : QStringLiteral("IQ stream");
+    case DspLinkKind::Spectrum: return uk ? QStringLiteral("Спектральні кадри") : QStringLiteral("Spectrum frames");
     case DspLinkKind::Invalid: return uk ? QStringLiteral("Несумісні типи потоків") : QStringLiteral("Incompatible stream types");
     default: return uk ? QStringLiteral("Лише схема: цей зв'язок не передає сигнал і не змінює порядок DSP")
                       : QStringLiteral("Diagram only: this link does not carry samples or change DSP order");
@@ -78,7 +80,17 @@ DspGraphPlan compileDspGraph(const QJsonObject &graph) {
         if (inputs.contains(target)) { plan.errors << "Multiple stream inputs are not supported"; continue; }
         inputs.insert(target, source);
     }
-    // Only the explicit, acyclic Source -> DDC -> FFT/View grammar is executable.
+    // Main FFT bindings use the existing active source and optimized shared frame path.
+    // Missing source links leave the explicit display route inactive, not implicit.
+    for (auto it = inputs.cbegin(); it != inputs.cend(); ++it) {
+        if (blocks[it.key()].value("type") == "fft") plan.mainFftSources.insert(it.key(), it.value());
+    }
+    for (auto it = inputs.cbegin(); it != inputs.cend(); ++it) {
+        const auto type = blocks[it.key()].value("type").toString();
+        if ((type == "workspace_spectrum" || type == "workspace_waterfall") &&
+            plan.mainFftSources.contains(it.value())) plan.mainSpectrumRoutes.insert(it.key(), it.value());
+    }
+    // Independent workers only execute the explicit, acyclic Source -> DDC -> FFT/View grammar.
     QJsonArray execution;
     QStringList ids = blocks.keys();
     std::sort(ids.begin(), ids.end());
@@ -94,6 +106,7 @@ DspGraphPlan compileDspGraph(const QJsonObject &graph) {
         branch.outputRateHz = finiteValue(s, "outputRateHz", 192000.0, 1000.0, 2.0e6);
         branch.decimation = std::clamp(s.value("decimation").toInt(0), 0, 4096);
         branch.enabled = s.value("enabled").toBool(false);
+        branch.external = s.value("externalProcessing").toBool(false);
         for (const QString &consumer : ids) {
             if (inputs.value(consumer) != id) continue;
             const auto target = blocks[consumer];
@@ -124,16 +137,17 @@ DspGraphPlan compileDspGraph(const QJsonObject &graph) {
                 if (hasDisplay) branch.ffts.append(fft);
             }
         }
-        if (!branch.iqConsumer && branch.ffts.isEmpty()) continue;
+        // Consumer visibility and explicitly armed local sinks are resolved by the board.
         QJsonArray ffts;
         for (const auto &f : branch.ffts) ffts.append(QJsonObject{{"id", f.id}, {"length", f.length}, {"window", f.window}, {"refreshMs", f.refreshMs}});
         execution.append(QJsonObject{{"id", id}, {"source", inputs[id]}, {"frequency", branch.frequencyHz},
             {"bandwidth", branch.bandwidthHz}, {"rate", branch.outputRateHz}, {"decimation", branch.decimation},
-            {"enabled", branch.enabled}, {"iqConsumer", branch.iqConsumer}, {"iqSamples", branch.iqSamples}, {"ffts", ffts}});
+            {"enabled", branch.enabled}, {"external", branch.external}, {"iqConsumer", branch.iqConsumer}, {"iqSamples", branch.iqSamples}, {"ffts", ffts}});
         plan.branches.append(branch);
     }
     if (!plan.errors.isEmpty()) {
         plan.branches.clear(); plan.spectrumRoutes.clear(); plan.researchRoutes.clear();
+        plan.mainFftSources.clear(); plan.mainSpectrumRoutes.clear();
         execution = QJsonArray();
     }
     plan.executionKey = QJsonDocument(execution).toJson(QJsonDocument::Compact);

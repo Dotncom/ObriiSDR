@@ -61,6 +61,7 @@
 #include <mmsystem.h>
 #endif
 #include "appconstants.h"
+#include "fobosdevicecatalog.h"
 #include "fft.h"
 #include "dataprocessor.h"
 #include "digitaldecoder.h"
@@ -252,20 +253,11 @@ protected:
 
 private:
     double effectiveScalePercent() const;
-    struct FobosDeviceInfo {
-        FobosApiKind apiKind = FobosApiKind::Standard;
-        int nativeIndex = 0;
-        QString label;
-        QString serial;
-        QString hardwareRevision;
-        QString firmwareVersion;
-        QString product;
-        QString manufacturer;
-    };
-
     QWidget *centralWidget;
     QStringList getFobosDevices();
-    void refreshFobosDeviceList(bool recoverUsb = false);
+    void refreshFobosDeviceList();
+    void requestUsbDeviceRefresh();
+    void continueUsbDeviceRefresh();
     QString formatFobosDeviceLabel(const FobosDeviceInfo &info) const;
     FobosDeviceInfo selectedFobosDeviceInfo() const;
     bool isRtlTcpSelected() const;
@@ -1045,6 +1037,8 @@ private:
     double networkSpectrumFrameMaxFrequency = 0.0;
     int networkSpectrumFrameFftLength = 0;
     QVector<FobosDeviceInfo> availableFobosDevices;
+    QTimer *usbDeviceRefreshTimer = nullptr;
+    int usbDeviceRefreshPassesRemaining = 0;
     QStringList remoteReceiverDeviceLabels;
     QVector<int> remoteReceiverDeviceValues;
     bool remoteReceiverDeviceListValid = false;

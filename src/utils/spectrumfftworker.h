@@ -3,6 +3,8 @@
 
 #include "iqbuffer.h"
 #include "radiosettings.h"
+#include "dspstreammanager.h"
+#include "spectrumcomputeoptions.h"
 
 #include <QString>
 #include <atomic>
@@ -32,6 +34,7 @@ struct SpectrumFftFrame {
     std::vector<SpectrumFftHistoryRow> historyRows;
     IqBuffer::BlockMetadata metadata;
 };
+class RemoteSpectrumWorker;
 
 class SpectrumFftWorker {
 public:
@@ -50,9 +53,17 @@ public:
     bool resultReady() const noexcept { return resultAvailable.load(std::memory_order_acquire); }
     bool workOutstanding() const noexcept { return requestOutstanding.load(std::memory_order_acquire); }
     void resetHfNoiseCancelState();
+    void configureRemote(const DspStreamEndpoint &endpoint, const SpectrumComputeOptions &options);
+    QString remoteStatus() const;
+    bool remoteEnabled() const { return remoteOptions.mode != SpectrumComputeMode::Local; }
 
 private:
     void run();
+
+    std::unique_ptr<RemoteSpectrumWorker> remoteWorker;
+    SpectrumComputeOptions remoteOptions;
+    DspStreamEndpoint remoteEndpoint;
+    std::atomic<bool> releaseLocalPlan{false};
 
     std::thread workerThread;
     mutable std::mutex mutex;

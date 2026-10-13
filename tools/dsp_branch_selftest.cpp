@@ -2,6 +2,7 @@
 #include "dspflowpanel.h"
 #include "audiofilterchainwidget.h"
 #include "iqbuffer.h"
+#include "dspstreammanager.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -11,6 +12,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QThread>
+#include <QTemporaryDir>
+#include <QDir>
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -126,8 +129,28 @@ bool dspBranchSelfTest() {
     engine.configure(plan, s, false);
     tone(s, 32768, 262144); QThread::msleep(30);
     require(engine.takeFrames().empty(), "Disabled branch still produced frames");
+    auto simplified = s; simplified.simplifiedAudioChannelizer = true;
+    engine.configure(plan, simplified, true);
+    tone(s, 65536, 294912); const auto simpleQueue = IqBuffer::queuedBlocks();
+    QThread::msleep(100);
+    require(engine.takeFrames().empty() && IqBuffer::queuedBlocks() == simpleQueue,
+            "Simplified mode executed a branch or consumed audio IQ");
+
+    DspComputeServer server; DspStreamEndpoint endpoint;
+    endpoint.enabled = true; endpoint.token = QString(64, 'b');
+    require(server.start("127.0.0.1", 0, endpoint.token), "Board compute worker rejected start");
+    for (int i = 0; i < 100 && !server.port(); ++i) QThread::msleep(10);
+    endpoint.port = server.port(); require(endpoint.port, "Board compute worker did not bind");
+    auto remotePlan = plan; remotePlan.branches[0].external = true; remotePlan.executionKey += "remote-test";
+    engine.setExternalEndpoint(endpoint); engine.configure(remotePlan, s, true);
+    IqBuffer::clear(10003); IqBuffer::setSampleRateEstimate(s.sampleRate); tone(s, 262144);
+    frame = waitFor(engine, "fft");
+    require(frame.sampleRateHz == 96000 && *std::max_element(frame.levels.begin(), frame.levels.end()) > -12,
+            "Remote branch did not deliver a calibrated spectrum");
+    engine.configure(plan, s, false); QThread::msleep(30); server.stop();
 
     DspFlowPanel panel;
+    panel.setExternalEndpoint(endpoint);
     require(panel.setConfigurationJson(QString::fromUtf8(QJsonDocument(graph()).toJson())), "Typed board load failed");
     panel.resize(1200, 650); panel.setBranchSourceContext(s, true); panel.show();
     IqBuffer::setSampleRateEstimate(s.sampleRate*0.83);
@@ -156,6 +179,17 @@ bool dspBranchSelfTest() {
         require(image.save(QStringLiteral("build/dsp-branch-preview.png")), "Cannot save rendered DSP canvas");
     }
     panel.hide(); QApplication::processEvents();
+    QTemporaryDir recording;
+    require(recording.isValid() && panel.startBranchRecording("ddc", recording.path()), "Cannot arm independent branch recording");
+    for (int i = 0; i < 20; ++i) {
+        tone(s, 65536, 1081344U+std::uint64_t(i)*65536U);
+        QThread::msleep(25); QApplication::processEvents();
+    }
+    require(!QDir(recording.path()).entryList({"*.cf32"}, QDir::Files).empty(), "Hidden armed branch did not record");
+    require(!panel.configurationJson().contains(endpoint.token) && !panel.configurationJson().contains(recording.path()),
+            "DSP layout persisted session credentials or recording arming");
+    panel.setBranchSourceContext(simplified, true); QApplication::processEvents();
+    require(!panel.branchRecordingRequested("ddc"), "Simplified mode left branch recording armed");
     require(!panel.setConfigurationJson(QString::fromUtf8(QJsonDocument(invalid).toJson())), "Invalid board replaced a valid running graph");
 
     DspFlowPanel lifecycle;
@@ -166,6 +200,15 @@ bool dspBranchSelfTest() {
     require(lifecycle.setConfigurationJson(QString::fromUtf8(QJsonDocument(filterLayout).toJson())) && removed == 0, "Reload removed a retained filter");
     require(lifecycle.setConfigurationJson(QString::fromUtf8(QJsonDocument(graph()).toJson())) && removed == 1, "Layout replacement did not release the filter");
     IqBuffer::clear();
-    std::cout << "Typed DSP graph, independent DDC/FFT, filter lifecycle and board delivery tests passed\n";
+    std::cout << "Typed DSP graph, independent DDC/FFT, filter lifecycle and board delivery tests passed" << std::endl;
+    return true;
+}
+
+bool dspBranchTeardownSelfTest() {
+    for (int i = 0; i < 32; ++i) {
+        DspFlowPanel panel;
+        require(panel.setConfigurationJson(QString::fromUtf8(QJsonDocument(graph()).toJson())), "Teardown graph load failed");
+    }
+    std::cout << "DSP connected-node teardown: 32 cycles passed\n";
     return true;
 }

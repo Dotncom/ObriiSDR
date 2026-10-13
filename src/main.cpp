@@ -3701,29 +3701,13 @@ YourClassName::YourClassName(QWidget *parent)
     connect(stopButton, &QPushButton::clicked, this, &YourClassName::stopFobosProcessing);
     connect(modeBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &YourClassName::onDirectSamplingChanged);
     connect(clkBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &YourClassName::onClkChanged);
-    connect(refreshButton, &QPushButton::clicked, [this]() {
-        if (isNetworkClientMode()) {
-            sendRemoteControlCommand(QStringLiteral("requestServerState"));
-            return;
-        }
-
-        refreshFobosDeviceList(true);
-        rebuildReceiverDeviceCombo();
-        if (!availableFobosDevices.isEmpty() && comboBox) {
-            pendingSettings.deviceIndex =
-                receiverDeviceIndexFromComboValue(comboBox->currentData().toInt());
-            if (!isRtlBackendSelected() && isKnownRtlSampleRate(pendingSettings.sampleRate)) {
-                pendingSettings.sampleRate = FOBOS_DEFAULT_SAMPLE_RATE;
-            }
-        }
-        if (sampleBox) {
-            sampleBox->clear();
-            populateSampleRates();
-        }
-    });
+    connect(refreshButton, &QPushButton::clicked, this, &YourClassName::requestUsbDeviceRefresh);
     connect(comboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
         if (index < 0 || isRunningOrTransitioning()) {
             return;
+        }
+        if (usbDeviceRefreshTimer) {
+            usbDeviceRefreshTimer->stop();
         }
         bool ok = false;
         const int selectedIndex = comboBox->currentData().toInt(&ok);
@@ -7041,6 +7025,9 @@ void YourClassName::clearLiveSpectrumSnapshot(bool clearVisualHistory, uint64_t 
 void YourClassName::updateUiForRunState() {
     const bool processorRunning = processor && processor->isRunning();
     const bool idle = isIdle() && !processorRunning;
+    if (!idle && usbDeviceRefreshTimer) {
+        usbDeviceRefreshTimer->stop();
+    }
     const bool clientCanControl =
         !isNetworkClientMode() ||
         !networkController ||
@@ -7276,10 +7263,16 @@ bool YourClassName::openFobosSession() {
     if (selectedDevice < 0) {
         selectedDevice = 0;
     }
-    if (availableFobosDevices.isEmpty()) {
+    if (availableFobosDevices.isEmpty() || !selectedFobosDeviceInfo().present) {
         refreshFobosDeviceList();
+        rebuildReceiverDeviceCombo();
+        updateAgileScanControls();
     }
     FobosDeviceInfo selectedInfo = selectedFobosDeviceInfo();
+    if (!selectedInfo.present) {
+        qWarning() << "[FobosDevices] selected Fobos is not detected; refusing a different receiver";
+        return false;
+    }
     selectedDevice = selectedInfo.nativeIndex;
 
     qDebug() << "[FobosLifecycle] openFobosSession enter"
@@ -8546,6 +8539,7 @@ void YourClassName::pollStopCompletion() {
 }
  
 void YourClassName::stopFobosProcessing() {
+    if (spectrumFftWorker) spectrumFftWorker->resetHfNoiseCancelState();
     if (playbackManager && playbackManager->isPlaying()) {
         stopPlayback();
         return;

@@ -1,4 +1,5 @@
 #include "dspflowpanel.h"
+#include "dspcomputedialog.h"
 #include "dspresearchwidget.h"
 #include "dspbranchengine.h"
 #include "finetunewidget.h"
@@ -2194,7 +2195,7 @@ bool typeHasOutput(const QString &type) {
     }
     static const QSet<QString> noOutput = {
         QStringLiteral("audio_output"), QStringLiteral("recorder"), QStringLiteral("network_output"),
-        QStringLiteral("fft"), QStringLiteral("decoder"), QStringLiteral("second_spectrum"),
+        QStringLiteral("decoder"), QStringLiteral("second_spectrum"),
         QStringLiteral("spectrum_measurement"), QStringLiteral("zoom_spectrum"), QStringLiteral("zero_span"),
         QStringLiteral("research_analysis"), QStringLiteral("oscilloscope_view"),
         QStringLiteral("wireless_lab"),
@@ -3152,7 +3153,14 @@ public:
             kind == DspLinkKind::Settings ? QColor(78, 202, 151) :
             kind == DspLinkKind::Spectrum ? QColor(244, 184, 70) :
             kind == DspLinkKind::Documentation ? QColor(125, 133, 145) : QColor(104, 188, 255);
-        setToolTip(dspLinkDescription(kind, ukrainian_));
+        if ((kind == DspLinkKind::Iq && target_->blockType() == QStringLiteral("fft")) ||
+            (kind == DspLinkKind::Spectrum && source_->blockType() == QStringLiteral("fft"))) {
+            setToolTip(ukrainian_
+                ? QStringLiteral("Прив'язка до спільного головного FFT; джерело та тракт залишаються штатними")
+                : QStringLiteral("Shared main FFT binding; uses the existing active source and pipeline"));
+        } else {
+            setToolTip(dspLinkDescription(kind, ukrainian_));
+        }
         setPen(QPen(isSelected() ? QColor(255, 194, 72) : normal,
                     isSelected() ? 3.0 : 2.2, kind == DspLinkKind::Documentation ? Qt::DashLine : Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     }
@@ -3465,6 +3473,10 @@ public:
         resetSectorCuts();
         rebuildSectorItems();
     }
+    ~DspFlowScene() override {
+        // QGraphicsScene does not guarantee edges are deleted before their nodes.
+        clearGraph(false);
+    }
 
     void setNativeWorkspaceView(QGraphicsView *view) {
         nativeWorkspaceView_ = view;
@@ -3589,7 +3601,8 @@ public:
 
     bool addConnection(DspBlockItem *source, DspBlockItem *target, bool notify = true) {
         if (!source || !target || source == target || !source->hasOutput()) return false;
-        if (dspLinkKind(source->blockType(), target->blockType()) == DspLinkKind::Invalid) {
+        const auto kind = dspLinkKind(source->blockType(), target->blockType());
+        if (kind == DspLinkKind::Invalid) {
             setStatus(dspLinkDescription(DspLinkKind::Invalid, ukrainian));
             return false;
         }
@@ -3615,6 +3628,12 @@ public:
                     (edge->isControlConnection() && edge->target() == target &&
                      edge->source()->blockType() == source->blockType())) oldInputs.append(edge);
             } else if (!edge->isControlConnection() && edge->target() == target) {
+                const auto existingKind = dspLinkKind(edge->source()->blockType(), target->blockType());
+                const bool workspaceView = target->blockType() == QStringLiteral("workspace_spectrum") ||
+                                           target->blockType() == QStringLiteral("workspace_waterfall");
+                // Widget settings and main spectrum frames occupy different input roles.
+                if (workspaceView && ((kind == DspLinkKind::Settings && existingKind == DspLinkKind::Spectrum) ||
+                                      (kind == DspLinkKind::Spectrum && existingKind == DspLinkKind::Settings))) continue;
                 oldInputs.append(edge);
             }
         }
@@ -3674,32 +3693,43 @@ public:
         workspaceFrameBlocks_.clear();
         vfoFrameBlocks_.clear();
         vfoFrameChannels_.clear();
-        cancelPendingConnection();
+        cancelGraphInteraction();
         const auto dockedPanels = dockedSettingsPanels_;
         dockedSettingsPanels_.clear();
         for (DockedSettingsProxy *proxy : dockedPanels) {
             if (!proxy) continue;
             releaseDockedSettingsPanel(proxy);
         }
-        const auto snapshot = items();
-        for (QGraphicsItem *item : snapshot) if (dynamic_cast<DspConnectionItem*>(item)) delete item;
-        const auto remaining = items();
-        for (QGraphicsItem *item : remaining) if (dynamic_cast<DspBlockItem*>(item)) delete item;
+        QList<DspConnectionItem *> edges;
+        QList<DspBlockItem *> blocks;
+        for (QGraphicsItem *item : items()) {
+            if (auto *edge = dynamic_cast<DspConnectionItem *>(item)) edges.append(edge);
+            else if (auto *block = dynamic_cast<DspBlockItem *>(item)) blocks.append(block);
+        }
+        for (DspConnectionItem *edge : edges) delete edge;
+        for (DspBlockItem *block : blocks) delete block;
         if (notify) notifyChanged();
     }
 
     void deleteSelection() {
-        QList<DspConnectionItem*> edges;
+        QSet<DspConnectionItem*> edges;
         QList<DspBlockItem*> blocks;
         for (QGraphicsItem *item : selectedItems()) {
             if (auto *edge = dynamic_cast<DspConnectionItem*>(item)) {
-                edges.append(edge);
+                edges.insert(edge);
             } else if (auto *block = dynamic_cast<DspBlockItem*>(item)) {
                 blocks.append(block);
-                for (DspConnectionItem *edge : block->connections()) if (!edges.contains(edge)) edges.append(edge);
+                for (DspConnectionItem *edge : block->connections()) edges.insert(edge);
             }
         }
         if (edges.isEmpty() && blocks.isEmpty()) return;
+        cancelGraphInteraction();
+        frameRoutesDirty_ = true;
+        workspaceFrameBlocks_.clear();
+        vfoFrameBlocks_.clear();
+        vfoFrameChannels_.clear();
+        // A selected edge can also belong to several selected blocks. Delete it once,
+        // while both endpoints are still alive to detach it from their connection lists.
         for (DspConnectionItem *edge : edges) delete edge;
         for (DspBlockItem *block : blocks) {
             if (DockedSettingsProxy *proxy = dockedSettingsPanels_.take(block->id())) {
@@ -4338,7 +4368,7 @@ public:
                 .arg(frame.sampleRateHz/1000.0, 0, 'f', 3).arg(frame.decimation).arg(frame.frontDecimation)
                 .arg(qulonglong(frame.gaps)).arg(frame.processingMs, 0, 'f', 1)
             : (ukrainian ? QStringLiteral("Помилка параметрів/джерела DDC: %1").arg(frame.error) : frame.error);
-        branchStatuses_.insert(frame.id, info);
+        branchStatuses_.insert(frame.id, frame.recordingStatus.isEmpty() ? info : info+QStringLiteral(" | ")+frame.recordingStatus);
         if (auto *block = blockById(frame.id)) block->setToolTip(info);
         for (auto route = plan.spectrumRoutes.cbegin(); route != plan.spectrumRoutes.cend(); ++route) {
             auto *view = blockById(route.key());
@@ -6206,16 +6236,37 @@ private:
         pendingSource_ = nullptr;
         if (temporaryConnection_) { delete temporaryConnection_; temporaryConnection_ = nullptr; }
     }
+    void cancelGraphInteraction() {
+        cancelPendingConnection();
+        pressedControl_ = nullptr;
+        draggedBlock_ = nullptr;
+        dragSelection_.clear();
+        if (resizingBlock_) resizingBlock_->finishSceneResize();
+        resizingBlock_ = nullptr;
+        finishWorkspaceGroupDividerDrag();
+        finishSectorDividerDrag();
+    }
     void ensureFrameRoutes() const {
         if (!frameRoutesDirty_) return;
         workspaceFrameBlocks_.clear();
         vfoFrameBlocks_.clear();
         vfoFrameChannels_.clear();
         const auto snapshot = items();
+        const auto plan = compileDspGraph(QJsonDocument::fromJson(configurationJson().toUtf8()).object());
+        QSet<QString> explicitMainViews;
+        for (QGraphicsItem *item : snapshot) {
+            auto *edge = dynamic_cast<DspConnectionItem *>(item);
+            if (edge && edge->source() && edge->target() && edge->source()->blockType() == QStringLiteral("fft") &&
+                dspLinkKind(edge->source()->blockType(), edge->target()->blockType()) == DspLinkKind::Spectrum)
+                explicitMainViews.insert(edge->target()->id());
+        }
         for (QGraphicsItem *item : snapshot) {
             auto *block = dynamic_cast<DspBlockItem *>(item);
             if (!block) continue;
-            if (block->isWorkspaceDisplayBlock()) workspaceFrameBlocks_.append(block);
+            // Unwired older layouts retain the shared-frame path; explicit routes must compile.
+            if (block->isWorkspaceDisplayBlock() &&
+                (!explicitMainViews.contains(block->id()) || plan.mainSpectrumRoutes.contains(block->id())))
+                workspaceFrameBlocks_.append(block);
             if (block->blockType() == QStringLiteral("vfo_spectrum") ||
                 block->blockType() == QStringLiteral("vfo_waterfall"))
                 vfoFrameBlocks_.append(block);
@@ -6326,6 +6377,12 @@ DspFlowPanel::DspFlowPanel(QWidget *parent) : QDialog(parent, Qt::Window) {
     ddcButton->setText(QStringLiteral("DDC +"));
     connect(ddcButton, &QToolButton::clicked, this, &DspFlowPanel::addDdcBranch);
     toolbar->addWidget(ddcButton);
+    auto *computeButton = new QToolButton(this);
+    computeButton->setObjectName(QStringLiteral("dspStreamManager"));
+    computeButton->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
+    computeButton->setToolTip(QStringLiteral("DSP stream manager / Менеджер потоків DSP"));
+    toolbar->addWidget(computeButton);
+    connect(computeButton, &QToolButton::clicked, this, &DspFlowPanel::showComputeDialog);
     toolbar->addWidget(openButton_);
     toolbar->addWidget(renameButton_);
     toolbar->addWidget(deleteButton_);
@@ -6635,7 +6692,14 @@ void DspFlowPanel::deleteWorkspaceProfile() {
 }
 
 QString DspFlowPanel::configurationJson() const {
-    return scene_ ? scene_->configurationJson() : QString();
+    if (!scene_) return QString();
+    auto root = QJsonDocument::fromJson(scene_->configurationJson().toUtf8()).object();
+    root.insert(QStringLiteral("spectrumCompute"), QJsonObject{
+        {QStringLiteral("mode"), int(spectrumComputeOptions_.mode)},
+        {QStringLiteral("backend"), spectrumComputeOptions_.backend},
+        {QStringLiteral("uploadLimitMBps"), spectrumComputeOptions_.uploadLimitMBps},
+        {QStringLiteral("fallbackToLocal"), spectrumComputeOptions_.fallbackToLocal}});
+    return QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Compact));
 }
 
 bool DspFlowPanel::setConfigurationJson(const QString &json) {
@@ -6653,6 +6717,16 @@ bool DspFlowPanel::setConfigurationJson(const QString &json) {
     bool loaded = false;
     if (!json.trimmed().isEmpty()) loaded = scene_->loadConfiguration(json);
     if (!loaded) scene_->resetDefault(false);
+    if (loaded) {
+        const auto options = QJsonDocument::fromJson(json.toUtf8()).object()
+                                 .value(QStringLiteral("spectrumCompute")).toObject();
+        SpectrumComputeOptions restored;
+        restored.mode = SpectrumComputeMode(options.value(QStringLiteral("mode")).toInt(0));
+        restored.backend = options.value(QStringLiteral("backend")).toInt(1);
+        restored.uploadLimitMBps = options.value(QStringLiteral("uploadLimitMBps")).toInt(100);
+        restored.fallbackToLocal = options.value(QStringLiteral("fallbackToLocal")).toBool(false);
+        setSpectrumComputeOptions(restored);
+    }
     loading_ = false;
     refreshSectorControls();
     QTimer::singleShot(0, this, [this]() {
@@ -6669,16 +6743,91 @@ bool DspFlowPanel::setConfigurationJson(const QString &json) {
 
 DspFlowPanel::~DspFlowPanel() { branchEngine_.reset(); }
 
-void DspFlowPanel::setBranchSourceContext(const RadioSettings &settings, bool running) {
+void DspFlowPanel::setBranchSourceContext(const RadioSettings &settings, bool running, int updateMs, int overlapPercent) {
+    if (!running || settings.simplifiedAudioChannelizer) {
+        const auto ids = branchRecordings_.keys();
+        for (const auto &id : ids) stopBranchRecording(id);
+    }
     branchSource_ = settings;
     branchSourceRunning_ = running;
+    mainFftUpdateMs_ = std::clamp(updateMs, 1, 5000);
+    mainFftOverlapPercent_ = std::clamp(overlapPercent, 0, 95);
+    if (computeDialog_) computeDialog_->setProbeContext(settings.sampleRate, settings.fftLength,
+                                                       mainFftUpdateMs_, mainFftOverlapPercent_);
 }
 
 QString DspFlowPanel::branchStatus(const QString &id) const {
+    if (branchSource_.simplifiedAudioChannelizer)
+        return ukrainian_ ? QStringLiteral("Додаткові потоки вимкнено спрощеним режимом") : QStringLiteral("Additional streams disabled by simplified mode");
     return scene_->branchStatus(id);
 }
 
+void DspFlowPanel::setExternalEndpoint(const DspStreamEndpoint &endpoint) {
+    if (externalEndpoint_ == endpoint) return;
+    externalEndpoint_ = endpoint;
+    if (branchEngine_) branchEngine_->setExternalEndpoint(endpoint);
+    if (computeDialog_) computeDialog_->setEndpoint(endpoint);
+    emit externalEndpointChanged();
+}
+
+void DspFlowPanel::setSpectrumComputeOptions(const SpectrumComputeOptions &options) {
+    auto normalized = options;
+    if (int(normalized.mode) < 0 || int(normalized.mode) > 2) normalized.mode = SpectrumComputeMode::Local;
+    if (normalized.backend < 0 || normalized.backend > 2) normalized.backend = 1;
+    normalized.uploadLimitMBps = std::clamp(normalized.uploadLimitMBps, 1, 2000);
+    if (spectrumComputeOptions_ == normalized) return;
+    spectrumComputeOptions_ = normalized;
+    if (computeDialog_) computeDialog_->setSpectrumComputeOptions(normalized);
+    if (!loading_ && saveTimer_) saveTimer_->start();
+    emit spectrumComputeOptionsChanged();
+}
+
+void DspFlowPanel::setSpectrumComputeStatus(const QString &status) {
+    if (spectrumComputeStatus_ == status) return;
+    spectrumComputeStatus_ = status;
+    if (computeDialog_) computeDialog_->setSpectrumComputeStatus(status);
+    emit spectrumComputeStatusChanged(status);
+}
+
+void DspFlowPanel::showComputeDialog() {
+    if (!computeDialog_) {
+        computeDialog_ = new DspComputeDialog(externalEndpoint_, ukrainian_, this);
+        computeDialog_->setSpectrumComputeOptions(spectrumComputeOptions_);
+        computeDialog_->setSpectrumComputeStatus(spectrumComputeStatus_);
+        computeDialog_->setProbeContext(branchSource_.sampleRate, branchSource_.fftLength,
+                                         mainFftUpdateMs_, mainFftOverlapPercent_);
+        connect(computeDialog_, &DspComputeDialog::endpointChanged, this, [this]() {
+            if (computeDialog_) setExternalEndpoint(computeDialog_->endpoint());
+        });
+        connect(computeDialog_, &DspComputeDialog::spectrumComputeOptionsChanged, this, [this]() {
+            if (computeDialog_) setSpectrumComputeOptions(computeDialog_->spectrumComputeOptions());
+        });
+    }
+    computeDialog_->show();
+    computeDialog_->raise();
+    computeDialog_->activateWindow();
+}
+
+bool DspFlowPanel::startBranchRecording(const QString &id, const QString &directory) {
+    if (!branchSourceRunning_ || branchSource_.simplifiedAudioChannelizer || directory.isEmpty() ||
+        blockTypeForId(id) != QStringLiteral("ddc_channelizer") || !blockSettings(id).value("enabled").toBool() ||
+        (branchRecordings_.size() >= 2 && !branchRecordings_.contains(id))) return false;
+    branchRecordings_.insert(id, directory);
+    if (branchEngine_) branchEngine_->setRecording(id, directory);
+    return true;
+}
+void DspFlowPanel::stopBranchRecording(const QString &id) {
+    if (!branchRecordings_.remove(id)) return;
+    if (branchEngine_) branchEngine_->setRecording(id, {});
+}
+bool DspFlowPanel::branchRecordingRequested(const QString &id) const { return branchRecordings_.contains(id); }
+
 void DspFlowPanel::refreshBranches() {
+    if (branchSource_.simplifiedAudioChannelizer || !branchSourceRunning_ ||
+        ((!isVisible() || isMinimized()) && branchRecordings_.isEmpty())) {
+        if (branchEngine_) branchEngine_->configure(branchPlan_, branchSource_, false);
+        return;
+    }
     if (branchPlanDirty_) {
         auto plan = compileDspGraph(QJsonDocument::fromJson(configurationJson().toUtf8()).object());
         if (branchPlan_.executionKey != plan.executionKey || branchPlan_.spectrumRoutes != plan.spectrumRoutes)
@@ -6689,14 +6838,30 @@ void DspFlowPanel::refreshBranches() {
             (ukrainian_ ? QStringLiteral("Гілки DSP зупинено: ") : QStringLiteral("DSP branches stopped: ")) + branchPlan_.errors.join(QStringLiteral("; ")));
     }
     if (branchPlan_.branches.isEmpty()) {
+        const auto ids = branchRecordings_.keys();
+        for (const auto &id : ids) stopBranchRecording(id);
         if (branchEngine_) branchEngine_->configure(branchPlan_, branchSource_, false);
         return;
     }
-    const auto plan = scene_->visibleBranchPlan(branchPlan_);
+    auto plan = scene_->visibleBranchPlan(branchPlan_);
+    const auto recordingIds = branchRecordings_.keys();
+    for (const auto &id : recordingIds) {
+        const auto original = std::find_if(branchPlan_.branches.begin(), branchPlan_.branches.end(), [&id](const auto &b) { return b.id == id && b.enabled; });
+        if (original == branchPlan_.branches.end()) { stopBranchRecording(id); continue; }
+        auto activeBranch = std::find_if(plan.branches.begin(), plan.branches.end(), [&id](const auto &b) { return b.id == id; });
+        if (activeBranch == plan.branches.end()) { auto copy = *original; copy.ffts.clear(); copy.iqConsumer = true; plan.branches.append(copy); }
+        else activeBranch->iqConsumer = true;
+        plan.executionKey += QByteArray("|record:")+id.toUtf8();
+    }
     bool enabled = false;
     for (const auto &b : plan.branches) if (b.enabled && (b.iqConsumer || !b.ffts.isEmpty())) enabled = true;
-    const bool active = enabled && branchSourceRunning_ && isVisible() && !isMinimized();
-    if (!branchEngine_ && active) branchEngine_ = std::make_unique<DspBranchEngine>();
+    const bool active = enabled && !branchSource_.simplifiedAudioChannelizer && branchSourceRunning_ &&
+        ((isVisible() && !isMinimized()) || !branchRecordings_.isEmpty());
+    if (!branchEngine_ && active) {
+        branchEngine_ = std::make_unique<DspBranchEngine>();
+        branchEngine_->setExternalEndpoint(externalEndpoint_);
+        for (auto it = branchRecordings_.cbegin(); it != branchRecordings_.cend(); ++it) branchEngine_->setRecording(it.key(), it.value());
+    }
     if (!branchEngine_) return;
     branchEngine_->configure(plan, branchSource_, active);
     for (const auto &frame : branchEngine_->takeFrames()) scene_->applyBranchFrame(branchPlan_, frame);
@@ -6795,7 +6960,7 @@ void DspFlowPanel::resizeEvent(QResizeEvent *event) {
 
 void DspFlowPanel::closeEvent(QCloseEvent *event) {
     if (saveTimer_ && saveTimer_->isActive()) saveTimer_->stop();
-    if (!loading_ && scene_) emit configurationChanged(scene_->configurationJson());
+    if (!loading_ && scene_) emit configurationChanged(configurationJson());
     if (workspaceMode_) {
         emit workspaceCloseRequested();
         event->ignore();

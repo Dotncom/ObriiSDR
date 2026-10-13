@@ -1022,6 +1022,7 @@ void YourClassName::onPlaybackStarted(const QString &filePath, PlaybackManager::
 }
 
 void YourClassName::onPlaybackStopped() {
+    if (spectrumFftWorker) spectrumFftWorker->resetHfNoiseCancelState();
     if (offlineIqPlaybackActive) {
         offlineIqPlaybackActive = false;
         offlineIqPlaybackHasMetadata = false;

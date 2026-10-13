@@ -1,5 +1,42 @@
 # Changelog
 
+## 6.2.0 - 2026-10-13
+- USB refresh no longer resets Fobos hardware or silently selects an unrelated
+  receiver. It preserves owned sessions and serial-based selection, retries
+  missing-device discovery for up to ten seconds and marks unavailable receivers.
+- Added a cancellable, authenticated DSP connection preflight test: TCP/handshake
+  timing, RTT min/median/p95 and jitter, synthetic upload/download throughput,
+  worker FFT memory limit and network-only IQ/FFT traffic estimates. It uses draft
+  connection fields without enabling IQ transfer and excludes active compute sessions.
+- Continuous remote FFT joins at the newest retained complete window rather than
+  replaying old local history; status now distinguishes IQ sample lag from cycle
+  latency. Connection estimates respect the separate window/continuous cadences
+  and the local 8M-sample window retention limit.
+- Fixed a DSP-board crash when deleting a selection containing both blocks and
+  their connections. Deletion now deduplicates edges and clears pending mouse
+  interactions and display routes before releasing blocks and docked settings.
+- Added opt-in main RF FFT offload to the native LAN worker: individual complete
+  IQ windows or continuous full-band CF32LE, with chunked transfers, upload and
+  worker memory budgets, generation checks and explicit discontinuities.
+  The existing FFT kernel is shared; local audio and receiver control are unchanged.
+- Main FFT placement is configured in the DSP stream manager or FFT block.
+  Receiver/IQ -> FFT -> workspace display links now bind the shared main frame
+  path. Local fallback is explicit; RF scan/HF use the established local path.
+- Added a shared, optional DSP stream manager for independent DDC branches:
+  local processing, authenticated native LAN compute workers, and a persistent
+  external GNU Radio adapter with returned IQ and FFT spectra.
+- Added explicit per-branch CF32LE/JSON recording with bounded sessions and
+  segments on discontinuities. The main receiver/audio queues are unchanged.
+- Renamed Simplified audio channelizer to Simplified operating mode, preserving
+  saved settings. It also disables optional DSP stream branches and recording.
+- Added protocol, integration, recording and local routing-overhead tests.
+  Real Raspberry-to-laptop throughput remains to be qualified.
+- Fixed DSP worker initialization ordering and dangling graph connections during
+  board destruction, covered by repeated lifecycle tests.
+- Preserve concrete DSP TCP/handshake failures between retries, report native
+  token rejection, and show the worker bind endpoint/loopback warning. Connection
+  diagnostics are gated by Logging and never include session tokens.
+
 ## 6.1.1 - 2026-10-13
 - Added opt-in online MapTiler elevations for TX/RX heights, path profiles and
   coverage, reusing the configured QTH key with temporary in-memory terrain tiles.

@@ -535,11 +535,11 @@ void YourClassName::openApplicationSettings() {
         QStringLiteral("Add versioned scientific metadata, calibration, FFT/RBW, spectrum markers and measurements to recording metadata. Location, device serials, keys and API tokens are excluded.")));
     QCheckBox *simplifiedAudioChannelizerOption = new QCheckBox(
         uiText(QStringLiteral("simplified_audio_channelizer"),
-               QStringLiteral("Simplified audio channelizer")),
+               QStringLiteral("Simplified operating mode")),
         quickOptionsBox);
     simplifiedAudioChannelizerOption->setToolTip(uiText(
         QStringLiteral("simplified_audio_channelizer_tooltip"),
-        QStringLiteral("Prioritize live audio on weak CPUs by reducing channelizer and background FFT load.")));
+        QStringLiteral("Use the lower-cost existing audio path and disable optional DSP branch/stream-manager work (DDC and network research branches). Main spectrum/waterfall, audio, DMR, ordinary filters and demodulators remain available. The server is started explicitly by the user on the compute laptop, independently of this mode. No speed or real-time guarantee.")));
     audioOption->setChecked(audioCheckbox && audioCheckbox->isChecked());
     syncOption->setChecked(syncCheckbox && syncCheckbox->isChecked());
     syncOption->setEnabled(false);
