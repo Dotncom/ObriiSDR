@@ -14,6 +14,9 @@
 namespace propagation {
 constexpr double Unknown = std::numeric_limits<double>::quiet_NaN();
 enum class Model { KnifeEdge, Itm, FreeSpace };
+enum class ClutterEnvironment { None, Rural, Suburban, Urban, DenseUrban };
+enum class ClutterMode { P2108, Manual };
+enum class ClutterStatus { Disabled, Modelled, AboveClutter, Manual, Invalid };
 struct Parameters {
     qth::GeoPosition tx, rx;
     double frequencyMHz = 145.0;
@@ -27,6 +30,10 @@ struct Parameters {
     double confidencePercent = 50.0, reliabilityPercent = 50.0;
     int climate = 5, polarization = 1, gridSize = 64;
     Model model = Model::KnifeEdge;
+    ClutterEnvironment rxEnvironment = ClutterEnvironment::None;
+    ClutterMode rxClutterMode = ClutterMode::P2108;
+    double rxClutterManualDb = 0.0;
+    bool rxClutterExcludedFromTerrain = false;
     bool flatTerrain = false;
     QString terrainDirectory;
 };
@@ -34,10 +41,19 @@ struct ProfilePoint {
     double distanceM = 0.0, terrainM = Unknown, adjustedTerrainM = Unknown;
     double rayM = Unknown, fresnelM = Unknown;
 };
+struct ClutterResult {
+    ClutterStatus status = ClutterStatus::Disabled;
+    double lossDb = 0.0, representativeHeightM = 0.0;
+    double rxHeightM = Unknown, referenceHeightM = Unknown;
+    QString error;
+};
 struct PathResult {
     bool valid = false, completeTerrain = false, cancelled = false, shortPathFallback = false;
     double distanceM = 0.0, freeSpaceDb = Unknown, diffractionDb = Unknown;
     double pathLossDb = Unknown, receivedDbm = Unknown, marginDb = Unknown;
+    // Base terrain/free-space loss at clutter.referenceHeightM; pathLossDb adds clutter once.
+    double basePathLossDb = Unknown;
+    ClutterResult clutter;
     double minimumClearanceM = Unknown, minimumFresnelRatio = Unknown;
     long itmWarnings = 0;
     int itmError = 0;
@@ -72,6 +88,10 @@ double distanceM(const qth::GeoPosition &a, const qth::GeoPosition &b);
 qth::GeoPosition destination(const qth::GeoPosition &a, double bearingRadians, double distanceM);
 double freeSpaceLossDb(double distanceM, double frequencyMHz);
 double knifeEdgeLossDb(double v);
+ClutterResult receiverClutter(const Parameters &p);
+QString clutterModelLimits();
+QString clutterSummary(const Parameters &p, const ClutterResult &clutter);
+QString profileCsv(const Parameters &p, const PathResult &path);
 QString validate(const Parameters &p);
 PathResult calculatePath(const Parameters &p, const Elevation &terrain,
                          const std::atomic_bool *cancel = nullptr, int maxPoints = 4096);

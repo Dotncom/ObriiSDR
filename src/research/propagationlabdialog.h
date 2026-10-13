@@ -42,6 +42,7 @@ private:
     void updateMapSource();
     void calculate(bool coverage);
     void updateRaster();
+    void updateClutterControls();
     void showProfile();
     void exportProfile();
     void setPoint(bool tx, const qth::GeoPosition &point);
@@ -74,6 +75,10 @@ private:
     QthMapWidget *map = nullptr;
     QComboBox *picking = nullptr, *reference = nullptr, *layer = nullptr, *tiles = nullptr, *terrainSource = nullptr;
     QCheckBox *online = nullptr, *onlineTerrainPermission = nullptr;
+    QComboBox *rxEnvironment = nullptr, *rxClutterMode = nullptr;
+    QDoubleSpinBox *rxClutterManual = nullptr;
+    QCheckBox *rxClutterExcluded = nullptr;
+    QLabel *rxClutterStatus = nullptr;
     QLineEdit *directory = nullptr;
     QSlider *opacity = nullptr;
     QTabWidget *controls = nullptr;

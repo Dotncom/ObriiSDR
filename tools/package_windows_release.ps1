@@ -65,6 +65,7 @@ $PublicDocs = @(
     "release_notes_$Version.md"
     'research_backends.md', 'psk31_decoder.md', 'hf_prediction.md', 'wireless_addon.md'
     'dsp_stream_protocol.md', 'dsp_stream_manager.md', 'gnu_radio_bridge_usage.md'
+    'pfb_channelizer.md', 'dsp_board_coverage.md', 'experiment_bundle.md'
 )
 $Backends = if ($WirelessAddOn) { @('wireshark', 'wifi-phy', 'wifi-ht') } else { @('pocketsdr', 'satdump', 'hdf5', 'itu_hf') }
 $ResearchFiles = @{}
@@ -99,7 +100,7 @@ Get-ChildItem -LiteralPath $RuntimePath -Recurse -File -Force | ForEach-Object {
     switch -Regex ($Relative) {
         '^[^/]+$' { $Allowed = $RootFiles -contains $File.Name }
         '^docs/[^/]+$' { $Allowed = $PublicDocs -contains $File.Name }
-        '^dsp/[^/]+$' { $Allowed = $Relative -eq 'dsp/obrii_gr_bridge.py' }
+        '^dsp/[^/]+$' { $Allowed = $Relative -in @('dsp/obrii_gr_bridge.py', 'dsp/obrii_gr_resampler.py', 'dsp/obrii_gr_hier_resampler.py') }
         '^licenses/' { $Allowed = $File.Extension -in @('', '.txt', '.md', '.json') }
         '^config/' { $Allowed = $Relative -in @('config/dmr_backends.example.json', 'config/fobosapp_defaults_4.2.json') }
         '^platforms/' { $Allowed = $Relative -eq 'platforms/qwindows.dll' }

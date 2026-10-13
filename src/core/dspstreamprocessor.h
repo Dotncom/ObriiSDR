@@ -17,6 +17,13 @@ struct DspStreamBlock {
 struct DspStreamResult {
     QString error;
     double processingMs = 0.0;
+    // Processed IQ domain. Native/legacy replies retain the input clock.
+    double sampleRate = 0.0;
+    std::uint64_t firstSample = 0, originFirstSample = 0;
+    std::size_t sampleCount = 0;
+    int rateNumerator = 1, rateDenominator = 1;
+    int inputReserve = 0;
+    bool gap = false;
     std::shared_ptr<const std::vector<float>> iq;
     std::vector<DspBranchFrame> spectra;
 };
@@ -37,6 +44,8 @@ namespace DspStreamProtocol {
 constexpr int MaxJsonBytes = 65536;
 constexpr int MaxPayloadBytes = 2097152;
 constexpr std::size_t MaxSamples = 65536;
+constexpr std::size_t MaxOutputSamples = 131072;
+constexpr std::size_t MaxStreams = 8;
 QByteArray encode(const QJsonObject &json, const QByteArray &payload = {});
 // 0: incomplete; 1: complete; -1: invalid (caller must close connection).
 int extract(QByteArray &buffer, QJsonObject &json, QByteArray &payload, QString &error);

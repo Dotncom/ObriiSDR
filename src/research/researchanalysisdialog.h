@@ -6,6 +6,7 @@
 
 #include <QDialog>
 #include <QElapsedTimer>
+#include <QJsonObject>
 #include <QString>
 
 #include <functional>
@@ -88,6 +89,8 @@ public:
                                     QWidget *parent = nullptr);
 
     void selectTab(Tab tab);
+    void setExperimentBundleCallbacks(std::function<QJsonObject()> snapshot,
+                                      std::function<bool(const QJsonObject &, QString *)> applyWorkspace);
     void setIqView(int viewMode);
     bool hasActiveMeasurementSession() const;
     void appendSpectrumFrame(const std::vector<float> &frequencies,

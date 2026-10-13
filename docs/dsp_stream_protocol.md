@@ -74,7 +74,7 @@ connections still authenticating. A newly accepted descriptor may wait up to
 100 ms for a retiring session during reconnect; no third worker is created.
 If both sessions remain occupied, the new connection is aborted, with no busy
 reply guaranteed. Main FFT and DDC can therefore use separate connections to the
-same endpoint. The per-connection DDC processor still has its separate two-stream
+same endpoint. The per-connection DDC processor still has its separate eight-stream
 limit; a session is not a DDC stream ID.
 
 At most **one session owns main FFT processing**. The first `main_fft_*` request
@@ -130,12 +130,60 @@ FFT normalization is abs(FFT(window*x))/sum(window), floor -200 dBFS; RBW is
 Fs/N * N*sum(window^2)/sum(window)^2. Frequency at index i is centerHz+(i-N/2)*Fs/N.
 No FFT is emitted until its full history is available, and refreshMs limits
 outputs by elapsed monotonic time. The reply is still sent for every work block.
-Maximum retained IQ history is 65536 complex samples per stream, two streams.
-A third stream ID is rejected until the connection/session is reset.
+Maximum retained FFT IQ history is 65536 complex samples per stream, eight streams.
+A ninth stream ID is rejected until the connection/session is reset. This stream
+cap is separate from the native server's two TCP session slots.
 
 Errors use `{ "type":"error", "error":"bounded non-sensitive reason" }`.
 Reject unknown requests; never execute commands or deserialize executable code
 received over the connection. Successful replies do not assert loss-free RF.
+
+### Rational Output v1
+
+The GNU adapter advertises `rationalRateVersion: 1` in its hello. It retains the
+v1 work request and top-level result **input** echoes for request correlation.
+Native and same-rate results retain their existing wire format. A rate-changing
+result adds this object (example: first 4096 inputs, 2/3 ratio, reserve 192):
+
+```json
+{"output":{"sampleRate":64000,"firstSample":"0","sampleCount":2602,"originFirstSample":"10000","rateNumerator":2,"rateDenominator":3,"inputReserve":192,"gap":true}}
+```
+
+L=rateNumerator and M=rateDenominator are reduced positive integers <=64;
+L != M, L/M <=2. Output sampleRate is input sampleRate*L/M, finite and within
+1000..2000000. R=inputReserve is an integer, M..4096 and divisible by M. It is
+declared by the trusted local adapter, not chosen remotely. Define
+`P(T) = L * floor(max(0,T-R)/M)`, where T counts admitted inputs since the most
+recent reset. For request input interval [A,A+N) and origin O:
+
+- `output.firstSample = P(A-O)` as a decimal uint64 string.
+- `output.sampleCount = P(A+N-O)-P(A-O)`, integer 0..131072.
+- `output.originFirstSample = O`, the reset's input firstSample, uint64 string.
+- `output.gap = true` until the first nonempty output has been returned; this
+  includes empty startup replies and the first nonempty reply.
+- `iqBytes = output.sampleCount*8` when returnIq, otherwise 0. Output metadata is
+  present even when returned IQ is disabled. Empty output emits no FFT.
+
+The eight output keys are mandatory together. Counts, origins, the rate ratio,
+reserve, counter arithmetic/overflow, finite payloads and exact payload length
+are validated before publication. FFT bin widths, RBW, frequency axes and frame
+sequence use processed rate and `output.firstSample + output.sampleCount`.
+The 2 MiB frame cap remains unchanged (131072 CF32 + two 65536-bin float FFTs
+fits). A manager should not buffer R again. Split downstream recorder writes
+when their chunk cap is smaller than the output packet.
+
+Output counter zero names the beginning of a new processed segment. Its relative
+time is `O/inputRate + output.firstSample/outputRate`. Keep the integer anchor
+for precision; these are not UTC/hardware timestamps or FIR group-delay
+compensation. Reset/gap discards pending input/output tail without flushing and
+starts a new origin. Consumers must honor gap even when generation/epoch is
+unchanged. Native/legacy decoder defaults are input sampleRate, input firstSample,
+input count, ratio 1/1, origin/reserve 0, and request gap.
+
+Only upgraded consumers that understand this extension may use rate-changing
+plugins. An old client must not ignore the output object and assume input timing.
+The capability does not promise arbitrary GNU scheduler, tags, multiport or
+variable-rate support, nor does it change the native processor's sample rate.
 
 ## Main FFT Begin
 
@@ -268,10 +316,11 @@ The service never retries a failed request by changing length, rate or mode.
 ## GNU Radio Adapter
 
 The external Python adapter implements the same endpoint, optionally processing
-IQ through a locally selected GNU Radio block before FFT/return. Version 1 allows
-one-in/one-out complex streams at the unchanged sample rate only. A local plugin
-provides `make_block(sample_rate)` returning a GNU Radio block/hier_block2.
-The block and scheduler persist across contiguous packets. Unsupported rate
-changes, unbounded output, or missing output fail explicitly. This is not an
+IQ through a locally selected GNU Radio block before FFT/return. Legacy mode uses
+one-in/one-out same-rate CF32; rational-output v1 adds bounded constant-ratio
+decimation/interpolation. A local plugin provides `make_block(sample_rate)`
+returning a GNU block/hier_block2, or a tuple with explicit ratio/reserve.
+The block and scheduler persist across contiguous packets. Unsupported dynamic
+rates, unbounded output, or missing output fail explicitly. This is not an
 arbitrary graph scheduler inside Obrii and does not load plugins from the network.
 Its DDC v1 support does not imply `mainFftVersion: 1` or any `main_fft_*` support.

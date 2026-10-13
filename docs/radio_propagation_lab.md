@@ -113,8 +113,8 @@ persisted; recalculate after reopening.
 Received dBm = 30 + 10 log10(TX watts) + TX/RX gains (dBi) - cable losses -
 additional losses - model path loss. Link margin subtracts receiver sensitivity
 and fade reserve. Antenna gain is direction-independent in this version.
-Neither receiver noise, interference, terrain uncertainty, nor building clutter
-is automatically estimated. Coverage is a planning approximation, not a
+Receiver noise, interference and terrain uncertainty are not automatically
+estimated. Optional RX local clutter is described below. Coverage is a planning approximation, not a
 certified service guarantee. HF ionospheric paths, MUF/LUF, sky-wave hops and
 surface-wave attenuation are not implemented by these terrestrial models.
 
@@ -127,15 +127,90 @@ model statistical variability, so an additional reserve is deliberately more
 conservative, not a substitute for those percentages.
 
 ITM climate, refractivity, ground conductivity/permittivity and polarization do
-not select rural/suburban/urban clutter. No building-density model is implemented
-yet. **Additional loss** permits an explicit user-supplied fixed correction,
-but does not map individual buildings or vary with land use. A future clutter
-layer requires a separate model (for example ITU-R P.2108) and suitable data;
-terrain/vegetation already present in SRTM must not be counted twice.
+not select rural/suburban/urban clutter. **Additional loss** remains a separate
+user-supplied link-budget correction; do not also enter the same loss in RX clutter.
 
 References: [NTIA ITM](https://github.com/NTIA/itm),
 [ITU-R P.525](https://www.itu.int/rec/R-REC-P.525/en),
 [ITU-R P.526](https://www.itu.int/rec/R-REC-P.526/en).
+
+## RX Local Environment (Item 7)
+
+**Terrain / model -> RX local environment** offers **None**, **Rural / open**,
+**Suburban**, **Urban**, and **Dense urban**. None is the default for both new and
+existing settings, preserving prior numerical results. This is an RX endpoint
+correction, not a building map, street-canyon ray tracer or land-use database.
+One selected environment and RX height apply uniformly to every coverage cell.
+TX clutter and indoor/building-entry loss are not predicted. These controls
+do not select or alter HF man-made noise or HF prediction settings.
+
+The automatic method implements **ITU-R P.2108-1 (09/2021), Annex 1, section 3.1**,
+not the section 3.2 terrestrial statistical model. Its frequency interval is
+**30..3000 MHz inclusive**, not the whole Recommendation's 30 MHz..100 GHz span.
+Default representative heights R are 10 m for rural/suburban, 15 m for urban,
+20 m for dense urban, with street width 27 m (Tables 2/3). Rural uses (2b);
+the built-up categories use (2a), with (1) and (2c-g), GHz frequency and degrees
+for the clutter angle. These are median corrections, not reliability percentiles.
+
+Below R, the base terrain model is evaluated at **R above local RX ground**, then
+the local correction is added once. At/above R the correction is zero and the
+actual RX height is retained. This applies to knife edge, ITM (including its
+short-path fallback), and free-space reference. There is no borrowed 250 m/1 km
+threshold from section 3.2; section 3.1 is an above-clutter end correction, not a
+validated full-path short-range urban model. The application retains its existing
+0.5..3000 m antenna-height limits. Other base-model limits still apply.
+
+The automatic model requires explicit **RX clutter absent from base terrain**
+confirmation. SRTM and other surface DEMs can already include roofs/vegetation;
+the application cannot automatically remove them or establish a bare-earth DTM.
+Do not confirm this assumption unless justified for the selected data and all RX
+locations. Terrain samples are never inflated with extra building heights, and
+terrain diffraction is not added a second time. An inappropriate DSM still cannot
+be made physically valid by checking a box. Reassess the assumption after changing
+the terrain source or area. Flat terrain remains explicitly synthetic.
+
+Outside the frequency interval or when these geometric/data assumptions do not
+hold, select **Manual residual loss** (or None). Manual is an explicit replacement
+for the automatic correction, never an additive override. It accepts 0..200 dB
+(an application input bound, not an ITU validity range), uses the actual RX height,
+and represents only attenuation not already present in terrain or Additional loss.
+It makes no ITU accuracy claim and does not extend the base model's validity.
+Invalid automatic input stops path/coverage calculation instead of silently
+substituting zero or extrapolating. No new network requests are introduced.
+
+`PathResult.basePathLossDb` is the base propagation loss at the reported reference
+height; `PathResult.clutter.lossDb` is the separate RX correction;
+`PathResult.pathLossDb` is their sum. Received level subtracts that sum exactly
+once. The profile's white antenna is the actual RX tip; its ray, Fresnel zone and
+clearance refer to the base-model reference height. Raising that reference can
+change terrain diffraction, so the automatic result need not equal the old
+actual-height prediction plus the clutter correction.
+
+The UI, result and profile CSV report the method, correction and limitations.
+CSV retains its five data columns and adds comment metadata for environment,
+method, terrain assumption, actual/reference RX heights, manual setting, base
+and total loss, RX level and margin. Export uses the calculated parameter snapshot.
+Selections are saved in the existing local `propagationLab` group under
+`rxEnvironment`, `rxClutterMode`, `rxClutterManualDb` and
+`rxClutterExcludedFromTerrain`. Endpoint swapping retains these RX-role settings,
+so reassess the environment at the new RX. No coordinates are logged by this feature.
+
+Primary sources verified for this implementation:
+[ITU-R P.2108-1 official PDF](https://www.itu.int/dms_pubrec/itu-r/rec/p/R-REC-P.2108-1-202109-I!!PDF-E.pdf)
+and [NTIA ITS model documentation](https://ntia.github.io/propagation-library-wiki/models/P2108/index.html).
+
+### Integration and Verification
+
+No new source files, libraries or CMake entries are required. Existing application
+and `ObriiPropagationSelfTest` source lists already cover all changed code. Shared
+CMake, translations, app help and main-window files are intentionally untouched.
+Optional CI registration by the parent: run
+`ObriiPropagationSelfTest --clutter-only`. This branch uses QCoreApplication only,
+synthetic paths and in-memory CSV, with no GUI, network, settings or private data.
+It covers published equations, category heights, boundaries, invalid inputs,
+default regressions, all three base models, manual replacement, terrain integrity,
+coverage/profile consistency and export metadata. The existing GUI suite also has
+control-state and settings round-trip checks; it is separate from this headless run.
 
 ## Calculation and Profile
 

@@ -1,5 +1,26 @@
 # Changelog
 
+## 6.3.0 - 2026-10-14
+- Added independent DDC demodulator, filter-chain and audio-output branches,
+  bounded asynchronous external processing and local audio isolation. Simplified
+  operating mode keeps optional branches disabled and preserves the main path.
+- Added configurable DDC FIR controls, an opt-in PFB channel bank and bounded
+  rational-rate GNU Radio adapters. These extensions need real hardware validation.
+- More DSP connections now route real data: main FFT display bindings and settings
+  aliases, independent branch audio and explicit main-filter wire-order application.
+- Added bounded DSP-board Undo/Redo, safer group deletion and repeated teardown
+  coverage. Frequency, listening and demodulator editors now mirror live receiver
+  limits, step lists and presets without duplicate tuning actions.
+- Improved remote FFT upload pipelining, legacy-peer negotiation, retry/fallback
+  behavior and cancellation, with deterministic FFT parity and loopback tests.
+- Added portable spectrum/IQ experiment folders with sanitized context, checksums,
+  cancellable export, isolated paused replay and optional backed-up DSP-layout
+  restoration. Import never automatically starts hardware or remote connections.
+- Added optional receiver-local rural/suburban/urban clutter loss to propagation
+  estimates, with model validity limits and manual-loss alternatives.
+- Updated help and DSP documentation. Windows core and
+  Raspberry/Linux source only; no new Wireless add-on or Android package.
+
 ## 6.2.0 - 2026-10-13
 - USB refresh no longer resets Fobos hardware or silently selects an unrelated
   receiver. It preserves owned sessions and serial-based selection, retries

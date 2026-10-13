@@ -1,12 +1,16 @@
 #include "frequencycontrol.h"
 
 #include <QComboBox>
+#include <QApplication>
+#include <QPointer>
+#include <QLineEdit>
 #include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QPushButton>
 #include <QSizePolicy>
 #include <QSignalBlocker>
 #include <QVBoxLayout>
+#include <QTimer>
 
 #include <algorithm>
 #include <cmath>
@@ -107,9 +111,11 @@ FrequencyControl::FrequencyControl(QWidget *parent)
         unitSelectionLocked = true;
         updateSpinRange();
         updateDisplayedValue();
+        emit selectionChanged();
     });
     connect(stepCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         updateSpinRange();
+        emit selectionChanged();
     });
     connect(minusButton, &QPushButton::clicked, this, [this]() {
         adjustByStep(-1);
@@ -240,15 +246,83 @@ QString FrequencyControl::selectedValuePresetName() const {
 }
 
 void FrequencyControl::setSelectedValuePresetName(const QString &name) {
-    if (!presetCombo || name.trimmed().isEmpty()) {
+    if (!presetCombo) {
         return;
     }
-    const int index = presetCombo->findText(name);
+    const int index = name.trimmed().isEmpty() ? 0 : presetCombo->findText(name);
     if (index < 0) {
         return;
     }
     QSignalBlocker blocker(presetCombo);
     presetCombo->setCurrentIndex(index);
+}
+
+void FrequencyControl::copySelectionTo(FrequencyControl &target) const {
+    target.setSelectedUnitIndex(selectedUnitIndex());
+    target.setSelectedStepName(selectedStepName());
+    target.setSelectedValuePresetName(selectedValuePresetName());
+}
+
+void FrequencyControl::synchronizeFrom(const FrequencyControl &source, bool includeValue) {
+    if (minimumValueHz != source.minimumValueHz || maximumValueHz != source.maximumValueHz) {
+        setRangeHz(source.minimumValueHz, source.maximumValueHz);
+    }
+    const auto syncPresets = [](QComboBox *target, const QComboBox *original) {
+        bool same = target->count() == original->count();
+        for (int i = 0; same && i < original->count(); ++i) {
+            same = target->itemText(i) == original->itemText(i) &&
+                   target->itemData(i) == original->itemData(i);
+        }
+        if (!same) {
+            const QSignalBlocker blocker(target);
+            target->clear();
+            for (int i = 0; i < original->count(); ++i) {
+                target->addItem(original->itemText(i), original->itemData(i));
+            }
+            target->setCurrentIndex(original->currentIndex());
+        }
+        return !same;
+    };
+    const bool stepsChanged = syncPresets(stepCombo, source.stepCombo);
+    syncPresets(presetCombo, source.presetCombo);
+    presetCombo->setEnabled(source.presetCombo->isEnabled());
+    if (stepsChanged) updateSpinRange();
+    if (includeValue) {
+        source.copySelectionTo(*this);
+        if (currentValueHz != source.currentValueHz) setValueHz(source.currentValueHz);
+    }
+    setEnabled(source.isEnabled());
+}
+
+FrequencyControl *FrequencyControl::createLinkedControl(QWidget *parent, QTimer *syncTimer,
+                                                       const std::function<void()> &apply) {
+    auto *copy = new FrequencyControl(parent);
+    copy->synchronizeFrom(*this, true);
+    const QPointer<FrequencyControl> source(this);
+    connect(copy, &FrequencyControl::selectionChanged, copy, [source, copy]() {
+        if (source) copy->copySelectionTo(*source);
+    });
+    connect(copy, &FrequencyControl::valueCommitted, copy, [source, copy, apply](double value) {
+        if (!source || !source->isEnabled()) return;
+        copy->copySelectionTo(*source);
+        source->setValueHz(value);
+        const QPointer<FrequencyControl> guard(copy);
+        apply();
+        // The receiver can clamp or reject a request; show the accepted value immediately.
+        if (guard && source) guard->synchronizeFrom(*source, true);
+    });
+    connect(this, &FrequencyControl::valueCommitted, copy, [source, copy](double) {
+        if (source) copy->synchronizeFrom(*source, true);
+    });
+    connect(syncTimer, &QTimer::timeout, copy, [source, copy]() {
+        if (!source) { copy->setEnabled(false); return; }
+        QWidget *focus = QApplication::focusWidget();
+        const auto *edit = copy->valueSpin->findChild<QLineEdit *>();
+        const bool typing = edit && edit->isModified() &&
+                            (focus == copy || copy->isAncestorOf(focus));
+        copy->synchronizeFrom(*source, !typing);
+    });
+    return copy;
 }
 
 double FrequencyControl::unitFactor() const {

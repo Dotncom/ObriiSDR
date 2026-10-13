@@ -10,6 +10,8 @@ struct SpectrumFftFrame;
 
 // Owns its socket and FFT state on one background thread. request() renews demand;
 // it does not enqueue a frame or govern continuous IQ delivery.
+// Negotiated IQ upload has at most four outstanding chunks; FFT/results remain
+// single-flight. Legacy v1 peers use explicit one-chunk lockstep.
 class RemoteSpectrumWorker final {
 public:
     RemoteSpectrumWorker();

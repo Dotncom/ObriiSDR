@@ -1,4 +1,6 @@
 #include "dspflowpanel.h"
+#include "audiofilterchainwidget.h"
+#include "dspbranchaudiooutput.h"
 #include "dspcomputedialog.h"
 #include "dspresearchwidget.h"
 #include "dspbranchengine.h"
@@ -8,6 +10,7 @@
 #include "radiosettings.h"
 
 #include <QAction>
+#include <QApplication>
 #include <QComboBox>
 #include <QCheckBox>
 #include <QContextMenuEvent>
@@ -80,6 +83,8 @@ constexpr qreal kVisualBlockMinHeight = 96.0;
 constexpr qreal kVisualBlockMaxWidth = 2000.0;
 constexpr qreal kVisualBlockMaxHeight = 1400.0;
 constexpr qreal kPortRadius = 6.0;
+constexpr int kBoardHistorySteps = 100;
+constexpr qint64 kBoardHistoryBytes = 16 * 1024 * 1024;
 constexpr int kWorkspacePlotLeftMargin = 42;
 constexpr int kWorkspacePlotRightMargin = 8;
 
@@ -157,7 +162,7 @@ QVector<DspWorkspaceProfile> loadDspWorkspaceProfiles() {
     return profiles;
 }
 
-void storeDspWorkspaceProfiles(const QVector<DspWorkspaceProfile> &profiles) {
+bool storeDspWorkspaceProfiles(const QVector<DspWorkspaceProfile> &profiles) {
     QSettings settings(persistentSettingsFilePath(), QSettings::IniFormat);
     settings.remove(QStringLiteral("dspFlow/profiles"));
     settings.beginWriteArray(QStringLiteral("dspFlow/profiles"), profiles.size());
@@ -168,6 +173,28 @@ void storeDspWorkspaceProfiles(const QVector<DspWorkspaceProfile> &profiles) {
     }
     settings.endArray();
     settings.sync();
+    return settings.status() == QSettings::NoError;
+}
+
+bool validDspWorkspaceLayout(const QJsonObject &root) {
+    if (!root.value(QStringLiteral("blocks")).isArray() ||
+        (root.contains(QStringLiteral("connections")) && !root.value(QStringLiteral("connections")).isArray())) return false;
+    const auto blocks = root.value(QStringLiteral("blocks")).toArray();
+    if ((blocks.isEmpty() && root.value(QStringLiteral("version")).toInt() < 8) ||
+        blocks.size() > 128 || root.value(QStringLiteral("connections")).toArray().size() > 256) return false;
+    QSet<QString> ids;
+    for (const auto &value : blocks) {
+        const auto block = value.toObject();
+        const auto id = block.value(QStringLiteral("id")).toString();
+        if (id.isEmpty() || ids.contains(id) || block.value(QStringLiteral("type")).toString().isEmpty()) return false;
+        ids.insert(id);
+        for (const auto *key : {"x", "y", "localX", "localY"}) {
+            if (!block.contains(QLatin1String(key))) continue;
+            const auto coordinate = block.value(QLatin1String(key));
+            if (!coordinate.isDouble() || !qIsFinite(coordinate.toDouble()) || qAbs(coordinate.toDouble()) > 100000.0) return false;
+        }
+    }
+    return true;
 }
 
 class DspConnectionItem;
@@ -2188,6 +2215,7 @@ bool typeHasInput(const QString &type) {
 }
 
 bool typeHasOutput(const QString &type) {
+    if (type == QStringLiteral("branch_audio_output")) return false;
     if (type == QStringLiteral("branch_spectrum") || type == QStringLiteral("branch_waterfall")) return false;
     if (type.startsWith(QStringLiteral("research_")) ||
         type == QStringLiteral("zoom_density")) {
@@ -2226,6 +2254,8 @@ QStringList allBlockTypes() {
             QStringLiteral("frequency_control"), QStringLiteral("fine_tune_control"),
             QStringLiteral("display_scale"), QStringLiteral("channel_filter"),
             QStringLiteral("ddc_channelizer"), QStringLiteral("branch_fft"),
+            QStringLiteral("pfb_channelizer"), QStringLiteral("branch_demodulator"),
+            QStringLiteral("branch_audio_filter"), QStringLiteral("branch_audio_output"),
             QStringLiteral("branch_spectrum"), QStringLiteral("branch_waterfall"),
             QStringLiteral("multi_vfo_channelizer"), QStringLiteral("vfo_channel"),
             QStringLiteral("vfo_spectrum"), QStringLiteral("vfo_waterfall"),
@@ -3152,12 +3182,18 @@ public:
         const QColor normal = kind == DspLinkKind::Control ? QColor(190, 122, 235) :
             kind == DspLinkKind::Settings ? QColor(78, 202, 151) :
             kind == DspLinkKind::Spectrum ? QColor(244, 184, 70) :
+            kind == DspLinkKind::Audio ? QColor(92, 220, 151) :
             kind == DspLinkKind::Documentation ? QColor(125, 133, 145) : QColor(104, 188, 255);
         if ((kind == DspLinkKind::Iq && target_->blockType() == QStringLiteral("fft")) ||
             (kind == DspLinkKind::Spectrum && source_->blockType() == QStringLiteral("fft"))) {
             setToolTip(ukrainian_
                 ? QStringLiteral("Прив'язка до спільного головного FFT; джерело та тракт залишаються штатними")
                 : QStringLiteral("Shared main FFT binding; uses the existing active source and pipeline"));
+        } else if (kind == DspLinkKind::Settings && isWorkspaceDisplaySettingsType(source_->blockType()) &&
+                   source_->settings().value(QStringLiteral("mainFftRouteExplicit")).toBool(false)) {
+            setToolTip(ukrainian_
+                ? QStringLiteral("Параметри віджета та маршрут спільного FFT; для даних потрібен повний зв'язок із джерелом")
+                : QStringLiteral("Widget settings and shared FFT route; data requires a complete source connection"));
         } else {
             setToolTip(dspLinkDescription(kind, ukrainian_));
         }
@@ -3225,6 +3261,7 @@ public:
     std::function<bool(const QPointF &, int)> workspaceWheelHandler;
     std::function<bool(const QPointF &, const QPointF &, bool)> workspacePanHandler;
     std::function<void()> nativeWidgetsGeometryChanged;
+    std::function<void(bool)> historyRequested;
 
 protected:
     void wheelEvent(QWheelEvent *event) override {
@@ -3260,6 +3297,19 @@ protected:
     }
 
     void keyPressEvent(QKeyEvent *event) override {
+        // Proxy editors must keep their own text/value undo stack.
+        QWidget *focus = QApplication::focusWidget();
+        bool canvasFocus = !focus || focus == this || focus == viewport();
+        for (auto *item = scene() ? scene()->focusItem() : nullptr; item; item = item->parentItem())
+            if (dynamic_cast<QGraphicsProxyWidget *>(item)) canvasFocus = false;
+        if (canvasFocus &&
+            (event->matches(QKeySequence::Undo) || event->matches(QKeySequence::Redo) ||
+             (event->key() == Qt::Key_Y && event->modifiers() == Qt::ControlModifier) ||
+             (event->key() == Qt::Key_Z && event->modifiers() == (Qt::ControlModifier | Qt::ShiftModifier)))) {
+            if (historyRequested) historyRequested(!event->matches(QKeySequence::Undo));
+            event->accept();
+            return;
+        }
         if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
             spacePressed_ = true;
             if (!panning_) setCursor(Qt::OpenHandCursor);
@@ -3494,7 +3544,7 @@ public:
         }
     }
 
-    std::function<void()> changed;
+    std::function<void(const QString &)> changed;
     std::function<void(const QString&, const QPointF&)> addRequested;
     std::function<void(const QString&, const QString&)> activated;
     std::function<void(const QString&, const QString&, const QString&, const QString&)> controlTriggered;
@@ -3640,6 +3690,11 @@ public:
         for (DspConnectionItem *edge : oldInputs) delete edge;
         auto *edge = new DspConnectionItem(source, target, ukrainian);
         addItem(edge);
+        if (kind == DspLinkKind::Spectrum && source->blockType() == QStringLiteral("fft")) {
+            QJsonObject settings = target->settings();
+            settings.insert(QStringLiteral("mainFftRouteExplicit"), true);
+            target->setSettings(settings);
+        }
         frameRoutesDirty_ = true;
         updateConnectionContainer(edge);
         refreshResearchDisplays(); refreshWorkspaceDisplayBindings();
@@ -4119,7 +4174,9 @@ public:
             const QRectF available = target->rect().adjusted(10.0, 10.0, -10.0, -10.0);
             proxy->widget()->setFixedWidth((std::max)(180, int(available.width())));
             proxy->widget()->adjustSize();
-            qreal y = preserveVertical ? target->mapFromScene(oldSceneTopLeft).y() : available.top();
+            const auto *owner = blockById(proxy->blockId);
+            qreal y = preserveVertical ? target->mapFromScene(oldSceneTopLeft).y()
+                : owner ? owner->settings().value(QStringLiteral("dockedSettingsY")).toDouble(available.top()) : available.top();
             y = std::clamp(y, available.top(),
                            (std::max)(available.top(), available.bottom() - proxy->boundingRect().height()));
             proxy->setPos(available.left(), y);
@@ -4128,6 +4185,7 @@ public:
                 QJsonObject settings = owner->settings();
                 settings.insert(QStringLiteral("dockedSettingsSector"), requestedSector);
                 settings.insert(QStringLiteral("dockedSettingsExpanded"), proxy->expanded);
+                settings.insert(QStringLiteral("dockedSettingsY"), y);
                 owner->setSettings(settings);
             }
         };
@@ -4155,6 +4213,7 @@ public:
                 QJsonObject settings = owner->settings();
                 settings.remove(QStringLiteral("dockedSettingsSector"));
                 settings.remove(QStringLiteral("dockedSettingsExpanded"));
+                settings.remove(QStringLiteral("dockedSettingsY"));
                 owner->setSettings(settings);
             }
             dialog->hide();
@@ -4183,6 +4242,7 @@ public:
                 QJsonObject settings = owner->settings();
                 settings.remove(QStringLiteral("dockedSettingsSector"));
                 settings.remove(QStringLiteral("dockedSettingsExpanded"));
+                settings.remove(QStringLiteral("dockedSettingsY"));
                 owner->setSettings(settings);
             }
             releaseDockedSettingsPanel(proxy);
@@ -4315,7 +4375,7 @@ public:
             block->blockType() == QStringLiteral("workspace_spectrum") ||
             block->blockType() == QStringLiteral("workspace_waterfall"))
             refreshWorkspaceDisplayBindings();
-        notifyChanged();
+        notifyChanged(QStringLiteral("settings:") + blockId);
         return true;
     }
 
@@ -4357,18 +4417,25 @@ public:
         }
         std::sort(liveSinks.begin(), liveSinks.end());
         for (int i = visible.branches.size()-1; i >= 0; --i)
-            if (!visible.branches[i].iqConsumer && visible.branches[i].ffts.isEmpty()) visible.branches.removeAt(i);
+            if (!visible.branches[i].iqConsumer && !visible.branches[i].audioEnabled && visible.branches[i].ffts.isEmpty()) visible.branches.removeAt(i);
         visible.executionKey += liveSinks.join(QLatin1Char('|')).toUtf8();
         return visible;
     }
 
     void applyBranchFrame(const DspGraphPlan &plan, const DspBranchFrame &frame) {
         const QString info = frame.error.isEmpty()
-            ? QStringLiteral("Fs %1 ksps | D %2 (%3) | gaps %4 | %5 ms")
+            ? QStringLiteral("Fs %1 ksps | D %2 (%3) | gaps %4 | %5 ms | FIR %6%7")
                 .arg(frame.sampleRateHz/1000.0, 0, 'f', 3).arg(frame.decimation).arg(frame.frontDecimation)
-                .arg(qulonglong(frame.gaps)).arg(frame.processingMs, 0, 'f', 1)
+                .arg(qulonglong(frame.gaps)).arg(frame.processingMs, 0, 'f', 1).arg(frame.firTaps)
+                .arg(frame.pfbChannels ? QStringLiteral(" | PFB %1: %2 ms").arg(frame.pfbChannels).arg(frame.bankProcessingMs, 0, 'f', 1) : QString())
             : (ukrainian ? QStringLiteral("Помилка параметрів/джерела DDC: %1").arg(frame.error) : frame.error);
         branchStatuses_.insert(frame.id, frame.recordingStatus.isEmpty() ? info : info+QStringLiteral(" | ")+frame.recordingStatus);
+        for (auto route = plan.audioRoutes.cbegin(); route != plan.audioRoutes.cend(); ++route)
+            if (route.value() == frame.id) {
+                const QString audio = frame.audioStatus.isEmpty() ? info : info+QStringLiteral(" | ")+frame.audioStatus;
+                branchStatuses_.insert(route.key(), audio);
+                if (auto *block = blockById(route.key())) block->setToolTip(audio);
+            }
         if (auto *block = blockById(frame.id)) block->setToolTip(info);
         for (auto route = plan.spectrumRoutes.cbegin(); route != plan.spectrumRoutes.cend(); ++route) {
             auto *view = blockById(route.key());
@@ -4623,7 +4690,7 @@ public:
         return QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Compact));
     }
 
-    bool loadConfiguration(const QString &json) {
+    bool loadConfiguration(const QString &json, bool historyRestore = false) {
         QJsonParseError error;
         const QJsonDocument document = QJsonDocument::fromJson(json.toUtf8(), &error);
         if (error.error != QJsonParseError::NoError || !document.isObject()) return false;
@@ -4631,7 +4698,7 @@ public:
         const int version = root.value(QStringLiteral("version")).toInt(1);
         const QJsonArray blockArray = root.value(QStringLiteral("blocks")).toArray();
         const QJsonArray connectionArray = root.value(QStringLiteral("connections")).toArray();
-        if (blockArray.isEmpty() || blockArray.size() > 128 || connectionArray.size() > 256) return false;
+        if (!historyRestore && !validDspWorkspaceLayout(root)) return false;
 
         clearGraph(false);
         setSectorLayout(root.value(QStringLiteral("sectorColumns")).toInt(1),
@@ -4721,7 +4788,7 @@ public:
         refreshResearchDisplays(); refreshWorkspaceDisplayBindings();
         relayoutSectorWidgets();
         if (version < 7) spreadOverlappingBlocks();
-        return !byId.isEmpty();
+        return historyRestore || !byId.isEmpty() || version >= 8;
     }
 
     void refreshResearchDisplayLanguage() { refreshResearchDisplays(); refreshWorkspaceDisplayBindings(); }
@@ -4749,7 +4816,7 @@ public:
             updateBlockConnections(block);
             changedScale = true;
         }
-        if (changedScale) notifyChanged();
+        if (changedScale) notifyChanged(QStringLiteral("zoom:") + QString::number(sectorIndex));
         return changedScale;
     }
 
@@ -6135,10 +6202,18 @@ private:
     }
     void refreshWorkspaceDisplayBindings() {
         const QList<QGraphicsItem *> sceneItems = items();
+        const auto plan = compileDspGraph(QJsonDocument::fromJson(configurationJson().toUtf8()).object());
         for (QGraphicsItem *item : sceneItems) {
             auto *view = dynamic_cast<DspBlockItem *>(item);
             if (!view || (view->blockType() != QStringLiteral("workspace_spectrum") &&
                           view->blockType() != QStringLiteral("workspace_waterfall"))) continue;
+            // Keep explicit admission after deleting a controller or its last link, including ID-bound aliases.
+            if (plan.explicitMainSpectrumViews.contains(view->id()) &&
+                !view->settings().value(QStringLiteral("mainFftRouteExplicit")).toBool(false)) {
+                auto settings = view->settings();
+                settings.insert(QStringLiteral("mainFftRouteExplicit"), true);
+                view->setSettings(settings);
+            }
             DspBlockItem *settingsBlock = nullptr;
             const QString bindingId =
                 view->settings().value(QStringLiteral("bindingId")).toString().trimmed();
@@ -6173,6 +6248,8 @@ private:
             }
             view->setWorkspaceControllerSettings(controller);
         }
+        for (QGraphicsItem *item : sceneItems)
+            if (auto *edge = dynamic_cast<DspConnectionItem *>(item)) edge->updatePath();
     }
 
     DspBlockItem *blockAtInput(const QPointF &pos, DspBlockItem *source) const {
@@ -6253,19 +6330,12 @@ private:
         vfoFrameChannels_.clear();
         const auto snapshot = items();
         const auto plan = compileDspGraph(QJsonDocument::fromJson(configurationJson().toUtf8()).object());
-        QSet<QString> explicitMainViews;
-        for (QGraphicsItem *item : snapshot) {
-            auto *edge = dynamic_cast<DspConnectionItem *>(item);
-            if (edge && edge->source() && edge->target() && edge->source()->blockType() == QStringLiteral("fft") &&
-                dspLinkKind(edge->source()->blockType(), edge->target()->blockType()) == DspLinkKind::Spectrum)
-                explicitMainViews.insert(edge->target()->id());
-        }
         for (QGraphicsItem *item : snapshot) {
             auto *block = dynamic_cast<DspBlockItem *>(item);
             if (!block) continue;
             // Unwired older layouts retain the shared-frame path; explicit routes must compile.
             if (block->isWorkspaceDisplayBlock() &&
-                (!explicitMainViews.contains(block->id()) || plan.mainSpectrumRoutes.contains(block->id())))
+                (!plan.explicitMainSpectrumViews.contains(block->id()) || plan.mainSpectrumRoutes.contains(block->id())))
                 workspaceFrameBlocks_.append(block);
             if (block->blockType() == QStringLiteral("vfo_spectrum") ||
                 block->blockType() == QStringLiteral("vfo_waterfall"))
@@ -6282,9 +6352,9 @@ private:
         }
         frameRoutesDirty_ = false;
     }
-    void notifyChanged() {
+    void notifyChanged(const QString &mergeKey = QString()) {
         frameRoutesDirty_ = true;
-        if (changed) changed();
+        if (changed) changed(mergeKey);
     }
     void setStatus(const QString &status) { if (statusChanged) statusChanged(status); }
 
@@ -6338,6 +6408,19 @@ DspFlowPanel::DspFlowPanel(QWidget *parent) : QDialog(parent, Qt::Window) {
     addButton_->setPopupMode(QToolButton::InstantPopup);
     addButton_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     addButton_->setIcon(style()->standardIcon(QStyle::SP_FileDialogNewFolder));
+    undoButton_ = new QToolButton(this);
+    undoButton_->setObjectName(QStringLiteral("dspUndo"));
+    undoButton_->setIcon(QIcon::fromTheme(QStringLiteral("edit-undo"), style()->standardIcon(QStyle::SP_ArrowBack)));
+    redoButton_ = new QToolButton(this);
+    redoButton_->setObjectName(QStringLiteral("dspRedo"));
+    redoButton_->setIcon(QIcon::fromTheme(QStringLiteral("edit-redo"), style()->standardIcon(QStyle::SP_ArrowForward)));
+    for (auto *button : {undoButton_, redoButton_}) {
+        button->setFixedSize(28, 28);
+        button->setAutoRaise(true);
+        button->setFocusPolicy(Qt::NoFocus);
+    }
+    connect(undoButton_, &QToolButton::clicked, this, &DspFlowPanel::undoBoard);
+    connect(redoButton_, &QToolButton::clicked, this, &DspFlowPanel::redoBoard);
     openButton_ = new QPushButton(this);
     renameButton_ = new QPushButton(this);
     deleteButton_ = new QPushButton(this);
@@ -6372,6 +6455,8 @@ DspFlowPanel::DspFlowPanel(QWidget *parent) : QDialog(parent, Qt::Window) {
     statusLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     statusLabel_->setStyleSheet(QStringLiteral("color: #8793a2; padding-right: 4px;"));
     toolbar->addWidget(addButton_);
+    toolbar->addWidget(undoButton_);
+    toolbar->addWidget(redoButton_);
     auto *ddcButton = new QToolButton(this);
     ddcButton->setObjectName(QStringLiteral("addDdcBranch"));
     ddcButton->setText(QStringLiteral("DDC +"));
@@ -6409,6 +6494,7 @@ DspFlowPanel::DspFlowPanel(QWidget *parent) : QDialog(parent, Qt::Window) {
     scene_ = new DspFlowScene(this);
     auto *dspView = new DspFlowView(scene_, this);
     view_ = dspView;
+    dspView->historyRequested = [this](bool redo) { if (redo) redoBoard(); else undoBoard(); };
     scene_->setNativeWorkspaceView(view_);
     dspView->nativeWidgetsGeometryChanged = [this]() {
         if (scene_) scene_->syncNativeWorkspaceWidgets();
@@ -6418,7 +6504,12 @@ DspFlowPanel::DspFlowPanel(QWidget *parent) : QDialog(parent, Qt::Window) {
     saveTimer_ = new QTimer(this);
     saveTimer_->setSingleShot(true);
     saveTimer_->setInterval(450);
-    scene_->changed = [this]() {
+    historyTimer_ = new QTimer(this);
+    historyTimer_->setSingleShot(true);
+    historyTimer_->setInterval(0);
+    connect(historyTimer_, &QTimer::timeout, this, &DspFlowPanel::commitBoardHistory);
+    scene_->changed = [this](const QString &mergeKey) {
+        queueBoardHistory(mergeKey);
         refreshSectorControls();
         scheduleConfigurationChanged();
     };
@@ -6542,6 +6633,7 @@ DspFlowPanel::DspFlowPanel(QWidget *parent) : QDialog(parent, Qt::Window) {
     loading_ = true;
     scene_->resetDefault(false);
     loading_ = false;
+    resetBoardHistory();
     QTimer::singleShot(0, this, [this]() {
         view_->fitInView(scene_->itemsBoundingRect().adjusted(-80.0, -80.0, 80.0, 80.0), Qt::KeepAspectRatio);
     });
@@ -6551,6 +6643,8 @@ void DspFlowPanel::setLanguage(bool ukrainian) {
     ukrainian_ = ukrainian;
     setWindowTitle(ukrainian_ ? QStringLiteral("Конструктор DSP-шляху") : QStringLiteral("DSP Path Designer"));
     addButton_->setText(ukrainian_ ? QStringLiteral("Додати") : QStringLiteral("Add"));
+    undoButton_->setToolTip(ukrainian_ ? QStringLiteral("Скасувати редагування дошки (Ctrl+Z)") : QStringLiteral("Undo board edit (Ctrl+Z)"));
+    redoButton_->setToolTip(ukrainian_ ? QStringLiteral("Повторити редагування дошки (Ctrl+Y / Ctrl+Shift+Z)") : QStringLiteral("Redo board edit (Ctrl+Y / Ctrl+Shift+Z)"));
     openButton_->setText(ukrainian_ ? QStringLiteral("Відкрити") : QStringLiteral("Open"));
     renameButton_->setText(ukrainian_ ? QStringLiteral("Назва") : QStringLiteral("Rename"));
     deleteButton_->setText(ukrainian_ ? QStringLiteral("Видалити") : QStringLiteral("Delete"));
@@ -6702,6 +6796,263 @@ QString DspFlowPanel::configurationJson() const {
     return QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Compact));
 }
 
+QByteArray DspFlowPanel::captureBoardHistory() const {
+    // Only board state: never copy RF settings, endpoint credentials or TX controls.
+    auto root = QJsonDocument::fromJson(scene_->configurationJson().toUtf8()).object();
+    for (const auto &key : {QStringLiteral("blocks"), QStringLiteral("connections")}) {
+        auto values = root.value(key).toArray();
+        QVector<QJsonObject> ordered;
+        for (const auto &value : values) ordered.append(value.toObject());
+        std::sort(ordered.begin(), ordered.end(), [key](const auto &a, const auto &b) {
+            if (key == QStringLiteral("blocks")) return a.value("id").toString() < b.value("id").toString();
+            if (a.value("source") != b.value("source")) return a.value("source").toString() < b.value("source").toString();
+            return a.value("target").toString() < b.value("target").toString();
+        });
+        values = {};
+        for (const auto &value : ordered) values.append(value);
+        root.insert(key, values);
+    }
+    return QJsonDocument(root).toJson(QJsonDocument::Compact);
+}
+
+QByteArray DspFlowPanel::captureFilterHistory(const QByteArray &board) const {
+    if (!mainAudioFilterChain_) return {};
+    QSet<QString> ids;
+    for (const auto &value : QJsonDocument::fromJson(board).object().value("blocks").toArray()) {
+        const auto block = value.toObject();
+        if (block.value("type").toString().startsWith("filter_")) ids.insert(block.value("id").toString());
+    }
+    QJsonArray selected;
+    const auto stages = decodeAudioFilterChain(mainAudioFilterChain_->configurationJson());
+    for (int index = 0; index < stages.size(); ++index) if (ids.contains(stages[index].id))
+        selected.append(QJsonObject{{"index", index}, {"stage", encodeAudioFilterChain({stages[index]})}});
+    return QJsonDocument(selected).toJson(QJsonDocument::Compact);
+}
+
+void DspFlowPanel::setMainAudioFilterChainWidget(AudioFilterChainWidget *widget) {
+    if (mainAudioFilterChain_ == widget) return;
+    mainAudioFilterChain_ = widget;
+    // Rebinding a different live chain invalidates the old membership history.
+    resetBoardHistory();
+}
+
+void DspFlowPanel::refreshCurrentFilterHistory() {
+    if (boardHistoryIndex_ < 0 || restoringHistory_) return;
+    auto &entry = boardHistory_[boardHistoryIndex_];
+    auto saved = QJsonDocument::fromJson(entry.filters).array();
+    for (const auto &value : QJsonDocument::fromJson(captureFilterHistory(entry.board)).array()) {
+        const auto stages = decodeAudioFilterChain(value.toObject().value("stage").toString());
+        if (stages.size() != 1) continue;
+        bool found = false;
+        for (int i = 0; i < saved.size(); ++i) {
+            const auto previous = decodeAudioFilterChain(saved[i].toObject().value("stage").toString());
+            if (previous.size() == 1 && previous[0].id == stages[0].id) { saved[i] = value; found = true; break; }
+        }
+        if (!found) saved.append(value);
+    }
+    // A compound deletion may notify again after the live stage has already gone.
+    entry.filters = QJsonDocument(saved).toJson(QJsonDocument::Compact);
+}
+
+void DspFlowPanel::resetBoardHistory() {
+    if (historyTimer_) historyTimer_->stop();
+    historyPending_ = false;
+    historyMergeKey_.clear();
+    historyMergeTimer_.invalidate();
+    boardHistory_.clear();
+    const auto board = captureBoardHistory();
+    boardHistory_.append({board, captureFilterHistory(board)});
+    boardHistoryIndex_ = 0;
+    trimBoardHistory();
+    updateHistoryActions();
+}
+
+void DspFlowPanel::queueBoardHistory(const QString &mergeKey) {
+    if (loading_ || restoringHistory_) return;
+    // Capture live stage parameters before blockRemoved removes their real stages.
+    refreshCurrentFilterHistory();
+    if (!historyPending_) pendingHistoryMergeKey_ = mergeKey;
+    else if (pendingHistoryMergeKey_ != mergeKey) pendingHistoryMergeKey_.clear();
+    historyPending_ = true;
+    historyTimer_->start();
+    updateHistoryActions();
+}
+
+void DspFlowPanel::trimBoardHistory() {
+    qint64 bytes = 0;
+    for (const auto &entry : boardHistory_) bytes += entry.board.size() + entry.filters.size();
+    while (boardHistory_.size() > 1 && (boardHistory_.size() > kBoardHistorySteps + 1 || bytes > kBoardHistoryBytes)) {
+        // Normally the cursor is at the end. Preserve the current state when pruning redo history.
+        const int index = boardHistoryIndex_ > 0 ? 0 : boardHistory_.size() - 1;
+        bytes -= boardHistory_[index].board.size() + boardHistory_[index].filters.size();
+        boardHistory_.removeAt(index);
+        if (index == 0) --boardHistoryIndex_;
+    }
+    if (bytes > kBoardHistoryBytes) {
+        boardHistory_.clear();
+        boardHistoryIndex_ = -1;
+    }
+}
+
+void DspFlowPanel::commitBoardHistory() {
+    historyTimer_->stop();
+    if (!historyPending_ || loading_ || restoringHistory_) return;
+    historyPending_ = false;
+    const auto board = captureBoardHistory();
+    if (boardHistoryIndex_ >= 0 && boardHistory_[boardHistoryIndex_].board == board) {
+        updateHistoryActions();
+        return;
+    }
+    const bool merge = !pendingHistoryMergeKey_.isEmpty() && pendingHistoryMergeKey_ == historyMergeKey_ &&
+        historyMergeTimer_.isValid() && historyMergeTimer_.elapsed() < 450 &&
+        boardHistoryIndex_ > 0 && boardHistoryIndex_ == boardHistory_.size() - 1;
+    boardHistory_.resize(boardHistoryIndex_ + 1);
+    BoardHistoryEntry entry{board, captureFilterHistory(board)};
+    if (merge) boardHistory_[boardHistoryIndex_] = std::move(entry);
+    else { boardHistory_.append(std::move(entry)); ++boardHistoryIndex_; }
+    historyMergeKey_ = pendingHistoryMergeKey_;
+    historyMergeTimer_.restart();
+    trimBoardHistory();
+    updateHistoryActions();
+}
+
+bool DspFlowPanel::canUndoBoard() const { return boardHistoryIndex_ > 0 || (historyPending_ && boardHistoryIndex_ >= 0); }
+bool DspFlowPanel::canRedoBoard() const { return !historyPending_ && boardHistoryIndex_ + 1 < boardHistory_.size(); }
+
+void DspFlowPanel::updateHistoryActions() {
+    undoButton_->setEnabled(canUndoBoard());
+    redoButton_->setEnabled(canRedoBoard());
+}
+
+void DspFlowPanel::undoBoard() {
+    commitBoardHistory();
+    restoreBoardHistory(boardHistoryIndex_ - 1);
+}
+
+void DspFlowPanel::redoBoard() {
+    commitBoardHistory();
+    restoreBoardHistory(boardHistoryIndex_ + 1);
+}
+
+void DspFlowPanel::restoreBoardHistory(int index) {
+    if (index < 0 || index >= boardHistory_.size() || index == boardHistoryIndex_ || restoringHistory_) return;
+    refreshCurrentFilterHistory();
+    const auto target = boardHistory_[index];
+    const auto filterIds = [](const QByteArray &json) {
+        QSet<QString> ids;
+        for (const auto &value : QJsonDocument::fromJson(json).object().value("blocks").toArray()) {
+            const auto block = value.toObject();
+            if (block.value("type").toString().startsWith("filter_")) ids.insert(block.value("id").toString());
+        }
+        return ids;
+    };
+    const auto oldIds = filterIds(captureBoardHistory());
+    const auto newIds = filterIds(target.board);
+    if (oldIds != newIds && !mainAudioFilterChain_) {
+        statusLabel_->setText(ukrainian_ ? QStringLiteral("Історія аудіофільтрів не підключена; дошку не змінено")
+                                       : QStringLiteral("Audio filter history is not connected; board unchanged"));
+        return;
+    }
+    QString filterJson;
+    if (mainAudioFilterChain_ && oldIds != newIds) {
+        auto stages = decodeAudioFilterChain(mainAudioFilterChain_->configurationJson());
+        stages.erase(std::remove_if(stages.begin(), stages.end(), [&](const auto &stage) {
+            return oldIds.contains(stage.id) && !newIds.contains(stage.id);
+        }), stages.end());
+        QVector<QJsonObject> savedStages;
+        for (const auto &value : QJsonDocument::fromJson(target.filters).array()) savedStages.append(value.toObject());
+        std::sort(savedStages.begin(), savedStages.end(), [](const auto &a, const auto &b) { return a.value("index").toInt() < b.value("index").toInt(); });
+        for (const auto &saved : savedStages) {
+            const auto restored = decodeAudioFilterChain(saved.value("stage").toString());
+            if (restored.size() != 1 || oldIds.contains(restored[0].id)) continue;
+            const auto found = std::find_if(stages.cbegin(), stages.cend(), [&](const auto &stage) { return stage.id == restored[0].id; });
+            // Existing same-ID stages belong to the live chain; never replace or duplicate them.
+            if (found == stages.cend()) stages.insert(std::clamp(saved.value("index").toInt(), 0, stages.size()), restored[0]);
+        }
+        if (stages.size() > 32) {
+            statusLabel_->setText(ukrainian_ ? QStringLiteral("Відновлення перевищить ліміт 32 аудіофільтрів")
+                                           : QStringLiteral("Restore would exceed the 32 audio filter limit"));
+            return;
+        }
+        filterJson = encodeAudioFilterChain(stages);
+    }
+    restoringHistory_ = true;
+    loading_ = true;
+    const bool restored = scene_->loadConfiguration(QString::fromUtf8(target.board), true);
+    loading_ = false;
+    if (restored) {
+        boardHistoryIndex_ = index;
+        if (mainAudioFilterChain_ && !filterJson.isEmpty() && filterJson != mainAudioFilterChain_->configurationJson()) {
+            mainAudioFilterChain_->setConfigurationJson(filterJson);
+            emit mainAudioFilterChain_->configurationChanged(filterJson);
+        }
+        refreshSectorControls();
+        scheduleConfigurationChanged();
+        emit controlStateRefreshRequested();
+        // Old docked dialogs are destroyed by the normal loader. Recreate only those saved as docked.
+        for (const auto &value : QJsonDocument::fromJson(target.board).object().value("blocks").toArray()) {
+            const auto block = value.toObject();
+            if (block.value("settings").toObject().contains("dockedSettingsSector"))
+                emit blockActivated(block.value("type").toString(), block.value("id").toString());
+        }
+    }
+    restoringHistory_ = false;
+    historyMergeKey_.clear();
+    historyMergeTimer_.invalidate();
+    trimBoardHistory();
+    updateHistoryActions();
+}
+
+bool DspFlowPanel::importExperimentLayout(const QString &json, QString *error) {
+    if (error) error->clear();
+    const auto fail = [&](const QString &message) {
+        if (error) *error = message;
+        statusLabel_->setText(message);
+        return false;
+    };
+    const auto bytes = json.toUtf8();
+    QJsonParseError parseError;
+    const auto document = bytes.size() <= kBoardHistoryBytes
+        ? QJsonDocument::fromJson(bytes, &parseError) : QJsonDocument();
+    if (parseError.error != QJsonParseError::NoError || !document.isObject() ||
+        !validDspWorkspaceLayout(document.object()))
+        return fail(ukrainian_ ? QStringLiteral("Некоректна або завелика схема експерименту")
+                              : QStringLiteral("Invalid or oversized experiment layout"));
+    const auto plan = compileDspGraph(document.object());
+    if (!plan.errors.isEmpty()) return fail(plan.errors.join(QStringLiteral("; ")));
+
+    const QString previous = configurationJson();
+    const auto previousGraph = QJsonDocument::fromJson(previous.toUtf8()).object();
+    if (!validDspWorkspaceLayout(previousGraph) || !compileDspGraph(previousGraph).errors.isEmpty())
+        return fail(ukrainian_ ? QStringLiteral("Поточну дошку неможливо зберегти як відновлюваний профіль")
+                              : QStringLiteral("Current board cannot be saved as a recoverable profile"));
+    const QString backupName = QStringLiteral("Before experiment import");
+    auto profiles = loadDspWorkspaceProfiles();
+    auto backup = std::find_if(profiles.begin(), profiles.end(), [&](const DspWorkspaceProfile &profile) {
+        return profile.name.compare(backupName, Qt::CaseInsensitive) == 0;
+    });
+    if (backup == profiles.end()) profiles.append({backupName, previous});
+    else *backup = {backupName, previous};
+    if (!storeDspWorkspaceProfiles(profiles))
+        return fail(ukrainian_ ? QStringLiteral("Не вдалося зберегти резервний профіль; імпорт скасовано")
+                              : QStringLiteral("Could not save the backup profile; import cancelled"));
+    refreshWorkspaceProfiles();
+    if (!setConfigurationJson(json)) {
+        setConfigurationJson(previous);
+        return fail(ukrainian_ ? QStringLiteral("Не вдалося завантажити схему експерименту")
+                              : QStringLiteral("Could not load the experiment layout"));
+    }
+    {
+        const QSignalBlocker blocker(profileCombo_);
+        profileCombo_->setCurrentIndex(0);
+    }
+    deleteProfileButton_->setEnabled(false);
+    statusLabel_->setText(ukrainian_
+        ? QStringLiteral("Схему імпортовано. Попередня дошка: профіль Before experiment import")
+        : QStringLiteral("Layout imported. Previous board: Before experiment import profile"));
+    return true;
+}
+
 bool DspFlowPanel::setConfigurationJson(const QString &json) {
     if (!json.trimmed().isEmpty()) {
         const auto object = QJsonDocument::fromJson(json.toUtf8()).object();
@@ -6738,6 +7089,7 @@ bool DspFlowPanel::setConfigurationJson(const QString &json) {
         if (!bounds.isEmpty()) view_->fitInView(bounds.adjusted(-80.0, -80.0, 80.0, 80.0), Qt::KeepAspectRatio);
     });
     if (loaded) scheduleConfigurationChanged();
+    resetBoardHistory();
     return loaded;
 }
 
@@ -6811,7 +7163,7 @@ void DspFlowPanel::showComputeDialog() {
 bool DspFlowPanel::startBranchRecording(const QString &id, const QString &directory) {
     if (!branchSourceRunning_ || branchSource_.simplifiedAudioChannelizer || directory.isEmpty() ||
         blockTypeForId(id) != QStringLiteral("ddc_channelizer") || !blockSettings(id).value("enabled").toBool() ||
-        (branchRecordings_.size() >= 2 && !branchRecordings_.contains(id))) return false;
+        (branchRecordings_.size() >= DspMaxBranches && !branchRecordings_.contains(id))) return false;
     branchRecordings_.insert(id, directory);
     if (branchEngine_) branchEngine_->setRecording(id, directory);
     return true;
@@ -6823,9 +7175,9 @@ void DspFlowPanel::stopBranchRecording(const QString &id) {
 bool DspFlowPanel::branchRecordingRequested(const QString &id) const { return branchRecordings_.contains(id); }
 
 void DspFlowPanel::refreshBranches() {
-    if (branchSource_.simplifiedAudioChannelizer || !branchSourceRunning_ ||
-        ((!isVisible() || isMinimized()) && branchRecordings_.isEmpty())) {
+    if (branchSource_.simplifiedAudioChannelizer || !branchSourceRunning_) {
         if (branchEngine_) branchEngine_->configure(branchPlan_, branchSource_, false);
+        if (branchAudioOutput_) branchAudioOutput_->setActiveSinks({});
         return;
     }
     if (branchPlanDirty_) {
@@ -6841,6 +7193,7 @@ void DspFlowPanel::refreshBranches() {
         const auto ids = branchRecordings_.keys();
         for (const auto &id : ids) stopBranchRecording(id);
         if (branchEngine_) branchEngine_->configure(branchPlan_, branchSource_, false);
+        if (branchAudioOutput_) branchAudioOutput_->setActiveSinks({});
         return;
     }
     auto plan = scene_->visibleBranchPlan(branchPlan_);
@@ -6854,11 +7207,27 @@ void DspFlowPanel::refreshBranches() {
         plan.executionKey += QByteArray("|record:")+id.toUtf8();
     }
     bool enabled = false;
-    for (const auto &b : plan.branches) if (b.enabled && (b.iqConsumer || !b.ffts.isEmpty())) enabled = true;
+    QSet<QString> audioSinks;
+    for (const auto &b : plan.branches) if (b.enabled) {
+        if (b.iqConsumer || b.audioEnabled || !b.ffts.isEmpty()) enabled = true;
+        if (b.audioEnabled) audioSinks.insert(b.audioOutputId);
+    }
     const bool active = enabled && !branchSource_.simplifiedAudioChannelizer && branchSourceRunning_ &&
-        ((isVisible() && !isMinimized()) || !branchRecordings_.isEmpty());
+        ((isVisible() && !isMinimized()) || !branchRecordings_.isEmpty() || !audioSinks.isEmpty());
+    if (!branchAudioOutput_ && !audioSinks.isEmpty()) {
+        branchAudioOutput_ = std::make_shared<DspBranchAudioOutput>();
+        if (branchEngine_) {
+            const auto output = branchAudioOutput_;
+            branchEngine_->setAudioConsumer([output](const auto &frame) { output->enqueue(frame); });
+        }
+    }
+    if (branchAudioOutput_) branchAudioOutput_->setActiveSinks(active ? audioSinks : QSet<QString>{});
     if (!branchEngine_ && active) {
         branchEngine_ = std::make_unique<DspBranchEngine>();
+        if (branchAudioOutput_) {
+            const auto output = branchAudioOutput_;
+            branchEngine_->setAudioConsumer([output](const auto &frame) { output->enqueue(frame); });
+        }
         branchEngine_->setExternalEndpoint(externalEndpoint_);
         for (auto it = branchRecordings_.cbegin(); it != branchRecordings_.cend(); ++it) branchEngine_->setRecording(it.key(), it.value());
     }
@@ -7120,6 +7489,10 @@ void DspFlowPanel::addBlock(const QString &type) {
 
 QString DspFlowPanel::blockTitle(const QString &type) const {
     if (type == QStringLiteral("ddc_channelizer")) return ukrainian_ ? QStringLiteral("DDC каналізатор") : QStringLiteral("DDC channelizer");
+    if (type == QStringLiteral("pfb_channelizer")) return ukrainian_ ? QStringLiteral("PFB банк каналів") : QStringLiteral("PFB channel bank");
+    if (type == QStringLiteral("branch_demodulator")) return ukrainian_ ? QStringLiteral("Демодулятор гілки") : QStringLiteral("Branch demodulator");
+    if (type == QStringLiteral("branch_audio_filter")) return ukrainian_ ? QStringLiteral("Аудіофільтри гілки") : QStringLiteral("Branch audio filters");
+    if (type == QStringLiteral("branch_audio_output")) return ukrainian_ ? QStringLiteral("Аудіовихід гілки") : QStringLiteral("Branch audio output");
     if (type == QStringLiteral("branch_fft")) return ukrainian_ ? QStringLiteral("FFT гілки") : QStringLiteral("Branch FFT");
     if (type == QStringLiteral("branch_spectrum")) return ukrainian_ ? QStringLiteral("Спектр гілки") : QStringLiteral("Branch spectrum");
     if (type == QStringLiteral("branch_waterfall")) return ukrainian_ ? QStringLiteral("Водоспад гілки") : QStringLiteral("Branch waterfall");

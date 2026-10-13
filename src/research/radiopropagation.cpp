@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QFile>
 #include <QSet>
+#include <QTextStream>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -117,6 +118,100 @@ double knifeEdgeLossDb(double v) {
     const double u = v - 0.1;
     return 6.9 + 20.0 * std::log10(std::sqrt(u*u+1.0)+u);
 }
+ClutterResult receiverClutter(const Parameters &p) {
+    ClutterResult out;
+    out.rxHeightM = out.referenceHeightM = p.rxHeightM;
+    const auto invalid = [&out](const QString &error) {
+        out.status = ClutterStatus::Invalid; out.lossDb = Unknown; out.error = error;
+        return out;
+    };
+    switch (p.rxEnvironment) {
+    case ClutterEnvironment::None: return out;
+    case ClutterEnvironment::Rural:
+    case ClutterEnvironment::Suburban: out.representativeHeightM = 10.0; break;
+    case ClutterEnvironment::Urban: out.representativeHeightM = 15.0; break;
+    case ClutterEnvironment::DenseUrban: out.representativeHeightM = 20.0; break;
+    default: return invalid(QStringLiteral("Unknown RX clutter environment"));
+    }
+    if (!std::isfinite(p.rxHeightM) || p.rxHeightM < 0.5 || p.rxHeightM > 3000.0)
+        return invalid(QStringLiteral("RX height outside application range 0.5..3000 m AGL"));
+    if (p.rxClutterMode == ClutterMode::Manual) {
+        if (!std::isfinite(p.rxClutterManualDb) || p.rxClutterManualDb < 0.0 || p.rxClutterManualDb > 200.0)
+            return invalid(QStringLiteral("Manual RX residual clutter loss must be 0..200 dB (application limit)"));
+        out.status = ClutterStatus::Manual; out.lossDb = p.rxClutterManualDb;
+        return out;
+    }
+    if (p.rxClutterMode != ClutterMode::P2108)
+        return invalid(QStringLiteral("Unknown RX clutter method"));
+    if (!std::isfinite(p.frequencyMHz) || p.frequencyMHz < 30.0 || p.frequencyMHz > 3000.0)
+        return invalid(QStringLiteral("ITU-R P.2108-1 section 3.1 requires 30..3000 MHz; select None or Manual residual loss"));
+    if (!p.rxClutterExcludedFromTerrain)
+        return invalid(QStringLiteral("RX clutter must be excluded from the terrain/base model; confirm this or select None / Manual residual loss"));
+    if (p.rxHeightM >= out.representativeHeightM) {
+        out.status = ClutterStatus::AboveClutter;
+        return out;
+    }
+    out.status = ClutterStatus::Modelled;
+    out.referenceHeightM = out.representativeHeightM;
+    // ITU-R P.2108-1, Annex 1, 3.1, Table 3 and (2a)-(2g). f is GHz, theta is degrees.
+    const double f = p.frequencyMHz / 1000.0;
+    if (p.rxEnvironment == ClutterEnvironment::Rural) {
+        out.lossDb = -(21.8 + 6.2 * std::log10(f)) * std::log10(p.rxHeightM / out.representativeHeightM);
+    } else {
+        const double difference = out.representativeHeightM - p.rxHeightM;
+        const double theta = degrees(std::atan(difference / 27.0));
+        const double v = 0.342 * std::sqrt(f) * std::sqrt(difference * theta);
+        out.lossDb = knifeEdgeLossDb(v) - 6.03;
+    }
+    return out;
+}
+QString clutterModelLimits() {
+    return QStringLiteral("ITU-R P.2108-1 section 3.1: 30..3000 MHz; median RX end correction to an above-clutter path. "
+        "R = 10/10/15/20 m (rural/suburban/urban/dense urban), street width 27 m. "
+        "Base path uses max(RX height, R); zero correction at/above R. "
+        "RX clutter must be absent from terrain/base loss. No TX clutter, building entry, individual buildings, or HF noise model. "
+        "Uniform RX environment for all coverage cells. Application RX height: 0.5..3000 m. "
+        "Manual: 0..200 dB user-supplied residual only (application bound), actual RX height, no ITU validity claim.");
+}
+QString clutterSummary(const Parameters &p, const ClutterResult &c) {
+    QString environment;
+    switch (p.rxEnvironment) {
+    case ClutterEnvironment::None: environment = QStringLiteral("None"); break;
+    case ClutterEnvironment::Rural: environment = QStringLiteral("Rural/open"); break;
+    case ClutterEnvironment::Suburban: environment = QStringLiteral("Suburban"); break;
+    case ClutterEnvironment::Urban: environment = QStringLiteral("Urban"); break;
+    case ClutterEnvironment::DenseUrban: environment = QStringLiteral("Dense urban"); break;
+    default: environment = QStringLiteral("Invalid"); break;
+    }
+    QString method;
+    switch (c.status) {
+    case ClutterStatus::Disabled: method = QStringLiteral("disabled"); break;
+    case ClutterStatus::Modelled: method = QStringLiteral("ITU-R P.2108-1 section 3.1 median"); break;
+    case ClutterStatus::AboveClutter: method = QStringLiteral("ITU-R P.2108-1 section 3.1; RX at/above R"); break;
+    case ClutterStatus::Manual: method = QStringLiteral("manual residual; not an ITU prediction"); break;
+    case ClutterStatus::Invalid: return QStringLiteral("RX clutter: %1; INVALID: %2").arg(environment, c.error);
+    }
+    return QStringLiteral("RX clutter: %1; %2; %3 dB; RX actual/reference = %4/%5 m AGL")
+        .arg(environment, method).arg(c.lossDb, 0, 'f', 2).arg(c.rxHeightM, 0, 'f', 1).arg(c.referenceHeightM, 0, 'f', 1);
+}
+QString profileCsv(const Parameters &p, const PathResult &path) {
+    QString csv; QTextStream stream(&csv); stream.setRealNumberPrecision(12);
+    stream << "# TX=" << p.tx.latitude << "," << p.tx.longitude << "; RX=" << p.rx.latitude << "," << p.rx.longitude << "; MHz=" << p.frequencyMHz << "\n";
+    stream << "# " << clutterSummary(p, path.clutter) << "\n# " << clutterModelLimits() << "\n";
+    stream << "# source=https://www.itu.int/rec/R-REC-P.2108-1-202109-I/en\n";
+    stream << "# rx_environment=" << int(p.rxEnvironment) << "; rx_clutter_mode=" << int(p.rxClutterMode)
+           << "; rx_clutter_excluded_from_terrain=" << p.rxClutterExcludedFromTerrain
+           << "; manual_rx_clutter_db=" << p.rxClutterManualDb << "\n";
+    stream << "# base_path_loss_db=" << path.basePathLossDb << "; rx_clutter_loss_db=" << path.clutter.lossDb
+           << "; total_path_loss_db=" << path.pathLossDb << "; received_dbm=" << path.receivedDbm
+           << "; margin_db=" << path.marginDb << "; valid=" << path.valid << "\n";
+    if (!path.error.isEmpty()) stream << "# error=" << path.error << "\n";
+    stream << "# los_m and Fresnel clearance use the RX reference height, not the actual RX tip when below clutter.\n";
+    stream << "distance_m,terrain_m_msl,terrain_curvature_m,los_m,fresnel1_radius_m\n";
+    for (const auto &v : path.points)
+        stream << v.distanceM << "," << v.terrainM << "," << v.adjustedTerrainM << "," << v.rayM << "," << v.fresnelM << "\n";
+    return csv;
+}
 QString validate(const Parameters &p) {
     const double finite[] = {p.tx.latitude,p.tx.longitude,p.rx.latitude,p.rx.longitude,p.frequencyMHz,
         p.powerW,p.txHeightM,p.rxHeightM,p.txGainDbi,p.rxGainDbi,p.txLossDb,p.rxLossDb,
@@ -137,11 +232,12 @@ QString validate(const Parameters &p) {
         p.reliabilityPercent<=0 || p.reliabilityPercent>=100 ||
         p.climate<1 || p.climate>7 || p.polarization<0 || p.polarization>1))
         return QStringLiteral("ITM requires 20..20000 MHz and valid environment parameters");
-    return {};
+    return receiverClutter(p).error;
 }
 PathResult calculatePath(const Parameters &p, const Elevation &terrain,
                          const std::atomic_bool *cancel, int maxPoints) {
     PathResult out;
+    out.clutter = receiverClutter(p);
     out.error = validate(p);
     if (!out.error.isEmpty()) return out;
     out.distanceM = distanceM(p.tx,p.rx);
@@ -168,7 +264,7 @@ PathResult calculatePath(const Parameters &p, const Elevation &terrain,
     double largestV = -1e100;
     if (out.completeTerrain) {
         const double a=out.points.front().terrainM+p.txHeightM;
-        const double b=out.points.back().terrainM+p.rxHeightM;
+        const double b=out.points.back().terrainM+out.clutter.referenceHeightM;
         const double wavelength=LightMps/(p.frequencyMHz*1e6);
         out.minimumClearanceM=1e100; out.minimumFresnelRatio=1e100;
         for (int i=0;i<count;++i) {
@@ -189,13 +285,15 @@ PathResult calculatePath(const Parameters &p, const Elevation &terrain,
         out.pathLossDb += out.diffractionDb;
         out.shortPathFallback = p.model==Model::Itm;
     } else if (p.model==Model::Itm) {
-        out.itmError = ITM_P2P_CR(p.txHeightM,p.rxHeightM,pfl.data(),p.climate,p.refractivity,
+        out.itmError = ITM_P2P_CR(p.txHeightM,out.clutter.referenceHeightM,pfl.data(),p.climate,p.refractivity,
             p.frequencyMHz,p.polarization,p.permittivity,p.conductivity,12,
             p.confidencePercent,p.reliabilityPercent,&out.pathLossDb,&out.itmWarnings);
         if (out.itmError>1 || !std::isfinite(out.pathLossDb)) {
             out.error=QStringLiteral("ITM error %1").arg(out.itmError); return out;
         }
     }
+    out.basePathLossDb = out.pathLossDb;
+    out.pathLossDb += out.clutter.lossDb;
     out.receivedDbm=30+10*std::log10(p.powerW)+p.txGainDbi+p.rxGainDbi-
         p.txLossDb-p.rxLossDb-p.additionalLossDb-out.pathLossDb;
     out.marginDb=out.receivedDbm-p.sensitivityDbm-p.fadeMarginDb;
@@ -205,7 +303,10 @@ CoverageResult calculateCoverage(const Parameters &p, const Elevation &elevation
                                  const std::atomic_bool *cancel,
                                  const std::function<void(int)> &progress) {
     CoverageResult out; out.parameters=p; out.error=validate(p);
-    if (!out.error.isEmpty()) return out;
+    if (!out.error.isEmpty()) {
+        out.path.clutter=receiverClutter(p);out.path.error=out.error;
+        return out;
+    }
     out.path=calculatePath(p,elevation,cancel);
     const double angular=p.radiusKm*1000/EarthM;
     const double dLat=degrees(angular);

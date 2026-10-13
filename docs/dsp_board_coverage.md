@@ -9,6 +9,10 @@ Audit scope: user-visible desktop functions in the current development tree.
   output, recorder, replay, network output, transmitter, and GPIO.
 - The receiver editor mirrors receiver/input/clock/sample-rate/FFT/gain controls
   and provides direct Fobos details and HackRF RX-settings actions.
+- Frequency and demodulator/channel-filter editors share the main controls'
+  current limits, step lists and value presets, including edits made while the
+  editors are open. Changing a preset uses the same receiver/bandwidth action;
+  passive synchronization never retunes the receiver.
 - Full audio-filter chain plus one block per filter type.
 - Full workspace spectrum, frequency ruler and waterfall blocks that consume the
   already prepared shared spectrum frame, plus settings blocks for the legacy
@@ -37,6 +41,21 @@ Audit scope: user-visible desktop functions in the current development tree.
 - DMR, CW, SSTV, digital video, GNSS over SDR, serial NMEA/UBX, QTH map,
   presets/calibration, and general settings.
 
+## Board Editing History
+
+Undo/Redo toolbar buttons and Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z operate on canvas
+edits: blocks, links, geometry, sectors and board-local settings. Text editors
+keep their own Undo. Group deletion/movement is one operation. History is kept
+only in memory, up to 100 steps and 16 MiB; loading a layout resets it.
+Restoring deleted main-chain filter blocks restores their saved parameters and
+position without replacing surviving same-ID stages or unrelated live filters.
+RF Start/Stop, TX, network permissions and main receiver settings are not undone.
+
+VFO plots select a band from the existing shared main FFT; the selected VFO uses
+the main audio path. DDC branches instead produce their own filtered, decimated
+IQ, suitable for separate FFT, audio, research, recording and external processing.
+Thus a VFO plot is inexpensive, but is not an independent IQ channelizer.
+
 ## Intentional Boundary
 
 The board mirrors controls and embeds selected displays, but it is not a
@@ -55,10 +74,33 @@ Raspberry-class hardware qualification.
 
 The optional stream manager routes DDC outputs locally or to a native compute
 worker/GNU Radio adapter; independent CF32LE recorders are explicit DDC controls.
-It does not load arbitrary GNU binaries in-process. At most two DDC branches and
-two FFTs per branch execute, with no audio-queue consumption. Simplified operating
-mode disables these branches. Filter ordering and independent demodulator/audio
-sinks are still future work; ordinary legacy diagram links remain documentation.
+It does not load arbitrary GNU binaries in-process. At most eight DDC branches and
+two FFTs per branch execute, with no main audio-queue consumption. Simplified
+operating mode disables these branches. Independent AM/NFM/SAM/USB/LSB/DSB/CW/WFM
+demodulator, audio-filter-chain and audio-output blocks have executable typed
+links. One audio output per DDC is supported; output is 48 kHz mono and defaults
+off. Explicitly enabled audio continues with a hidden board. A bounded audio
+worker delivers PCM independently of GUI frame updates. The main filter editor
+also offers a one-shot validated wire-order apply action; ordinary legacy diagram
+links remain documentation and never automatically rewire the main receiver.
+
+DDC and the optional PFB bank run once on the local branch worker. External
+branches move their already-channelized IQ to a separate, lazily started worker;
+socket waits and external-result demodulation no longer block local branch audio.
+The queue retains at most two pending blocks per external branch (sixteen total,
+8 MiB maximum IQ payload), plus one in-flight request. Overflow discards the
+oldest pending block for that branch and marks the next retained data as a gap.
+The remote worker sleeps without polling when idle. Stop, retune, source-epoch
+changes and simplified mode invalidate queued/in-flight results and cancel socket
+waits. Endpoint edits reset only external state. Remote branches still share one
+connection, and CPU, disk and device contention can still cause real overruns;
+this is isolation from network waits, not a hard real-time guarantee.
+
+The opt-in PFB analysis bank shares RF channelization across connected DDCs.
+Its 8/16/32/64-channel configuration must be common to all PFB branches. Each DDC
+passband must fit one guarded bank channel; unsupported cross-boundary bands
+are rejected. Direct DDC remains available. DDC FIR tap/transition controls do
+not alter the normal receiver audio channelizer. See pfb_channelizer.md.
 See dsp_stream_manager.md for operation and current limits.
 
 Main FFT links are typed IQ/spectrum bindings to the single existing optimized
@@ -68,6 +110,13 @@ Explicit FFT-to-view links require a supported connected source; unwired legacy
 views retain implicit shared frames. Display-settings links coexist with spectrum
 inputs. Compute placement is a setting, not a signal-flow connection. Other
 ordinary legacy links remain diagram-only.
+
+Main FFT also routes through `spectrum_display`, `waterfall_2d` and
+`waterfall_3d` settings blocks to their workspace views, by explicit settings
+wire or matching binding ID. A single controller may serve several views
+without duplicate FFT work. Explicit routes retain their disconnected state
+instead of silently falling back to an implicit feed. Conflicting stream and
+settings sources are rejected before applying the graph.
 
 The native worker accepts up to two sessions (separate main FFT and DDC), at most
 one of them main FFT. Its 64-8192 MiB main FFT budget defaults to 512 MiB and limits

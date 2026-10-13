@@ -12,6 +12,7 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -23,12 +24,47 @@ import numpy as np
 
 TOKEN = "synthetic-selftest-only-0123456789abcdef"
 RUN_GNU = False
+CPP_CODEC = None
+RATIOS = {104000: (1, 2), 105000: (2, 1), 106000: (3, 2), 107000: (2, 3),
+          108000: (64, 33), 128000: (1, 64)}
 
 
 def make_block(sample_rate):
     """Local-only fixtures selected by synthetic sample rate, not TCP code."""
     from gnuradio import blocks, filter, gr
 
+    if sample_rate in RATIOS:
+        numerator, denominator = RATIOS[sample_rate]
+        return (filter.rational_resampler_ccf(numerator, denominator), numerator, denominator)
+    if sample_rate == 109000:
+        return (blocks.multiply_const_cc(1), 2, 1)
+    if sample_rate == 110000:
+        return (blocks.multiply_const_cc(1), 65, 64)
+    if sample_rate == 111000:
+        return (blocks.multiply_const_cc(1), 3, 1)
+    if sample_rate == 113000:
+        return (filter.rational_resampler_ccf(2, 3), 2, 3, 4098)
+    if sample_rate in (114000, 115000):
+        class BadInterpolator(gr.interp_block):
+            def __init__(self):
+                super().__init__(name="Synthetic bad interpolation", in_sig=[np.complex64],
+                                 out_sig=[np.complex64], interp=2)
+
+            def work(self, _inputs, outputs):
+                if sample_rate == 114000:
+                    outputs[0][:] = np.inf
+                    return len(outputs[0])
+                return 0
+        return BadInterpolator(), 2, 1
+    if sample_rate == 112000:
+        class Hung(gr.sync_block):
+            def __init__(self):
+                super().__init__(name="Synthetic hung plugin", in_sig=[np.complex64], out_sig=[np.complex64])
+
+            def work(self, _inputs, _outputs):
+                time.sleep(60)
+                return 0
+        return Hung()
     if sample_rate == 97000:
         return filter.fir_filter_ccc(1, [0.5, 0.25, 0.125])
     if sample_rate == 98000:
@@ -192,10 +228,10 @@ class ReferenceTests(unittest.TestCase):
         self.assertIs(old, self.session.streams["test-stream"].processor)
 
     def test_stream_limit_and_independence(self):
-        for key in ("a", "b"):
+        for key in ("a", "b", "c", "d", "e", "f", "g", "h"):
             self.process(request(256, stream=key))
         with self.assertRaises(bridge.ProtocolError):
-            self.process(request(256, stream="c"))
+            self.process(request(256, stream="ninth"))
         result, _ = self.process(request(256, 256, stream="a"))
         self.assertEqual(len(result["spectra"]), 1)
         self.assertEqual(self.session.streams["b"].used, 256)
@@ -266,7 +302,7 @@ class LoopbackTests(unittest.TestCase):
         if authenticate:
             bridge.send_frame(connection, {"type": "hello", "version": 1, "token": TOKEN})
             hello, payload = bridge.receive_frame(connection, 3)
-            self.assertEqual(hello, {"type": "hello", "version": 1})
+            self.assertEqual(hello, {"type": "hello", "version": 1, "rationalRateVersion": 1})
             self.assertEqual(payload, b"")
         return connection
 
@@ -425,6 +461,22 @@ class GnuTests(unittest.TestCase):
             np.testing.assert_array_equal(processor.process(values), values)
             self.assertEqual(processor.process_handle.pid, pid)
 
+    def test_hung_plugin_cancellation(self):
+        cancel = threading.Event()
+        processor = bridge.GnuProcessor(112000, self.plugin, 10, cancel)
+        self.addCleanup(processor.close)
+        timer = threading.Timer(0.2, cancel.set)
+        timer.start()
+        started = time.monotonic()
+        try:
+            with self.assertRaises(bridge.ProtocolError):
+                processor.process(np.ones(512, np.complex64))
+        finally:
+            timer.cancel()
+            timer.join()
+        self.assertIsNone(processor.process_handle)
+        self.assertLess(time.monotonic()-started, 3)
+
     def test_hierarchical_plugin(self):
         processor = bridge.GnuProcessor(103000, self.plugin, 10)
         self.addCleanup(processor.close)
@@ -498,10 +550,10 @@ class GnuTests(unittest.TestCase):
             np.testing.assert_allclose(np.frombuffer(payload, dtype="<c8"), expected[:127], atol=1e-6)
 
     def test_reject_rate_signature_missing_excess_and_nonfinite_output(self):
-        for rate in (98000, 99000):
+        for rate in (98000, 99000, 109000, 110000, 111000, 113000):
             with self.subTest(rate=rate), self.assertRaises(bridge.ProtocolError):
                 bridge.GnuProcessor(rate, self.plugin, 10)
-        for rate in (100000, 101000, 102000):
+        for rate in (100000, 101000, 102000, 114000, 115000):
             with self.subTest(rate=rate):
                 processor = bridge.GnuProcessor(rate, self.plugin, 10)
                 processor.timeout = 0.75
@@ -512,13 +564,107 @@ class GnuTests(unittest.TestCase):
                 finally:
                     processor.close()
 
+    def test_rational_irregular_chunks_match_contiguous_gnu(self):
+        values = (0.3*np.exp(2j*np.pi*np.arange(4096)/97)).astype(np.complex64)
+        for rate, (n, d) in RATIOS.items():
+            with self.subTest(ratio=(n, d)):
+                reference = bridge.GnuProcessor(rate, self.plugin, 10)
+                try:
+                    expected = reference.process(values)
+                finally:
+                    reference.close()
+                session = bridge.DspSession(bridge.ProcessorFactory("gnuradio", self.plugin, 10))
+                try:
+                    actual, first, produced, pid = [], 0, 0, None
+                    for count in (1, 1, 3, 127, 509, 1, 2048, 1406):
+                        reply, payload = session.process(request(count, first, sampleRate=rate, ffts=[]),
+                                                         iq(values[first:first+count]))
+                        output = reply["output"]
+                        self.assertEqual(output["sampleRate"], rate*n/d)
+                        self.assertEqual(output["firstSample"], str(produced))
+                        self.assertEqual(output["originFirstSample"], "0")
+                        self.assertEqual(output["gap"], produced == 0)
+                        self.assertEqual(output["sampleCount"]*8, len(payload))
+                        actual.extend(np.frombuffer(payload, dtype="<c8"))
+                        first += count
+                        produced += output["sampleCount"]
+                        self.assertEqual(produced, max(0, (first-output["inputReserve"])//d)*n)
+                        current = session.streams["test-stream"].processor.process_handle.pid
+                        self.assertTrue(pid is None or pid == current)
+                        pid = current
+                    np.testing.assert_allclose(actual, expected, atol=1e-6)
+                finally:
+                    session.close()
+
+    def test_rational_rate_fft_reset_and_timestamp(self):
+        rate, n, d = 106000, 3, 2
+        values = (0.5*np.exp(2j*np.pi*np.arange(4096)/64)).astype(np.complex64)
+        session = bridge.DspSession(bridge.ProcessorFactory("gnuradio", self.plugin, 10))
+        self.addCleanup(session.close)
+        origin = (1 << 60) + 123
+        reply, payload = session.process(request(4096, origin, sampleRate=rate), iq(values))
+        expected = payload[:reply["iqBytes"]]
+        self.assertEqual(reply["output"]["originFirstSample"], str(origin))
+        self.assertAlmostEqual(reply["spectra"][0]["binWidthHz"], rate*n/d/512)
+        for changes in ({"gap": True}, {"epoch": "2"}, {"generation": "2"},
+                        {"firstSample": str(origin+9999)}, {"centerHz": 200000000}):
+            message = request(4096, origin+4096, sampleRate=rate, **changes)
+            reply, payload = session.process(message, iq(values))
+            self.assertEqual(reply["output"]["firstSample"], "0")
+            self.assertEqual(reply["output"]["originFirstSample"], message["firstSample"])
+            self.assertTrue(reply["output"]["gap"])
+            self.assertEqual(payload[:reply["iqBytes"]], expected)
+
+    def test_rational_maximum_packets_and_no_iq(self):
+        session = bridge.DspSession(bridge.ProcessorFactory("gnuradio", self.plugin, 10))
+        self.addCleanup(session.close)
+        values = np.ones(bridge.MAX_SAMPLES, np.complex64)
+        ffts = [{"id": str(i), "length": 65536, "window": i, "refreshMs": 20} for i in range(2)]
+        for index in range(4):
+            reply, payload = session.process(request(len(values), index*len(values), sampleRate=105000,
+                                                     returnIq=index != 2, ffts=ffts), iq(values))
+            self.assertEqual(reply["output"]["sampleCount"],
+                             (65536-reply["output"]["inputReserve"])*2 if index == 0 else 131072)
+            self.assertEqual(reply["iqBytes"], 0 if index == 2 else reply["output"]["sampleCount"]*8)
+            self.assertLessEqual(len(payload), bridge.MAX_BINARY)
+
+    def test_runnable_hierarchy_example(self):
+        plugin = str(Path(__file__).with_name("obrii_gr_hier_resampler.py"))
+        processor = bridge.GnuProcessor(96000, plugin, 10)
+        self.addCleanup(processor.close)
+        values = processor.process(np.ones(4096, np.complex64))
+        self.assertEqual(len(values), (4096-processor.input_reserve)//3*2)
+        np.testing.assert_allclose(values, 0.5, atol=0.001)
+
+    def test_cpp_decoder_accepts_real_gnu_packets(self):
+        if CPP_CODEC is None:
+            self.skipTest("provide --cpp-codec path to the standalone C++ protocol test")
+        with tempfile.TemporaryDirectory(prefix="obrii-gnu-test-") as directory:
+            path = Path(directory) / "packet.bin"
+            for rate in (104000, 105000, 106000, 107000):
+                session = bridge.DspSession(bridge.ProcessorFactory("gnuradio", self.plugin, 10))
+                try:
+                    first = (1 << 60) + 17
+                    for count in (1, 127, 4096):
+                        message = request(count, first, sampleRate=rate)
+                        payload = iq(np.ones(count, np.complex64))
+                        reply, output = session.process(message, payload)
+                        path.write_bytes(bridge.encode_frame(message, payload) + bridge.encode_frame(reply, output))
+                        checked = subprocess.run([CPP_CODEC, str(path)], capture_output=True, timeout=10)
+                        self.assertEqual(checked.returncode, 0, checked.stderr.decode(errors="replace"))
+                        first += count
+                finally:
+                    session.close()
+
 
 def main():
-    global RUN_GNU
+    global RUN_GNU, CPP_CODEC
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gnu", action="store_true")
+    parser.add_argument("--cpp-codec", help="optional compiled gnu_radio_protocol_selftest executable")
     args = parser.parse_args()
     RUN_GNU = args.gnu
+    CPP_CODEC = str(Path(args.cpp_codec).resolve(strict=True)) if args.cpp_codec else None
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
 

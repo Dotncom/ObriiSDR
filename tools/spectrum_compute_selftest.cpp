@@ -1,7 +1,9 @@
 #include "diagnosticlogging.h"
 #include "dspstreammanager.h"
+#include "dspstreamtransport_p.h"
 #include "fft.h"
 #include "remotespectrumworker.h"
+#include "remotefftretrypolicy.h"
 #include "spectrumcomputesession.h"
 #include "spectrumfftworker.h"
 
@@ -15,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -389,6 +392,10 @@ DspStreamBlock ddcTone() {
 void checkDdc(const DspStreamResult &result, const DspStreamBlock &block) {
     require(result.error.isEmpty() && result.iq && *result.iq == block.iq &&
                 result.spectra.size() == 1, "second-socket DDC stream failed");
+    require(result.sampleRate == block.sampleRate && result.firstSample == block.firstSample &&
+                result.sampleCount == block.iq.size() / 2 && result.rateNumerator == 1 &&
+                result.rateDenominator == 1 && result.inputReserve == 0,
+            "manager changed native DDC output metadata");
     const auto &spectrum = result.spectra.front();
     require(!spectrum.levels.empty() && spectrum.frequencies.size() == spectrum.levels.size(),
             "DDC spectrum incomplete");
@@ -798,6 +805,58 @@ void wrapperToggleTests() {
     checkQueuedIq(iq);
     std::cout << "Wrapper Local -> Remote -> Local, in-flight toggle and stale-frame suppression passed\n";
 }
+
+#include "remote_fft_pipeline_tests.h"
+
+void loopbackBenchmark() {
+    LoopbackServer loopback;
+    quint64 epoch = 2001;
+    std::cout << "Native TCP loopback only; FFTW; 1 cold + 9 warm frames; no LAN/GPU claim\n";
+    for (auto mode : {SpectrumComputeMode::Windows, SpectrumComputeMode::Continuous}) {
+        for (int length : {65536, 1048576}) {
+            for (int budget : {100, 2000}) {
+                RemoteSpectrumWorker worker;
+                auto options = remoteOptions(mode);
+                options.uploadLimitMBps = budget;
+                const auto settings = radioSettings(length);
+                const auto iq = makeIq(length);
+                const auto reference = directLevels(settings, iq);
+                std::vector<double> warm;
+                double cold = 0;
+                for (int i = 0; i < 10; ++i) {
+                    const auto published = publishIq(settings, iq, epoch, i == 0);
+                    QElapsedTimer timer;
+                    timer.start();
+                    requestRemote(worker, settings, loopback.endpoint, options);
+                    SpectrumFftFrame frame;
+                    qint64 renewAt = 250;
+                    while (!worker.takeLatest(frame) && timer.elapsed() < 30000) {
+                        QCoreApplication::processEvents();
+                        if (timer.elapsed() >= renewAt) {
+                            requestRemote(worker, settings, loopback.endpoint, options);
+                            renewAt = timer.elapsed() + 250;
+                        }
+                        QThread::msleep(1);
+                    }
+                    const double ms = timer.nsecsElapsed() / 1e6;
+                    require(frame.valid && frame.metadata.totalFloatCount == published.totalFloatCount,
+                            "benchmark failed or returned a stale frame");
+                    compare(frame.magnitudes, reference);
+                    checkAudioQueue(published);
+                    checkQueuedIq(iq);
+                    if (i == 0) cold = ms;
+                    else warm.push_back(ms);
+                }
+                std::sort(warm.begin(), warm.end());
+                std::cout << (mode == SpectrumComputeMode::Windows ? "windows" : "continuous")
+                          << " N=" << length << " cap_MBps=" << budget << " cold_ms=" << cold
+                          << " warm_median_ms=" << warm[4] << " warm_p95_ms=" << warm.back() << '\n';
+                worker.cancel();
+                ++epoch;
+            }
+        }
+    }
+}
 }
 
 int main(int argc, char **argv) {
@@ -806,9 +865,19 @@ int main(int argc, char **argv) {
     QStandardPaths::setTestModeEnabled(true);
     setFobosVerboseLoggingEnabled(false);
     try {
+        if (app.arguments().contains(QStringLiteral("--benchmark"))) {
+            loopbackBenchmark();
+            return 0;
+        }
         windowSessionTests();
         continuousSessionTests();
         invalidSessionTests();
+        pipelineSessionTests();
+        pipelineWorkerTests();
+        pipelineFailureTests();
+        fallbackRetryTests();
+        fallbackRecoveryTests();
+        managerMetadataCoexistenceTest();
         remoteLoopbackTests();
         remoteFailureTests();
         remoteCancellationTests();

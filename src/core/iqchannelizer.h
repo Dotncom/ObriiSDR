@@ -11,10 +11,14 @@
 
 class IqChannelizer {
 public:
+    enum class FirQuality { Legacy, Balanced, High };
     struct Options {
         double outputRateHz = 0.0;
         double cutoffHz = 0.0;
         int decimationFactor = 0;
+        FirQuality firQuality = FirQuality::Legacy;
+        int firTapCount = 0;         // 0: preset; otherwise even, 16..256.
+        double transitionHz = 0.0;  // 0: no width constraint; otherwise Blackman estimate.
     };
     struct Result {
         bool valid = false;
@@ -31,6 +35,8 @@ public:
         int inputSamples = 0;
         int outputSamples = 0;
         float agcLevel = 0.0f;
+        int firTapCount = 32;
+        double firDelayCoarseSamples = 16.0;
     };
 
     void reset(double initialNcoPhaseRadians = 0.0);
@@ -47,12 +53,13 @@ private:
     static constexpr int FrontDecimatorMaxFactor = 64;
     static constexpr int ResamplerPhases = 64;
     static constexpr int ResamplerTaps = 32;
-    static constexpr int ResamplerHistory = 64;
+    static constexpr int MaxResamplerTaps = 256;
+    static constexpr int ResamplerHistory = MaxResamplerTaps * 2;
 
     void configureFrontDecimator(int factor);
     bool pushFrontDecimatorSample(const std::complex<float> &sample,
                                   std::complex<float> &output);
-    void configureResampler(double inputRate, double targetRate, double cutoff);
+    void configureResampler(double inputRate, double targetRate, double cutoff, int tapCount);
     void pushResamplerSample(const std::complex<float> &sample,
                              std::vector<float> &output,
                              bool applyAgc);
@@ -73,7 +80,8 @@ private:
     double configuredCoarseRate = 0.0;
     double configuredTargetRate = 0.0;
     double configuredCutoff = 0.0;
-    std::array<std::array<float, ResamplerTaps>, ResamplerPhases> resamplerTaps = {};
+    int configuredTapCount = ResamplerTaps;
+    std::array<std::array<float, MaxResamplerTaps>, ResamplerPhases> resamplerTaps = {};
     std::array<std::complex<float>, ResamplerHistory> resamplerHistory = {};
     std::uint64_t resamplerSamplesSeen = 0;
     int resamplerWriteIndex = 0;

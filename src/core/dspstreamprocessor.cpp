@@ -10,6 +10,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <numeric>
 #include <stdexcept>
 
 namespace {
@@ -116,15 +117,20 @@ DspStreamResult DspStreamProcessor::process(const DspStreamBlock &block) {
     DspStreamResult result;
     result.error = DspStreamProtocol::validate(block);
     if (!result.error.isEmpty()) return result;
+    result.sampleRate = block.sampleRate;
+    result.firstSample = block.firstSample;
+    result.sampleCount = block.iq.size()/2U;
+    result.gap = block.gap;
     const auto started = Clock::now();
     try {
-        if (!impl->states.count(block.stream) && impl->states.size() >= 2) {
+        if (!impl->states.count(block.stream) && impl->states.size() >= DspStreamProtocol::MaxStreams) {
             result.error = "DSP stream count exceeds limit";
             return result;
         }
         auto &state = impl->states[block.stream];
         if (!state || block.gap || state->generation != block.generation || state->epoch != block.epoch ||
             state->next != block.firstSample || state->rate != block.sampleRate || state->center != block.centerHz || !sameFfts(state->configs, block.ffts)) {
+            result.gap = true;
             state = std::make_unique<State>();
             state->generation = block.generation; state->epoch = block.epoch;
             state->rate = block.sampleRate; state->center = block.centerHz; state->configs = block.ffts;
@@ -220,6 +226,13 @@ bool decodeRequest(const QJsonObject &j, const QByteArray &payload, DspStreamBlo
 QByteArray response(const DspStreamBlock &b, const DspStreamResult &r) {
     if (!r.error.isEmpty()) return encode({{"type", "error"}, {"error", r.error.left(256)}});
     QJsonObject json = request(b); json["type"] = "result"; json.remove("ffts");
+    if (r.rateNumerator != r.rateDenominator) {
+        json["output"] = QJsonObject{{"sampleRate", r.sampleRate},
+            {"firstSample", QString::number(qulonglong(r.firstSample))}, {"sampleCount", int(r.sampleCount)},
+            {"originFirstSample", QString::number(qulonglong(r.originFirstSample))},
+            {"rateNumerator", r.rateNumerator}, {"rateDenominator", r.rateDenominator},
+            {"inputReserve", r.inputReserve}, {"gap", r.gap}};
+    }
     QByteArray payload = r.iq ? floats(*r.iq) : QByteArray(); json["iqBytes"] = payload.size();
     QJsonArray spectra;
     for (const auto &f : r.spectra) {
@@ -232,33 +245,68 @@ QByteArray response(const DspStreamBlock &b, const DspStreamResult &r) {
 bool decodeResponse(const DspStreamBlock &b, const QJsonObject &j, const QByteArray &payload, DspStreamResult &r) {
     r = {};
     if (j.value("type") == "error") { r.error = "External DSP worker rejected the stream"; return true; }
-    const auto invalid = [&r]() { r.error = "Invalid or stale DSP worker result"; return false; };
+    const auto invalid = [&r]() { r = {}; r.error = "Invalid or stale DSP worker result"; return false; };
     std::uint64_t generation, epoch, first;
     if (j.value("type") != "result" || j.value("stream").toString() != b.stream ||
         !u64(j.value("generation"), generation) || generation != b.generation ||
         !u64(j.value("epoch"), epoch) || epoch != b.epoch || !u64(j.value("firstSample"), first) || first != b.firstSample ||
         j.value("sampleRate").toDouble() != b.sampleRate || j.value("centerHz").toDouble(-1) != b.centerHz ||
         j.value("sampleCount").toInt(-1) != int(b.iq.size()/2U) || !j.value("spectra").isArray()) return invalid();
+    r.sampleRate = b.sampleRate; r.firstSample = b.firstSample;
+    r.sampleCount = b.iq.size()/2U; r.gap = b.gap;
+    if (j.contains("output")) {
+        if (!j.value("output").isObject()) return invalid();
+        const auto o = j.value("output").toObject();
+        const int n = o.value("rateNumerator").toInt(0), d = o.value("rateDenominator").toInt(0);
+        const int count = o.value("sampleCount").toInt(-1);
+        const int reserve = o.value("inputReserve").toInt(-1);
+        if (o.size() != 8 || n < 1 || n > 64 || d < 1 || d > 64 || n == d || n > 2*d ||
+            reserve < d || reserve > 4096 || reserve%d ||
+            std::gcd(n, d) != 1 || count < 0 || count > int(MaxOutputSamples) ||
+            !u64(o.value("firstSample"), r.firstSample) ||
+            !u64(o.value("originFirstSample"), r.originFirstSample) || r.originFirstSample > b.firstSample ||
+            !o.value("gap").isBool()) return invalid();
+        r.sampleRate = o.value("sampleRate").toDouble(0);
+        if (!std::isfinite(r.sampleRate) || r.sampleRate < 1000 || r.sampleRate > 2000000 ||
+            std::abs(r.sampleRate-b.sampleRate*n/d) > 1e-6) return invalid();
+        // Bounded input history/lookahead is retained. Arithmetic is
+        // integer-only so counters above 2^53 never lose timestamp precision.
+        const auto target = [n, d, reserve](std::uint64_t input, std::uint64_t &output) {
+            const auto groups = input > std::uint64_t(reserve) ? (input-reserve)/std::uint64_t(d) : 0;
+            if (groups > UINT64_MAX/std::uint64_t(n)) return false;
+            output = groups*std::uint64_t(n);
+            return true;
+        };
+        std::uint64_t start, end;
+        if (b.firstSample > UINT64_MAX-b.iq.size()/2U ||
+            !target(b.firstSample-r.originFirstSample, start) ||
+            !target(b.firstSample+b.iq.size()/2U-r.originFirstSample, end) ||
+            start != r.firstSample || end < start || end-start != std::uint64_t(count)) return invalid();
+        r.sampleCount = std::size_t(count); r.rateNumerator = n; r.rateDenominator = d;
+        r.inputReserve = reserve;
+        r.gap = o.value("gap").toBool();
+        if (r.gap != (start == 0) || (b.gap && r.originFirstSample != b.firstSample)) return invalid();
+    }
     int offset = j.value("iqBytes").toInt(-1);
-    if (offset != (b.returnIq ? int(b.iq.size()*4U) : 0)) return invalid();
+    if (offset != (b.returnIq ? int(r.sampleCount*8U) : 0)) return invalid();
     if (b.returnIq) {
         std::vector<float> iq;
-        if (!readFloats(payload, 0, int(b.iq.size()), iq)) return invalid();
+        if (!readFloats(payload, 0, int(r.sampleCount*2U), iq)) return invalid();
         r.iq = std::make_shared<const std::vector<float>>(std::move(iq));
     }
     const auto spectra = j.value("spectra").toArray();
-    if (spectra.size() > b.ffts.size()) return invalid();
+    if (spectra.size() > b.ffts.size() || (!r.sampleCount && !spectra.isEmpty())) return invalid();
     QStringList ids;
     for (const auto &value : spectra) {
         const auto s = value.toObject(); const QString id = s.value("id").toString();
         auto config = std::find_if(b.ffts.begin(), b.ffts.end(), [&id](const auto &f) { return f.id == id; });
         if (config == b.ffts.end() || ids.contains(id) || s.value("length").toInt(-1) != config->length || s.value("offsetBytes").toInt(-1) != offset) return invalid();
         ids.append(id); DspBranchFrame frame; frame.id = id; frame.centerHz = b.centerHz;
-        frame.sampleRateHz = b.sampleRate; frame.binWidthHz = s.value("binWidthHz").toDouble(); frame.rbwHz = s.value("rbwHz").toDouble();
-        if (!std::isfinite(frame.binWidthHz) || std::abs(frame.binWidthHz-b.sampleRate/config->length) > 1e-6 ||
+        frame.sampleRateHz = r.sampleRate; frame.binWidthHz = s.value("binWidthHz").toDouble(); frame.rbwHz = s.value("rbwHz").toDouble();
+        if (!std::isfinite(frame.binWidthHz) || std::abs(frame.binWidthHz-r.sampleRate/config->length) > 1e-6 ||
             !std::isfinite(frame.rbwHz) || frame.rbwHz < frame.binWidthHz*0.99 || frame.rbwHz > frame.binWidthHz*5 ||
             !readFloats(payload, offset, config->length, frame.levels)) return invalid();
-        frame.generation = b.generation; frame.sequence = b.firstSample+b.iq.size()/2U;
+        frame.generation = b.generation; frame.sequence = r.firstSample+r.sampleCount;
         for (int i = 0; i < config->length; ++i) frame.frequencies.push_back(float(b.centerHz+(i-config->length/2)*frame.binWidthHz));
         offset += config->length*4; r.spectra.push_back(std::move(frame));
     }

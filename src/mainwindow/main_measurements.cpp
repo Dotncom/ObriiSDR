@@ -208,6 +208,11 @@ void YourClassName::openResearchAnalysis(int tabIndex) {
                 }
             },
             this);
+        researchAnalysisDialog->setExperimentBundleCallbacks(
+            [this]() { return experimentBundleContext(); },
+            [this](const QJsonObject &context, QString *error) {
+                return applyExperimentWorkspace(context, error);
+            });
     }
     const int clampedTab = (std::clamp)(tabIndex,
                                         static_cast<int>(ResearchAnalysisDialog::InterferenceTab),

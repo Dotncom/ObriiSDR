@@ -177,7 +177,7 @@ $ReleaseDocFiles = @(
     "docs\dmr_external_backend.md",
     "docs\gnss_preflight_4.1.md",
     "docs\iq_pipeline_audit.md",
-    "docs\release_notes_6.2.0.md",
+    "docs\release_notes_6.3.0.md",
     "docs\dmr_motorola_privacy.md",
     "docs\performance_and_dmr_audit.md",
     "docs\wireless_lab.md",
@@ -189,7 +189,10 @@ $ReleaseDocFiles = @(
     "docs\wireless_addon.md",
     "docs\dsp_stream_protocol.md",
     "docs\dsp_stream_manager.md",
-    "docs\gnu_radio_bridge_usage.md"
+    "docs\gnu_radio_bridge_usage.md",
+    "docs\pfb_channelizer.md",
+    "docs\dsp_board_coverage.md",
+    "docs\experiment_bundle.md"
 )
 foreach ($DocFile in $ReleaseDocFiles) {
     $DocPath = Join-Path $Workspace $DocFile
@@ -203,7 +206,9 @@ foreach ($DocFile in $ReleaseDocFiles) {
 $WirelessScripts = Join-Path $DeployPath 'wireless'
 $DspScripts = Join-Path $DeployPath 'dsp'
 New-Item -ItemType Directory -Path $DspScripts -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $Workspace 'tools/obrii_gr_bridge.py') -Destination $DspScripts -Force
+foreach ($Script in @('obrii_gr_bridge.py', 'obrii_gr_resampler.py', 'obrii_gr_hier_resampler.py')) {
+    Copy-Item -LiteralPath (Join-Path $Workspace "tools/$Script") -Destination $DspScripts -Force
+}
 if (Test-Path -LiteralPath (Join-Path $DeployPath 'wifi-phy/python.exe')) {
     New-Item -ItemType Directory -Path $WirelessScripts -Force | Out-Null
     foreach ($Script in @('wifi_phy_decoder.py', 'wifi_packet_bus.py', 'wifi_extcap.py')) {

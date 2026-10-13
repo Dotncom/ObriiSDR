@@ -4,9 +4,11 @@ Obrii SDR is a wideband SDR receiver and research workstation, optimized first
 for RigExpert Fobos SDR hardware while also supporting additional receiver
 backends.
 The current packaged release is Windows-first, with active Linux/Raspberry Pi
-support and a separately maintained Android USB/network client. Version 6.2
-adds an optional DSP stream manager, LAN FFT offload, a GNU Radio bridge and
-connection diagnostics. It retains live Wi-Fi IQ decoding, experimental HT20 support, research
+support and a separately maintained Android USB/network client. Version 6.3
+adds independent DSP audio branches, board Undo/Redo, configurable DDC/PFB
+processing and portable experiment folders, alongside the DSP stream manager,
+LAN FFT offload, GNU Radio bridge and connection diagnostics.
+It retains live Wi-Fi IQ decoding, experimental HT20 support, research
 backends for GNSS/LRPT/HF prediction, and expanded measurement tools. It retains
 the 6.0.0 DMR, FT8, signal-generation and terrain-propagation features, plus
 the graphical DSP path designer, live audio-filter chain, Multi-VFO views, and
@@ -22,7 +24,8 @@ dropping, and multistage channel extraction keep the wideband desktop and
 Raspberry paths responsive. Android is released separately only when its
 package changes.
 
-Release 6.2.0 also fixes DSP-board group deletion and non-destructive USB refresh.
+Release 6.3.0 also synchronizes DSP frequency limits and presets with the main
+controls and improves safe routing, editing history and remote processing.
 Remote processing is opt-in and experimental; update both computers, use a
 trusted LAN and run the connection test before enabling IQ transfer. The receiver
 and audio path remain local. See `docs/dsp_stream_manager.md` for limits and setup.
@@ -35,14 +38,15 @@ Remove API keys, private coordinates and other sensitive data from any attachmen
 
 ## Windows Release Package
 
-Release 6.2.0 provides a Windows x64 core ZIP and a Raspberry/Linux source tar.gz.
-The unchanged optional Wireless add-on from 6.1.1 is also compatible with 6.2.0;
+Release 6.3.0 provides a Windows x64 core ZIP and a Raspberry/Linux source tar.gz.
+No Wireless add-on or Android package is uploaded with this release.
+The unchanged optional Wireless add-on from 6.1.1 is also compatible with 6.3.0;
 it does not need to be downloaded again for an existing installation.
 The add-on contains the portable GNU Radio
 Wi-Fi and Wireshark tools; to enable them, run `Install-Wireless-AddOn.ps1` beside
 `ObriiSDR.exe` or extract the add-on into that same folder. See
 `docs/wireless_addon.md`. Npcap is not bundled.
-Extract the Linux source with `tar -xzf ObriiSDR-v6.2.0-raspberry-source.tar.gz`;
+Extract the Linux source with `tar -xzf ObriiSDR-v6.3.0-raspberry-source.tar.gz`;
 the build/run shell scripts have executable permissions. Android packages are
 maintained and released separately.
 

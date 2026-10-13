@@ -304,6 +304,7 @@ QJsonObject YourClassName::recordingScientificMetadata(const QString &captureKin
     metadata["schemaVersion"] = 1;
     metadata["captureKind"] = captureKind;
     metadata["start"] = recordingScientificSnapshot(QStringLiteral("start"));
+    metadata["experimentContext"] = experimentBundleContext();
 
     QJsonObject privacy;
     privacy["coordinatesIncluded"] = false;

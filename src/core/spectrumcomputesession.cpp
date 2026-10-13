@@ -69,6 +69,10 @@ bool SpectrumComputeSession::handle(const QJsonObject &q, const QByteArray &payl
             const double rate = q.value("rate").toDouble(), center = q.value("center").toDouble(-1);
             const int window = q.value("window").toInt(-1), backend = q.value("backend").toInt(-1);
             const QString job = q.value("job").toString(), mode = q.value("mode").toString();
+            const auto pipeline = q.value("pipelineChunks");
+            if (!pipeline.isUndefined() && (!pipeline.isDouble() || pipeline.toDouble() < 1 ||
+                pipeline.toDouble() > SpectrumComputeProtocol::MaxPipelineChunks ||
+                pipeline.toDouble() != pipeline.toInt())) return fail("Invalid main FFT pipeline bound");
             if (!payload.isEmpty() || length < 512 || length > impl->maxLength ||
                 !std::isfinite(rate) || rate < 1000 || rate > 1e9 || !std::isfinite(center) || center < 0 || center > 8e9 ||
                 window < 0 || window > 4 || backend < 0 || backend > 2 || job.isEmpty() || job.size() > 80 ||
@@ -81,7 +85,9 @@ bool SpectrumComputeSession::handle(const QJsonObject &q, const QByteArray &payl
             impl->history.resize(std::size_t(length)*2);
             impl->linear.clear(); impl->count = impl->write = 0; impl->haveNext = false;
             impl->job = job; impl->continuous = mode == "continuous"; impl->configured = true;
-            return reply({{"type", "main_fft_ready"}, {"job", job}}, {});
+            QJsonObject ready{{"type", "main_fft_ready"}, {"job", job}};
+            if (!pipeline.isUndefined()) ready["pipelineChunks"] = pipeline.toInt();
+            return reply(ready, {});
         }
         if (!impl->configured || q.value("job") != impl->job) return fail("Stale or missing main FFT job");
         if (type == "main_fft_iq") {

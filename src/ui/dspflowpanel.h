@@ -15,7 +15,9 @@
 #include "spectrumcomputeoptions.h"
 #include <QPointer>
 class DspBranchEngine;
+class DspBranchAudioOutput;
 class DspComputeDialog;
+class AudioFilterChainWidget;
 
 class DspFlowScene;
 class QCloseEvent;
@@ -39,6 +41,12 @@ public:
     void setLanguage(bool ukrainian);
     QString configurationJson() const;
     bool setConfigurationJson(const QString &json);
+    bool importExperimentLayout(const QString &json, QString *error = nullptr);
+    void setMainAudioFilterChainWidget(AudioFilterChainWidget *widget);
+    bool canUndoBoard() const;
+    bool canRedoBoard() const;
+    void undoBoard();
+    void redoBoard();
     void setControlStates(bool receiverRunning, const QHash<QString, bool> &enabledByBlockType);
     void setFineTuneRangeHz(double rangeHz);
     bool shouldUpdateMultiVfoSpectrum();
@@ -129,6 +137,32 @@ private:
     void refreshSectorControls();
     void syncWorkspaceViewport();
     void refreshBranches();
+    void queueBoardHistory(const QString &mergeKey);
+    void commitBoardHistory();
+    void resetBoardHistory();
+    void trimBoardHistory();
+    void updateHistoryActions();
+    void restoreBoardHistory(int index);
+    QByteArray captureBoardHistory() const;
+    QByteArray captureFilterHistory(const QByteArray &board) const;
+    void refreshCurrentFilterHistory();
+    friend struct DspFlowHistoryTestAccess;
+
+    struct BoardHistoryEntry {
+        QByteArray board;
+        QByteArray filters;
+    };
+    QVector<BoardHistoryEntry> boardHistory_;
+    int boardHistoryIndex_ = -1;
+    bool restoringHistory_ = false;
+    bool historyPending_ = false;
+    QString historyMergeKey_;
+    QString pendingHistoryMergeKey_;
+    QElapsedTimer historyMergeTimer_;
+    QTimer *historyTimer_ = nullptr;
+    QToolButton *undoButton_ = nullptr;
+    QToolButton *redoButton_ = nullptr;
+    QPointer<AudioFilterChainWidget> mainAudioFilterChain_;
 
     bool ukrainian_ = false;
     bool loading_ = false;
@@ -161,6 +195,7 @@ private:
     bool analogPeakMeterTargetValid_ = false;
     QHash<QString, QString> knownFilterBlocks_;
     std::unique_ptr<DspBranchEngine> branchEngine_;
+    std::shared_ptr<DspBranchAudioOutput> branchAudioOutput_;
     DspGraphPlan branchPlan_;
     RadioSettings branchSource_;
     bool branchSourceRunning_ = false;

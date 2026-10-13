@@ -1,5 +1,6 @@
 #include "scientificsessiontools.h"
 #include "hdf5spectrumexportui.h"
+#include "experimentbundledialog.h"
 
 #include "appsettingsutils.h"
 #include "fft.h"
@@ -641,6 +642,8 @@ struct MeasurementSessionWidget::Impl {
 
     Translator translator;
     FrequencySetter frequencySetter;
+    ExperimentBundleDialog::Snapshot experimentSnapshot;
+    ExperimentBundleDialog::ApplyWorkspace experimentWorkspace;
     MeasurementSessionWidget *owner = nullptr;
     QLineEdit *name = nullptr;
     QPlainTextEdit *notes = nullptr;
@@ -748,7 +751,69 @@ struct MeasurementSessionWidget::Impl {
     }
 
     void exportReport();
+    QJsonObject experimentSession() const;
+    bool restoreExperimentSession(const QJsonObject &context, QString *error);
 };
+
+QJsonObject MeasurementSessionWidget::Impl::experimentSession() const {
+    QJsonArray rows;
+    const auto begin = snapshots.size() > 4096 ? snapshots.size() - 4096 : 0;
+    for (std::size_t i = begin; i < snapshots.size(); ++i) {
+        const auto &s = snapshots[i];
+        rows.append(QJsonObject{{"utcMs", double(s.utcMs)}, {"amplitudeUnit", s.amplitudeUnit},
+            {"context", QJsonObject{{"sampleRateHz", s.context.sampleRateHz},
+                {"centerFrequencyHz", s.context.centerFrequencyHz}, {"listeningFrequencyHz", s.context.listeningFrequencyHz},
+                {"bandwidthHz", s.context.bandwidthHz}, {"inputMode", s.context.inputMode},
+                {"modulationType", s.context.modulationType}, {"fftLength", s.context.fftLength},
+                {"fftWindowType", s.context.fftWindowType}}},
+            {"metrics", QJsonObject{{"valid", s.metrics.valid}, {"peakFrequencyHz", s.metrics.peakFrequencyHz},
+                {"peakDb", s.metrics.peakDb}, {"noiseFloorDb", s.metrics.noiseFloorDb},
+                {"snrDb", s.metrics.snrDb}, {"channelPowerDb", s.metrics.channelPowerDb},
+                {"occupiedBandwidth95Hz", s.metrics.occupiedBandwidth95Hz}}}});
+    }
+    return {{"name", name->text().left(1024)}, {"notes", notes->toPlainText().left(65536)}, {"snapshots", rows},
+        {"totalSnapshotCount", double(snapshots.size())}, {"exportedSnapshotCount", rows.size()}, {"omittedSnapshotCount", double(begin)}};
+}
+
+bool MeasurementSessionWidget::Impl::restoreExperimentSession(const QJsonObject &context, QString *error) {
+    const bool uk = QSettings(persistentSettingsFilePath(), QSettings::IniFormat).value("ui/language", "en").toString().startsWith("uk");
+    const auto fail = [&](const char *en, const char *ua) { if (error) *error = QString::fromUtf8(uk ? ua : en); return false; };
+    const auto session = context.value("session").toObject();
+    const auto rows = session.value("snapshots").toArray();
+    if (session.isEmpty() || !session.value("snapshots").isArray() || rows.size() > 4096) {
+        return fail("Invalid measurement session (maximum 4096 snapshots).", "Некоректна сесія вимірювань (не більше 4096 знімків).");
+    }
+    std::vector<Snapshot> restored;
+    for (const auto &value : rows) {
+        const auto row = value.toObject(), c = row.value("context").toObject(), m = row.value("metrics").toObject();
+        if (c.isEmpty() || m.isEmpty()) return fail("Invalid session snapshot", "Некоректний знімок сесії");
+        for (auto object : {c, m, row}) for (auto it = object.begin(); it != object.end(); ++it)
+            if (it->isDouble() && !std::isfinite(it->toDouble())) return fail("Non-finite session value", "Нескінченне або невизначене значення сесії");
+        for (const auto *key : {"peakDb", "noiseFloorDb", "snrDb", "channelPowerDb"})
+            if (!m.value(key).isDouble() || std::abs(m.value(key).toDouble()) > 1000000)
+                return fail("Invalid snapshot level", "Некоректний рівень знімка");
+        const double utc = row.value("utcMs").toDouble(-1);
+        if (utc < 0 || utc > 8640000000000000.0) return fail("Invalid snapshot time", "Некоректний час знімка");
+        Snapshot s;
+        s.utcMs = qint64(utc); s.amplitudeUnit = std::clamp(row.value("amplitudeUnit").toInt(), 0, 3);
+        s.context = {c.value("sampleRateHz").toDouble(), c.value("centerFrequencyHz").toDouble(),
+            c.value("listeningFrequencyHz").toDouble(), c.value("bandwidthHz").toDouble(),
+            c.value("inputMode").toInt(), c.value("modulationType").toInt(),
+            c.value("fftLength").toInt(), c.value("fftWindowType").toInt()};
+        s.metrics.valid = m.value("valid").toBool(); s.metrics.peakFrequencyHz = m.value("peakFrequencyHz").toDouble();
+        s.metrics.peakDb = float(m.value("peakDb").toDouble()); s.metrics.noiseFloorDb = float(m.value("noiseFloorDb").toDouble());
+        s.metrics.snrDb = float(m.value("snrDb").toDouble()); s.metrics.channelPowerDb = float(m.value("channelPowerDb").toDouble());
+        s.metrics.occupiedBandwidth95Hz = m.value("occupiedBandwidth95Hz").toDouble();
+        restored.push_back(s);
+    }
+    setRunning(false);
+    snapshots = std::move(restored);
+    { QSignalBlocker a(name), b(notes); name->setText(session.value("name").toString().left(1024));
+      notes->setPlainText(session.value("notes").toString().left(65536)); }
+    // No cursor assignment: its valueChanged handler retunes the live receiver.
+    rebuildTable();
+    return true;
+}
 
 void MeasurementSessionWidget::Impl::exportReport() {
     if (snapshots.empty()) return;
@@ -870,6 +935,24 @@ MeasurementSessionWidget::MeasurementSessionWidget(Translator translator,
     controls->addWidget(impl->exportButton, 1, 5);
     auto *hdf5Button = new QPushButton(impl->text("hdf5_export", "HDF5 export..."), this);
     controls->addWidget(hdf5Button, 2, 5);
+    const bool experimentUk = QSettings(persistentSettingsFilePath(), QSettings::IniFormat).value("ui/language", "en").toString().startsWith("uk");
+    auto *exportExperiment = new QPushButton(impl->text("experiment_export", experimentUk ? QString::fromUtf8("Експортувати експеримент...") : QStringLiteral("Export experiment...")), this);
+    auto *openExperiment = new QPushButton(impl->text("experiment_open", experimentUk ? QString::fromUtf8("Відкрити експеримент...") : QStringLiteral("Open experiment...")), this);
+    controls->addWidget(exportExperiment, 2, 2, 1, 2);
+    controls->addWidget(openExperiment, 2, 4);
+    const auto bundle = [this](bool importing) {
+        auto *dialog = new ExperimentBundleDialog(importing, [this] {
+            auto context = impl->experimentSnapshot ? impl->experimentSnapshot() : QJsonObject();
+            context["session"] = impl->experimentSession();
+            return context;
+        }, impl->experimentWorkspace, [this](const QJsonObject &context, QString *error) {
+            return impl->restoreExperimentSession(context, error);
+        }, impl->translator, this);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->show();
+    };
+    connect(exportExperiment, &QPushButton::clicked, this, [bundle] { bundle(false); });
+    connect(openExperiment, &QPushButton::clicked, this, [bundle] { bundle(true); });
     connect(hdf5Button, &QPushButton::clicked, this, [this]() { showSpectrumHdf5Export(this, impl->translator); });
     controls->setColumnStretch(6, 1);
     root->addLayout(controls);
@@ -941,6 +1024,13 @@ MeasurementSessionWidget::~MeasurementSessionWidget() = default;
 
 bool MeasurementSessionWidget::isRunning() const {
     return impl && impl->running;
+}
+
+void MeasurementSessionWidget::setExperimentBundleCallbacks(
+    std::function<QJsonObject()> snapshot,
+    std::function<bool(const QJsonObject &, QString *)> applyWorkspace) {
+    impl->experimentSnapshot = std::move(snapshot);
+    impl->experimentWorkspace = std::move(applyWorkspace);
 }
 
 void MeasurementSessionWidget::appendSpectrumFrame(

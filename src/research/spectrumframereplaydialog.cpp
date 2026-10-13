@@ -14,6 +14,9 @@
 #include "scalewidget.h"
 #include "appsettingsutils.h"
 #include "waterfall3dview.h"
+#include "dspbranchaudiooutput.h"
+#include "iqchannelizer.h"
+#include "experimentbundle.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -24,6 +27,8 @@
 #include <QFileInfo>
 #include <QFileDialog>
 #include <QFontMetrics>
+#include <QFutureWatcher>
+#include <QtConcurrent/QtConcurrentRun>
 #include <QJsonDocument>
 #include <QHBoxLayout>
 #include <QJsonObject>
@@ -35,6 +40,7 @@
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QScopedValueRollback>
 #include <QSettings>
 #include <QShowEvent>
 #include <QSignalBlocker>
@@ -156,6 +162,11 @@ QString replayDialogTranslationKey(const QString &id) {
 
 QString replayText(const char *key, const char *fallback) {
     const QString id = QString::fromLatin1(key);
+    if (replayDialogLanguage().startsWith("uk")) {
+        if (id == "experiment_audio_limit") return QString::fromUtf8("Ізольоване аудіо: AM/NFM/SAM/USB/LSB/DSB/CW/WFM; канальний IQ 48 кГц..2 МГц.");
+        if (id == "experiment_image_failed") return QString::fromUtf8("Не вдалося виділити пам'ять зображення. Зменште обсяг даних відтворення.");
+        if (id == "experiment_display_limited") return QString::fromUtf8("Вигляд адаптовано до меж відтворення");
+    }
     const QString translationKey = replayDialogTranslationKey(id);
     if (!translationKey.isEmpty()) {
         const QJsonObject languageObject = replayDialogTranslations(replayDialogLanguage());
@@ -168,10 +179,11 @@ QString replayText(const char *key, const char *fallback) {
 }
 }
 
-SpectrumFrameReplayDialog::SpectrumFrameReplayDialog(QWidget *parent)
-    : QDialog(parent) {
+SpectrumFrameReplayDialog::SpectrumFrameReplayDialog(QWidget *parent, bool isolated)
+    : QDialog(parent), isolatedExperiment(isolated) {
     setWindowTitle(replayText("title", "Spectrum replay"));
     resize(1100, 720);
+    if (isolatedExperiment) setMaximumSize(4096, 2304);
 
     graph = new MyGraphWidget(this);
     graph->setMinimumHeight(220);
@@ -397,7 +409,7 @@ SpectrumFrameReplayDialog::SpectrumFrameReplayDialog(QWidget *parent)
     });
 
     connect(&playbackTimer, &QTimer::timeout, this, [this]() {
-        if (recording.frames.empty()) {
+        if (recording->frames.empty()) {
             setPlaybackEnabled(false);
             return;
         }
@@ -405,7 +417,7 @@ SpectrumFrameReplayDialog::SpectrumFrameReplayDialog(QWidget *parent)
         const qint64 targetElapsedMs =
             playbackStartElapsedMs +
             static_cast<qint64>(std::llround(static_cast<double>(playbackClock.elapsed()) * speed));
-        const qint64 lastElapsedMs = recording.frames.back().elapsedMs;
+        const qint64 lastElapsedMs = recording->frames.back().elapsedMs;
         if (targetElapsedMs >= lastElapsedMs) {
             qDebug() << "[SpectrumReplay] visual end"
                      << "clockMs" << playbackClock.elapsed()
@@ -429,10 +441,10 @@ SpectrumFrameReplayDialog::SpectrumFrameReplayDialog(QWidget *parent)
         }
 
         int low = playbackStartFrame;
-        int high = static_cast<int>(recording.frames.size()) - 1;
+        int high = static_cast<int>(recording->frames.size()) - 1;
         while (low < high) {
             const int mid = low + (high - low + 1) / 2;
-            if (recording.frames[static_cast<std::size_t>(mid)].elapsedMs <= targetElapsedMs) {
+            if (recording->frames[static_cast<std::size_t>(mid)].elapsedMs <= targetElapsedMs) {
                 low = mid;
             } else {
                 high = mid - 1;
@@ -458,6 +470,13 @@ SpectrumFrameReplayDialog::SpectrumFrameReplayDialog(QWidget *parent)
     waterfallScroll = new QScrollArea(this);
     waterfallScroll->setWidget(waterfallLabel);
     waterfallScroll->setWidgetResizable(false);
+    if (isolatedExperiment) {
+        experimentWaterfallTile = new QLabel(waterfallLabel);
+        experimentWaterfallTile->setAttribute(Qt::WA_TransparentForMouseEvents);
+        experimentWaterfallTile->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+        for (auto *bar : {waterfallScroll->verticalScrollBar(), waterfallScroll->horizontalScrollBar()})
+            connect(bar, &QScrollBar::valueChanged, this, [this] { renderWaterfallPixmap(); });
+    }
     waterfallScroll->setMinimumHeight(300);
     waterfallPauseButton = new QToolButton(waterfallScroll->viewport());
     waterfallPauseButton->setAutoRaise(true);
@@ -486,11 +505,11 @@ SpectrumFrameReplayDialog::SpectrumFrameReplayDialog(QWidget *parent)
             &Waterfall3DView::frequencySliceSelected,
             this,
             [this](double ratio) {
-                if (recording.frames.empty()) {
+                if (recording->frames.empty()) {
                     return;
                 }
                 const SpectrumFrameRecord &frame =
-                    recording.frames[static_cast<std::size_t>(selectedFrame)];
+                    recording->frames[static_cast<std::size_t>(selectedFrame)];
                 setReplayListenFrequency(frame.minFrequency +
                                              std::clamp(ratio, 0.0, 1.0) *
                                                  (frame.maxFrequency - frame.minFrequency),
@@ -758,12 +777,14 @@ SpectrumFrameReplayDialog::SpectrumFrameReplayDialog(QWidget *parent)
     layout->addWidget(timelineSlider);
     layout->addWidget(infoLabel);
     setLayout(layout);
-    loadPersistentUiSettings();
+    if (!isolatedExperiment) loadPersistentUiSettings();
+    else openButton->setEnabled(false);
     updateSliderValueLabels();
     updateReplayDisplayMode();
 }
 
 SpectrumFrameReplayDialog::~SpectrumFrameReplayDialog() {
+    if (imageCancel) imageCancel->store(true);
     saveSettingsTimer.stop();
     savePersistentUiSettings();
     resetLocalIqPlaybackState(false);
@@ -1022,6 +1043,7 @@ void SpectrumFrameReplayDialog::loadPersistentUiSettings() {
 }
 
 void SpectrumFrameReplayDialog::savePersistentUiSettings() const {
+    if (isolatedExperiment) return;
     QSettings settings(persistentSettingsFilePath(), QSettings::IniFormat);
     settings.setValue(QStringLiteral("spectrumReplay/levelMin"), static_cast<int>(levelMin));
     settings.setValue(QStringLiteral("spectrumReplay/levelMax"), static_cast<int>(levelMax));
@@ -1046,6 +1068,7 @@ void SpectrumFrameReplayDialog::savePersistentUiSettings() const {
 }
 
 void SpectrumFrameReplayDialog::schedulePersistentUiSettingsSave() {
+    if (isolatedExperiment) return;
     if (saveSettingsTimer.isActive()) {
         saveSettingsTimer.start();
     } else {
@@ -1069,6 +1092,10 @@ void SpectrumFrameReplayDialog::updateSliderValueLabels() {
 }
 
 bool SpectrumFrameReplayDialog::loadRecording(const QString &path, QString *errorMessage) {
+    if (isolatedExperiment) {
+        if (errorMessage) *errorMessage = "Bundle replay requires verified recording data";
+        return false;
+    }
     playbackTimer.stop();
     resetLocalIqPlaybackState(false);
     if (playButton) {
@@ -1082,7 +1109,166 @@ bool SpectrumFrameReplayDialog::loadRecording(const QString &path, QString *erro
         return false;
     }
 
-    recording = std::move(loaded);
+    adoptRecording(path, std::move(loaded));
+    return true;
+}
+
+bool SpectrumFrameReplayDialog::loadExperimentRecording(const QString &path, SpectrumFrameRecording loaded,
+    const QJsonObject &context, QString *errorMessage, const QStringList &verifiedAssetPaths) {
+    if (!isolatedExperiment || loaded.frames.empty() || !recording->frames.empty()) {
+        if (errorMessage) *errorMessage = "A fresh isolated replay and a nonempty recording are required";
+        return false;
+    }
+    setPlaybackEnabled(false);
+    recording->metadata = loaded.metadata;
+    if (!applyExperimentContext(context, errorMessage)) return false;
+    verifiedReplayAssets.clear();
+    for (const auto &asset : verifiedAssetPaths) {
+        const auto canonical = QFileInfo(asset).canonicalFilePath();
+        if (!canonical.isEmpty()) verifiedReplayAssets.insert(canonical);
+    }
+    adoptRecording(path, std::move(loaded));
+    return true;
+}
+
+bool SpectrumFrameReplayDialog::applyExperimentContext(const QJsonObject &context, QString *errorMessage) {
+    if (!isolatedExperiment) {
+        if (errorMessage) *errorMessage = "Experiment context requires an isolated replay instance";
+        return false;
+    }
+    const auto scientific = recording->metadata.value("scientificMetadata").toObject();
+    const auto recorded = scientific.value("experimentContext").toObject();
+    const auto start = scientific.value("start").toObject();
+    const auto radio = start.value("radio").toObject(), analysis = start.value("analysis").toObject();
+    const auto effective = ExperimentBundle::sanitizeContext(recorded.isEmpty() ? context : recorded);
+    auto display = (recorded.isEmpty() ? context : recorded).value("display").toObject();
+    // Old files still carry authoritative recording-time display limits.
+    if (recorded.isEmpty()) {
+        if (analysis.contains("displayLevelMinDb")) display["levelMin"] = analysis.value("displayLevelMinDb");
+        if (analysis.contains("displayLevelMaxDb")) display["levelMax"] = analysis.value("displayLevelMaxDb");
+    }
+    QString invalid;
+    const auto number = [&invalid](const QJsonObject &o, const char *key, double fallback, double low, double high, bool integer = false) {
+        if (!o.contains(key)) return fallback;
+        const auto v = o.value(key); const double n = v.toDouble();
+        if (!v.isDouble() || !std::isfinite(n) || n < low || n > high || (integer && n != std::floor(n))) {
+            invalid = QStringLiteral("Invalid experiment value: %1").arg(QString::fromLatin1(key)); return fallback;
+        }
+        return n;
+    };
+    const double minimum = number(display, "levelMin", -140, -180, 20);
+    const double maximum = number(display, "levelMax", -30, -180, 20);
+    const double contrast = number(display, "contrast", 10, 1, 20);
+    const double sensitivity = number(display, "sensitivity", 10, 1, 30);
+    const int mode = int(number(display, "waterfallDisplayMode", 0, 0, 2, true));
+    const int requestedRows = int(number(display, "waterfallRowsPerFrame", 4, 1, 100000, true));
+    const int rows = std::clamp(requestedRows, rowHeightSlider->minimum(), rowHeightSlider->maximum());
+    const int requestedResolution = int(number(display, "waterfall3DResolutionDivisor", 4, 1, 100000, true));
+    const int resolution = waterfall3DResolutionCombo->findData(requestedResolution) >= 0 ? requestedResolution : 4;
+    if (minimum >= maximum) invalid = "Experiment display minimum must be below maximum";
+    if (display.contains("coloredSpectrum") && !display.value("coloredSpectrum").isBool()) invalid = "Invalid experiment spectrum color flag";
+
+    // Export-time audio settings are not treated as the original acquisition.
+    auto settings = recorded.isEmpty() ? QJsonObject() : effective.value("settings").toObject();
+    const std::pair<const char *, const char *> radioKeys[] = {
+        {"sampleRateHz", "sampleRate"}, {"centerFrequencyHz", "centerFrequency"},
+        {"actualFrequencyHz", "actualFrequency"}, {"listeningFrequencyHz", "listeningFrequency"},
+        {"bandwidthHz", "bandwidth"}, {"inputMode", "inputMode"}, {"modulationType", "modulationType"}};
+    for (const auto &key : radioKeys) if (radio.contains(key.first)) settings[key.second] = radio.value(key.first);
+    for (const auto *key : {"centerFrequency", "actualFrequency", "listeningFrequency", "bandwidth", "inputMode", "modulationType", "fftLength", "fftWindowType"})
+        if (recording->metadata.contains(key)) settings[key] = recording->metadata.value(key);
+    if (recording->metadata.contains("sourceSampleRate")) settings["sampleRate"] = recording->metadata.value("sourceSampleRate");
+    QJsonObject safeSettings;
+    for (const auto *key : {"centerFrequency", "actualFrequency", "listeningFrequency"})
+        safeSettings[key] = number(settings, key, 100000000, 0, 1.0e12);
+    safeSettings["sampleRate"] = number(settings, "sampleRate", 50000000, 1, 1.0e9);
+    safeSettings["bandwidth"] = number(settings, "bandwidth", 200000, 1, 1.0e9);
+    safeSettings["inputMode"] = number(settings, "inputMode", 0, 0, 4, true);
+    safeSettings["modulationType"] = number(settings, "modulationType", MOD_WFM, MOD_AM, MOD_DMR, true);
+    for (const auto *key : {"audioLowPassHz", "audioHighPassHz"}) safeSettings[key] = number(settings, key, 0, 0, 24000);
+    if (settings.value("audioFilterChainJson").isString() && settings.value("audioFilterChainJson").toString().size() <= 65536)
+        safeSettings["audioFilterChainJson"] = settings.value("audioFilterChainJson");
+    if (!invalid.isEmpty()) { if (errorMessage) *errorMessage = invalid; return false; }
+
+    setPlaybackEnabled(false);
+    saveSettingsTimer.stop();
+    experimentSettings = safeSettings;
+    experimentDisplayAdjusted = requestedRows != rows || requestedResolution != resolution;
+    experimentCalibration = analysis;
+    experimentContextSource = recorded.isEmpty() ? "export-time-fallback; recording header authoritative" : "recording-start";
+    levelMin = float(minimum); levelMax = float(maximum); replayContrast = float(contrast); replaySensitivity = float(sensitivity);
+    replayColoredSpectrum = display.value("coloredSpectrum").toBool(true);
+    replayWaterfallDisplayMode = mode; replay3DResolutionDivisor = resolution; waterfallRowHeight = rows;
+    replayListenFrequencyHz = safeSettings.value("listeningFrequency").toDouble();
+    const auto setSpin = [](QSpinBox *control, int v) { QSignalBlocker blocker(control); control->setValue(v); };
+    const auto setSlider = [](QSlider *control, int v) { QSignalBlocker blocker(control); control->setValue(v); };
+    setSpin(levelMinSpin, int(std::lround(minimum))); setSpin(levelMaxSpin, int(std::lround(maximum)));
+    setSlider(contrastSlider, int(std::lround(contrast))); setSlider(sensitivitySlider, int(std::lround(sensitivity))); setSlider(rowHeightSlider, rows);
+    { QSignalBlocker b(waterfallDisplayModeCombo); waterfallDisplayModeCombo->setCurrentIndex(waterfallDisplayModeCombo->findData(mode)); }
+    { QSignalBlocker b(waterfall3DResolutionCombo); waterfall3DResolutionCombo->setCurrentIndex(waterfall3DResolutionCombo->findData(resolution)); }
+    { QSignalBlocker b(replayAudioCheckbox); replayAudioCheckbox->setChecked(false); }
+    updateSliderValueLabels(); updateReplayDisplayMode(); rebuildWaterfallImage(); updateFrameSelection(selectedFrame);
+    return true;
+}
+
+QJsonObject SpectrumFrameReplayDialog::experimentReplayState() const {
+    return {{"display", QJsonObject{{"levelMin", levelMin}, {"levelMax", levelMax}, {"contrast", replayContrast},
+        {"sensitivity", replaySensitivity}, {"coloredSpectrum", replayColoredSpectrum}, {"waterfallDisplayMode", replayWaterfallDisplayMode},
+        {"waterfallRowsPerFrame", waterfallRowHeight}, {"waterfall3DResolutionDivisor", replay3DResolutionDivisor}}},
+        {"settings", experimentSettings}, {"calibrationProvenance", experimentCalibration}, {"contextSource", experimentContextSource},
+        {"paused", !playbackTimer.isActive()}, {"persistentSettingsEnabled", !isolatedExperiment},
+        {"storedAmplitudesUnchanged", true}, {"displayAdjustedToReplayLimits", experimentDisplayAdjusted},
+        {"firstStoredMagnitude", recording->frames.empty() || recording->frames.front().magnitudes.empty() ? QJsonValue() : QJsonValue(recording->frames.front().magnitudes.front())},
+        {"frameCount", double(recording->frames.size())}, {"viewportRasterPixels", experimentViewportPixels},
+        {"sharedRecordingBacking", experimentFrames && experimentFrames.get() == recording.get()},
+        {"channelIqAvailable", replayIqSourceAvailable(ReplayIqSource::ChannelIq)},
+        {"fullIqAvailable", replayIqSourceAvailable(ReplayIqSource::FullIq)}};
+}
+
+void SpectrumFrameReplayDialog::rebuildExperimentWaterfall() {
+    if (!experimentFrames || experimentFrames->frames.empty()) return;
+    if (imageWatcher) { experimentImageDirty = true; imageCancel->store(true); return; }
+    experimentImageDirty = false;
+    imageCancel = std::make_shared<std::atomic_bool>(false);
+    const auto cancel = imageCancel;
+    const auto frames = experimentFrames;
+    const float minimum = levelMin, maximum = levelMax, contrast = replayContrast, sensitivity = replaySensitivity;
+    auto *watcher = new QFutureWatcher<QImage>(this); imageWatcher = watcher;
+    connect(watcher, &QFutureWatcher<QImage>::finished, this, [this, watcher, cancel] {
+        QImage image;
+        try { image = watcher->result(); } catch (...) { image = QImage(); }
+        imageWatcher = nullptr; watcher->deleteLater();
+        if (!cancel->load()) {
+            waterfallImage = image; scaledWaterfallDirty = true;
+            if (image.isNull()) linkedIqLabel->setText(replayText("experiment_image_failed", "Replay image allocation failed; reduce the replay budget."));
+            renderWaterfallPixmap();
+            if (replayWaterfallDisplayMode != 0) rebuild3DWindow(true);
+        }
+        if (experimentImageDirty) rebuildExperimentWaterfall();
+    });
+    watcher->setFuture(QtConcurrent::run([frames, cancel, minimum, maximum, contrast, sensitivity] {
+        try {
+        const int width = int(frames->frames.front().magnitudes.size()), height = int(frames->frames.size());
+        QImage image(width, height, QImage::Format_RGB888);
+        if (image.isNull()) return image;
+        for (int y = 0; y < height; ++y) {
+            if (cancel->load()) return QImage();
+            const auto &values = frames->frames[std::size_t(y)].magnitudes;
+            auto *row = image.scanLine(y);
+            for (int x = 0; x < width; ++x) {
+                const auto shifted = values.empty() ? 0 : (std::size_t(x)+values.size()/2)%values.size();
+                const auto color = colorForLevel(values.empty() ? minimum : values[shifted], minimum, maximum, contrast, sensitivity);
+                row[x*3] = uchar(color.red()); row[x*3+1] = uchar(color.green()); row[x*3+2] = uchar(color.blue());
+            }
+        }
+        return image;
+        } catch (...) { return QImage(); }
+    }));
+}
+
+void SpectrumFrameReplayDialog::adoptRecording(const QString &path, SpectrumFrameRecording loaded) {
+    recording = std::make_shared<SpectrumFrameRecording>(std::move(loaded));
+    if (isolatedExperiment) experimentFrames = recording;
     recordingPath = path;
     linkedChannelIqPath = recordingPath;
     if (linkedChannelIqPath.endsWith(QStringLiteral("_spectrum.fbspec"))) {
@@ -1100,15 +1286,16 @@ bool SpectrumFrameReplayDialog::loadRecording(const QString &path, QString *erro
         linkedFullIqPath.chop(QStringLiteral(".fbspec").size());
         linkedFullIqPath += QStringLiteral("_full_iq_s8.iq8");
     }
-    replayListenFrequencyHz = recording.metadata.value(QStringLiteral("listeningFrequency")).toDouble(0.0);
-    if (replayListenFrequencyHz <= 0.0 && !recording.frames.empty()) {
-        replayListenFrequencyHz = recording.frames.front().centerFrequency;
+    replayListenFrequencyHz = isolatedExperiment ? experimentSettings.value("listeningFrequency").toDouble()
+        : recording->metadata.value(QStringLiteral("listeningFrequency")).toDouble(0.0);
+    if (replayListenFrequencyHz <= 0.0 && !recording->frames.empty()) {
+        replayListenFrequencyHz = recording->frames.front().centerFrequency;
     }
     selectedFrame = 0;
     replay3DWindowStart = -1;
     replay3DWindowEnd = -1;
     if (timelineSlider) {
-        timelineSlider->setRange(0, static_cast<int>(recording.frames.size()) - 1);
+        timelineSlider->setRange(0, static_cast<int>(recording->frames.size()) - 1);
         timelineSlider->setValue(0);
     }
     updateLinkedIqControls();
@@ -1120,16 +1307,16 @@ bool SpectrumFrameReplayDialog::loadRecording(const QString &path, QString *erro
                             QFileInfo(recordingPath).fileName()));
     qDebug() << "[SpectrumReplay] loaded"
              << QFileInfo(recordingPath).fileName()
-             << "frames" << static_cast<int>(recording.frames.size())
-             << "firstUtc" << (recording.frames.empty() ? 0 : recording.frames.front().utcMs)
-             << "lastElapsedMs" << (recording.frames.empty() ? 0 : recording.frames.back().elapsedMs)
+             << "frames" << static_cast<int>(recording->frames.size())
+             << "firstUtc" << (recording->frames.empty() ? 0 : recording->frames.front().utcMs)
+             << "lastElapsedMs" << (recording->frames.empty() ? 0 : recording->frames.back().elapsedMs)
              << "channelIq" << QFileInfo(linkedChannelIqPath).exists()
              << "fullIq" << QFileInfo(linkedFullIqPath).exists();
-    return true;
 }
 
 void SpectrumFrameReplayDialog::rebuildWaterfallImage() {
-    if (recording.frames.empty()) {
+    if (isolatedExperiment) { rebuildExperimentWaterfall(); return; }
+    if (recording->frames.empty()) {
         waterfallImage = QImage();
         scaledWaterfallCache = QImage();
         scaledWaterfallCacheWidth = 0;
@@ -1143,15 +1330,15 @@ void SpectrumFrameReplayDialog::rebuildWaterfallImage() {
         return;
     }
 
-    const int width = static_cast<int>(recording.frames.front().magnitudes.size());
-    const int height = static_cast<int>(recording.frames.size());
+    const int width = static_cast<int>(recording->frames.front().magnitudes.size());
+    const int height = static_cast<int>(recording->frames.size());
     if (width <= 0 || height <= 0) {
         return;
     }
 
     waterfallImage = QImage(width, height, QImage::Format_RGB888);
     for (int y = 0; y < height; ++y) {
-        const SpectrumFrameRecord &frame = recording.frames[static_cast<std::size_t>(y)];
+        const SpectrumFrameRecord &frame = recording->frames[static_cast<std::size_t>(y)];
         const int frameBins = static_cast<int>(frame.magnitudes.size());
         for (int x = 0; x < width; ++x) {
             const int shiftedIndex = frameBins > 0 ? (x + frameBins / 2) % frameBins : x;
@@ -1177,12 +1364,12 @@ void SpectrumFrameReplayDialog::rebuildWaterfallImage() {
 }
 
 void SpectrumFrameReplayDialog::rebuild3DWindow(bool force) {
-    if (!waterfall3DView || recording.frames.empty()) {
+    if (!waterfall3DView || recording->frames.empty()) {
         return;
     }
 
     constexpr int kWindowCapacity = 128;
-    const int frameCount = static_cast<int>(recording.frames.size());
+    const int frameCount = static_cast<int>(recording->frames.size());
     const bool cached = replay3DWindowStart >= 0 && replay3DWindowEnd >= replay3DWindowStart;
     const int edgeMargin = 16;
     if (!force && cached && selectedFrame >= replay3DWindowStart &&
@@ -1222,7 +1409,7 @@ void SpectrumFrameReplayDialog::rebuild3DWindow(bool force) {
     const int baseColumns = std::clamp(visibleWidth * 2, 512, 4096);
     const int fixedOutputColumns = std::min(
         baseColumns,
-        static_cast<int>(recording.frames.front().magnitudes.size()));
+        static_cast<int>(recording->frames.front().magnitudes.size()));
     if (fixedOutputColumns <= 0) {
         waterfall3DView->clearHistory();
         return;
@@ -1230,7 +1417,7 @@ void SpectrumFrameReplayDialog::rebuild3DWindow(bool force) {
     for (int frameIndex = replay3DWindowStart;
          frameIndex <= replay3DWindowEnd;
          ++frameIndex) {
-        const SpectrumFrameRecord &frame = recording.frames[static_cast<std::size_t>(frameIndex)];
+        const SpectrumFrameRecord &frame = recording->frames[static_cast<std::size_t>(frameIndex)];
         const int sourceBins = static_cast<int>(frame.magnitudes.size());
         const int outputColumns = fixedOutputColumns;
         replay3DLevels.assign(static_cast<std::size_t>(outputColumns), levelMin);
@@ -1321,6 +1508,7 @@ void SpectrumFrameReplayDialog::updateReplayDisplayMode() {
 }
 
 void SpectrumFrameReplayDialog::renderWaterfallPixmap() {
+    if (isolatedExperiment) { renderExperimentWaterfallViewport(); return; }
     if (replayWaterfallPaused) return;
     if (waterfallImage.isNull()) {
         waterfallLabel->clear();
@@ -1378,8 +1566,8 @@ void SpectrumFrameReplayDialog::renderWaterfallPixmap() {
                           scaled,
                           QRect(0, selectedY + 1, zoomedWidth, tailHeight));
     }
-    if (replayListenFrequencyHz > 0.0 && !recording.frames.empty()) {
-        const SpectrumFrameRecord &frame = recording.frames[static_cast<std::size_t>(selectedFrame)];
+    if (replayListenFrequencyHz > 0.0 && !recording->frames.empty()) {
+        const SpectrumFrameRecord &frame = recording->frames[static_cast<std::size_t>(selectedFrame)];
         if (frame.maxFrequency > frame.minFrequency) {
             const double markerRatio =
                 std::clamp((replayListenFrequencyHz - frame.minFrequency) /
@@ -1391,7 +1579,7 @@ void SpectrumFrameReplayDialog::renderWaterfallPixmap() {
             painter.drawLine(markerX, 0, markerX, composed.height());
         }
     }
-    if (replayAreaRulerEnabled && !recording.frames.empty()) {
+    if (replayAreaRulerEnabled && !recording->frames.empty()) {
         const QPoint first(std::clamp(replayAreaRulerStart.x(), 0, composed.width() - 1),
                            std::clamp(replayAreaRulerStart.y(), 0, composed.height() - 1));
         const QPoint last(std::clamp(replayAreaRulerEnd.x(), 0, composed.width() - 1),
@@ -1405,9 +1593,9 @@ void SpectrumFrameReplayDialog::renderWaterfallPixmap() {
                 } else if (imageY >= selectedY) {
                     sourceY = selectedY;
                 }
-                return std::clamp(sourceY, 0, static_cast<int>(recording.frames.size()) - 1);
+                return std::clamp(sourceY, 0, static_cast<int>(recording->frames.size()) - 1);
             };
-            const SpectrumFrameRecord &frequencyFrame = recording.frames.front();
+            const SpectrumFrameRecord &frequencyFrame = recording->frames.front();
             const double spanHz = frequencyFrame.maxFrequency - frequencyFrame.minFrequency;
             const double firstHz = frequencyFrame.minFrequency +
                                    static_cast<double>(selection.left()) * spanHz /
@@ -1418,8 +1606,8 @@ void SpectrumFrameReplayDialog::renderWaterfallPixmap() {
             const int firstFrame = imageYToFrame(selection.top());
             const int lastFrame = imageYToFrame(selection.bottom());
             const qint64 elapsedMs = std::llabs(
-                recording.frames[static_cast<std::size_t>(lastFrame)].elapsedMs -
-                recording.frames[static_cast<std::size_t>(firstFrame)].elapsedMs);
+                recording->frames[static_cast<std::size_t>(lastFrame)].elapsedMs -
+                recording->frames[static_cast<std::size_t>(firstFrame)].elapsedMs);
             const QString label = QStringLiteral("%1: %2   %3: %4")
                                       .arg(replayText("frequency_span", "Delta f"),
                                            formatFrequency(std::abs(lastHz - firstHz)),
@@ -1474,12 +1662,55 @@ void SpectrumFrameReplayDialog::renderWaterfallPixmap() {
     }
 }
 
+void SpectrumFrameReplayDialog::renderExperimentWaterfallViewport() {
+    if (renderingExperimentViewport || replayWaterfallPaused || !experimentWaterfallTile || waterfallImage.isNull()) return;
+    QScopedValueRollback<bool> rendering(renderingExperimentViewport, true);
+    const int viewportWidth = std::clamp(graphScroll->viewport()->width()-2, 1, 4096);
+    const int virtualWidth = viewportWidth*std::clamp(waterfallZoomPercent, 100, 400)/100;
+    const int loupe = std::clamp(waterfallRowHeight, 1, 16);
+    const int virtualHeight = waterfallImage.height()+loupe-1;
+    graph->setFixedWidth(virtualWidth); scaleWidget->setFixedWidth(virtualWidth);
+    waterfallLabel->resize(virtualWidth, virtualHeight);
+    if (playbackTimer.isActive()) waterfallScroll->verticalScrollBar()->setValue(
+        std::clamp(selectedFrame-waterfallScroll->viewport()->height()/2, 0, waterfallScroll->verticalScrollBar()->maximum()));
+    const int left = waterfallScroll->horizontalScrollBar()->value(), top = waterfallScroll->verticalScrollBar()->value();
+    const int width = std::clamp(std::min(virtualWidth-left, waterfallScroll->viewport()->width()), 1, 4096);
+    const int height = std::clamp(std::min(virtualHeight-top, waterfallScroll->viewport()->height()), 1, 2048);
+    QImage tile(width, height, QImage::Format_RGB888);
+    if (tile.isNull()) { experimentWaterfallTile->clear(); return; }
+    tile.fill(Qt::black);
+    QPainter painter(&tile);
+    // Only the visible portion is rasterized; the QLabel supplies virtual scroll geometry.
+    const auto segment = [&](int sourceY, int sourceRows, int targetY, int targetRows) {
+        if (targetRows <= 0) return;
+        const int low = std::max(top, targetY), high = std::min(top+height, targetY+targetRows);
+        if (high <= low) return;
+        const double scale = double(sourceRows)/targetRows;
+        painter.drawImage(QRect(0, low-top, width, high-low), waterfallImage,
+            QRectF(double(left)*waterfallImage.width()/virtualWidth, sourceY+(low-targetY)*scale,
+                   double(width)*waterfallImage.width()/virtualWidth, (high-low)*scale));
+    };
+    segment(0, selectedFrame, 0, selectedFrame);
+    segment(selectedFrame, 1, selectedFrame, loupe);
+    segment(selectedFrame+1, waterfallImage.height()-selectedFrame-1, selectedFrame+loupe, waterfallImage.height()-selectedFrame-1);
+    painter.setPen(QPen(Qt::red, 2));
+    painter.drawRect(-left, selectedFrame-top, virtualWidth-1, loupe);
+    if (replayAreaRulerEnabled) {
+        painter.setPen(QPen(Qt::yellow, 1, Qt::DashLine));
+        painter.drawRect(QRect(replayAreaRulerStart, replayAreaRulerEnd).normalized().translated(-left, -top));
+    }
+    painter.end();
+    experimentViewportPixels = width*height;
+    experimentWaterfallTile->setPixmap(QPixmap::fromImage(tile));
+    experimentWaterfallTile->resize(width, height); experimentWaterfallTile->move(left, top); experimentWaterfallTile->show();
+}
+
 void SpectrumFrameReplayDialog::updateFrameSelection(int index) {
-    if (recording.frames.empty()) {
+    if (recording->frames.empty()) {
         return;
     }
-    selectedFrame = std::clamp(index, 0, static_cast<int>(recording.frames.size()) - 1);
-    const SpectrumFrameRecord &frame = recording.frames[static_cast<std::size_t>(selectedFrame)];
+    selectedFrame = std::clamp(index, 0, static_cast<int>(recording->frames.size()) - 1);
+    const SpectrumFrameRecord &frame = recording->frames[static_cast<std::size_t>(selectedFrame)];
     const int count = static_cast<int>(frame.magnitudes.size());
     frequencyScratch.resize(static_cast<std::size_t>(count));
     const double span = frame.maxFrequency - frame.minFrequency;
@@ -1493,7 +1724,7 @@ void SpectrumFrameReplayDialog::updateFrameSelection(int index) {
                    frame.minFrequency,
                    frame.maxFrequency,
                    frame.fftLength,
-                   true);
+                   replayColoredSpectrum);
     updateScaleWidget();
     if (listenFrequencyControl) {
         listenFrequencyControl->setRangeHz(frame.minFrequency, frame.maxFrequency);
@@ -1514,28 +1745,30 @@ void SpectrumFrameReplayDialog::updateFrameSelection(int index) {
 }
 
 void SpectrumFrameReplayDialog::updateLabels() {
-    if (recording.frames.empty()) {
+    if (recording->frames.empty()) {
         infoLabel->setText(QStringLiteral("No frames"));
         return;
     }
 
-    const SpectrumFrameRecord &frame = recording.frames[static_cast<std::size_t>(selectedFrame)];
+    const SpectrumFrameRecord &frame = recording->frames[static_cast<std::size_t>(selectedFrame)];
     const QString fileName = QFileInfo(recordingPath).fileName();
     const QString utc = QDateTime::fromMSecsSinceEpoch(frame.utcMs, Qt::UTC)
                             .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz 'UTC'"));
     infoLabel->setText(QStringLiteral("%1 | frame %2/%3 | t=%4 ms | %5 - %6 | center %7 | %8")
                            .arg(fileName)
                            .arg(selectedFrame + 1)
-                           .arg(recording.frames.size())
+                           .arg(recording->frames.size())
                            .arg(frame.elapsedMs)
                            .arg(formatFrequency(frame.minFrequency))
                            .arg(formatFrequency(frame.maxFrequency))
                            .arg(formatFrequency(frame.centerFrequency))
                            .arg(utc));
+    if (isolatedExperiment && experimentDisplayAdjusted)
+        infoLabel->setText(infoLabel->text() + " | " + replayText("experiment_display_limited", "Display adapted to replay limits"));
 }
 
 void SpectrumFrameReplayDialog::setPlaybackEnabled(bool enabled) {
-    if (enabled && recording.frames.empty()) {
+    if (enabled && recording->frames.empty()) {
         enabled = false;
     }
     if (playButton && playButton->isChecked() != enabled) {
@@ -1555,7 +1788,7 @@ void SpectrumFrameReplayDialog::setPlaybackEnabled(bool enabled) {
             }
         }
         playbackStartFrame = selectedFrame;
-        playbackStartElapsedMs = recording.frames[static_cast<std::size_t>(selectedFrame)].elapsedMs;
+        playbackStartElapsedMs = recording->frames[static_cast<std::size_t>(selectedFrame)].elapsedMs;
         playbackClock.restart();
         if (replayAudioCheckbox && replayAudioCheckbox->isChecked()) {
             startLocalIqPlayback();
@@ -1580,7 +1813,7 @@ double SpectrumFrameReplayDialog::replaySpeedMultiplier() const {
 }
 
 void SpectrumFrameReplayDialog::scheduleNextPlaybackFrame() {
-    if (recording.frames.empty()) {
+    if (recording->frames.empty()) {
         playbackTimer.stop();
         return;
     }
@@ -1614,13 +1847,13 @@ void SpectrumFrameReplayDialog::updateLinkedIqControls() {
     if (replayAudioCheckbox) {
         replayAudioCheckbox->setEnabled(hasSelectedIq);
     }
-    if (listenFrequencyControl && !recording.frames.empty()) {
-        const SpectrumFrameRecord &frame = recording.frames[static_cast<std::size_t>(selectedFrame)];
+    if (listenFrequencyControl && !recording->frames.empty()) {
+        const SpectrumFrameRecord &frame = recording->frames[static_cast<std::size_t>(selectedFrame)];
         listenFrequencyControl->setEnabled(fullIq);
         listenFrequencyControl->setRangeHz(frame.minFrequency, frame.maxFrequency);
         if (!fullIq) {
             const double fixedFrequency =
-                recording.metadata.value(QStringLiteral("listeningFrequency")).toDouble(frame.centerFrequency);
+                recording->metadata.value(QStringLiteral("listeningFrequency")).toDouble(frame.centerFrequency);
             replayListenFrequencyHz = fixedFrequency > 0.0 ? fixedFrequency : frame.centerFrequency;
         }
         QSignalBlocker blocker(listenFrequencyControl);
@@ -1648,15 +1881,15 @@ void SpectrumFrameReplayDialog::updateReplayMarker() {
 }
 
 void SpectrumFrameReplayDialog::updateScaleWidget() {
-    if (!scaleWidget || recording.frames.empty()) {
+    if (!scaleWidget || recording->frames.empty()) {
         return;
     }
-    const SpectrumFrameRecord &frame = recording.frames[static_cast<std::size_t>(selectedFrame)];
+    const SpectrumFrameRecord &frame = recording->frames[static_cast<std::size_t>(selectedFrame)];
     if (frame.maxFrequency <= frame.minFrequency) {
         return;
     }
-    const double bandwidth = recording.metadata.value(QStringLiteral("bandwidth")).toDouble(0.0);
-    const int modulationType = recording.metadata.value(QStringLiteral("modulationType")).toInt(MOD_WFM);
+    const double bandwidth = recording->metadata.value(QStringLiteral("bandwidth")).toDouble(0.0);
+    const int modulationType = recording->metadata.value(QStringLiteral("modulationType")).toInt(MOD_WFM);
     const QSignalBlocker blocker(scaleWidget);
     scaleWidget->setRange(frame.minFrequency, frame.maxFrequency);
     scaleWidget->setTuning(replayListenFrequencyHz > 0.0 ? replayListenFrequencyHz : frame.centerFrequency,
@@ -1672,7 +1905,7 @@ void SpectrumFrameReplayDialog::scheduleDeferredRender() {
     deferredRenderQueued = true;
     QTimer::singleShot(0, this, [this]() {
         deferredRenderQueued = false;
-        if (recording.frames.empty()) {
+        if (recording->frames.empty()) {
             return;
         }
         updateScaleWidget();
@@ -1681,7 +1914,7 @@ void SpectrumFrameReplayDialog::scheduleDeferredRender() {
             rebuild3DWindow(true);
         }
         QTimer::singleShot(40, this, [this]() {
-            if (!recording.frames.empty()) {
+            if (!recording->frames.empty()) {
                 updateScaleWidget();
                 renderWaterfallPixmap();
             }
@@ -1726,7 +1959,7 @@ void SpectrumFrameReplayDialog::startLocalIqPlayback() {
     }
 
     resetLocalIqPlaybackState(false);
-    IqBuffer::clear();
+    if (!isolatedExperiment) IqBuffer::clear();
     localIqPlaybackActive = true;
     localIqPlaybackSampleRate = 0.0;
     localIqPlaybackAudioSampleRate = 0.0;
@@ -1741,9 +1974,9 @@ void SpectrumFrameReplayDialog::startLocalIqPlayback() {
     localIqPlaybackTimelineOffsetSeconds = 0.0;
     localIqPlaybackStartDelaySeconds = 0.0;
 
-    const qint64 selectedElapsedMs = recording.frames.empty()
+    const qint64 selectedElapsedMs = recording->frames.empty()
                                          ? 0
-                                         : recording.frames[static_cast<std::size_t>(selectedFrame)].elapsedMs;
+                                         : recording->frames[static_cast<std::size_t>(selectedFrame)].elapsedMs;
     const double selectedSeconds = std::max(0.0, selectedElapsedMs / 1000.0);
     quint64 dataOffset = 0;
 
@@ -1758,9 +1991,9 @@ void SpectrumFrameReplayDialog::startLocalIqPlayback() {
             return;
         }
         replayListenFrequencyHz =
-            recording.metadata.value(QStringLiteral("listeningFrequency")).toDouble(replayListenFrequencyHz);
-        if (replayListenFrequencyHz <= 0.0 && !recording.frames.empty()) {
-            replayListenFrequencyHz = recording.frames.front().centerFrequency;
+            recording->metadata.value(QStringLiteral("listeningFrequency")).toDouble(replayListenFrequencyHz);
+        if (replayListenFrequencyHz <= 0.0 && !recording->frames.empty()) {
+            replayListenFrequencyHz = recording->frames.front().centerFrequency;
         }
         localIqPlaybackSampleRate = replayIqNominalSampleRate(source, info.sampleRate);
         localIqPlaybackBytesPerSample = info.channels * (info.bitsPerSample / 8);
@@ -1769,7 +2002,7 @@ void SpectrumFrameReplayDialog::startLocalIqPlayback() {
         dataOffset = info.dataOffset;
     } else {
         const double sampleRate =
-            recording.metadata.value(QStringLiteral("sourceSampleRate")).toDouble(0.0);
+            recording->metadata.value(QStringLiteral("sourceSampleRate")).toDouble(0.0);
         if (sampleRate <= 0.0 || !std::isfinite(sampleRate)) {
             linkedIqLabel->setText(replayText("full_iq_bad_rate", "Full IQ error: invalid sample rate"));
             localIqPlaybackActive = false;
@@ -1830,6 +2063,10 @@ void SpectrumFrameReplayDialog::startLocalIqPlayback() {
 
     localIqPlaybackBytesRead = byteOffset;
     localIqPlaybackStartByteOffset = byteOffset;
+    if (isolatedExperiment) {
+        startExperimentIqPlayback(path, dataOffset, byteOffset);
+        return;
+    }
     RadioSettings audioSettings = replaySettingsForSource(localIqPlaybackAudioSampleRate);
     localAudioProcessor->configure(audioSettings);
 
@@ -2042,7 +2279,73 @@ void SpectrumFrameReplayDialog::startLocalIqPlayback() {
     updateReplayMarker();
 }
 
+void SpectrumFrameReplayDialog::startExperimentIqPlayback(const QString &path, quint64 dataOffset, quint64 byteOffset) {
+    const auto settings = replaySettingsForSource(localIqPlaybackSampleRate);
+    const bool channel = localIqPlaybackS16;
+    if (settings.modulationType > MOD_WFM || (channel && (settings.sampleRate < 48000 || settings.sampleRate > 2000000))) {
+        linkedIqLabel->setText(replayText("experiment_audio_limit", "Isolated replay audio: AM/NFM/SAM/USB/LSB/DSB/CW/WFM; channel IQ 48 kS/s..2 MS/s."));
+        localIqPlaybackActive = false; return;
+    }
+    if (!experimentAudio) experimentAudio = std::make_unique<DspBranchAudioOutput>();
+    experimentAudio->setActiveSinks({QStringLiteral("experiment-replay")});
+    auto *output = experimentAudio.get();
+    const auto generation = ++experimentAudioGeneration;
+    const quint64 size = localIqPlaybackDataSize;
+    const int bytesPerSample = localIqPlaybackBytesPerSample;
+    const double feedRate = localIqPlaybackFeedSampleRate, delay = localIqPlaybackStartDelaySeconds;
+    localIqWorkerStop.store(false);
+    localIqWorkerThread = std::thread([this, output, generation, path, dataOffset, byteOffset, size, channel, bytesPerSample, settings, feedRate, delay] {
+        const auto fail = [this, generation](const QString &message) {
+            QMetaObject::invokeMethod(this, [this, generation, message] {
+                if (experimentAudioGeneration == generation) { linkedIqLabel->setText(message); localIqPlaybackActive = false; }
+            }, Qt::QueuedConnection);
+        };
+        try {
+            QFile file(path);
+            if (!file.open(QIODevice::ReadOnly) || !file.seek(qint64(dataOffset+byteOffset))) { fail(file.errorString()); return; }
+            IqChannelizer channelizer;
+            AudioProcessor demodulator;
+            demodulator.setLocalPlaybackEnabled(false);
+            std::vector<float> iq, filtered;
+            std::vector<short> pcm;
+            quint64 position = byteOffset;
+            bool first = true;
+            const auto started = std::chrono::steady_clock::now();
+            while (!localIqWorkerStop.load() && position < size) {
+                const double due = delay + double(position-byteOffset)/bytesPerSample/std::max(1.0, feedRate);
+                const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+                if (due > elapsed + 0.1) { std::this_thread::sleep_for(std::chrono::milliseconds(4)); continue; }
+                const qint64 count = qint64(std::min<quint64>(size-position, quint64((channel ? 4096 : 65536)*bytesPerSample)));
+                const QByteArray bytes = file.read(count);
+                if (bytes.size() != count || bytes.size()%bytesPerSample) { fail("Experiment IQ read failed or file changed"); return; }
+                position += quint64(bytes.size());
+                iq.clear();
+                if (channel) appendIqS16LeToFloat(bytes, bytes.size()/bytesPerSample, iq);
+                else appendIqS8ToFloat(bytes, bytes.size()/bytesPerSample, iq);
+                auto audio = settings;
+                const std::vector<float> *input = &iq;
+                if (!channel) {
+                    const auto result = channelizer.processFloatIq(iq.data(), iq.size(), settings, filtered);
+                    if (!result.valid) { fail("Unsupported full IQ replay channel"); return; }
+                    audio.sampleRate = result.outputRate; input = &filtered;
+                }
+                if (input->empty()) continue;
+                audio.inputMode = INPUT_RF;
+                audio.centerFrequency = audio.actualFrequency = audio.listeningFrequency;
+                if (!demodulator.processIndependentIq(*input, audio, first, pcm)) { fail("Unsupported isolated replay demodulation/rate"); return; }
+                if (localIqWorkerStop.load()) return;
+                DspBranchPcmFrame frame;
+                frame.sinkId = QStringLiteral("experiment-replay"); frame.generation = generation; frame.reset = first;
+                frame.pcm = QByteArray(reinterpret_cast<const char *>(pcm.data()), int(pcm.size()*sizeof(short)));
+                output->enqueue(frame); first = false;
+            }
+        } catch (const std::exception &e) { fail(QString::fromUtf8(e.what())); }
+    });
+    updateLinkedIqControls(); updateReplayMarker();
+}
+
 void SpectrumFrameReplayDialog::stopLocalIqWorker() {
+    ++experimentAudioGeneration;
     localIqWorkerStop.store(true, std::memory_order_release);
     if (localIqWorkerThread.joinable()) {
         localIqWorkerThread.join();
@@ -2059,7 +2362,8 @@ void SpectrumFrameReplayDialog::resetLocalIqPlaybackState(bool updateButton) {
     if (localAudioProcessor) {
         localAudioProcessor->stopDemodulation();
     }
-    IqBuffer::clear();
+    if (experimentAudio) experimentAudio->setActiveSinks({});
+    if (!isolatedExperiment) IqBuffer::clear();
     localIqPlaybackSampleRate = 0.0;
     localIqPlaybackAudioSampleRate = 0.0;
     localIqPlaybackSeekSampleRate = 0.0;
@@ -2079,27 +2383,34 @@ void SpectrumFrameReplayDialog::resetLocalIqPlaybackState(bool updateButton) {
 
 RadioSettings SpectrumFrameReplayDialog::replaySettingsForSource(double sampleRate) const {
     RadioSettings settings;
-    settings.inputMode = recording.metadata.value(QStringLiteral("inputMode")).toInt(settings.inputMode);
-    settings.centerFrequency = recording.metadata.value(QStringLiteral("centerFrequency")).toDouble(settings.centerFrequency);
-    settings.actualFrequency = recording.metadata.value(QStringLiteral("actualFrequency")).toDouble(settings.actualFrequency);
+    settings.inputMode = recording->metadata.value(QStringLiteral("inputMode")).toInt(settings.inputMode);
+    settings.centerFrequency = recording->metadata.value(QStringLiteral("centerFrequency")).toDouble(settings.centerFrequency);
+    settings.actualFrequency = recording->metadata.value(QStringLiteral("actualFrequency")).toDouble(settings.actualFrequency);
     settings.listeningFrequency = replayListenFrequencyHz > 0.0 ? replayListenFrequencyHz
-                                                                 : recording.metadata.value(QStringLiteral("listeningFrequency")).toDouble(settings.listeningFrequency);
+                                                                 : recording->metadata.value(QStringLiteral("listeningFrequency")).toDouble(settings.listeningFrequency);
     settings.sampleRate = sampleRate > 0.0
                               ? sampleRate
-                              : recording.metadata.value(QStringLiteral("sourceSampleRate")).toDouble(settings.sampleRate);
-    settings.bandwidth = recording.metadata.value(QStringLiteral("bandwidth")).toDouble(settings.bandwidth);
-    settings.modulationType = recording.metadata.value(QStringLiteral("modulationType")).toInt(settings.modulationType);
-    settings.fftLength = recording.metadata.value(QStringLiteral("fftLength")).toInt(settings.fftLength);
+                              : recording->metadata.value(QStringLiteral("sourceSampleRate")).toDouble(settings.sampleRate);
+    settings.bandwidth = recording->metadata.value(QStringLiteral("bandwidth")).toDouble(settings.bandwidth);
+    settings.modulationType = recording->metadata.value(QStringLiteral("modulationType")).toInt(settings.modulationType);
+    settings.fftLength = recording->metadata.value(QStringLiteral("fftLength")).toInt(settings.fftLength);
     settings.fftWindowType = normalizedFftWindowType(
-        recording.metadata.value(QStringLiteral("fftWindowType")).toInt(settings.fftWindowType));
+        recording->metadata.value(QStringLiteral("fftWindowType")).toInt(settings.fftWindowType));
     settings.audioEnabled = true;
+    if (isolatedExperiment) {
+        settings.bandwidth = experimentSettings.value("bandwidth").toDouble(settings.bandwidth);
+        settings.modulationType = experimentSettings.value("modulationType").toInt(settings.modulationType);
+        settings.audioLowPassHz = experimentSettings.value("audioLowPassHz").toDouble();
+        settings.audioHighPassHz = experimentSettings.value("audioHighPassHz").toDouble();
+        settings.audioFilterChainJson = experimentSettings.value("audioFilterChainJson").toString("[]");
+    }
 
     if (selectedReplayIqSource() == ReplayIqSource::ChannelIq) {
         settings.centerFrequency = settings.listeningFrequency;
         settings.actualFrequency = settings.listeningFrequency;
-    } else if (!recording.frames.empty()) {
-        const int index = std::clamp(selectedFrame, 0, static_cast<int>(recording.frames.size()) - 1);
-        const SpectrumFrameRecord &frame = recording.frames[static_cast<std::size_t>(index)];
+    } else if (!recording->frames.empty()) {
+        const int index = std::clamp(selectedFrame, 0, static_cast<int>(recording->frames.size()) - 1);
+        const SpectrumFrameRecord &frame = recording->frames[static_cast<std::size_t>(index)];
         if (frame.centerFrequency > 0.0 && std::isfinite(frame.centerFrequency)) {
             settings.centerFrequency = frame.centerFrequency;
             settings.actualFrequency = frame.centerFrequency;
@@ -2123,7 +2434,9 @@ SpectrumFrameReplayDialog::ReplayIqSource SpectrumFrameReplayDialog::selectedRep
 }
 
 QString SpectrumFrameReplayDialog::replayIqPathForSource(ReplayIqSource source) const {
-    return source == ReplayIqSource::FullIq ? linkedFullIqPath : linkedChannelIqPath;
+    const auto path = source == ReplayIqSource::FullIq ? linkedFullIqPath : linkedChannelIqPath;
+    if (isolatedExperiment && !verifiedReplayAssets.contains(QFileInfo(path).canonicalFilePath())) return {};
+    return path;
 }
 
 QString SpectrumFrameReplayDialog::replayIqSidecarPathForSource(ReplayIqSource source) const {
@@ -2146,6 +2459,7 @@ QString SpectrumFrameReplayDialog::replayIqSidecarPathForSource(ReplayIqSource s
             path += QStringLiteral(".json");
         }
     }
+    if (isolatedExperiment && !verifiedReplayAssets.contains(QFileInfo(path).canonicalFilePath())) return {};
     return path;
 }
 
@@ -2176,7 +2490,7 @@ double SpectrumFrameReplayDialog::replayIqTimelineOffsetSeconds(ReplayIqSource s
         return (iqFirstUtcMs - spectrumFirstUtcMs) / 1000.0;
     }
 
-    if (recording.frames.empty() || iqDurationSeconds <= 0.0 || !std::isfinite(iqDurationSeconds)) {
+    if (recording->frames.empty() || iqDurationSeconds <= 0.0 || !std::isfinite(iqDurationSeconds)) {
         return 0.0;
     }
     const QString recordedAtLocal = root.value(QStringLiteral("recordedAtLocal")).toString();
@@ -2190,7 +2504,7 @@ double SpectrumFrameReplayDialog::replayIqTimelineOffsetSeconds(ReplayIqSource s
     const qint64 estimatedIqStartUtcMs =
         stopTime.toMSecsSinceEpoch() -
         static_cast<qint64>(std::llround(iqDurationSeconds * 1000.0));
-    return (estimatedIqStartUtcMs - recording.frames.front().utcMs) / 1000.0;
+    return (estimatedIqStartUtcMs - recording->frames.front().utcMs) / 1000.0;
 }
 
 double SpectrumFrameReplayDialog::replayIqNominalSampleRate(ReplayIqSource source,
@@ -2253,9 +2567,9 @@ double SpectrumFrameReplayDialog::replayIqEffectiveSampleRate(ReplayIqSource sou
         }
     }
 
-    if (recording.frames.size() >= 2) {
-        const qint64 firstUtc = recording.frames.front().utcMs;
-        const qint64 lastUtc = recording.frames.back().utcMs;
+    if (recording->frames.size() >= 2) {
+        const qint64 firstUtc = recording->frames.front().utcMs;
+        const qint64 lastUtc = recording->frames.back().utcMs;
         if (lastUtc > firstUtc) {
             const double durationSeconds = static_cast<double>(lastUtc - firstUtc) / 1000.0;
             if (durationSeconds > 0.0 && std::isfinite(durationSeconds)) {
@@ -2275,10 +2589,10 @@ bool SpectrumFrameReplayDialog::replayIqSourceAvailable(ReplayIqSource source) c
 }
 
 double SpectrumFrameReplayDialog::frequencyForLocalX(int x, int widgetWidth) const {
-    if (recording.frames.empty() || widgetWidth <= 0) {
+    if (recording->frames.empty() || widgetWidth <= 0) {
         return replayListenFrequencyHz;
     }
-    const SpectrumFrameRecord &frame = recording.frames[static_cast<std::size_t>(selectedFrame)];
+    const SpectrumFrameRecord &frame = recording->frames[static_cast<std::size_t>(selectedFrame)];
     if (frame.maxFrequency <= frame.minFrequency) {
         return frame.centerFrequency;
     }

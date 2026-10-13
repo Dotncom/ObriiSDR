@@ -19,6 +19,8 @@
 #include <iostream>
 #include <stdexcept>
 
+bool runDspBranchAudioTests();
+
 namespace {
 void require(bool value, const char *message) { if (!value) throw std::runtime_error(message); }
 QJsonObject graph() {
@@ -35,6 +37,102 @@ QJsonObject graph() {
             QJsonObject{{"source", "ddc"}, {"target", "fft"}},
             QJsonObject{{"source", "fft"}, {"target", "display"}},
             QJsonObject{{"source", "fft"}, {"target", "waterfall"}}}}};
+}
+void testActiveBranchResources() {
+    QJsonArray blocks, edges;
+    const auto reset = [&] {
+        blocks = QJsonArray{QJsonObject{{"id", "source"}, {"type", "iq_source"}}};
+        edges = QJsonArray();
+    };
+    const auto addBranch = [&](const QString &id, bool enabled, int channels = 0, int taps = 16) {
+        QString input = "source";
+        if (channels) {
+            input = id + "-pfb";
+            blocks.append(QJsonObject{{"id", input}, {"type", "pfb_channelizer"},
+                {"settings", QJsonObject{{"channels", channels}, {"tapsPerPhase", taps}}}});
+            edges.append(QJsonObject{{"source", "source"}, {"target", input}});
+        }
+        blocks.append(QJsonObject{{"id", id}, {"type", "ddc_channelizer"},
+            {"settings", QJsonObject{{"enabled", enabled}}}});
+        edges.append(QJsonObject{{"source", input}, {"target", id}});
+        blocks.append(QJsonObject{{"id", id + "-fft"}, {"type", "branch_fft"}});
+        blocks.append(QJsonObject{{"id", id + "-view"}, {"type", "branch_spectrum"}});
+        blocks.append(QJsonObject{{"id", id + "-scope"}, {"type", "oscilloscope"}});
+        blocks.append(QJsonObject{{"id", id + "-demod"}, {"type", "branch_demodulator"}});
+        blocks.append(QJsonObject{{"id", id + "-audio"}, {"type", "branch_audio_output"}});
+        edges.append(QJsonObject{{"source", id}, {"target", id + "-fft"}});
+        edges.append(QJsonObject{{"source", id + "-fft"}, {"target", id + "-view"}});
+        edges.append(QJsonObject{{"source", id}, {"target", id + "-scope"}});
+        edges.append(QJsonObject{{"source", id}, {"target", id + "-demod"}});
+        edges.append(QJsonObject{{"source", id + "-demod"}, {"target", id + "-audio"}});
+    };
+    const auto compile = [&] { return compileDspGraph(QJsonObject{{"blocks", blocks}, {"connections", edges}}); };
+    const auto requireInactiveRoutes = [](const DspGraphPlan &plan, const QString &id) {
+        const auto branch = std::find_if(plan.branches.cbegin(), plan.branches.cend(),
+            [&](const DspBranchConfig &b) { return b.id == id; });
+        require(branch != plan.branches.cend() && !branch->enabled && branch->ffts.size() == 1 && branch->iqConsumer,
+            "Inactive branch configuration was lost or activated");
+        require(plan.spectrumRoutes.value(id + "-view") == id + "-fft" &&
+                plan.researchRoutes.value(id + "-scope") == id &&
+                plan.audioRoutes.value(id + "-demod") == id && plan.audioRoutes.value(id + "-audio") == id,
+            "Inactive branch display/research/audio routes were lost");
+    };
+    const auto requireRejected = [](const DspGraphPlan &plan, const QString &error) {
+        require(plan.errors.contains(error) && plan.branches.isEmpty() && plan.spectrumRoutes.isEmpty() &&
+                plan.researchRoutes.isEmpty() && plan.audioRoutes.isEmpty() && plan.pfbChannels == 0 &&
+                QJsonDocument::fromJson(plan.executionKey).object().value("branches").toArray().isEmpty(),
+            "Invalid active branch resources did not clear the executable plan");
+    };
+
+    for (int active : {0, 1, DspMaxBranches, DspMaxBranches + 1}) {
+        reset();
+        // Disabled IDs sort both before and after the eight-active boundary.
+        for (int i = 0; i < DspMaxBranches + 2; ++i)
+            addBranch(QStringLiteral("ddc-%1").arg(i, 2, 10, QLatin1Char('0')), i > 0 && i <= active);
+        const auto plan = compile();
+        if (active > DspMaxBranches) {
+            requireRejected(plan, "At most eight DDC branches can run");
+        } else {
+            require(plan.errors.isEmpty() && plan.branches.size() == DspMaxBranches + 2 &&
+                    std::count_if(plan.branches.cbegin(), plan.branches.cend(),
+                        [](const DspBranchConfig &b) { return b.enabled; }) == active,
+                "Disabled DDCs consumed the active branch budget");
+            requireInactiveRoutes(plan, "ddc-00");
+            requireInactiveRoutes(plan, QStringLiteral("ddc-%1").arg(DspMaxBranches + 1, 2, 10, QLatin1Char('0')));
+        }
+    }
+
+    const int channels[] = {8, 16, 64};
+    const int taps[] = {8, 16, 32};
+    for (int selected = -1; selected < 3; ++selected) {
+        reset();
+        for (int i = 0; i < 3; ++i)
+            addBranch(QStringLiteral("pfb-ddc-%1").arg(i), i == selected, channels[i], taps[i]);
+        const auto plan = compile();
+        require(plan.errors.isEmpty() && plan.branches.size() == 3 &&
+                plan.pfbChannels == (selected < 0 ? 0 : channels[selected]) &&
+                plan.pfbTaps == (selected < 0 ? 16 : taps[selected]),
+            "Disabled PFB branches selected, conflicted with or overwrote the active bank");
+        for (int i = 0; i < 3; ++i)
+            if (i != selected) requireInactiveRoutes(plan, QStringLiteral("pfb-ddc-%1").arg(i));
+    }
+    // Matching active banks remain valid; channel-count and tap-count conflicts still fail.
+    for (int mismatch = 0; mismatch < 3; ++mismatch) {
+        reset();
+        addBranch("a-inactive", false, 8, 8);
+        addBranch("m-active-1", true, 16, 16);
+        addBranch("m-active-2", true, mismatch == 1 ? 32 : 16, mismatch == 2 ? 32 : 16);
+        addBranch("z-inactive", false, 64, 32);
+        const auto plan = compile();
+        if (mismatch) {
+            requireRejected(plan, "All active PFB branches must share the same bank settings");
+        } else {
+            require(plan.errors.isEmpty() && plan.branches.size() == 4 && plan.pfbChannels == 16 && plan.pfbTaps == 16,
+                "Matching active PFB banks were rejected");
+            requireInactiveRoutes(plan, "a-inactive");
+            requireInactiveRoutes(plan, "z-inactive");
+        }
+    }
 }
 RadioSettings sourceSettings() {
     RadioSettings s;
@@ -65,6 +163,8 @@ DspBranchFrame waitFor(DspBranchEngine &engine, const QString &id, bool error = 
 }
 
 bool dspBranchSelfTest() {
+    testActiveBranchResources();
+    require(runDspBranchAudioTests(), "DSP branch audio tests failed");
     require(dspLinkKind("iq_source", "ddc_channelizer") == DspLinkKind::Iq, "Raw IQ port type wrong");
     require(dspLinkKind("ddc_channelizer", "branch_fft") == DspLinkKind::Iq, "DDC IQ port type wrong");
     require(dspLinkKind("branch_fft", "branch_spectrum") == DspLinkKind::Spectrum, "FFT port type wrong");

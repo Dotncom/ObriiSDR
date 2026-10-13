@@ -32,10 +32,147 @@
 #include <iostream>
 #include "itm.h"
 
+static void clutterTests(const std::function<void(bool,const char *)> &check){
+    using namespace propagation;
+    const auto near=[](double a,double b){return std::isfinite(a)&&std::isfinite(b)&&std::abs(a-b)<1e-9;};
+    const auto flat=[](double,double){return 0.0;};
+    Parameters p;p.tx={0,0};p.rx=destination(p.tx,1.0,5000);p.txHeightM=30;
+    p.frequencyMHz=1000;p.model=Model::FreeSpace;p.gridSize=16;p.radiusKm=2;
+    const auto legacy=calculatePath(p,flat);
+    check(legacy.valid&&legacy.clutter.status==ClutterStatus::Disabled&&legacy.clutter.lossDb==0&&
+          legacy.basePathLossDb==legacy.pathLossDb,"None preserves original FSPL path loss exactly");
+    check(near(legacy.receivedDbm,30+10*std::log10(p.powerW)-legacy.freeSpaceDb),"None preserves original budget");
+    check(legacy.points.back().rayM==p.rxHeightM,"None preserves actual profile height");
+    auto dormant=p;dormant.rxClutterManualDb=Unknown;dormant.rxClutterMode=ClutterMode::Manual;
+    check(calculatePath(dormant,flat).receivedDbm==legacy.receivedDbm,"None ignores dormant clutter settings");
+    p.rxEnvironment=ClutterEnvironment::Urban;
+    check(receiverClutter(p).status==ClutterStatus::Invalid&&!validate(p).isEmpty(),"Automatic clutter requires explicit terrain exclusion");
+    check(!calculatePath(p,flat).valid&&!calculateCoverage(p,flat).error.isEmpty(),"Unconfirmed clutter invalidates path and map consistently");
+    const auto rejected=calculateCoverage(p,flat);
+    check(rejected.path.clutter.status==ClutterStatus::Invalid&&
+          profileCsv(p,rejected.path).contains("# error="),"Rejected coverage retains explicit clutter failure in result and export");
+    p.rxClutterExcludedFromTerrain=true;
+    // Independently evaluated P.2108-1 3.1 (2a-g), h=1.5 m, ws=27 m, f=1 GHz.
+    const ClutterEnvironment environments[]={ClutterEnvironment::Rural,ClutterEnvironment::Suburban,
+        ClutterEnvironment::Urban,ClutterEnvironment::DenseUrban};
+    const double expected[]={17.96121055258615,19.20683060916835,23.035326724794245,25.539197259959444};
+    const double heights[]={10,10,15,20};
+    for(int i=0;i<4;++i){
+        p.rxEnvironment=environments[i];const auto c=receiverClutter(p);
+        check(c.status==ClutterStatus::Modelled&&near(c.lossDb,expected[i])&&c.referenceHeightM==heights[i],
+              "Published equations and category heights, GHz frequency and degree angle");
+        auto high=p;high.rxHeightM=heights[i];
+        check(receiverClutter(high).status==ClutterStatus::AboveClutter&&receiverClutter(high).lossDb==0,"At clutter height has zero loss");
+        high.rxHeightM+=10;
+        check(receiverClutter(high).lossDb==0&&receiverClutter(high).referenceHeightM==high.rxHeightM,"Above clutter keeps actual height");
+        for(double f:{30.0,145.0,3000.0}){
+            auto edge=p;edge.frequencyMHz=f;
+            check(validate(edge).isEmpty()&&receiverClutter(edge).lossDb>0,"Automatic frequency boundaries inclusive");
+        }
+        for(double f:{0.1,29.999,3000.001,100000.0,Unknown,std::numeric_limits<double>::infinity()}){
+            auto outside=p;outside.frequencyMHz=f;
+            check(receiverClutter(outside).status==ClutterStatus::Invalid&&
+                  !std::isfinite(receiverClutter(outside).lossDb)&&!calculatePath(outside,flat).valid,
+                  "Automatic out-of-band and non-finite values never silently extrapolate");
+        }
+        for(double h:{0.0,-1.0,3000.1,Unknown}){
+            auto invalid=p;invalid.rxHeightM=h;
+            check(receiverClutter(invalid).status==ClutterStatus::Invalid,"Invalid RX height rejected");
+        }
+    }
+    p.rxEnvironment=ClutterEnvironment::Urban;p.frequencyMHz=145;
+    const auto ridge=[](double lat,double){return 130*std::exp(-std::pow((lat-0.012)/0.004,2));};
+    for(auto model:{Model::FreeSpace,Model::KnifeEdge,Model::Itm}){
+        p.model=model;
+        const auto withClutter=calculatePath(p,ridge);
+        auto reference=p;reference.rxEnvironment=ClutterEnvironment::None;reference.rxHeightM=15;
+        const auto above=calculatePath(reference,ridge);
+        check(withClutter.valid&&above.valid&&near(withClutter.basePathLossDb,above.pathLossDb),"Base model evaluated at representative height for every terrain model");
+        check(near(withClutter.pathLossDb,above.pathLossDb+withClutter.clutter.lossDb)&&
+              near(withClutter.receivedDbm,above.receivedDbm-withClutter.clutter.lossDb)&&
+              near(withClutter.marginDb,above.marginDb-withClutter.clutter.lossDb),"RX clutter added exactly once");
+        check(withClutter.points.back().rayM==above.points.back().rayM&&
+              withClutter.clutter.rxHeightM==1.5&&withClutter.clutter.referenceHeightM==15,"Profile reference ray is distinct from physical antenna");
+        bool sameTerrain=withClutter.points.size()==above.points.size();
+        for(int n=0;n<withClutter.points.size();++n)sameTerrain=sameTerrain&&
+            withClutter.points[n].terrainM==above.points[n].terrainM&&withClutter.points[n].adjustedTerrainM==above.points[n].adjustedTerrainM;
+        check(sameTerrain,"Local clutter never inserted as a terrain ridge");
+        auto manual=p;manual.rxClutterMode=ClutterMode::Manual;manual.rxClutterManualDb=12.5;manual.additionalLossDb=3;
+        manual.rxClutterExcludedFromTerrain=false;
+        const auto m=calculatePath(manual,ridge);
+        auto none=manual;none.rxEnvironment=ClutterEnvironment::None;none.additionalLossDb=0;
+        const auto base=calculatePath(none,ridge);
+        check(m.valid&&near(m.basePathLossDb,base.pathLossDb)&&near(m.receivedDbm,base.receivedDbm-15.5)&&
+              m.clutter.referenceHeightM==manual.rxHeightM,"Manual replaces automatic loss at actual height and remains separate from Additional loss");
+        manual.rxClutterManualDb=0;manual.additionalLossDb=0;
+        check(calculatePath(manual,ridge).receivedDbm==base.receivedDbm,"Zero manual correction exactly restores base output");
+        auto clear=none;const auto clear1=calculatePath(clear,ridge);
+        clear.rxClutterMode=ClutterMode::P2108;clear.rxClutterManualDb=190;
+        check(calculatePath(clear,ridge).receivedDbm==clear1.receivedDbm,"None regression for every terrain model");
+    }
+    p.model=Model::Itm;p.rx=destination(p.tx,1.0,500);
+    const auto shortPath=calculatePath(p,flat);
+    auto shortReference=p;shortReference.rxEnvironment=ClutterEnvironment::None;shortReference.rxHeightM=15;
+    check(shortPath.valid&&shortPath.shortPathFallback&&near(shortPath.basePathLossDb,calculatePath(shortReference,flat).pathLossDb),
+          "ITM short-path fallback uses same clutter reference height");
+    p.model=Model::KnifeEdge;p.rx=destination(p.tx,1.0,5000);
+    check(!calculatePath(p,[](double,double){return Unknown;}).valid,"Clutter does not conceal missing terrain");
+    std::atomic_bool cancel{true};check(calculateCoverage(p,flat,&cancel).cancelled,"Clutter coverage remains cancellable");
+    auto invalid=p;invalid.rxEnvironment=static_cast<ClutterEnvironment>(99);
+    check(!validate(invalid).isEmpty(),"Unknown environment rejected");
+    invalid=p;invalid.rxClutterMode=static_cast<ClutterMode>(99);
+    check(!validate(invalid).isEmpty(),"Unknown active method rejected");
+    auto manual=p;manual.rxClutterMode=ClutterMode::Manual;manual.model=Model::FreeSpace;
+    for(double f:{0.1,29.999,3000.001,100000.0}){
+        manual.frequencyMHz=f;manual.rxClutterManualDb=9;
+        check(calculatePath(manual,flat).valid&&receiverClutter(manual).status==ClutterStatus::Manual,"Manual override available outside ITU band");
+    }
+    for(double loss:{-0.01,200.01,Unknown,std::numeric_limits<double>::infinity()}){
+        manual.rxClutterManualDb=loss;check(!validate(manual).isEmpty(),"Invalid manual residual rejected");
+    }
+    for(double loss:{0.0,200.0}){manual.rxClutterManualDb=loss;check(validate(manual).isEmpty(),"Manual application boundaries inclusive");}
+    for(auto mode:{ClutterMode::P2108,ClutterMode::Manual}){
+        p.rxClutterMode=mode;p.rxClutterManualDb=8;
+        const auto map=calculateCoverage(p,flat);
+        const auto local=receiverClutter(p);
+        auto reference=p;reference.rxEnvironment=ClutterEnvironment::None;reference.rxHeightM=local.referenceHeightM;
+        const auto baseMap=calculateCoverage(reference,flat);
+        check(map.error.isEmpty()&&map.validCells==baseMap.validCells&&map.validCells>100,"Local clutter retains coverage grid and valid cells");
+        bool matches=true,oneProfile=false;
+        for(int i=0;i<map.cells.size();++i){
+            if(!std::isfinite(baseMap.cells[i].receivedDbm))continue;
+            matches=matches&&near(map.cells[i].receivedDbm,baseMap.cells[i].receivedDbm-local.lossDb)&&
+                near(map.cells[i].marginDb,baseMap.cells[i].marginDb-local.lossDb)&&map.cells[i].terrainM==baseMap.cells[i].terrainM;
+            if(!oneProfile){
+                constexpr double pi=3.14159265358979323846;
+                const double top=std::asinh(std::tan(map.bounds.maxLatitude*pi/180));
+                const double bottom=std::asinh(std::tan(map.bounds.minLatitude*pi/180));
+                auto cell=p;cell.rx={std::atan(std::sinh(top+(bottom-top)*(i/p.gridSize+0.5)/p.gridSize))*180/pi,
+                    map.bounds.minLongitude+(map.bounds.maxLongitude-map.bounds.minLongitude)*(i%p.gridSize+0.5)/p.gridSize};
+                const auto profile=calculatePath(cell,flat,nullptr,256);
+                check(profile.valid&&near(profile.receivedDbm,map.cells[i].receivedDbm)&&near(profile.marginDb,map.cells[i].marginDb),"Coverage cell and same-endpoint profile agree");
+                oneProfile=true;
+            }
+        }
+        check(matches&&oneProfile,"Every synthetic coverage cell uses same RX correction exactly once");
+        const auto csv=profileCsv(p,map.path);
+        check(csv.contains("base_path_loss_db=")&&csv.contains("rx_clutter_loss_db=")&&csv.contains("total_path_loss_db=")&&
+              csv.contains("30..3000 MHz")&&csv.contains("HF noise")&&csv.contains("reference height")&&
+              csv.contains("rx_clutter_excluded_from_terrain=")&&csv.contains("manual_rx_clutter_db="),"CSV records budget, settings, reference-height semantics and model limits");
+        check(csv.contains(mode==ClutterMode::Manual?"manual residual; not an ITU prediction":"ITU-R P.2108-1 section 3.1 median"),"CSV distinguishes manual from modelled loss");
+    }
+}
+
 int main(int argc,char **argv){
+    if(argc>1&&QString::fromLocal8Bit(argv[1])=="--clutter-only"){
+        QCoreApplication app(argc,argv);int failures=0,checks=0;
+        clutterTests([&](bool condition,const char *name){++checks;if(!condition){++failures;std::cerr<<"FAIL: "<<name<<"\n";}});
+        std::cout<<checks<<" clutter checks; "<<failures<<" failures\n";return failures?1:0;
+    }
     QApplication app(argc,argv);
     int failures=0,checks=0;
     auto check=[&](bool condition,const char *name){++checks;if(!condition){++failures;std::cerr<<"FAIL: "<<name<<"\n";}};
+    clutterTests(check);
     const QString workspace=argc>1?QString::fromLocal8Bit(argv[1]):QDir::currentPath();
     // Local HTTP fixtures exercise either Qt or the no-OpenSSL Windows fallback.
     for(int expectedStatus:{200,403,404,429}){
@@ -236,6 +373,23 @@ int main(int argc,char **argv){
     for(bool uk:{false,true}){
         const QString settingsFile=settingsDirectory.filePath(uk?"uk.ini":"en.ini");
         PropagationLabDialog dialog(uk,nullptr,settingsFile);dialog.setAttribute(Qt::WA_DontShowOnScreen);dialog.show();app.processEvents();
+        auto *environment=dialog.findChild<QComboBox*>("rxEnvironment");
+        auto *clutterMode=dialog.findChild<QComboBox*>("rxClutterMode");
+        auto *clutterLoss=dialog.findChild<QDoubleSpinBox*>("rxClutterManualDb");
+        auto *clutterExcluded=dialog.findChild<QCheckBox*>("rxClutterExcludedFromTerrain");
+        auto *clutterStatus=dialog.findChild<QLabel*>("rxClutterStatus");
+        check(environment&&environment->count()==5&&environment->currentIndex()==0&&
+              !clutterMode->isEnabled()&&!clutterLoss->isEnabled()&&!clutterExcluded->isChecked(),"Old settings default to None without changing results");
+        environment->setCurrentIndex(3);
+        check(clutterMode->isEnabled()&&clutterExcluded->isEnabled()&&clutterStatus->text().contains("INVALID"),"Automatic clutter exposes missing terrain confirmation");
+        clutterExcluded->setChecked(true);
+        check(!clutterStatus->text().contains("INVALID"),"Terrain confirmation enables valid default-band model");
+        dialog.findChild<QDoubleSpinBox*>("frequencyMHz")->setValue(10);
+        check(clutterStatus->text().contains("INVALID")&&clutterStatus->text().contains("30..3000"),"Clutter UI updates frequency validity immediately");
+        clutterMode->setCurrentIndex(1);
+        check(clutterLoss->isEnabled()&&!clutterExcluded->isEnabled()&&!clutterStatus->text().contains("INVALID"),"Manual override available for HF without claiming ITU validity");
+        environment->setCurrentIndex(0);clutterMode->setCurrentIndex(0);clutterExcluded->setChecked(false);
+        dialog.findChild<QDoubleSpinBox*>("frequencyMHz")->setValue(145);
         for(auto *c:dialog.findChildren<QCheckBox*>())check(!c->isChecked(),"Network disabled by default");
         dialog.setOnlineMapSource("MapTiler test","https://example.invalid/{z}/{x}/{y}.png?key=TEST_ONLY","Test attribution",2);
         auto *terrainChoice=dialog.findChild<QComboBox*>("terrain");
@@ -362,6 +516,7 @@ int main(int argc,char **argv){
         colorLow->setValue(-145);colorHigh->setValue(-35);
         dialog.findChild<QDoubleSpinBox*>("marginColorMinimum")->setValue(-45);
         dialog.findChild<QDoubleSpinBox*>("marginColorMaximum")->setValue(55);
+        environment->setCurrentIndex(4);clutterMode->setCurrentIndex(1);clutterLoss->setValue(12.5);clutterExcluded->setChecked(true);
         markerClass->setCurrentIndex(0);
         QElapsedTimer autosave;autosave.start();
         while(!QFile::exists(settingsFile)&&autosave.elapsed()<3000){app.processEvents();QThread::msleep(10);}
@@ -382,7 +537,12 @@ int main(int argc,char **argv){
                   restoredPoints[1].latitude==points[1].latitude&&restoredPoints[1].longitude==points[1].longitude,"TX/RX points restored");
             check(restored.findChild<QLabel*>("propagationDistance")->text()==distance->text(),"Restored points recompute distance");
             check(restored.findChild<QComboBox*>("propagationMapSource")->currentIndex()==3,"QTH provider does not overwrite saved map choice");
-            for(auto *box:restored.findChildren<QCheckBox*>())check(!box->isChecked(),"Restoring settings does not enable online requests");
+            check(restored.findChild<QComboBox*>("rxEnvironment")->currentIndex()==4&&
+                  restored.findChild<QComboBox*>("rxClutterMode")->currentIndex()==1&&
+                  restored.findChild<QDoubleSpinBox*>("rxClutterManualDb")->value()==12.5&&
+                  restored.findChild<QCheckBox*>("rxClutterExcludedFromTerrain")->isChecked(),"Environment, method, residual and terrain assumption persist");
+            for(auto *box:restored.findChildren<QCheckBox*>())if(box->objectName()!="rxClutterExcludedFromTerrain")
+                check(!box->isChecked(),"Restoring settings does not enable online requests");
         }
         QImage shot(dialog.size(),QImage::Format_ARGB32);shot.fill(Qt::transparent);dialog.render(&shot);
         check(shot.save(output+(uk?"/propagation-uk.png":"/propagation-en.png")),"Dialog render");

@@ -6,7 +6,7 @@ docs/release_stability_handoff.md.
 
 ## Current Baseline
 
-The v6.2.0 release baseline provides:
+The v6.3.0 release baseline provides:
 
 1. First-class Fobos Standard and Agile receive paths, native RTL-SDR, and a
    hardware-tested native HackRF receive path. SoapySDR remains optional and
@@ -107,9 +107,10 @@ Bluetooth hopping and cellular links remain future work. See docs/wireless_lab.m
    individual windows or continuous full-band IQ on the native worker. DDC and
    audio remain local; Wi-Fi/GNSS offload is not implemented. See
    docs/dsp_stream_manager.md and docs/gnu_radio_compatibility.md.
-2. Independent bounded DDC recorders are implemented. Independent demodulator/
-   audio sinks and a measured PFB stage remain future work. The existing
-   Multi-VFO path still shares one FFT and one proven audio monitor.
+2. Version 6.3.0 adds independent bounded DDC demodulator/audio sinks,
+   explicit main-filter wire-order application and an opt-in PFB bank. Qualify
+   multi-channel audio and PFB performance on actual Raspberry hardware. The
+   legacy Multi-VFO path still shares one FFT and one proven audio monitor.
 3. Add backend-specific USB/driver discontinuity counters only where the
    underlying API can report them reliably.
 4. Streaming HDF5 spectrum export, condition-bound calibration, up to 64
@@ -119,6 +120,11 @@ Bluetooth hopping and cellular links remain future work. See docs/wireless_lab.m
    band FFT modes. First evaluate linear-power display reduction before dB
    conversion; preserve calibration, detectors, recording and RBW semantics.
    Do not silently replace a requested long FFT with a shorter display FFT.
+6. Version 6.3.0 adds a portable native spectrum/IQ experiment bundle:
+   verified file manifest, recording-time context for extended captures, isolated
+   replay and optional disarmed DSP-layout restoration. Validate portability on
+   another machine; arbitrary third-party/session graph execution is not included.
+   See docs/experiment_bundle.md.
 
 ### P3: Deferred Signal Work
 
@@ -155,21 +161,24 @@ synchronization, VFO spectrum, and VFO waterfall also have self-contained
 visual blocks.
 
 The board now also executes an explicit Source -> DDC -> branch FFT/display
-grammar alongside the unchanged main pipeline. Two DDC branches and two FFTs
+grammar alongside the unchanged main pipeline. Eight DDC branches and two FFTs
 per branch are supported; research views can consume DDC IQ. Processing uses
-one bounded worker, snapshot reads (never audio-queue consumption), generation
+one local DDC/PFB worker, a lazy bounded external worker, snapshot reads (never audio-queue consumption), generation
 checks and gap counters. Hidden/offscreen consumers stop requesting work unless
-an independent recorder is explicitly armed. Optional external FFT/IQ processing
+an independent recorder or audio output is explicitly enabled. Optional external FFT/IQ processing
 uses the stream manager, not a replacement of the main pipeline. Simplified
 operating mode suppresses all these optional DDC branches and recordings.
 Typed links distinguish data, controls, bindings and legacy diagram-only links.
 New board audio filters start disabled and deletion removes their matching
 table stage. Existing saved stages retain their activation state.
 
-Remaining graph work: independent demodulator/audio sinks, an explicit
+Development after 6.2.0 implements independent demodulator/audio sinks, an explicit
 opt-in audio-filter order compiler, configurable FIR quality/transition bands,
-and a measured PFB stage for many channels. There is no arbitrary IQ scheduler
-and no graph-controlled replacement of the main RX/audio/DMR pipeline.
+and a PFB bank. Remaining graph work is hardware qualification and broader typed
+adapters, not an arbitrary IQ scheduler or replacement of the main RX/audio/DMR
+pipeline. The external GNU Radio adapter supports bounded rational-rate changes;
+arbitrary multi-input/multi-output graphs and automatic OOT-module installation
+remain outside its contract.
 
 ## Release Checklist
 Radio propagation planning is implemented as an independent, manually started

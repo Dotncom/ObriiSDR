@@ -49,6 +49,9 @@ public:
     void processAudioBuffer();
 public:
     void setVolume(float volume);
+    // Thread-confined offline use of the same demodulator; never opens RX/audio devices.
+    bool processIndependentIq(const std::vector<float> &iq, const RadioSettings &settings,
+                              bool discontinuity, std::vector<short> &pcm);
 
 
 public slots:

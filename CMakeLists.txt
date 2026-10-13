@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 6.2.0)
+project(ObriiSDR VERSION 6.3.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -167,6 +167,7 @@ set(SOURCES
     src/mainwindow/main_localization.cpp
     src/mainwindow/main_localization_translations.cpp
     src/mainwindow/main_measurements.cpp
+    src/mainwindow/main_experiment.cpp
     src/mainwindow/main_wireless.cpp
     src/mainwindow/main_propagation.cpp
     src/research/radiopropagation.cpp
@@ -211,6 +212,13 @@ set(SOURCES
     src/core/channelizerutils.h
     src/core/iqchannelizer.cpp
     src/core/iqchannelizer.h
+    src/core/pfbchannelizer.cpp
+    src/core/pfbchannelizer.h
+    src/ui/dspbranchsettingswidget.cpp
+    src/ui/dspbranchsettingswidget.h
+    src/audio/dspbranchaudiooutput.cpp
+    src/audio/dspbranchaudiooutput.h
+    src/audio/dspbranchaudioqueue_p.h
     src/core/dspgraphmodel.cpp
     src/core/dspgraphmodel.h
     src/core/dspbranchengine.cpp
@@ -325,6 +333,10 @@ set(SOURCES
     src/research/iqconstellationpreview.h
     src/research/scientificsessiontools.cpp
     src/research/scientificsessiontools.h
+    src/research/experimentbundle.cpp
+    src/research/experimentbundle.h
+    src/research/experimentbundledialog.cpp
+    src/research/experimentbundledialog.h
     src/research/spectrumpersistencetools.cpp
     src/research/spectrumpersistencetools.h
     src/research/zerospandialog.cpp
@@ -557,6 +569,13 @@ if(OBRII_HDF5_INCLUDE_DIR)
 endif()
 
 if(FOBOS_BUILD_CW_SELFTEST)
+    add_executable(ObriiExperimentBundleSelfTest tools/experiment_bundle_selftest.cpp
+        src/research/experimentbundle.cpp src/research/spectrumframerecorder.cpp)
+    target_include_directories(ObriiExperimentBundleSelfTest PRIVATE src/research src/core src/ui src/utils)
+    target_link_libraries(ObriiExperimentBundleSelfTest PRIVATE Qt5::Core)
+    if(MSVC)
+        target_compile_options(ObriiExperimentBundleSelfTest PRIVATE /utf-8)
+    endif()
     add_executable(ObriiReceiverRefreshSelfTest tools/receiver_refresh_selftest.cpp
         src/utils/fobosdevicecatalog.cpp src/utils/receiverdeviceutils.cpp)
     target_include_directories(ObriiReceiverRefreshSelfTest PRIVATE src/core src/utils)
@@ -663,10 +682,22 @@ if(FOBOS_BUILD_CW_SELFTEST)
     else()
         target_link_libraries(ObriiDspStreamSelfTest PRIVATE Threads::Threads)
     endif()
+    add_executable(ObriiFrequencyControlSelfTest tools/frequency_control_selftest.cpp
+        src/ui/frequencycontrol.cpp src/ui/frequencycontrol.h)
+    target_include_directories(ObriiFrequencyControlSelfTest PRIVATE src/ui)
+    target_link_libraries(ObriiFrequencyControlSelfTest PRIVATE Qt5::Widgets)
+    if(MSVC)
+        target_compile_options(ObriiFrequencyControlSelfTest PRIVATE /utf-8)
+    endif()
+
     add_executable(ObriiDspFlowSelfTest
         tools/dsp_flow_selftest.cpp
         tools/dsp_branch_selftest.cpp
+        tools/dsp_branch_audio_selftest.cpp
+        tools/dsp_branch_audio_queue_selftest.cpp
+        tools/dsp_branch_remote_selftest.cpp
         src/ui/dspflowpanel.cpp src/ui/dspflowpanel.h
+        src/ui/dspbranchsettingswidget.cpp src/ui/dspbranchsettingswidget.h
         src/ui/multivfowidget.cpp src/ui/multivfowidget.h
         src/ui/dspresearchwidget.cpp
         src/research/iqconstellationpreview.cpp
@@ -674,7 +705,6 @@ if(FOBOS_BUILD_CW_SELFTEST)
         src/ui/finetunewidget.cpp src/ui/finetunewidget.h
         src/ui/MyWaterfallWidget.cpp src/ui/MyWaterfallWidget.h
         src/ui/waterfall3drenderer.cpp
-        src/utils/appsettingsutils.cpp
         src/core/iqbuffer.cpp
         src/core/dspgraphmodel.cpp src/core/dspbranchengine.cpp
         src/core/dspstreamprocessor.cpp src/core/dspstreammanager.cpp src/core/dspconnectionprobe.cpp
@@ -682,6 +712,10 @@ if(FOBOS_BUILD_CW_SELFTEST)
         src/core/spectrumcomputesession.cpp src/core/fft.cpp src/core/gpufftbackend.cpp tools/fft_test_globals.cpp
         src/ui/dspcomputedialog.cpp src/ui/dspcomputedialog.h
         src/core/iqchannelizer.cpp src/core/channelizerutils.cpp
+        src/core/pfbchannelizer.cpp
+        src/audio/audioprocessor.cpp src/audio/audioprocessor.h
+        src/audio/remoteaudioplayer.cpp src/audio/remoteaudioplayer.h
+        src/audio/dspbranchaudiooutput.cpp
         src/core/fftplannermutex.cpp
         src/ui/audiofilterchainwidget.cpp src/audio/audiofilterchain.cpp
         src/scan/scanvisualassembler.cpp)
@@ -690,15 +724,48 @@ if(FOBOS_BUILD_CW_SELFTEST)
     target_link_libraries(ObriiDspFlowSelfTest PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets Qt5::Network Qt5::Concurrent ${FFTW_FLOAT_LIBRARY})
     target_compile_definitions(ObriiDspFlowSelfTest PRIVATE OBRII_VFO_SELFTEST=1)
     if(WIN32)
-        target_link_libraries(ObriiDspFlowSelfTest PRIVATE opengl32)
+        target_link_libraries(ObriiDspFlowSelfTest PRIVATE opengl32 winmm)
     else()
         target_link_libraries(ObriiDspFlowSelfTest PRIVATE OpenGL::GL Threads::Threads)
+        if(Qt5Multimedia_FOUND)
+            target_link_libraries(ObriiDspFlowSelfTest PRIVATE Qt5::Multimedia)
+            target_compile_definitions(ObriiDspFlowSelfTest PRIVATE FOBOSAPP_HAS_QT_AUDIO=1)
+        endif()
     endif()
     if(MSVC)
         target_compile_options(ObriiDspFlowSelfTest PRIVATE /utf-8)
         target_compile_options(ObriiDspFlowSelfTest PRIVATE /Zi)
         target_link_options(ObriiDspFlowSelfTest PRIVATE /DEBUG)
         target_link_libraries(ObriiDspFlowSelfTest PRIVATE dbghelp)
+    endif()
+
+    add_executable(ObriiExperimentReplaySelfTest
+        tools/experiment_replay_ui_selftest.cpp tools/fft_test_globals.cpp
+        src/research/spectrumframereplaydialog.cpp src/research/spectrumframereplaydialog.h
+        src/research/spectrumframerecorder.cpp src/research/experimentbundle.cpp
+        src/ui/MyGraphWidget.cpp src/ui/MyGraphWidget.h
+        src/ui/scalewidget.cpp src/ui/scalewidget.h
+        src/ui/frequencycontrol.cpp src/ui/frequencycontrol.h
+        src/ui/waterfall3dview.cpp src/ui/waterfall3dview.h src/ui/waterfall3drenderer.cpp
+        src/audio/playbackmanager.cpp src/audio/playbackmanager.h
+        src/audio/audioprocessor.cpp src/audio/audioprocessor.h
+        src/audio/remoteaudioplayer.cpp src/audio/remoteaudioplayer.h
+        src/audio/dspbranchaudiooutput.cpp src/audio/audiofilterchain.cpp
+        src/core/iqbuffer.cpp src/core/iqchannelizer.cpp src/core/channelizerutils.cpp
+        src/utils/samplefileutils.cpp)
+    target_include_directories(ObriiExperimentReplaySelfTest PRIVATE ${OBRII_DSP_TEST_INCLUDES})
+    target_link_libraries(ObriiExperimentReplaySelfTest PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets Qt5::Network Qt5::Concurrent ${FFTW_FLOAT_LIBRARY})
+    if(WIN32)
+        target_link_libraries(ObriiExperimentReplaySelfTest PRIVATE opengl32 winmm)
+    else()
+        target_link_libraries(ObriiExperimentReplaySelfTest PRIVATE OpenGL::GL Threads::Threads)
+        if(Qt5Multimedia_FOUND)
+            target_link_libraries(ObriiExperimentReplaySelfTest PRIVATE Qt5::Multimedia)
+            target_compile_definitions(ObriiExperimentReplaySelfTest PRIVATE FOBOSAPP_HAS_QT_AUDIO=1)
+        endif()
+    endif()
+    if(MSVC)
+        target_compile_options(ObriiExperimentReplaySelfTest PRIVATE /utf-8)
     endif()
 
     add_executable(ObriiSpectrumPipelineSelfTest
@@ -713,6 +780,23 @@ if(FOBOS_BUILD_CW_SELFTEST)
     target_compile_definitions(ObriiIqChannelizerSelfTest PRIVATE OBRII_IQBUFFER_SELFTEST=1)
     if(NOT WIN32)
         target_link_libraries(ObriiIqChannelizerSelfTest PRIVATE Threads::Threads)
+    endif()
+
+    add_executable(ObriiPfbChannelizerSelfTest tools/pfb_channelizer_selftest.cpp
+        src/core/pfbchannelizer.cpp src/core/iqchannelizer.cpp src/core/channelizerutils.cpp
+        src/core/fftplannermutex.cpp)
+    target_include_directories(ObriiPfbChannelizerSelfTest PRIVATE src/core ${FFTW_INCLUDE_DIR})
+    target_link_libraries(ObriiPfbChannelizerSelfTest PRIVATE Qt5::Core ${FFTW_FLOAT_LIBRARY})
+    add_executable(ObriiGnuRadioProtocolSelfTest tools/gnu_radio_protocol_selftest.cpp
+        src/core/dspstreamprocessor.cpp src/core/fftplannermutex.cpp)
+    target_include_directories(ObriiGnuRadioProtocolSelfTest PRIVATE src/core ${FFTW_INCLUDE_DIR})
+    target_link_libraries(ObriiGnuRadioProtocolSelfTest PRIVATE Qt5::Core ${FFTW_FLOAT_LIBRARY})
+    if(MSVC)
+        target_compile_options(ObriiPfbChannelizerSelfTest PRIVATE /utf-8)
+        target_compile_options(ObriiGnuRadioProtocolSelfTest PRIVATE /utf-8)
+    else()
+        target_link_libraries(ObriiPfbChannelizerSelfTest PRIVATE Threads::Threads)
+        target_link_libraries(ObriiGnuRadioProtocolSelfTest PRIVATE Threads::Threads)
     endif()
 
     add_executable(ObriiWirelessDmrSelfTest

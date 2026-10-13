@@ -4,11 +4,13 @@
 #include "spectrumcomputeoptions.h"
 #include "spectrumcomputesession.h"
 #include "fft.h"
+#include "remotefftretrypolicy.h"
 
 #include <QHostAddress>
 #include <QTcpSocket>
 #include <QtEndian>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -91,7 +93,17 @@ struct RemoteSpectrumWorker::Impl {
     quint64 uploaded = 0, downloaded = 0;
     double upRate = 0, downRate = 0, dspMs = 0, latencyMs = 0, sampleLagMs = 0;
     Time meterAt = Clock::now(), statusAt{}, errorAt{};
+    RemoteFftRetryPolicy retry;
+    std::unique_ptr<FFTResult> localFft;
+    std::vector<float> localIq;
+    quint64 localGeneration = 0, localEpoch = 0, localLoss = 0, localEnd = 0;
+    int pipelineChunks = 1;
 
+    void releaseLocalCache() {
+        localFft.reset();
+        std::vector<float>().swap(localIq);
+        localEnd = localEpoch = localLoss = 0;
+    }
     void check() const {
         if (stopping.load(std::memory_order_acquire) ||
             generation.load(std::memory_order_acquire) != activeGeneration || ticks() >= lease.load())
@@ -124,9 +136,9 @@ struct RemoteSpectrumWorker::Impl {
             uploaded = downloaded = 0;
             meterAt = now;
         }
-        const QString value = QStringLiteral("%1 | upload %2 MB/s | download %3 MB/s | DSP %4 ms | latency %5 ms | gaps %6 | overrun %7 samples | IQ lag %8 ms")
+        const QString value = QStringLiteral("%1 | upload %2 MB/s | download %3 MB/s | DSP %4 ms | latency %5 ms | gaps %6 | overrun %7 samples | IQ lag %8 ms | IQ window %9 chunks")
             .arg(text).arg(upRate, 0, 'f', 2).arg(downRate, 0, 'f', 2)
-            .arg(dspMs, 0, 'f', 1).arg(latencyMs, 0, 'f', 1).arg(gaps).arg(overrunSamples).arg(sampleLagMs, 0, 'f', 1);
+            .arg(dspMs, 0, 'f', 1).arg(latencyMs, 0, 'f', 1).arg(gaps).arg(overrunSamples).arg(sampleLagMs, 0, 'f', 1).arg(pipelineChunks);
         std::lock_guard<std::mutex> lock(mutex);
         if (generation.load() == activeGeneration && demanded) message = value;
         statusAt = now;
@@ -173,6 +185,10 @@ struct RemoteSpectrumWorker::Impl {
         QByteArray buffer;
         QString job;
         bool connected = false;
+        int credit = 1, head = 0, pending = 0;
+        bool pipelineAdvertised = false;
+        struct Ack { quint64 next; int filled; };
+        std::array<Ack, SpectrumComputeProtocol::MaxPipelineChunks> acks{};
         Time nextUpload{};
         explicit Connection(Impl &p, const Config &c) : owner(p), config(c) {
             socket.setReadBufferSize(PacketLimit);
@@ -268,19 +284,30 @@ struct RemoteSpectrumWorker::Impl {
                 throw Failure{QStringLiteral("Remote server does not advertise compatible main FFT v1 support")};
             if (config.settings.fftLength > maximum)
                 throw Failure{QStringLiteral("Requested FFT exceeds remote memory budget (maximum %1 samples)").arg(maximum)};
+            pipelineAdvertised = header.contains("mainFftPipelineChunks");
+            if (pipelineAdvertised && !integer(header.value("mainFftPipelineChunks"), 1,
+                SpectrumComputeProtocol::MaxPipelineChunks, credit))
+                throw Failure{QStringLiteral("Invalid remote FFT pipeline capability")};
+            owner.pipelineChunks = credit;
             connected = true;
         }
         void begin(const RadioSettings &settings) {
             open();
+            drain();
             job = QString::number(owner.activeGeneration) + QLatin1Char('-') + QString::number(++owner.jobs);
-            send({{"type", "main_fft_begin"}, {"job", job}, {"length", settings.fftLength},
+            QJsonObject request{{"type", "main_fft_begin"}, {"job", job}, {"length", settings.fftLength},
                 {"rate", settings.sampleRate}, {"center", settings.centerFrequency},
                 {"window", settings.fftWindowType}, {"backend", config.options.backend},
-                {"mode", config.options.mode == SpectrumComputeMode::Continuous ? "continuous" : "windows"}});
+                {"mode", config.options.mode == SpectrumComputeMode::Continuous ? "continuous" : "windows"}};
+            if (pipelineAdvertised) request["pipelineChunks"] = credit;
+            send(request);
             QJsonObject header;
             QByteArray payload;
             expect("main_fft_ready", header, payload, deadline());
             if (!payload.isEmpty()) throw Failure{QStringLiteral("Invalid remote FFT ready payload")};
+            int accepted = 0;
+            if (pipelineAdvertised && !integer(header.value("pipelineChunks"), credit, credit, accepted))
+                throw Failure{QStringLiteral("Remote FFT did not confirm the pipeline bound")};
         }
         void iq(const float *samples, int count, quint64 first, int expectedFilled, bool gap) {
             if (count <= 0 || count > SpectrumComputeProtocol::ChunkSamples * 2 || count % 2 ||
@@ -288,21 +315,34 @@ struct RemoteSpectrumWorker::Impl {
                 throw Failure{QStringLiteral("Invalid remote FFT IQ counters")};
             for (int i = 0; i < count; ++i)
                 if (!std::isfinite(samples[i])) throw Failure{QStringLiteral("Non-finite IQ samples; remote FFT stopped")};
+            if (pending == credit) acknowledge();
             send({{"type", "main_fft_iq"}, {"job", job}, {"first", QString::number(first)}, {"gap", gap}},
                  SpectrumComputeProtocol::floats(samples, count));
+            acks[std::size_t((head + pending) % credit)] = {first + quint64(count / 2), expectedFilled};
+            ++pending;
+            if (credit == 1) acknowledge();
+        }
+        void acknowledge() {
+            if (!pending) return;
             QJsonObject header;
             QByteArray payload;
             expect("main_fft_ack", header, payload, deadline());
             quint64 next = 0;
             int filled = 0;
             if (!payload.isEmpty() || !SpectrumComputeProtocol::readCounter(header.value("next"), next) ||
-                next != first + quint64(count / 2) ||
-                !integer(header.value("filled"), 0, config.settings.fftLength, filled) || filled != expectedFilled)
+                next != acks[std::size_t(head)].next ||
+                !integer(header.value("filled"), 0, config.settings.fftLength, filled) || filled != acks[std::size_t(head)].filled)
                 throw Failure{QStringLiteral("Invalid remote FFT acknowledgement counters")};
+            head = (head + 1) % credit;
+            --pending;
         }
+        void drain() { while (pending) acknowledge(); }
         std::unique_ptr<SpectrumFftFrame> run(const RadioSettings &settings,
                                              const IqBuffer::BlockMetadata &metadata, Time started) {
             send({{"type", "main_fft_run"}, {"job", job}});
+            // TCP orders run after its IQ. The server can start computing while
+            // we validate the ACK tail, without a second transform or IQ window.
+            drain();
             const Time end = Clock::now() + std::chrono::milliseconds(FftMs);
             QJsonObject header;
             QByteArray payload;
@@ -344,6 +384,8 @@ struct RemoteSpectrumWorker::Impl {
             frame->valid = true;
             owner.dspMs = dsp.toDouble();
             owner.latencyMs = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+            owner.retry.reset();
+            owner.releaseLocalCache();
             return frame;
         }
     };
@@ -451,6 +493,7 @@ struct RemoteSpectrumWorker::Impl {
                 continue;
             }
             if (cursor == stats.totalFloatCount) {
+                connection.drain();
                 report(QStringLiteral("Remote continuous FFT: waiting for IQ (%1/%2 samples)").arg(filled).arg(n));
                 pause(5);
                 continue;
@@ -489,37 +532,40 @@ struct RemoteSpectrumWorker::Impl {
         }
     }
 
-    void fallback(const Config &c, const QString &reason) {
+    void fallback(const Config &c, const QString &reason, int retryMs) {
         // The failed Connection has already been destroyed before entering here.
-        FFTResult fft(true);
-        fft.setBackendPreference(c.localBackend);
-        const Time until = Clock::now() + std::chrono::seconds(1);
-        quint64 lastEnd = 0;
-        std::vector<float> iq;
+        // Keep the plan and source cursor warm across failed reconnect attempts.
+        if (!localFft) localFft = std::make_unique<FFTResult>(true);
+        localFft->setBackendPreference(c.localBackend);
+        const Time until = Clock::now() + std::chrono::milliseconds(retryMs);
         while (Clock::now() < until) {
             check();
             const auto stats = IqBuffer::stats();
-            bind(stats);
+            if (!boundTimeline) bind(stats);
+            else if (stats.epoch != epoch || stats.skippedSnapshotBlocks != loss) throw TimelineChanged{};
             const quint64 count = quint64(c.settings.fftLength) * 2;
-            const QString label = QStringLiteral("LOCAL FALLBACK: %1").arg(reason);
+            const QString label = QStringLiteral("LOCAL FALLBACK: %1; remote retry backoff %2 ms").arg(reason).arg(retryMs);
             report(label, true);
-            if (stats.snapshotSize < count) {
+            if (stats.snapshotSize < count || (historyBarrierEpoch == epoch &&
+                (stats.totalFloatCount < historyBarrier || stats.totalFloatCount - historyBarrier < count))) {
                 error(label + QStringLiteral("; ") + needsWindow(count / 2, stats.snapshotSize / 2));
                 pause(100);
                 continue;
             }
-            if (lastEnd == stats.totalFloatCount) { pause(20); continue; }
+            if (localEpoch == epoch && localLoss == loss && localEnd == stats.totalFloatCount) { pause(20); continue; }
             auto frame = std::make_unique<SpectrumFftFrame>();
             RadioSettings sampled;
-            if (!snapshot(iq, std::size_t(count), stats.totalFloatCount, sampled, frame->metadata)) { pause(10); continue; }
+            if (!snapshot(localIq, std::size_t(count), stats.totalFloatCount, sampled, frame->metadata)) { pause(10); continue; }
             const auto start = Clock::now();
-            frame->valid = fft.computeSnapshot(sampled, iq, frame->frequencies, frame->magnitudes,
+            frame->valid = localFft->computeSnapshot(sampled, localIq, frame->frequencies, frame->magnitudes,
                                                &frame->referenceMagnitudes, &frame->metadata);
             if (!frame->valid) throw Failure{QStringLiteral("LOCAL FALLBACK: FFT computation failed")};
             frame->settings = settings();
             check();
             dspMs = latencyMs = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
-            lastEnd = frame->metadata.totalFloatCount;
+            localEnd = frame->metadata.totalFloatCount;
+            localEpoch = epoch;
+            localLoss = loss;
             publish(std::move(frame));
             report(label, true);
             pause(c.interval);
@@ -536,15 +582,22 @@ struct RemoteSpectrumWorker::Impl {
                 activeGeneration = generation.load();
             }
             boundTimeline = false;
+            if (localGeneration != activeGeneration) {
+                releaseLocalCache();
+                localGeneration = activeGeneration;
+                retry.reset();
+                pipelineChunks = 1;
+            }
             try {
                 validate(c);
                 try {
                     remote(c);
                 } catch (const Failure &failure) {
-                    boundTimeline = false;
+                    if (c.options.mode == SpectrumComputeMode::Continuous && boundTimeline) ++gaps;
                     check();
-                    if (c.options.fallbackToLocal) fallback(c, failure.message);
-                    else { error(failure.message); pause(1000); }
+                    const int retryMs = retry.failed(failure.unavailable);
+                    if (c.options.fallbackToLocal) fallback(c, failure.message, retryMs);
+                    else { error(failure.message); pause(retryMs); }
                 }
             } catch (const TimelineChanged &) {
                 // The loss counter can advance before the ring is cleared by the
@@ -558,6 +611,7 @@ struct RemoteSpectrumWorker::Impl {
                 ++gaps;
                 report(QStringLiteral("IQ epoch/loss changed; restarting remote FFT history"), true);
             } catch (const Cancelled &) {
+                releaseLocalCache();
                 std::lock_guard<std::mutex> lock(mutex);
                 if (generation.load() == activeGeneration && ticks() >= lease.load()) {
                     hasResult = false;

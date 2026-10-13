@@ -1,9 +1,9 @@
-# DSP Stream Manager (Experimental, 6.2)
+# DSP Stream Manager (Experimental)
 
 ## Scope
 
 The manager configures main spectrum FFT placement and optional DDC research
-channels without replacing the receiver/audio pipeline. It supports two DDC
+channels without replacing the receiver/audio pipeline. It supports eight DDC
 channel streams, local FFT or an external processor, returned channel IQ for
 research widgets, and explicit independent CF32LE branch recording. Native Obrii
 compute workers and the optional GNU Radio Python adapter share the bounded DDC
@@ -16,6 +16,41 @@ separate, explicit selection. Neither route offloads Wi-Fi/GNSS engines or exist
 audio/DMR. A network is not inherently faster:
 96 ksps CF32LE costs 768 kB/s each way when returned IQ is requested; 2 Msps costs
 16 MB/s each way, before framing. Spectrum-only consumers do not return IQ.
+
+## Independent Audio And PFB
+
+Add and connect `DDC -> Branch demodulator -> Branch audio output`; insert one
+or more `Branch audio filters` blocks between demodulator and output as needed.
+Enable DDC and audio output separately (both default off). Each DDC can feed one
+independent output, plus its FFT/research consumers. Demodulators reuse the
+existing AM/NFM/SAM/USB/LSB/DSB/CW/WFM code; DMR/digital decoders are not branch
+demodulators. Filters execute in link order, with a total limit of 32 stages.
+The demodulation band must fit the DDC band and the returned sample rate.
+Processed IQ for audio must be 48 ksps..2 Msps. Output is 48 kHz mono with an
+independent device, gain and power-based squelch. A 250 ms pending queue and a
+bounded device queue prevent unbounded catch-up; these limits are not a fixed
+end-to-end latency guarantee. Display refresh does not clock or drop PCM.
+
+Explicitly enabled branch audio continues while the board is hidden. Receiver
+Stop, a disabled branch/output, invalid routing, or Simplified operating mode
+stops it. No branch consumes the main audio queue. Output-device indexes are
+local to the machine and may need reselection after moving settings to another PC.
+
+Optional `IQ -> PFB channel bank -> DDC` shares an RF analysis bank across
+branches. All PFB blocks in the active plan must use the same bank configuration;
+there is one active receiver source, not one physical receiver per source block.
+Choose 8/16/32/64 bank channels and 8..64 taps per phase. Bands crossing guarded
+channel edges fail explicitly; direct IQ -> DDC is always available. FIR controls
+on each DDC expose tap count and a transition-width estimate. The status reports
+actual FIR taps and PFB processing time separately from downstream branch time.
+See pfb_channelizer.md for delay, passband limits and measured performance.
+
+The main Audio filters block's **Apply order from DSP links** action validates a
+single complete `Demodulator -> filter blocks -> Audio output` path and reorders
+the matching existing stages. Unrelated stages retain their slots and all stage
+parameters/enabled states remain unchanged. This is a one-shot apply action, not
+automatic rewiring of the main audio path. Independent branch audio links execute
+directly; ordinary legacy main-path diagram links otherwise stay descriptive.
 
 ## Two Computers
 
@@ -155,7 +190,8 @@ FFT executor or a separate compute-target signal-flow block.
   Window mode additionally needs the entire FFT in local history, capped at
   8,388,608 complex samples regardless of the remote worker memory budget.
 - The estimate reserves 25% of measured bandwidth and respects the draft upload
-  budget on Main FFT. It includes current per-IQ-chunk ACK latency, but excludes
+  budget on Main FFT. Its per-IQ-chunk ACK estimate remains conservative for the
+  negotiated four-chunk pipeline (and applicable to legacy lockstep peers), but excludes
   actual FFT computation, source copying, rendering, protocol overhead, competing
   traffic and receiver load. "Headroom available" is not a real-time guarantee.
   The advertised FFT memory limit is checked separately. No network test alone
@@ -188,6 +224,12 @@ not automatically armed from a saved layout. Stop RX, disable the branch or enab
 simplified mode to stop it. An explicitly armed recorder can keep its branch
 working while its visual widgets are hidden.
 
+Stopping is asynchronous: each segment creation and bounded sample write is
+admitted against the current generation immediately before I/O. An already
+admitted operation may finish after Stop was requested (including creating an
+empty segment); the worker then finalizes its files. Disk I/O never holds the
+branch-control mutex and cannot delay local audio through that mutex.
+
 ## Resources And Failure Behavior
 
 - Local processing calls the shared processor directly, without JSON, sockets or
@@ -196,22 +238,125 @@ working while its visual widgets are hidden.
   and no unlimited backlog. Slow/disconnected workers report a stream interruption.
   No silent switch to another processor or change of sample rate occurs. Main FFT
   local fallback is separately opt-in as described above.
+- Local DDC/PFB processing never waits for that connection. Channelized IQ moves
+  to a separate external worker with two pending blocks per branch, sixteen total
+  (at most 8 MiB pending CF32), plus one in-flight request. Oldest pending data is
+  dropped on overflow with an explicit gap, not accumulated into growing latency.
+  The worker is created only when external work is submitted and sleeps on a
+  condition variable while idle. Local-only use adds no remote thread or IQ queue.
+- Source epochs, retuning, stopping and simplified mode invalidate remote jobs
+  and cancel transport waits. Endpoint changes do not reset local demodulators.
+  Remote branches still share their connection; their own audio can have gaps
+  when it cannot keep up. Shared CPU/disk/audio-device limits remain applicable.
 - Epoch/generation/sample counters invalidate mixed, interrupted and stale results.
   Source IQ is read via snapshots, never taken from the main audio queue.
-- Hidden/offscreen visual consumers stop requesting work unless recording was
-  explicitly started. No branch worker is created if no branch is active.
+- Hidden/offscreen visual consumers stop requesting work unless recording or
+  audio was explicitly enabled. No branch worker is created if no branch is active.
 - **Simplified operating mode** disables these optional DDC/stream branches and
   recording. Its legacy settings key is preserved. Main RX/audio/DMR and the main
   spectrum/waterfall keep their established shared-frame path with separately
   selected main FFT placement. The separately, explicitly
   started compute service is independent of this receiver-side setting.
 
+## Bounded Main FFT Transport
+
+The native main FFT v1 handshake optionally advertises `mainFftPipelineChunks: 4`.
+The client requests `pipelineChunks` in `main_fft_begin`, and requires the same
+integer in `main_fft_ready` before uploading. Bounds are 1-4. A missing capability
+means explicit legacy one-chunk lockstep: no extension is sent or assumed.
+Old clients still receive their unchanged ready reply when they omit the field.
+Malformed capabilities or missing/mismatched confirmations fail closed. Framing,
+tokens, chunk payloads, job IDs, ACKs and result messages are unchanged; this does
+not change DDC protocol or processor APIs.
+
+The sender permits at most four outstanding 131072-complex-sample IQ chunks
+(4 MiB CF32LE plus bounded framing). Each ACK must match the oldest pending job,
+64-bit next-sample counter and filled count. One ACK releases one credit. The
+fixed-size client queue contains only four counter records, not extra FFT windows.
+Socket/read buffers and single-packet write bounds remain unchanged. Server
+history, memory-budget limits, one-main-FFT admission and the two-connection cap
+are unchanged. Whole framed packets still count toward the upload budget.
+
+TCP orders `main_fft_run` after the final IQ chunk; the client can send it before
+draining the last ACKs, allowing server computation to overlap ACK validation.
+Upload/chunk ingestion and ACK transit can overlap inside the credit window.
+There is still only **one transform and result download at a time**. No next-frame
+IQ is uploaded during FFT computation or spectrum download, no second FFT buffer
+is allocated for pipelining, and no asynchronous compute scheduler is introduced.
+That limit avoids extra large-FFT memory, mutable-history races and full-duplex
+write deadlocks. Exact FFT/window/scaling/bin order is unchanged.
+
+Pending ACKs are drained before replacing a job and when continuous input becomes
+idle. Cancellation, demand expiry or source epoch/loss changes close the socket
+and discard its pending credits. Reconnection never replays unacknowledged IQ
+into another job. Continuous transport failures count as gaps; retained-ring
+overruns still report skipped samples and restart history. Generation, epoch,
+loss, job, token and final result-counter checks remain active throughout.
+Runtime status includes `IQ window 1 chunks` or `IQ window 4 chunks`.
+
+Opt-in local fallback retains one local FFT kernel and IQ snapshot across retry
+attempts in the same request generation. It does not recompute an unchanged
+source window on every retry. Transient connection/busy failures back off by
+1, 2, 4, then at most 8 seconds; protocol/authentication/capacity refusals use
+30 seconds. A complete remote result or changed configuration resets backoff.
+The first complete validated remote result releases the local FFT plan and IQ
+storage; generation changes, cancellation and lease expiry also release them.
+The cache stays warm only during failure/retry cycles. Its bounded memory can
+coexist with a remote attempt, but no parallel local compute
+thread is added. Fallback observes the same epoch/loss/history barriers and is
+still explicitly labelled. Reconnect attempts can pause local updates: this is
+not seamless failover. No local FFT occurs unless fallback was enabled.
+
+## Loopback Measurement
+
+Measured on this Windows host on 2026-10-13, MSVC `/O2`, Qt 5.15.2, CPU FFTW,
+127.0.0.1 TCP, native server budget 64 MiB. Each row uses a fresh worker and one
+cold plus nine warm frames, deterministic Hann-window IQ and exact-source parity
+checks. "Cold" means the first frame on a fresh remote connection, not a cold
+machine/process; the reference FFT has already run. The synthetic source advances
+one N-sample block after each returned frame, not at a sustained RF sample rate.
+Times cover request through frame receipt (1 ms polling), not rendering
+or RF acquisition. Baseline was compiled before transport changes with the same
+benchmark harness. Values are milliseconds, rounded to one decimal; warm p95 is
+the maximum of nine observations. These small samples are descriptive, not a
+statistical speed guarantee; other concurrent host work can affect them.
+
+| Mode | N | Cap MB/s | Cold before/after | Warm median before/after | Warm p95 before/after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Windows | 65536 | 100 | 38.8 / 34.1 | 45.6 / 48.7 | 49.8 / 53.7 |
+| Windows | 65536 | 2000 | 22.8 / 42.0 | 32.5 / 30.1 | 34.1 / 45.1 |
+| Windows | 1048576 | 100 | 225.6 / 263.8 | 233.0 / 215.1 | 249.4 / 253.6 |
+| Windows | 1048576 | 2000 | 204.3 / 204.7 | 148.9 / 135.0 | 180.3 / 165.2 |
+| Continuous | 65536 | 100 | 45.8 / 58.0 | 48.2 / 46.5 | 52.9 / 51.9 |
+| Continuous | 65536 | 2000 | 38.1 / 23.3 | 31.7 / 31.9 | 35.0 / 32.3 |
+| Continuous | 1048576 | 100 | 246.0 / 244.5 | 232.8 / 229.7 | 237.2 / 256.2 |
+| Continuous | 1048576 | 2000 | 156.9 / 144.7 | 147.6 / 128.5 | 183.1 / 149.4 |
+
+The eight-chunk, high-cap warm medians improved in this run; small-window and
+tail timings were mixed. These are **loopback cycle times, not actual LAN speed**,
+and do not establish full-rate continuous streaming, GPU performance or a speedup
+over local FFT. Upload caps are configured ceilings, not measured link rates.
+An additional repeat measured high-cap 1048576-point warm medians of 121.4 ms
+(windows) and 121.6 ms (continuous); timing variability remains material. Raw
+repeat output is in `build/remote-fft-selftest/final-loopback.log`.
+
+Reproduce without shared CMake changes or launching the GUI:
+`powershell -File tools/build_remote_fft_selftest.ps1` builds and runs the isolated
+headless `build/remote-fft-selftest/ObriiSpectrumComputeSelfTest.exe`.
+Add `-Benchmark` for timings or `-BuildOnly` to compile only. The existing shared
+CMake target remains `ObriiSpectrumComputeSelfTest`. The script does not publish,
+package, or replace the sole
+application executable.
+
+Deterministic tests withhold ACKs to prove four credits (one for legacy), release
+one credit at a time, and prove run-before-ACK-tail ordering with exact FFT parity.
+They cover bad negotiation/counters/jobs, disconnect/timeout, full-window
+cancel/retune/epoch/lease expiry, fallback duplicate suppression/backoff/recovery,
+server stop, concurrent DDC and untouched audio queues. Manager coexistence also
+checks that rational output metadata survives consecutive processor replies.
+
 ## Remaining Phases
 
-Current main FFT transport is serialized: each 131072-complex-sample IQ chunk
-waits for an application ACK; computation and complete float32 spectrum download
-pause further input upload. The common FFT kernel and epoch/generation guards
-preserve numerical meaning, but this is not yet a pipelined distributed scheduler.
 Small FFTs may be faster locally. At 50 MS/s, FFT 65536 and 100 ms window updates
 need approximately 5.24 MB/s up and 2.62 MB/s down instead of continuous 400 MB/s
 up; transfer volume alone does not include FFT, copy and rendering time.
@@ -225,9 +370,8 @@ when acquisition pauses the sample clock also pauses. The existing `latency`
 describes the processing cycle and can include waiting for new IQ.
 
 Future performance work should benchmark full cold/warm FFT cycles on the actual
-two computers, pipeline bounded IQ transfer with processing/results, and retain
-local FFT state during fallback retries. Current local fallback periodically
-retries the remote path and is not a seamless zero-pause failover. The server's
+two computers and evaluate bounded next-frame transfer during processing/results
+only with explicit memory and cancellation ownership. The server's
 1-second compute-payload flush and 5-second request-idle limits also mean a slow
 or paused peer can need reconnection. The preflight tool does not remove those
 limits or establish GPU speed from link bandwidth.
@@ -240,16 +384,18 @@ the status reports the reconnect/failure, and receiver/audio processing continue
 
 Main FFT software checks include 2,000 exact snapshot parity frames, 300 direct
 DFT reference cases, 47 chunk/ring/protocol session frames, native loopback main
-FFT plus DDC, arbitrary FFT lengths, retuning, sampled-center metadata, explicit
+FFT plus DDC, bounded pipeline/legacy negotiation, arbitrary FFT lengths, retuning, sampled-center metadata, explicit
 fallback, cancellation, mode toggles and preservation of the audio queue.
 These checks do not qualify full-rate LAN streaming or GPU performance.
 
-This is a first executable shared-stream foundation, not a general GNU Radio
-scheduler in Obrii. Independent demodulator/audio sinks, graph-controlled filter
-order, arbitrary rate-changing external blocks, PFB, automatic
-load balancing and qualified device-clock timestamps remain separate work. The
-current GNU adapter accepts persistent one-in/one-out complex blocks at unchanged
-sample rate; see gnu_radio_bridge_usage.md and dsp_stream_protocol.md.
+This is a bounded shared-stream system, not a general GNU Radio scheduler in
+Obrii. Development after 6.2.0 adds eight independent DDC branches, branch
+demodulator/filter/audio sinks, explicit main-filter wire-order application,
+FIR controls and an opt-in PFB bank. The GNU adapter accepts persistent one-in/
+one-out complex blocks at unchanged or bounded rational sample rates. Arbitrary
+rate-changing graphs, automatic load balancing and qualified device-clock
+timestamps remain separate work. See gnu_radio_bridge_usage.md,
+dsp_stream_protocol.md and pfb_channelizer.md.
 
 Local synthetic/loopback tests do not establish Raspberry-to-laptop throughput.
 That requires an actual two-machine test and comparison with the manager disabled.

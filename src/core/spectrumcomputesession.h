@@ -8,6 +8,8 @@
 namespace SpectrumComputeProtocol {
 constexpr int MaxFftLength = 67108864;
 constexpr int ChunkSamples = 131072;
+// Optional v1 extension. Each chunk still gets an ordered, validated ACK.
+constexpr int MaxPipelineChunks = 4;
 int maxLengthForBudget(int memoryMiB);
 bool readCounter(const QJsonValue &value, quint64 &out);
 QByteArray floats(const float *values, int count);

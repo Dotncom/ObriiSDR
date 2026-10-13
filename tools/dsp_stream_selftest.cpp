@@ -1,11 +1,16 @@
 #include "dspstreammanager.h"
+#include "dspstreamtransport_p.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QHostAddress>
 #include <QJsonDocument>
+#include <QNetworkProxy>
+#include <QTcpServer>
 #include <QTcpSocket>
 #include <QThread>
 #include <algorithm>
 #include <cmath>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -83,8 +88,12 @@ void processorTests() {
     checkTone(processor.process(b));
     b.stream = "second"; b.firstSample = 0;
     require(processor.process(b).error.isEmpty(), "Second stream rejected");
-    b.stream = "third";
-    require(!processor.process(b).error.isEmpty(), "Third stream exceeded the history budget");
+    for (int i = 2; i < 8; ++i) {
+        b.stream = QString("extra-%1").arg(i);
+        require(processor.process(b).error.isEmpty(), "Eight-stream admission failed");
+    }
+    b.stream = "ninth";
+    require(!processor.process(b).error.isEmpty(), "Ninth stream exceeded the history budget");
     processor.clear(); b = tone(4096);
     for (int i = 0; i < 19; ++i) {
         b.firstSample = std::uint64_t(i)*4096;
@@ -109,6 +118,214 @@ void networkTests(const DspStreamEndpoint &endpoint, bool native = false) {
     checkTone(manager.process(b, true));
     manager.clear();
     std::cout << "Authenticated external FFT/IQ, rejected wrong token and reconnect: passed\n";
+}
+
+template <typename Predicate>
+bool waitUntil(Predicate predicate, int ms = 3000) {
+    QElapsedTimer timer;
+    timer.start();
+    while (!predicate() && timer.elapsed() < ms) {
+        QCoreApplication::processEvents();
+        QThread::msleep(1);
+    }
+    return predicate();
+}
+
+enum class CancelPhase { Connect, Hello, Result };
+
+// Owns only the peer sockets on the test thread. The manager and all its Qt
+// client operations live on a separate thread; only its atomic flag is shared.
+struct CancellationPeer {
+    struct Client { QTcpSocket *socket; QByteArray buffer; int ordinal; int socks = 0; };
+    QTcpServer listener;
+    std::vector<std::unique_ptr<Client>> clients;
+    DspStreamProcessor processor;
+    CancelPhase phase;
+    bool reached = false, firstClosed = false;
+    QString error;
+
+    explicit CancellationPeer(CancelPhase p) : phase(p) {
+        listener.setProxy(QNetworkProxy::NoProxy);
+        require(listener.listen(QHostAddress::LocalHost, 0), "Cancellation peer bind failed");
+        QObject::connect(&listener, &QTcpServer::newConnection, &listener, [this] {
+            auto *socket = listener.nextPendingConnection();
+            socket->setReadBufferSize(DspStreamTransport::PacketLimit);
+            auto client = std::make_unique<Client>();
+            client->socket = socket;
+            client->ordinal = int(clients.size());
+            auto *state = client.get();
+            clients.push_back(std::move(client));
+            QObject::connect(socket, &QTcpSocket::readyRead, &listener, [this, state] { receive(*state); });
+            if (!state->ordinal)
+                QObject::connect(socket, &QTcpSocket::disconnected, &listener, [this] { firstClosed = true; });
+            receive(*state);
+        });
+    }
+    DspStreamEndpoint endpoint() const {
+        DspStreamEndpoint endpoint;
+        endpoint.enabled = true;
+        endpoint.address = QStringLiteral("127.0.0.1");
+        endpoint.port = listener.serverPort();
+        endpoint.token = QString(64, 'c');
+        return endpoint;
+    }
+    void receive(Client &client) {
+        client.buffer.append(client.socket->read(DspStreamTransport::PacketLimit - client.buffer.size()));
+        if (phase == CancelPhase::Connect) {
+            // A real SOCKS5 greeting proves TCP setup is still ConnectingState.
+            // Withhold the proxy reply, not the application hello.
+            if (!client.ordinal) {
+                if (!client.buffer.isEmpty()) {
+                    if (quint8(client.buffer[0]) != 5) error = "Missing SOCKS connect greeting";
+                    reached = true;
+                }
+                return;
+            }
+            // The replacement connection completes SOCKS locally, then serves
+            // DSP on the same socket. No connection to the synthetic IP is made.
+            if (client.socks == 0) {
+                if (client.buffer.size() < 2) return;
+                const int greeting = 2 + quint8(client.buffer[1]);
+                if (client.buffer.size() < greeting) return;
+                client.buffer.remove(0, greeting);
+                client.socket->write(QByteArray::fromHex("0500"));
+                client.socks = 1;
+            }
+            if (client.socks == 1) {
+                if (client.buffer.size() < 5) return;
+                const int type = quint8(client.buffer[3]);
+                const int size = type == 1 ? 10 : type == 4 ? 22 : type == 3 ? 7 + quint8(client.buffer[4]) : 0;
+                if (!size) { error = "Invalid SOCKS address type"; return; }
+                if (client.buffer.size() < size) return;
+                client.buffer.remove(0, size);
+                client.socket->write(QByteArray::fromHex("050000017f0000010001"));
+                client.socks = 2;
+            }
+        }
+        while (error.isEmpty()) {
+            QJsonObject header;
+            QByteArray payload;
+            const int parsed = DspStreamProtocol::extract(client.buffer, header, payload, error);
+            if (parsed <= 0) return;
+            QByteArray reply;
+            const bool hello = header.value("type") == "hello";
+            if (hello) {
+                reply = DspStreamProtocol::encode({{"type", "hello"}, {"version", 1}});
+            } else {
+                DspStreamBlock block;
+                if (!DspStreamProtocol::decodeRequest(header, payload, block, error)) return;
+                reply = DspStreamProtocol::response(block, processor.process(block));
+            }
+            if (!client.ordinal && ((hello && phase == CancelPhase::Hello) || (!hello && phase == CancelPhase::Result))) {
+                reply.truncate(9); // Leave an incomplete frame behind for cancellation to discard.
+                reached = true;
+            }
+            if (client.socket->write(reply) != reply.size()) error = "Cancellation peer reply failed";
+        }
+    }
+};
+
+struct RestoreProxy {
+    QNetworkProxy previous = QNetworkProxy::applicationProxy();
+    ~RestoreProxy() { QNetworkProxy::setApplicationProxy(previous); }
+};
+
+void cancellationTests() {
+    std::atomic_bool cancel{true};
+    auto b = tone(1024);
+    DspStreamManager local;
+    const auto cancelledLocal = local.process(b, false, &cancel);
+    require(cancelledLocal.error == "DSP stream request cancelled" && !cancelledLocal.iq && cancelledLocal.spectra.empty(),
+            "Pre-cancelled local request entered the processor");
+    cancel = false;
+    require(local.process(b, false, &cancel).spectra.empty(), "Cancelled local request retained IQ history");
+    b.firstSample += 1024;
+    checkTone(local.process(b, false));
+    cancel = true;
+    const auto cancelledExternal = local.process(b, true, &cancel);
+    require(cancelledExternal.error == cancelledLocal.error && !cancelledExternal.iq && cancelledExternal.spectra.empty(),
+            "Pre-cancelled request did not precede endpoint validation");
+
+    for (auto phase : {CancelPhase::Connect, CancelPhase::Hello, CancelPhase::Result}) {
+        RestoreProxy restore;
+        QNetworkProxy::setApplicationProxy(QNetworkProxy::NoProxy);
+        CancellationPeer peer(phase);
+        auto endpoint = peer.endpoint();
+        if (phase == CancelPhase::Connect) {
+            // Qt bypasses application proxies for loopback destinations. This
+            // documentation-only IP stays entirely inside the local test proxy.
+            endpoint.address = QStringLiteral("192.0.2.1");
+            QNetworkProxy::setApplicationProxy(QNetworkProxy(QNetworkProxy::Socks5Proxy,
+                QStringLiteral("127.0.0.1"), peer.listener.serverPort()));
+        }
+        cancel = false;
+        std::promise<DspStreamResult> first;
+        auto firstResult = first.get_future();
+        std::promise<void> resume;
+        auto resumed = resume.get_future();
+        auto work = std::async(std::launch::async, [&] {
+            DspStreamManager manager;
+            manager.configure(endpoint);
+            auto block = tone();
+            block.gap = true;
+            first.set_value(manager.process(block, true, &cancel));
+            require(resumed.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+                    "Cancellation test did not release its worker");
+            ++block.generation;
+            return manager.process(block, true, &cancel);
+        });
+        if (!waitUntil([&] { return peer.reached || !peer.error.isEmpty(); }) || !peer.error.isEmpty()) {
+            QString detail = QStringLiteral("Cancellation stage %1 barrier not reached; connections=%2; peer=%3")
+                .arg(int(phase)).arg(peer.clients.size()).arg(peer.error);
+            if (firstResult.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
+                detail += QStringLiteral("; client=%1").arg(firstResult.get().error);
+            cancel = true;
+            resume.set_value();
+            throw std::runtime_error(detail.toStdString());
+        }
+        require(!waitUntil([&] { return firstResult.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready; }, 80),
+                "Network wait ended before cancellation (connect budget shortened to one slice)");
+        QElapsedTimer latency;
+        latency.start();
+        cancel.store(true, std::memory_order_release);
+        require(waitUntil([&] { return firstResult.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready; }, 400),
+                "Network cancellation exceeded its slice bound");
+        const auto result = firstResult.get();
+        require(result.error == "DSP stream request cancelled" && !result.iq && result.spectra.empty(),
+                "Cancellation returned a timeout, partial IQ or a stale spectrum");
+        const auto elapsed = latency.elapsed();
+        require(waitUntil([&] { return peer.firstClosed; }, 400), "Cancelled transport was not closed");
+        cancel.store(false, std::memory_order_release);
+        resume.set_value();
+        require(waitUntil([&] { return work.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready; }),
+                "Next generation did not finish after cancellation");
+        checkTone(work.get());
+        require(peer.error.isEmpty(), "Cancellation test peer failed");
+        require(peer.clients.size() == 2, "Next generation reused cancelled transport");
+        std::cout << "Cancellation stage " << int(phase) << ": " << elapsed
+                  << " ms; fresh generation immediately reconnects: passed\n";
+    }
+
+    // The same deterministic proxy barrier also tests the uncancelled 700 ms
+    // deadline without depending on a firewall or an unroutable external host.
+    RestoreProxy restore;
+    CancellationPeer proxy(CancelPhase::Connect);
+    auto endpoint = proxy.endpoint();
+    QNetworkProxy::setApplicationProxy(QNetworkProxy(QNetworkProxy::Socks5Proxy, endpoint.address, endpoint.port));
+    endpoint.address = QStringLiteral("192.0.2.1");
+    QElapsedTimer elapsed;
+    elapsed.start();
+    auto timeout = std::async(std::launch::async, [&] {
+        DspStreamManager manager;
+        manager.configure(endpoint);
+        return manager.process(tone(), true);
+    });
+    require(waitUntil([&] { return timeout.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready; }, 2000),
+            "Connect did not retain a finite deadline");
+    const auto result = timeout.get();
+    require(proxy.reached && elapsed.elapsed() >= 650 && elapsed.elapsed() < 1600 &&
+                result.error.contains("Connection timed out"), "Connect deadline no longer approximately 700 ms");
+    std::cout << "Pre-cancelled local/external requests and 700 ms connect deadline: passed\n";
 }
 void benchmark() {
     constexpr int rounds = 2400;
@@ -140,9 +357,11 @@ void benchmark() {
 }
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
+    std::cout << std::unitbuf;
     try {
         codecTests(); processorTests(); require(dspStreamRecorderSelfTest(), "Recorder tests failed");
         require(dspConnectionProbeSelfTest(), "Connection probe tests failed");
+        cancellationTests();
         DspStreamEndpoint endpoint; endpoint.enabled = true;
         if (argc == 3) {
             endpoint.address = QString::fromLocal8Bit(argv[1]); endpoint.port = quint16(QString::fromLocal8Bit(argv[2]).toUInt());

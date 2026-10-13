@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace {
 constexpr double TWO_PI = 6.28318530717958647692;
@@ -23,6 +24,35 @@ int frontDecimationFactorForRatio(int totalDecimationFactor) {
         factor *= 2;
     }
     return (std::min)(factor, 64);
+}
+
+int firTapCountForOptions(const IqChannelizer::Options *options, double inputRate,
+                         double targetRate, double cutoff) {
+    if (!options) return 32;
+    int taps = 32;
+    switch (options->firQuality) {
+    case IqChannelizer::FirQuality::Legacy: break;
+    case IqChannelizer::FirQuality::Balanced: taps = 64; break;
+    case IqChannelizer::FirQuality::High: taps = 128; break;
+    default: return 0;
+    }
+    if (options->firTapCount != 0) {
+        if (options->firTapCount < 16 || options->firTapCount > 256 || options->firTapCount % 2)
+            return 0;
+        taps = options->firTapCount;
+    }
+    if (!std::isfinite(options->transitionHz) || options->transitionHz < 0.0) return 0;
+    if (options->transitionHz > 0.0) {
+        if (options->transitionHz > targetRate - 2.0 * cutoff) return 0;
+        // Blackman's approximate full transition width is six bins. Refuse
+        // unachievable requests instead of silently capping quality at 256 taps.
+        const double required = std::ceil(6.0 * (inputRate / options->transitionHz));
+        if (!std::isfinite(required) || required > 256.0) return 0;
+        const int evenRequired = (static_cast<int>(required) + 1) & ~1;
+        if (options->firTapCount && taps < evenRequired) return 0;
+        taps = (std::max)(taps, evenRequired);
+    }
+    return taps;
 }
 }
 
@@ -46,6 +76,7 @@ void IqChannelizer::reset(double initialNcoPhaseRadians) {
     configuredCoarseRate = 0.0;
     configuredTargetRate = 0.0;
     configuredCutoff = 0.0;
+    configuredTapCount = ResamplerTaps;
     resamplerHistory.fill({0.0f, 0.0f});
     resamplerSamplesSeen = 0;
     resamplerWriteIndex = 0;
@@ -103,34 +134,36 @@ bool IqChannelizer::pushFrontDecimatorSample(const std::complex<float> &sample,
 
 void IqChannelizer::configureResampler(double inputRate,
                                        double targetRate,
-                                       double cutoff) {
+                                       double cutoff,
+                                       int tapCount) {
     if (std::abs(configuredCoarseRate - inputRate) < 0.5 &&
         std::abs(configuredTargetRate - targetRate) < 0.5 &&
-        std::abs(configuredCutoff - cutoff) < 0.5) {
+        std::abs(configuredCutoff - cutoff) < 0.5 && configuredTapCount == tapCount) {
         return;
     }
 
     configuredCoarseRate = inputRate;
     configuredTargetRate = targetRate;
     configuredCutoff = cutoff;
+    configuredTapCount = tapCount;
     resamplerHistory.fill({0.0f, 0.0f});
     resamplerSamplesSeen = 0;
     resamplerWriteIndex = 0;
-    nextOutputPosition = static_cast<double>(ResamplerTaps / 2);
+    nextOutputPosition = static_cast<double>(tapCount / 2);
 
     const double normalizedCutoff = (std::clamp)(
         (std::min)(cutoff, targetRate * 0.45) / inputRate,
         0.000001,
         0.495);
-    constexpr int leftTaps = ResamplerTaps / 2 - 1;
+    const int leftTaps = tapCount / 2 - 1;
     for (int phase = 0; phase < ResamplerPhases; ++phase) {
         const double fraction = static_cast<double>(phase) /
                                 static_cast<double>(ResamplerPhases);
         double sum = 0.0;
-        for (int tap = 0; tap < ResamplerTaps; ++tap) {
+        for (int tap = 0; tap < tapCount; ++tap) {
             const double distance = static_cast<double>(leftTaps - tap) + fraction;
             const double windowPosition = static_cast<double>(tap) /
-                                          static_cast<double>(ResamplerTaps - 1);
+                                          static_cast<double>(tapCount - 1);
             const double blackman = 0.42 - 0.5 * std::cos(TWO_PI * windowPosition) +
                                     0.08 * std::cos(2.0 * TWO_PI * windowPosition);
             const double coefficient =
@@ -142,8 +175,8 @@ void IqChannelizer::configureResampler(double inputRate,
         }
         if (std::abs(sum) > 1.0e-12) {
             const float scale = static_cast<float>(1.0 / sum);
-            for (float &coefficient : resamplerTaps[static_cast<std::size_t>(phase)]) {
-                coefficient *= scale;
+            for (int tap = 0; tap < tapCount; ++tap) {
+                resamplerTaps[static_cast<std::size_t>(phase)][static_cast<std::size_t>(tap)] *= scale;
             }
         }
     }
@@ -175,8 +208,8 @@ void IqChannelizer::pushResamplerSample(const std::complex<float> &sample,
     ++resamplerSamplesSeen;
 
     const double outputStep = configuredCoarseRate / configuredTargetRate;
-    constexpr int leftTaps = ResamplerTaps / 2 - 1;
-    constexpr double filterDelay = static_cast<double>(ResamplerTaps / 2);
+    const int leftTaps = configuredTapCount / 2 - 1;
+    const double filterDelay = static_cast<double>(configuredTapCount / 2);
     while (nextOutputPosition <= currentPosition + 1.0e-9) {
         const double sourcePosition = nextOutputPosition - filterDelay;
         const std::int64_t center = static_cast<std::int64_t>(std::floor(sourcePosition));
@@ -188,7 +221,7 @@ void IqChannelizer::pushResamplerSample(const std::complex<float> &sample,
 
         std::complex<float> filtered(0.0f, 0.0f);
         const auto &taps = resamplerTaps[static_cast<std::size_t>(phase)];
-        for (int tap = 0; tap < ResamplerTaps; ++tap) {
+        for (int tap = 0; tap < configuredTapCount; ++tap) {
             const std::int64_t inputIndex = center - leftTaps + tap;
             filtered += historySample(inputIndex) * taps[static_cast<std::size_t>(tap)];
         }
@@ -227,12 +260,15 @@ IqChannelizer::Result IqChannelizer::processFloatIq(const float *samples,
     }
 
     const std::size_t iqSamples = floatCount / 2U;
+    if (iqSamples > static_cast<std::size_t>((std::numeric_limits<int>::max)()) ||
+        !std::isfinite(result.frequencyShift)) return result;
     const double targetRate = options ? options->outputRateHz : channelizerTargetRate(settings);
     if (!std::isfinite(targetRate) || targetRate <= 0.0 ||
         (options && (targetRate > settings.sampleRate || !std::isfinite(options->cutoffHz) ||
                      options->cutoffHz <= 0.0 || options->cutoffHz >= targetRate * 0.45))) return result;
-    const int totalDecimationFactor =
-        (std::max)(1, static_cast<int>(std::floor(settings.sampleRate / targetRate)));
+    const double ratio = settings.sampleRate / targetRate;
+    if (!std::isfinite(ratio) || ratio > (std::numeric_limits<int>::max)()) return result;
+    const int totalDecimationFactor = (std::max)(1, static_cast<int>(std::floor(ratio)));
     int frontDecimationFactor =
         frontDecimationFactorForRatio(totalDecimationFactor);
     const int requestedDecimation = options ? options->decimationFactor : 0;
@@ -243,7 +279,6 @@ IqChannelizer::Result IqChannelizer::processFloatIq(const float *samples,
         while (frontDecimationFactor < 64 && requestedDecimation % (frontDecimationFactor * 2) == 0)
             frontDecimationFactor *= 2;
     }
-    configureFrontDecimator(frontDecimationFactor);
     const double frontOutputRate =
         settings.sampleRate / static_cast<double>(frontDecimationFactor);
     const int coarseDecimationFactor =
@@ -253,7 +288,10 @@ IqChannelizer::Result IqChannelizer::processFloatIq(const float *samples,
         frontOutputRate / static_cast<double>(coarseDecimationFactor);
     const double outputRate = (std::min)(targetRate, coarseRate);
     const double cutoff = options ? options->cutoffHz : channelizerCutoff(settings, outputRate);
-    configureResampler(coarseRate, outputRate, cutoff);
+    const int tapCount = firTapCountForOptions(options, coarseRate, outputRate, cutoff);
+    if (tapCount == 0) return result;
+    configureFrontDecimator(frontDecimationFactor);
+    configureResampler(coarseRate, outputRate, cutoff, tapCount);
     const float preLowPassAlpha = static_cast<float>((std::clamp)(
         1.0 - std::exp(-TWO_PI * cutoff / frontOutputRate),
         0.000001,
@@ -371,5 +409,7 @@ IqChannelizer::Result IqChannelizer::processFloatIq(const float *samples,
     result.inputSamples = static_cast<int>(iqSamples);
     result.outputSamples = static_cast<int>(output.size() / 2U);
     result.agcLevel = agcLevel;
+    result.firTapCount = configuredTapCount;
+    result.firDelayCoarseSamples = configuredTapCount / 2.0;
     return result;
 }

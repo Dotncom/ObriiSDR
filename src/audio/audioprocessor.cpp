@@ -237,6 +237,26 @@ AudioProcessor::~AudioProcessor() {
     closeAudioDevice();
 }
 
+bool AudioProcessor::processIndependentIq(const std::vector<float> &iq,
+                                         const RadioSettings &settings,
+                                         bool discontinuity, std::vector<short> &pcm) {
+    pcm.clear();
+    if (running.load() || settings.inputMode != INPUT_RF ||
+        !std::isfinite(settings.sampleRate) || settings.sampleRate < 48000.0 ||
+        settings.sampleRate > 2000000.0 || iq.size() % 2 || iq.size() > 262144U ||
+        settings.modulationType < MOD_AM || settings.modulationType > MOD_WFM) return false;
+    configure(settings);
+    const bool requestedReset = demodulatorResetRequested.exchange(false);
+    if (discontinuity || requestedReset) resetDemodulatorState();
+    audioFilterChain.configure(settings.audioFilterChainJson, AUDIO_OUTPUT_RATE);
+    if (discontinuity || requestedReset) audioFilterChain.reset();
+    std::vector<short> unused;
+    int unusedRate = 0;
+    processDemodulatorBlock(iq, pcm, unused, unusedRate, settings);
+    audioFilterChain.process(pcm);
+    return true;
+}
+
 void AudioProcessor::configure(const RadioSettings &settings) {
     std::lock_guard<std::mutex> lock(settingsMutex);
     const bool resetDemodulator =

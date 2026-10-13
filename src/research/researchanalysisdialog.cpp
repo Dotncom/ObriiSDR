@@ -1147,6 +1147,12 @@ void ResearchAnalysisDialog::updateAnalyzerStatus() {
         .arg(rbwHz, 0, 'f', 3));
 }
 
+void ResearchAnalysisDialog::setExperimentBundleCallbacks(
+    std::function<QJsonObject()> snapshot,
+    std::function<bool(const QJsonObject &, QString *)> applyWorkspace) {
+    sessionWidget->setExperimentBundleCallbacks(std::move(snapshot), std::move(applyWorkspace));
+}
+
 void ResearchAnalysisDialog::selectTab(Tab tab) {
     if (tabs) tabs->setCurrentIndex(static_cast<int>(tab));
     show();

@@ -613,6 +613,8 @@ private:
     QJsonObject recordingLabMetadata() const;
     QJsonObject recordingScientificSnapshot(const QString &phase) const;
     QJsonObject recordingScientificMetadata(const QString &captureKind) const;
+    QJsonObject experimentBundleContext() const;
+    bool applyExperimentWorkspace(const QJsonObject &context, QString *error);
     void showTuneContextMenu(double frequency, const QPoint &globalPos);
     void tuneSignalCenterAt(double frequency);
     void tuneSidebandEdgeAt(double frequency, int modulationType);

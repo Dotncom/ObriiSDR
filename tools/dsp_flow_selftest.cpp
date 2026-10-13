@@ -4,6 +4,8 @@
 #include "signallabconstellation3d.h"
 #include "iqbuffer.h"
 #include "dspcomputedialog.h"
+#include "audiofilterchainwidget.h"
+#include "appsettingsutils.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -24,11 +26,15 @@
 #include <QSpinBox>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QTableWidget>
 #include <QTabWidget>
 #include <QThread>
+#include <QTemporaryDir>
 #include <QMouseEvent>
+#include <QToolButton>
+#include <QVBoxLayout>
 
 #include <iostream>
 #include <cmath>
@@ -41,6 +47,25 @@
 bool multiVfoPreviewHistorySelfTest();
 bool dspBranchSelfTest();
 bool dspBranchTeardownSelfTest();
+
+// Keep profile import/recovery tests away from real per-user settings.
+QString persistentSettingsFilePath() {
+    static QTemporaryDir directory;
+    if (!directory.isValid()) throw std::runtime_error("Temporary DSP settings directory failed");
+    return directory.filePath(QStringLiteral("ObriiSDR.ini"));
+}
+
+struct DspFlowHistoryTestAccess {
+    static void commit(DspFlowPanel &panel) { panel.commitBoardHistory(); }
+    static QByteArray snapshot(const DspFlowPanel &panel) { return panel.captureBoardHistory(); }
+    static void separateEdit(DspFlowPanel &panel) { panel.historyMergeTimer_.invalidate(); }
+    static int count(const DspFlowPanel &panel) { return panel.boardHistory_.size(); }
+    static qint64 bytes(const DspFlowPanel &panel) {
+        qint64 bytes = 0;
+        for (const auto &entry : panel.boardHistory_) bytes += entry.board.size() + entry.filters.size();
+        return bytes;
+    }
+};
 
 struct SignalLabConstellation3DTestAccess {
     static int points(const SignalLabConstellation3DWidget &widget) {
@@ -124,6 +149,354 @@ QJsonObject mainFftBoard(bool sourceConnected = true, bool viewsConnected = true
 
 QString graphJson(const QJsonObject &graph) {
     return QString::fromUtf8(QJsonDocument(graph).toJson(QJsonDocument::Compact));
+}
+
+QJsonObject mainFftAliasBoard(bool bindingIds = false) {
+    auto graph = mainFftBoard(true, false);
+    auto blocks = graph["blocks"].toArray();
+    if (bindingIds) {
+        for (int i = 0; i < blocks.size(); ++i) {
+            auto block = blocks[i].toObject();
+            const auto id = block["id"].toString();
+            if (id.startsWith("spectrum") || id.startsWith("waterfall"))
+                block["settings"] = QJsonObject{{"bindingId", id.startsWith("spectrum") ? "S" : "W"}};
+            blocks[i] = block;
+        }
+    }
+    graph["blocks"] = blocks;
+    auto edges = graph["connections"].toArray();
+    if (bindingIds) edges = QJsonArray{edges.first()};
+    edges.append(QJsonObject{{"source", "main"}, {"target", "spectrum-settings"}});
+    edges.append(QJsonObject{{"source", "main"}, {"target", "waterfall-settings"}});
+    graph["connections"] = edges;
+    return graph;
+}
+
+void testMainFftAliases() {
+    for (const auto *type : {"spectrum_display", "waterfall_2d", "waterfall_3d"})
+        require(dspLinkKind("fft", type) == DspLinkKind::Spectrum, "FFT settings alias is not executable");
+    for (bool bindingIds : {false, true}) {
+        auto graph = mainFftAliasBoard(bindingIds);
+        auto blocks = graph["blocks"].toArray();
+        auto extraView = blocks[2].toObject();
+        extraView["id"] = "spectrum-copy";
+        blocks.append(extraView);
+        graph["blocks"] = blocks;
+        if (!bindingIds) {
+            auto edges = graph["connections"].toArray();
+            edges.append(QJsonObject{{"source", "spectrum-settings"}, {"target", "spectrum-copy"}});
+            graph["connections"] = edges;
+        }
+        const auto plan = compileDspGraph(graph);
+        require(plan.errors.isEmpty() && plan.mainSpectrumRoutes.size() == 3 &&
+                plan.mainDisplayControllers.value("spectrum-copy") == "spectrum-settings" &&
+                plan.mainSpectrumRoutes.value("spectrum-copy") == "main" &&
+                plan.explicitMainSpectrumViews.size() == 3, "Settings alias fanout failed");
+        require(plan.branches.isEmpty() && plan.executionKey == compileDspGraph(mainFftBoard()).executionKey,
+                "Settings alias created/restarted branch processing");
+    }
+    auto graph = mainFftAliasBoard(true);
+    auto blocks = graph["blocks"].toArray();
+    blocks.append(QJsonObject{{"id", "waterfall-3d"}, {"type", "waterfall_3d"},
+                             {"settings", QJsonObject{{"bindingId", "W"}}}});
+    graph["blocks"] = blocks;
+    auto plan = compileDspGraph(graph);
+    require(plan.errors.isEmpty() && plan.mainSpectrumRoutes.value("waterfall") == "main" &&
+            plan.mainDisplayControllers.value("waterfall") == "waterfall-3d",
+            "Mixed 2D/3D binding broke existing settings selection or shared FFT");
+    auto edges = graph["connections"].toArray();
+    edges.append(QJsonObject{{"source", "main"}, {"target", "waterfall-3d"}});
+    graph["connections"] = edges;
+    require(compileDspGraph(graph).errors.isEmpty(), "Same FFT through two controllers was rejected");
+    auto legacy = graph;
+    legacy["connections"] = QJsonArray{};
+    plan = compileDspGraph(legacy);
+    require(plan.errors.isEmpty() && plan.explicitMainSpectrumViews.isEmpty(),
+            "Mixed legacy controllers disabled implicit display feed");
+    auto invalid = graph;
+    blocks.append(QJsonObject{{"id", "other-fft"}, {"type", "fft"}});
+    invalid["blocks"] = blocks;
+    edges.removeLast();
+    edges.append(QJsonObject{{"source", "source"}, {"target", "other-fft"}});
+    edges.append(QJsonObject{{"source", "other-fft"}, {"target", "waterfall-3d"}});
+    invalid["connections"] = edges;
+    plan = compileDspGraph(invalid);
+    require(!plan.errors.isEmpty() && plan.mainSpectrumRoutes.isEmpty() &&
+            plan.explicitMainSpectrumViews.contains("waterfall"), "Conflicting alias sources remained active");
+    invalid = mainFftAliasBoard();
+    edges = invalid["connections"].toArray();
+    edges.append(QJsonObject{{"source", "main"}, {"target", "spectrum-settings"}});
+    invalid["connections"] = edges;
+    require(!compileDspGraph(invalid).errors.isEmpty(), "Duplicate alias IQ input accepted");
+    invalid = mainFftAliasBoard();
+    edges = invalid["connections"].toArray();
+    edges.append(QJsonObject{{"source", "spectrum-settings"}, {"target", "spectrum"}});
+    invalid["connections"] = edges;
+    require(!compileDspGraph(invalid).errors.isEmpty(), "Duplicate display settings edge accepted");
+}
+
+void testMainFftAliasDelivery() {
+    DspFlowPanel panel;
+    panel.show();
+    const auto frames = [&]() {
+        QApplication::processEvents();
+        QThread::msleep(25);
+        return panel.shouldUpdateWorkspaceSpectrum();
+    };
+    for (bool bindingIds : {false, true}) {
+        require(panel.setConfigurationJson(graphJson(mainFftAliasBoard(bindingIds))), "Alias board load failed");
+        require(frames(), "Complete alias route did not admit frames");
+        auto persisted = QJsonDocument::fromJson(panel.configurationJson().toUtf8()).object();
+        for (const auto &value : persisted["blocks"].toArray()) {
+            auto block = value.toObject();
+            if (block["type"] == "workspace_spectrum" || block["type"] == "workspace_waterfall")
+                require(block["settings"].toObject()["mainFftRouteExplicit"].toBool(), "Explicit admission was not persisted");
+        }
+        for (int cut = 0; cut < 3; ++cut) {
+            auto disconnected = persisted;
+            QJsonArray remaining;
+            for (const auto &value : persisted["connections"].toArray()) {
+                const auto source = value.toObject()["source"].toString();
+                if ((cut == 0 && source == "source") || (cut == 1 && source == "main") ||
+                    (cut == 2 && source.endsWith("-settings"))) continue;
+                remaining.append(value);
+            }
+            disconnected["connections"] = remaining;
+            if (cut == 2 && bindingIds) {
+                auto blocks = disconnected["blocks"].toArray();
+                for (int i = 0; i < blocks.size(); ++i) {
+                    auto block = blocks[i].toObject();
+                    auto settings = block["settings"].toObject();
+                    settings.remove("bindingId");
+                    block["settings"] = settings;
+                    blocks[i] = block;
+                }
+                disconnected["blocks"] = blocks;
+            }
+            require(panel.setConfigurationJson(graphJson(disconnected)) && !frames(),
+                    "Disconnected alias silently reverted to legacy frames");
+        }
+        require(panel.setConfigurationJson(graphJson(persisted)), "Alias restore failed");
+        auto *scene = panel.findChild<QGraphicsView *>()->scene();
+        for (auto *item : scene->items())
+            if (dynamic_cast<QGraphicsPathItem *>(item) && item->flags().testFlag(QGraphicsItem::ItemIsSelectable))
+                item->setSelected(true);
+        QKeyEvent remove(QEvent::KeyPress, Qt::Key_Delete, Qt::NoModifier);
+        QApplication::sendEvent(scene, &remove);
+        DspFlowHistoryTestAccess::commit(panel);
+        require(!frames(), "Deleted alias route continued frame delivery");
+        panel.undoBoard();
+        require(frames(), "Undo did not recover alias delivery");
+        panel.redoBoard();
+        require(!frames(), "Redo did not remove alias delivery");
+    }
+    require(panel.setConfigurationJson(graphJson(mainFftBoard(false, false))) && frames(),
+            "Unwired legacy views lost their automatic feed");
+    panel.hide();
+}
+
+void testExperimentLayoutImport() {
+    struct ProfilesGuard {
+        QSettings settings{persistentSettingsFilePath(), QSettings::IniFormat};
+        QMap<QString, QVariant> saved;
+        ProfilesGuard() {
+            settings.beginGroup("dspFlow/profiles");
+            for (const auto &key : settings.allKeys()) saved.insert(key, settings.value(key));
+            settings.endGroup();
+        }
+        ~ProfilesGuard() {
+            settings.remove("dspFlow/profiles");
+            settings.beginGroup("dspFlow/profiles");
+            for (auto it = saved.cbegin(); it != saved.cend(); ++it) settings.setValue(it.key(), it.value());
+            settings.endGroup(); settings.sync();
+        }
+    } guard;
+    DspFlowPanel panel;
+    require(panel.setConfigurationJson(graphJson(mainFftBoard())), "Import starting layout failed");
+    const auto before = DspFlowHistoryTestAccess::snapshot(panel);
+    int rfCommands = 0;
+    QObject::connect(&panel, &DspFlowPanel::controlTriggered, [&]() { ++rfCommands; });
+    QString error;
+    const bool importedOk = panel.importExperimentLayout(graphJson(mainFftAliasBoard()), &error);
+    if (!importedOk || !error.isEmpty())
+        throw std::runtime_error(QStringLiteral("Experiment layout import failed: %1 [settings: %2]")
+            .arg(error, persistentSettingsFilePath()).toStdString());
+    QComboBox *profiles = nullptr;
+    int backupIndex = -1;
+    for (auto *combo : panel.findChildren<QComboBox *>()) {
+        const int index = combo->findData("Before experiment import");
+        if (index >= 0) { profiles = combo; backupIndex = index; break; }
+    }
+    require(profiles && backupIndex > 0 && profiles->currentIndex() == 0,
+            "Backup is not a visible ordinary profile, or imported layout is mislabeled");
+    const auto imported = DspFlowHistoryTestAccess::snapshot(panel);
+    auto invalid = mainFftAliasBoard();
+    auto blocks = invalid["blocks"].toArray();
+    auto bad = blocks[0].toObject(); bad["x"] = 100001; blocks[0] = bad; invalid["blocks"] = blocks;
+    require(!panel.importExperimentLayout(graphJson(invalid), &error) && !error.isEmpty() &&
+            DspFlowHistoryTestAccess::snapshot(panel) == imported, "Invalid import changed the board");
+    profiles->setCurrentIndex(backupIndex);
+    QMetaObject::invokeMethod(profiles, "activated", Qt::DirectConnection, Q_ARG(int, backupIndex));
+    require(DspFlowHistoryTestAccess::snapshot(panel) == before, "Backup profile did not recover the original layout");
+    const QJsonObject empty{{"version", 8}, {"blocks", QJsonArray{}}, {"connections", QJsonArray{}}};
+    require(panel.setConfigurationJson(graphJson(empty)), "Explicit empty board cannot be loaded");
+    if (!panel.importExperimentLayout(graphJson(mainFftAliasBoard()), &error))
+        throw std::runtime_error(QStringLiteral("Empty board backup failed: %1").arg(error).toStdString());
+    const int updatedIndex = profiles->findData("Before experiment import");
+    profiles->setCurrentIndex(updatedIndex);
+    QMetaObject::invokeMethod(profiles, "activated", Qt::DirectConnection, Q_ARG(int, updatedIndex));
+    require(QJsonDocument::fromJson(panel.configurationJson().toUtf8()).object()["blocks"].toArray().isEmpty(),
+            "Updated backup did not restore an empty board");
+    require(rfCommands == 0, "Layout import/recovery issued an RF control command");
+}
+
+void testBoardHistory() {
+    DspFlowPanel panel;
+    require(panel.setConfigurationJson(graphJson(mainFftBoard())), "History fixture load failed");
+    auto *view = panel.findChild<QGraphicsView *>();
+    auto *scene = view->scene();
+    const auto snapshot = [&]() { return DspFlowHistoryTestAccess::snapshot(panel); };
+    const auto commit = [&]() { DspFlowHistoryTestAccess::commit(panel); };
+    const auto initial = snapshot();
+    int controls = 0;
+    QObject::connect(&panel, &DspFlowPanel::controlTriggered, [&]() { ++controls; });
+    require(!panel.canUndoBoard() && !panel.canRedoBoard(), "Loaded board retained unrelated history");
+    auto *undo = panel.findChild<QToolButton *>("dspUndo");
+    auto *redo = panel.findChild<QToolButton *>("dspRedo");
+    require(undo && redo && !undo->isEnabled() && !redo->isEnabled(), "History buttons missing or initially enabled");
+
+    panel.addDdcBranch();
+    commit();
+    const auto withBranch = snapshot();
+    require(withBranch != initial && DspFlowHistoryTestAccess::count(panel) == 2, "Compound DDC addition was not one history step");
+    undo->click();
+    require(snapshot() == initial && panel.canRedoBoard(), "Undo addition did not preserve IDs/links/settings");
+    redo->click();
+    require(snapshot() == withBranch, "Redo addition changed branch IDs or connections");
+
+    QKeyEvent remove(QEvent::KeyPress, Qt::Key_Delete, Qt::NoModifier);
+    for (auto *item : scene->items()) if (item->flags().testFlag(QGraphicsItem::ItemIsSelectable)) item->setSelected(true);
+    QApplication::sendEvent(scene, &remove);
+    commit();
+    require(QJsonDocument::fromJson(snapshot()).object()["blocks"].toArray().isEmpty(), "Delete-all history fixture failed");
+    panel.undoBoard();
+    require(snapshot() == withBranch, "Undo delete-all did not restore group and links");
+    panel.redoBoard();
+    require(QJsonDocument::fromJson(snapshot()).object()["blocks"].toArray().isEmpty(), "Redo cannot restore an empty board");
+    panel.undoBoard();
+
+    const auto originalSettings = panel.blockSettings("spectrum-settings");
+    for (int i = 0; i < 20; ++i) {
+        auto settings = originalSettings;
+        settings.insert("minimumDbfs", -160 + i);
+        require(panel.setBlockSettings("spectrum-settings", settings), "History settings fixture failed");
+        commit();
+    }
+    require(!panel.canRedoBoard(), "A new edit did not discard redo history");
+    panel.undoBoard();
+    require(panel.blockSettings("spectrum-settings") == originalSettings, "Continuous settings were not coalesced");
+    panel.redoBoard();
+    require(panel.blockSettings("spectrum-settings")["minimumDbfs"].toInt() == -141, "Redo lost final coalesced value");
+    require(controls == 0, "Board history invoked live run/enable controls");
+
+    // Each release records the completed drag, not its intermediate positions.
+    scene->clearSelection();
+    QGraphicsItem *moved = nullptr;
+    for (auto *item : scene->items()) if (item->flags().testFlag(QGraphicsItem::ItemIsSelectable) &&
+        !dynamic_cast<QGraphicsPathItem *>(item)) { moved = item; break; }
+    require(moved != nullptr, "No block available for history drag test");
+    const auto beforeMove = snapshot();
+    for (int i = 0; i < 20; ++i) moved->moveBy(1, 2);
+    QGraphicsSceneMouseEvent released(QEvent::GraphicsSceneMouseRelease);
+    released.setButton(Qt::LeftButton);
+    QApplication::sendEvent(scene, &released);
+    commit();
+    const auto afterMove = snapshot();
+    panel.undoBoard();
+    require(snapshot() == beforeMove, "Undo drag lost placement");
+    panel.redoBoard();
+    require(snapshot() == afterMove, "Redo drag lost placement");
+
+    QComboBox *sectors = nullptr;
+    for (auto *combo : panel.findChildren<QComboBox *>()) if (combo->findData("3x1") >= 0) { sectors = combo; break; }
+    require(sectors, "Sector selector missing");
+    const auto beforeSectors = snapshot();
+    sectors->setCurrentIndex(sectors->findData("3x1"));
+    commit();
+    const auto afterSectors = snapshot();
+    panel.undoBoard();
+    require(snapshot() == beforeSectors, "Undo sector split changed layout");
+    panel.redoBoard();
+    require(snapshot() == afterSectors && panel.workspaceSectorCount() == 3, "Redo sector split failed");
+
+    // Widget-local shortcuts work on the canvas, not in embedded text editors.
+    const auto beforeShortcut = snapshot();
+    panel.addDdcBranch(); commit();
+    const auto afterShortcut = snapshot();
+    QKeyEvent undoKey(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier);
+    QApplication::sendEvent(view, &undoKey);
+    require(snapshot() == beforeShortcut, "Canvas Ctrl+Z failed");
+    QKeyEvent redoKey(QEvent::KeyPress, Qt::Key_Y, Qt::ControlModifier);
+    QApplication::sendEvent(view, &redoKey);
+    require(snapshot() == afterShortcut, "Canvas Ctrl+Y failed");
+    panel.undoBoard();
+    QKeyEvent shiftRedo(QEvent::KeyPress, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+    QApplication::sendEvent(view, &shiftRedo);
+    require(snapshot() == afterShortcut, "Canvas Ctrl+Shift+Z failed");
+    QLineEdit edit;
+    edit.setText("a"); edit.insert("b");
+    QApplication::sendEvent(&edit, &undoKey);
+    require(edit.text() == "a" && snapshot() == afterShortcut, "Text undo changed board history");
+
+    require(panel.setConfigurationJson(graphJson(mainFftBoard())), "History limit fixture failed");
+    for (int i = 0; i < 110; ++i) {
+        DspFlowHistoryTestAccess::separateEdit(panel);
+        panel.setBlockSettings("spectrum-settings", {{"minimumDbfs", -i}}); commit();
+    }
+    require(DspFlowHistoryTestAccess::count(panel) == 101, "Board history exceeded 100 undo steps");
+    const QString payload(256 * 1024, QLatin1Char('x'));
+    for (int i = 0; i < 75; ++i) {
+        DspFlowHistoryTestAccess::separateEdit(panel);
+        panel.setBlockSettings("spectrum-settings", {{"minimumDbfs", -i}, {"historyTestPayload", payload}}); commit();
+    }
+    require(DspFlowHistoryTestAccess::bytes(panel) <= 16 * 1024 * 1024 && panel.canUndoBoard(), "Board history memory is unbounded");
+    require(!panel.configurationJson().contains("boardHistory"), "Undo history leaked into persisted board");
+    std::cout << "DSP board history: group/empty delete, IDs/links, coalescing, drag/sectors, shortcuts and bounds passed\n";
+}
+
+void testBoardFilterHistory() {
+    AudioFilterChainWidget chain;
+    auto first = defaultAudioFilterStage(AudioFilterKind::Gain);
+    first.id = "unrelated"; first.gainDb = 3;
+    auto owned = defaultAudioFilterStage(AudioFilterKind::Notch);
+    owned.id = "owned-filter"; owned.enabled = false; owned.frequencyHz = 1234; owned.q = 4.7;
+    chain.setConfigurationJson(encodeAudioFilterChain({first, owned}));
+    DspFlowPanel panel;
+    QJsonObject graph{{"version", 8}, {"blocks", QJsonArray{
+        QJsonObject{{"id", "source"}, {"type", "receiver_source"}},
+        QJsonObject{{"id", owned.id}, {"type", "filter_notch"}, {"x", 300}}}}, {"connections", QJsonArray{}}};
+    require(panel.setConfigurationJson(graphJson(graph)), "Filter history graph load failed");
+    panel.setMainAudioFilterChainWidget(&chain);
+    QObject::connect(&panel, &DspFlowPanel::blockRemoved, &chain, [&](const QString &, const QString &id) { chain.removeStageById(id); });
+    auto *scene = panel.findChild<QGraphicsView *>()->scene();
+    for (auto *item : scene->items()) if (item->flags().testFlag(QGraphicsItem::ItemIsSelectable) && item->scenePos().x() > 200) item->setSelected(true);
+    QKeyEvent remove(QEvent::KeyPress, Qt::Key_Delete, Qt::NoModifier);
+    QApplication::sendEvent(scene, &remove);
+    DspFlowHistoryTestAccess::commit(panel);
+    require(decodeAudioFilterChain(chain.configurationJson()).size() == 1, "Deleted filter stage stayed active");
+    first.gainDb = 11;
+    chain.setConfigurationJson(encodeAudioFilterChain({first}));
+    panel.undoBoard();
+    auto stages = decodeAudioFilterChain(chain.configurationJson());
+    require(stages.size() == 2 && stages[0].gainDb == 11 && stages[1].id == owned.id &&
+        !stages[1].enabled && stages[1].frequencyHz == 1234 && stages[1].q == 4.7,
+        "Filter undo lost original parameters/order or overwrote unrelated live changes");
+    panel.redoBoard();
+    require(decodeAudioFilterChain(chain.configurationJson()).size() == 1, "Filter redo failed to remove stage");
+    chain.setConfigurationJson(encodeAudioFilterChain({first, owned}));
+    panel.undoBoard();
+    require(decodeAudioFilterChain(chain.configurationJson()).size() == 2, "Filter undo duplicated an existing ID");
+    std::cout << "DSP board history: main filter membership/parameters/order and same-ID preservation passed\n";
 }
 
 void testSelectionDeletion() {
@@ -698,10 +1071,15 @@ int main(int argc, char **argv) {
     QStandardPaths::setTestModeEnabled(true);
     QApplication::setApplicationName("ObriiDspFlowSelfTest");
     try {
+        testBoardHistory();
+        testBoardFilterHistory();
         testSelectionDeletion();
         testBoard();
         testMainFftGraph();
         testMainFftBoardRouting();
+        testMainFftAliases();
+        testMainFftAliasDelivery();
+        testExperimentLayoutImport();
         testSpectrumComputePreferences();
         testComputeDialog();
         testPanelComputeDialog();

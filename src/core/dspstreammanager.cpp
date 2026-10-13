@@ -5,9 +5,11 @@
 #include "dspstreamtransport_p.h"
 #include <QDebug>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QHostAddress>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTimer>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -34,6 +36,30 @@ bool tokenMatches(const QString &a, const QString &b) {
     for (int i = 0; i < a.size(); ++i) difference |= a[i].unicode() ^ b[i].unicode();
     return difference == 0;
 }
+bool connectClient(QTcpSocket &socket, const QHostAddress &address, quint16 port,
+                   const std::atomic_bool *cancel) {
+    // waitForConnected() aborts its attempt on timeout; polling it at 25 ms
+    // would incorrectly shorten the 700 ms connect budget to the first slice.
+    QEventLoop loop;
+    QTimer slice;
+    slice.setInterval(25);
+    slice.setTimerType(Qt::PreciseTimer);
+    QElapsedTimer deadline;
+    QObject::connect(&socket, &QTcpSocket::stateChanged, &loop, [&loop](QAbstractSocket::SocketState state) {
+        if (state == QAbstractSocket::ConnectedState || state == QAbstractSocket::UnconnectedState) loop.quit();
+    });
+    QObject::connect(&slice, &QTimer::timeout, &loop, [&] {
+        if ((cancel && cancel->load(std::memory_order_acquire)) || deadline.elapsed() >= 700) loop.quit();
+    });
+    if (cancel && cancel->load(std::memory_order_acquire)) return false;
+    deadline.start();
+    socket.connectToHost(address, port);
+    if (socket.state() != QAbstractSocket::ConnectedState && socket.state() != QAbstractSocket::UnconnectedState) {
+        slice.start();
+        loop.exec(QEventLoop::ExcludeUserInputEvents);
+    }
+    return socket.state() == QAbstractSocket::ConnectedState;
+}
 }
 
 struct DspStreamManager::Impl {
@@ -54,17 +80,30 @@ void DspStreamManager::configure(const DspStreamEndpoint &endpoint) {
     if (impl->endpoint == endpoint) return;
     clear(); impl->endpoint = endpoint;
 }
-DspStreamResult DspStreamManager::process(const DspStreamBlock &block, bool external) {
+DspStreamResult DspStreamManager::process(const DspStreamBlock &block, bool external,
+                                         const std::atomic_bool *cancel) {
+    const auto cancelled = [cancel] { return cancel && cancel->load(std::memory_order_acquire); };
+    const auto cancellation = [this] {
+        impl->disconnect();
+        impl->retry = {};
+        impl->lastError.clear();
+        DspStreamResult result;
+        result.error = QStringLiteral("DSP stream request cancelled");
+        return result;
+    };
+    if (cancelled()) return cancellation();
     if (!external) return impl->local.process(block);
     DspStreamResult result;
     result.error = DspStreamProtocol::validate(block);
+    if (cancelled()) return cancellation();
     if (!result.error.isEmpty()) return result;
     const auto &endpoint = impl->endpoint;
     QHostAddress address;
     if (!endpoint.enabled || !validToken(endpoint.token) || !endpoint.port || !address.setAddress(endpoint.address)) {
         result.error = "Configure and enable the external DSP connection"; return result;
     }
-    const auto failure = [this, &result](const QString &reason) {
+    const auto failure = [this, &result, &cancelled, &cancellation](const QString &reason) {
+        if (cancelled()) return cancellation();
         if (impl->lastError != reason && fobosVerboseLoggingEnabled())
             qDebug().noquote() << "[DSP stream]" << impl->endpoint.address << impl->endpoint.port << reason;
         impl->lastError = reason;
@@ -75,19 +114,27 @@ DspStreamResult DspStreamManager::process(const DspStreamBlock &block, bool exte
     // visible instead of replacing it with an uninformative waiting message.
     if (std::chrono::steady_clock::now() < impl->retry) { result.error = impl->lastError; return result; }
     bool connected = false;
+    const auto write = [&](const QByteArray &packet) {
+        return !cancelled() && send(*impl->socket, packet, cancel);
+    };
     if (!impl->socket || impl->socket->state() != QAbstractSocket::ConnectedState) {
         impl->disconnect(); impl->socket = std::make_unique<QTcpSocket>();
         impl->socket->setReadBufferSize(PacketLimit);
-        impl->socket->connectToHost(address, endpoint.port);
-        if (!impl->socket->waitForConnected(700)) return failure(
+        const bool opened = connectClient(*impl->socket, address, endpoint.port, cancel);
+        if (cancelled()) return cancellation();
+        if (!opened) return failure(
             QStringLiteral("External DSP TCP %1:%2: %3 (socket error %4)")
-                .arg(endpoint.address).arg(endpoint.port).arg(impl->socket->errorString())
-                .arg(int(impl->socket->error())));
+                .arg(endpoint.address).arg(endpoint.port)
+                .arg(impl->socket->state() == QAbstractSocket::ConnectingState
+                    ? QStringLiteral("Connection timed out") : impl->socket->errorString())
+                .arg(int(impl->socket->state() == QAbstractSocket::ConnectingState
+                    ? QAbstractSocket::SocketTimeoutError : impl->socket->error())));
         impl->socket->setSocketOption(QAbstractSocket::LowDelayOption, 1);
         QJsonObject hello; QByteArray payload;
-        if (!send(*impl->socket, DspStreamProtocol::encode({{"type", "hello"}, {"version", 1}, {"token", endpoint.token}})) ||
-            !receive(*impl->socket, impl->buffer, hello, payload, 1000))
+        if (!write(DspStreamProtocol::encode({{"type", "hello"}, {"version", 1}, {"token", endpoint.token}})) ||
+            !receive(*impl->socket, impl->buffer, hello, payload, 1000, cancel))
             return failure("External DSP TCP connected, but handshake failed: check the compute service and session token");
+        if (cancelled()) return cancellation();
         if (hello.value("type") == "error" && hello.value("code") == "authentication_failed")
             return failure("External DSP rejected the session token; copy the current token from the compute PC");
         if (hello.value("type") == "error" && hello.value("code") == "busy")
@@ -102,9 +149,11 @@ DspStreamResult DspStreamManager::process(const DspStreamBlock &block, bool exte
     auto request = DspStreamProtocol::request(block);
     request["gap"] = block.gap || connected;
     QJsonObject response; QByteArray payload;
-    if (!send(*impl->socket, DspStreamProtocol::encode(request, DspStreamProtocol::floats(block.iq))) ||
-        !receive(*impl->socket, impl->buffer, response, payload, 1500)) return failure("External DSP timeout/disconnection; stream interrupted");
+    if (!write(DspStreamProtocol::encode(request, DspStreamProtocol::floats(block.iq))) ||
+        !receive(*impl->socket, impl->buffer, response, payload, 1500, cancel)) return failure("External DSP timeout/disconnection; stream interrupted");
+    if (cancelled()) return cancellation();
     if (!DspStreamProtocol::decodeResponse(block, response, payload, result)) return failure("External DSP returned invalid or stale data");
+    if (cancelled()) return cancellation();
     return result;
 }
 
@@ -173,6 +222,7 @@ struct DspComputeServer::Impl {
             }
             if (!send(*peer, DspStreamProtocol::encode({{"type", "hello"}, {"version", 1},
                 {"connectionProbeVersion", DspConnectionProbeProtocol::Version},
+                {"mainFftPipelineChunks", SpectrumComputeProtocol::MaxPipelineChunks},
                 {"mainFftVersion", 1}, {"mainFftMaxLength", SpectrumComputeProtocol::maxLengthForBudget(memoryMiB)}}), &stopping)) {
                 status("Listening; handshake reply failed"); return;
             }

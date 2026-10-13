@@ -105,8 +105,10 @@ protected:
                 p.drawLine(xy(a.distanceM,a.rayM+fraction*a.fresnelM),xy(b.distanceM,b.rayM+fraction*b.fresnelM));
             }
         }
-        if(!path.points.isEmpty()) for(const auto &v:{path.points.front(),path.points.back()}) {
-            if(std::isfinite(v.rayM)&&std::isfinite(v.terrainM)) {p.setPen(QPen(Qt::white,3));p.drawLine(xy(v.distanceM,v.terrainM),xy(v.distanceM,v.rayM));}
+        if(!path.points.isEmpty()) for(int endpoint:{0,path.points.size()-1}) {
+            const auto &v=path.points[endpoint];
+            const double tip=endpoint==0?v.rayM:v.terrainM+path.clutter.rxHeightM;
+            if(std::isfinite(tip)&&std::isfinite(v.terrainM)) {p.setPen(QPen(Qt::white,3));p.drawLine(xy(v.distanceM,v.terrainM),xy(v.distanceM,tip));}
         }
         p.restore();
     }
@@ -215,6 +217,33 @@ PropagationLabDialog::PropagationLabDialog(bool ukrainian,QWidget *parent,const 
     connect(grid,qOverload<int>(&QComboBox::currentIndexChanged),this,[this,grid](int){parameters.gridSize=grid->currentData().toInt();invalidate();});
     bind("profileStepM",environment,text("Terrain sample step",u8"Крок профілю висот"),10,2000,&propagation::Parameters::profileStepM,0," m")->setToolTip(text("Path profile: up to 4096 samples. Coverage rays: up to 256 samples; actual spacing can be larger than this setting.",u8"Профіль: до 4096 точок. Промені покриття: до 256 точок; фактичний крок може бути більшим за вказаний."));
     bind("earthK",environment,text("Effective Earth k",u8"Ефективний радіус k"),0.5,3,&propagation::Parameters::earthK,3)->setToolTip(text("Geometry and knife-edge only; ITM uses its own refractivity model.",u8"Лише геометрія та knife-edge; ITM має власну модель рефракції."));
+    rxEnvironment=new QComboBox(this);
+    rxEnvironment->addItems({text("None",u8"Немає"),text("Rural / open",u8"Сільська / відкрита"),
+        text("Suburban",u8"Приміська"),text("Urban",u8"Міська"),text("Dense urban",u8"Щільна міська")});
+    environment->addRow(text("RX local environment",u8"Локальне середовище RX"),rxEnvironment);
+    rxClutterMode=new QComboBox(this);
+    rxClutterMode->addItems({"ITU-R P.2108-1 (3.1)",text("Manual residual loss",u8"Ручні залишкові втрати")});
+    environment->addRow(text("RX clutter method",u8"Метод перешкод RX"),rxClutterMode);
+    rxClutterManual=bind("rxClutterManualDb",environment,text("RX residual loss",u8"Залишкові втрати RX"),
+        0,200,&propagation::Parameters::rxClutterManualDb,2," dB");
+    rxClutterManual->setToolTip(text("User estimate of loss absent from terrain and Additional loss. Replaces the ITU correction; does not add to it. No height adjustment or ITU validity claim.",
+        u8"Власна оцінка втрат, яких немає в рельєфі та додаткових втратах. Замінює поправку ITU, не додається до неї. Без зміни висоти й гарантій моделі ITU."));
+    rxClutterExcluded=new QCheckBox(text("RX clutter absent from base terrain",u8"Перешкоди RX відсутні в рельєфі"),this);
+    rxClutterExcluded->setObjectName("rxClutterExcludedFromTerrain");
+    rxClutterExcluded->setToolTip(text("Required for ITU correction. SRTM and other surface DEMs may already include buildings/trees. Do not count these losses again. Applies to all RX coverage cells.",
+        u8"Обов'язково для поправки ITU. SRTM та інші поверхневі DEM можуть уже містити будівлі/дерева. Не враховуйте ці втрати повторно. Стосується всіх комірок RX."));
+    environment->addRow(rxClutterExcluded);
+    rxClutterStatus=new QLabel(this);rxClutterStatus->setObjectName("rxClutterStatus");
+    rxClutterStatus->setWordWrap(true);rxClutterStatus->setTextFormat(Qt::PlainText);environment->addRow(rxClutterStatus);
+    connect(rxEnvironment,qOverload<int>(&QComboBox::currentIndexChanged),this,[this](int i){
+        parameters.rxEnvironment=propagation::ClutterEnvironment(i);invalidate();
+    });
+    connect(rxClutterMode,qOverload<int>(&QComboBox::currentIndexChanged),this,[this](int i){
+        parameters.rxClutterMode=propagation::ClutterMode(i);invalidate();
+    });
+    connect(rxClutterExcluded,&QCheckBox::toggled,this,[this](bool checked){
+        parameters.rxClutterExcludedFromTerrain=checked;invalidate();
+    });
     auto *itmForm=makeForm("ITM");
     auto *climate=new QComboBox(this);climate->addItems({text("Equatorial",u8"Екваторіальний"),text("Continental subtropical",u8"Континентальний субтропічний"),text("Maritime subtropical",u8"Морський субтропічний"),text("Desert",u8"Пустельний"),text("Continental temperate",u8"Континентальний помірний"),text("Maritime temperate, land",u8"Морський помірний, суходіл"),text("Maritime temperate, sea",u8"Морський помірний, море")});climate->setCurrentIndex(4);itmForm->addRow(text("Climate",u8"Клімат"),climate);
     connect(climate,qOverload<int>(&QComboBox::currentIndexChanged),this,[this](int i){parameters.climate=i+1;invalidate();});
@@ -296,7 +325,7 @@ PropagationLabDialog::PropagationLabDialog(bool ukrainian,QWidget *parent,const 
     progress=new QProgressBar(this);progress->setRange(0,100);progress->setValue(0);
     actions->addWidget(coverageButton);actions->addWidget(pathButton);actions->addWidget(csv);actions->addWidget(cancelButton);actions->addWidget(progress,1);root->addLayout(actions);
     status=new QLabel(this);status->setWordWrap(true);status->setMaximumHeight(90);status->setTextFormat(Qt::PlainText);root->addWidget(status);
-    auto *warning=new QLabel(text("Approximate terrestrial coverage. No building/vegetation clutter, antenna pattern, or HF ionospheric/ground-wave prediction. Missing terrain is transparent. Settings and points are saved locally; online maps require permission each session.",u8"Наближене наземне покриття. Не враховує будівлі/рослинність, діаграму антени та КХ іоносферне/поверхневе поширення. Невідомі висоти прозорі. Налаштування й точки зберігаються локально; онлайн-мапа потребує дозволу в кожному сеансі."),this);warning->setWordWrap(true);root->addWidget(warning);
+    auto *warning=new QLabel(text("Approximate terrestrial coverage. RX local clutter is optional; no individual buildings, indoor loss, antenna pattern or HF noise/ionospheric/ground-wave prediction. Missing terrain is transparent. Settings are local; online access requires session permission.",u8"Наближене наземне покриття. Локальні перешкоди RX опційні; без окремих будівель, втрат у приміщенні, діаграми антени, КХ шуму/іоносфери/поверхневої хвилі. Невідомий рельєф прозорий. Налаштування локальні; онлайн-доступ потребує дозволу на сеанс."),this);warning->setWordWrap(true);root->addWidget(warning);
     connect(tiles,qOverload<int>(&QComboBox::currentIndexChanged),this,[this](int){updateMapSource();});
     connect(online,&QCheckBox::toggled,this,[this](bool){updateMapSource();});
     connect(picking,qOverload<int>(&QComboBox::currentIndexChanged),this,[this](int i){map->setPointPickingEnabled(i!=0);map->setMarkerCreationEnabled(i!=0);});
@@ -341,6 +370,7 @@ PropagationLabDialog::PropagationLabDialog(bool ukrainian,QWidget *parent,const 
     };
     registerChoice(model,"model");registerChoice(terrainSource,"terrain");registerChoice(grid,"gridSize");
     registerChoice(climate,"climate");registerChoice(pol,"polarization");
+    registerChoice(rxEnvironment,"rxEnvironment");registerChoice(rxClutterMode,"rxClutterMode");
     registerChoice(picking,"propagationMarkerClass");registerChoice(tiles,"propagationMapSource");registerChoice(layer,"layer");
     opacity->setObjectName("coverageOpacity");
     connect(opacity,&QSlider::valueChanged,this,[this](int){scheduleSave();});
@@ -420,6 +450,7 @@ void PropagationLabDialog::loadSettings(){
     }
     txPresent=settings.value("txPresent",true).toBool();rxPresent=settings.value("rxPresent",true).toBool();
     directory->setText(settings.value("terrainDirectory").toString());
+    rxClutterExcluded->setChecked(settings.value("rxClutterExcludedFromTerrain",false).toBool());
     opacity->setValue(settings.value("opacity",65).toInt());
     controls->setCurrentIndex((std::clamp)(settings.value("tab",0).toInt(),0,controls->count()-1));
     map->setMapZoom(settings.value("mapZoom",11).toInt());
@@ -441,6 +472,7 @@ void PropagationLabDialog::saveSettings(){
         else if(auto *combo=qobject_cast<QComboBox *>(control))settings.setValue(control->objectName(),combo->currentIndex());
     }
     settings.setValue("txPresent",txPresent);settings.setValue("rxPresent",rxPresent);
+    settings.setValue("rxClutterExcludedFromTerrain",rxClutterExcluded->isChecked());
     settings.setValue("terrainDirectory",directory->text());settings.setValue("opacity",opacity->value());
     settings.setValue("tab",controls->currentIndex());settings.setValue("geometry",saveGeometry());settings.setValue("splitter",splitter->saveState());
     const auto center=map->mapCenter();settings.setValue("mapLatitude",center.latitude);settings.setValue("mapLongitude",center.longitude);
@@ -572,7 +604,19 @@ void PropagationLabDialog::updateMapSource(){
     map->setTileLayerMode(mode>=2&&online->isChecked()?QthMapWidget::TileLayerMode::OnlineXyz:
                          mode==1?QthMapWidget::TileLayerMode::LocalXyz:QthMapWidget::TileLayerMode::GridOnly);
 }
+void PropagationLabDialog::updateClutterControls(){
+    if(!rxClutterStatus)return;
+    const bool enabled=parameters.rxEnvironment!=propagation::ClutterEnvironment::None;
+    const bool manual=parameters.rxClutterMode==propagation::ClutterMode::Manual;
+    rxClutterMode->setEnabled(enabled);rxClutterManual->setEnabled(enabled&&manual);
+    rxClutterExcluded->setEnabled(enabled&&!manual);
+    rxClutterStatus->setText(propagation::clutterSummary(parameters,propagation::receiverClutter(parameters))+"\n"+
+        text("30..3000 MHz; median RX only. R: rural/suburban 10 m, urban 15 m, dense urban 20 m; street width 27 m. Base path ends at max(RX height, R). No TX clutter, indoor loss or HF noise. One environment for all coverage cells. Manual replaces ITU at the actual RX height.",
+        u8"30..3000 МГц; медіана лише для RX. R: село/передмістя 10 м, місто 15 м, щільна забудова 20 м; ширина вулиці 27 м. Базова траса до max(висота RX, R). Без перешкод TX, приміщень і КХ шуму. Єдине середовище для всіх комірок. Ручні втрати замінюють ITU на фактичній висоті RX."));
+    rxClutterStatus->setToolTip(propagation::clutterModelLimits());
+}
 void PropagationLabDialog::invalidate(){
+    updateClutterControls();
     cancelEndpointElevationRequest();
     cancel.store(true);result={};updateMarkers();
     if(elevationTimer){
@@ -638,7 +682,7 @@ void PropagationLabDialog::calculate(bool coverage){
         QMetaObject::invokeMethod(this,[this,calculated,coverage,useOnlineTerrain,onlineTerrain](){
             if(cancel.load()||calculated.cancelled){status->setText(text("Cancelled",u8"Скасовано"));return;}
             if(useOnlineTerrain&&calculated.error.isEmpty())loadedOnlineTerrain=onlineTerrain;
-            if(coverage)result=calculated;else result.path=calculated.path;
+            if(coverage)result=calculated;else {result.path=calculated.path;result.parameters=calculated.parameters;}
             QString info;
             if(coverage)info=text("Valid cells: ",u8"Валідних комірок: ")+QString::number(calculated.validCells)+
                 text("; unknown: ",u8"; невідомих: ")+QString::number(calculated.unknownCells)+
@@ -646,6 +690,7 @@ void PropagationLabDialog::calculate(bool coverage){
                 text("; <1 km fallback: ",u8"; наближення <1 км: ")+QString::number(calculated.shortPathCells)+". "+calculated.error;
             else info=calculated.path.valid?text("TX-RX path calculated",u8"Трасу TX–RX розраховано"):
                 !calculated.error.isEmpty()?calculated.error:calculated.path.error;
+            info+="\n"+propagation::clutterSummary(calculated.parameters,propagation::receiverClutter(calculated.parameters));
             if(!calculated.missingTiles.isEmpty()) info+="\n"+
                 (useOnlineTerrain?text("Unavailable terrain tiles: ",u8"Недоступних тайлів рельєфу: "):
                                   text("Missing/void HGT: ",u8"Відсутні/невідомі HGT: "))+
@@ -673,13 +718,15 @@ void PropagationLabDialog::updateRaster(){
 void PropagationLabDialog::showProfile(){
     if(!profileDialog){profileDialog=new QDialog(this);profileDialog->setWindowTitle(text("TX-RX terrain profile",u8"Профіль рельєфу TX–RX"));profileDialog->resize(900,540);
         auto *layout=new QVBoxLayout(profileDialog);profile=new PropagationProfileWidget(uk,profileDialog);layout->addWidget(profile,1);
-        auto *key=new QLabel(text("Green: terrain + curvature; yellow: line of sight; cyan: 60% first Fresnel zone; blue: full first Fresnel zone.",u8"Зелений: рельєф + кривизна; жовтий: пряма видимість; блакитний: 60% першої зони Френеля; синій: повна перша зона."),profileDialog);key->setWordWrap(true);layout->addWidget(key);
+        auto *key=new QLabel(text("Green: terrain + curvature; white: actual antennas; yellow: base-model ray to RX reference height; cyan/blue: 60%/full first Fresnel zone of that ray.",u8"Зелений: рельєф + кривизна; білий: фактичні антени; жовтий: промінь базової моделі до опорної висоти RX; блакитний/синій: 60%/повна перша зона Френеля цього променя."),profileDialog);key->setWordWrap(true);layout->addWidget(key);
         profileStatus=new QLabel(profileDialog);profileStatus->setWordWrap(true);profileStatus->setTextFormat(Qt::PlainText);layout->addWidget(profileStatus);}
     profile->path=result.path;profile->update();const auto &r=result.path;
     auto n=[](double v){return std::isfinite(v)?QString::number(v,'f',1):QStringLiteral("--");};
     profileStatus->setText(QStringLiteral("%1 km | FSPL %2 dB | %3 %4 dB | RX %5 dBm | %6 %7 dB\n%8 %9 m | F1 %10%% | %11 %12 dB | ITM warnings 0x%13 %14\n%15")
-        .arg(n(r.distanceM/1000),n(r.freeSpaceDb),text("Path loss",u8"Втрати траси"),n(r.pathLossDb),n(r.receivedDbm),text("Margin",u8"Запас"),n(r.marginDb))
-        .arg(text("Min clearance",u8"Мін. просвіт"),n(r.minimumClearanceM),n(r.minimumFresnelRatio*100),text("Dominant edge estimate",u8"Оцінка головної перешкоди"),n(r.diffractionDb),QString::number(r.itmWarnings,16),r.shortPathFallback?"(<1 km)":"",r.error));
+        .arg(n(r.distanceM/1000),n(r.freeSpaceDb),text("Total path loss",u8"Повні втрати траси"),n(r.pathLossDb),n(r.receivedDbm),text("Margin",u8"Запас"),n(r.marginDb))
+        .arg(text("Reference-ray clearance",u8"Просвіт опорного променя"),n(r.minimumClearanceM),n(r.minimumFresnelRatio*100),text("Dominant edge estimate",u8"Оцінка головної перешкоди"),n(r.diffractionDb),QString::number(r.itmWarnings,16),r.shortPathFallback?"(<1 km)":"",r.error)
+        +"\n"+text("Base path loss: ",u8"Базові втрати траси: ")+n(r.basePathLossDb)+" dB; "+propagation::clutterSummary(result.parameters,r.clutter)
+        +"\n"+propagation::clutterModelLimits());
     if(isVisible()){profileDialog->show();profileDialog->raise();}
 }
 void PropagationLabDialog::exportProfile(){
@@ -688,8 +735,6 @@ void PropagationLabDialog::exportProfile(){
     if(file.isEmpty())return;QSaveFile output(file);
     if(!output.open(QIODevice::WriteOnly|QIODevice::Text)){status->setText(output.errorString());return;}
     QTextStream stream(&output);stream.setCodec("UTF-8");stream.setRealNumberPrecision(12);
-    stream<<"# TX="<<parameters.tx.latitude<<","<<parameters.tx.longitude<<"; RX="<<parameters.rx.latitude<<","<<parameters.rx.longitude<<"; MHz="<<parameters.frequencyMHz<<"\n";
-    stream<<"distance_m,terrain_m_msl,terrain_curvature_m,los_m,fresnel1_radius_m\n";
-    for(const auto &v:result.path.points)stream<<v.distanceM<<","<<v.terrainM<<","<<v.adjustedTerrainM<<","<<v.rayM<<","<<v.fresnelM<<"\n";
+    stream<<propagation::profileCsv(result.parameters,result.path);
     stream.flush();status->setText(output.commit()?text("Profile exported",u8"Профіль експортовано"):output.errorString());
 }

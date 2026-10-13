@@ -14,9 +14,12 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QString>
+#include <QStringList>
+#include <QSet>
 #include <QTimer>
 #include <atomic>
 #include <thread>
+#include <memory>
 #include <vector>
 
 #include "spectrumframerecorder.h"
@@ -30,15 +33,23 @@ class QShowEvent;
 class QToolButton;
 class ScaleWidget;
 class Waterfall3DView;
+class DspBranchAudioOutput;
+template <typename T> class QFutureWatcher;
 
 class SpectrumFrameReplayDialog : public QDialog {
     Q_OBJECT
 
 public:
-    explicit SpectrumFrameReplayDialog(QWidget *parent = nullptr);
+    explicit SpectrumFrameReplayDialog(QWidget *parent = nullptr, bool isolatedExperiment = false);
     ~SpectrumFrameReplayDialog() override;
 
     bool loadRecording(const QString &path, QString *errorMessage = nullptr);
+    // The caller decodes a bounded recording off the UI thread after bundle verification.
+    bool loadExperimentRecording(const QString &path, SpectrumFrameRecording loaded,
+                                 const QJsonObject &context, QString *errorMessage = nullptr,
+                                 const QStringList &verifiedAssetPaths = {});
+    bool applyExperimentContext(const QJsonObject &context, QString *errorMessage = nullptr);
+    QJsonObject experimentReplayState() const;
 
 signals:
     void replayAudioFrameReady(const QByteArray &pcmData);
@@ -55,9 +66,13 @@ private:
     };
 
     void rebuildWaterfallImage();
+    void rebuildExperimentWaterfall();
+    void adoptRecording(const QString &path, SpectrumFrameRecording loaded);
+    void startExperimentIqPlayback(const QString &path, quint64 dataOffset, quint64 byteOffset);
     void rebuild3DWindow(bool force = false);
     void updateReplayDisplayMode();
     void renderWaterfallPixmap();
+    void renderExperimentWaterfallViewport();
     void updateFrameSelection(int index);
     void updateLabels();
     void setPlaybackEnabled(bool enabled);
@@ -99,6 +114,7 @@ private:
     MyGraphWidget *graph = nullptr;
     ScaleWidget *scaleWidget = nullptr;
     QLabel *waterfallLabel = nullptr;
+    QLabel *experimentWaterfallTile = nullptr;
     QScrollArea *graphScroll = nullptr;
     QScrollArea *scaleScroll = nullptr;
     QScrollArea *waterfallScroll = nullptr;
@@ -137,7 +153,7 @@ private:
     QTimer saveSettingsTimer;
     QElapsedTimer playbackClock;
 
-    SpectrumFrameRecording recording;
+    std::shared_ptr<SpectrumFrameRecording> recording = std::make_shared<SpectrumFrameRecording>();
     QString recordingPath;
     QString linkedChannelIqPath;
     QString linkedFullIqPath;
@@ -192,6 +208,20 @@ private:
     bool syncingHorizontalScroll = false;
     bool deferredRenderQueued = false;
     bool replayWaterfallPaused = false;
+    bool isolatedExperiment = false;
+    bool replayColoredSpectrum = true;
+    QJsonObject experimentSettings, experimentCalibration;
+    QString experimentContextSource;
+    bool experimentDisplayAdjusted = false;
+    std::shared_ptr<const SpectrumFrameRecording> experimentFrames;
+    std::shared_ptr<std::atomic_bool> imageCancel;
+    QFutureWatcher<QImage> *imageWatcher = nullptr;
+    bool experimentImageDirty = false;
+    std::unique_ptr<DspBranchAudioOutput> experimentAudio;
+    std::uint64_t experimentAudioGeneration = 0;
+    QSet<QString> verifiedReplayAssets;
+    int experimentViewportPixels = 0;
+    bool renderingExperimentViewport = false;
 };
 
 #endif // SPECTRUMFRAMEREPLAYDIALOG_H

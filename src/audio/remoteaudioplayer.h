@@ -25,6 +25,8 @@ public:
     void playPcmFrame(const QByteArray &pcmData);
     void stop();
     void setVolume(float volume);
+    void setOutputDevice(int index);
+    void setMaximumQueuedMs(int milliseconds);
 
 private slots:
     void cleanupCompletedBuffers();
@@ -37,6 +39,8 @@ private:
     };
 #endif
     std::atomic<float> outputVolume = 1.0f;
+    int outputDeviceIndex = -1;
+    int maximumQueuedMs = 0;
 #ifdef _WIN32
     void releaseBlock(AudioBlock *block);
 #endif

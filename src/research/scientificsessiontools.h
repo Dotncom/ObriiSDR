@@ -4,6 +4,7 @@
 #include "spectrumscienceanalyzer.h"
 
 #include <QWidget>
+#include <QJsonObject>
 
 #include <functional>
 #include <memory>
@@ -49,6 +50,8 @@ public:
     ~MeasurementSessionWidget() override;
 
     bool isRunning() const;
+    void setExperimentBundleCallbacks(std::function<QJsonObject()> snapshot,
+                                      std::function<bool(const QJsonObject &, QString *)> applyWorkspace);
     void appendSpectrumFrame(const std::vector<float> &frequencies,
                              const std::vector<float> &levels,
                              const ScientificSessionContext &context,

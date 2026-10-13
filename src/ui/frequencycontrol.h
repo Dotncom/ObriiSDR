@@ -5,10 +5,12 @@
 #include <QVector>
 #include <QPair>
 #include <QString>
+#include <functional>
 
 class QComboBox;
 class QDoubleSpinBox;
 class QPushButton;
+class QTimer;
 
 class FrequencyControl : public QWidget {
     Q_OBJECT
@@ -28,9 +30,12 @@ public:
     void setSelectedStepName(const QString &name);
     QString selectedValuePresetName() const;
     void setSelectedValuePresetName(const QString &name);
+    FrequencyControl *createLinkedControl(QWidget *parent, QTimer *syncTimer,
+                                         const std::function<void()> &apply);
 
 signals:
     void valueCommitted(double valueHz);
+    void selectionChanged();
 
 private:
     double unitFactor() const;
@@ -39,6 +44,8 @@ private:
     void updateDisplayedValue();
     void commitCurrentValue();
     void adjustByStep(int direction);
+    void synchronizeFrom(const FrequencyControl &source, bool includeValue);
+    void copySelectionTo(FrequencyControl &target) const;
 
     QDoubleSpinBox *valueSpin = nullptr;
     QComboBox *unitCombo = nullptr;

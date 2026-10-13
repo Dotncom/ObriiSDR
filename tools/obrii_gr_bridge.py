@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bounded, software-only Obrii DSP v1 endpoint. No radio/device access.
 
-GNU Radio runs in at most two persistent, locally configured worker processes.
+GNU Radio runs in at most eight persistent, locally configured worker processes.
 Only validated CF32 samples cross into the workers; TCP never carries code.
 """
 
@@ -37,7 +37,10 @@ HEADER = struct.Struct("<8sII")
 MAX_JSON = 65536
 MAX_BINARY = 2097152
 MAX_SAMPLES = 65536
-MAX_STREAMS = 2
+MAX_OUTPUT_SAMPLES = 131072
+MAX_RATE_FACTOR = 64
+MAX_INPUT_RESERVE = 4096
+MAX_STREAMS = 8
 UINT64_MAX = (1 << 64) - 1
 FFT_LENGTHS = frozenset(1 << n for n in range(9, 17))
 TOKEN_ENV = "OBRII_DSP_TOKEN"
@@ -240,6 +243,9 @@ class ReferenceFft:
 
 
 class NumpyProcessor:
+    numerator = denominator = 1
+    input_reserve = 0
+
     def process(self, samples):
         return samples.copy()
 
@@ -259,20 +265,51 @@ def _load_gnu_block(plugin, sample_rate):
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         block = module.make_block(sample_rate)
+    numerator = denominator = 1
+    reserve = None
+    if type(block) is tuple:
+        _require(len(block) in (3, 4), "invalid local rate contract")
+        if len(block) == 4:
+            reserve = block[3]
+        block, numerator, denominator = block[:3]
+        _integer(numerator, 1, MAX_RATE_FACTOR)
+        _integer(denominator, 1, MAX_RATE_FACTOR)
+        _require(math.gcd(numerator, denominator) == 1 and numerator <= 2 * denominator,
+                 "unsupported local rate ratio")
+    _number(sample_rate * numerator / denominator, 1000, 2000000)
     for signature in (block.input_signature(), block.output_signature()):
         _require(signature.min_streams() == 1 and signature.max_streams() == 1
                  and signature.sizeof_stream_item(0) == gr.sizeof_gr_complex,
                  "plugin must have one complex input and output")
     if hasattr(block, "relative_rate"):
-        _require(block.relative_rate() == 1.0, "plugin rate must be one to one")
-    return gr, block
+        _require(math.isclose(block.relative_rate(), numerator / denominator, rel_tol=1e-12),
+                 "plugin rate declaration mismatch")
+    if numerator != denominator:
+        if reserve is None:
+            _require(hasattr(block, "history"), "hierarchy requires explicit input reserve")
+            history = block.history()
+            # GNU 3.10 installs rational FIR taps lazily on its first work call;
+            # history() alone still reports 1 before the scheduler runs.
+            if all(hasattr(block, name) for name in ("taps", "interpolation", "decimation")):
+                history = max(history, (len(block.taps()) + block.interpolation() - 1) // block.interpolation())
+            reserve = ((history - 1 + denominator - 1) // denominator + 1) * denominator
+        _integer(reserve, denominator, MAX_INPUT_RESERVE)
+        _require(reserve % denominator == 0, "input reserve must be whole rate quanta")
+        if hasattr(block, "set_output_multiple"):
+            multiple = math.lcm(numerator, block.output_multiple())
+            _require(multiple <= 4096, "unsupported plugin output quantum")
+            block.set_output_multiple(multiple)
+    else:
+        _require(reserve in (None, 0), "same-rate reserve unsupported")
+        reserve = 0
+    return gr, block, numerator, denominator, reserve
 
 
 class _StreamingGraph:
     """Single bounded transaction in flight; source never pads or terminates it."""
 
     def __init__(self, plugin, sample_rate, output):
-        gr, block = _load_gnu_block(plugin, sample_rate)
+        gr, block, self.numerator, self.denominator, self.input_reserve = _load_gnu_block(plugin, sample_rate)
         # A Python block's gateway does not own its Python wrapper's lifetime.
         self.block = block
         self.condition = threading.Condition()
@@ -280,8 +317,10 @@ class _StreamingGraph:
         self.error = False
         self.samples = np.empty(0, dtype=np.complex64)
         self.emitted = 0
-        self.received = 0
         self.expected = 0
+        self.total_input = self.total_output = self.delivered = 0
+        self.capacity = MAX_OUTPUT_SAMPLES + 2 * MAX_INPUT_RESERVE + 2 * MAX_RATE_FACTOR
+        self.pending = np.empty(self.capacity, dtype=np.complex64)
         self.output = output
         state = self
 
@@ -298,6 +337,7 @@ class _StreamingGraph:
                     count = min(len(outputs[0]), state.expected - state.emitted)
                     outputs[0][:count] = state.samples[state.emitted:state.emitted + count]
                     state.emitted += count
+                    state.condition.notify_all()
                     return count
 
         class Sink(gr.sync_block):
@@ -307,13 +347,18 @@ class _StreamingGraph:
             def work(self, inputs, _outputs):
                 values = inputs[0]
                 with state.condition:
-                    end = state.received + len(values)
-                    if end > state.expected or not np.isfinite(values).all():
+                    end = state.total_output + len(values)
+                    limit = (state.total_input * state.numerator + state.denominator - 1) // state.denominator
+                    if (end > limit or end - state.delivered > state.capacity
+                            or not np.isfinite(values).all()):
                         state.error = True
                         state.condition.notify_all()
                         return -1
-                    state.output[state.received:end] = values
-                    state.received = end
+                    start = state.total_output % state.capacity
+                    first = min(len(values), state.capacity - start)
+                    state.pending[start:start + first] = values[:first]
+                    state.pending[:len(values) - first] = values[first:]
+                    state.total_output = end
                     state.condition.notify_all()
                     return len(values)
 
@@ -330,13 +375,28 @@ class _StreamingGraph:
             _require(not self.error and not self.closed, "GNU streaming failure")
             self.samples = samples
             self.expected = len(samples)
-            self.emitted = self.received = 0
+            self.emitted = 0
+            self.total_input += len(samples)
+            # Reserve filter history plus forecast lookahead; GNU general blocks
+            # may wait for real startup history. Never fabricate padding samples.
+            if self.numerator == self.denominator:
+                target = self.total_input
+            else:
+                target = max(0, (self.total_input - self.input_reserve) // self.denominator) * self.numerator
+            count = target - self.delivered
+            _require(0 <= count <= MAX_OUTPUT_SAMPLES, "GNU output limit exceeded")
             self.condition.notify_all()
-            while self.received != self.expected and not self.error:
+            while (self.total_output < target or self.emitted != self.expected) and not self.error:
                 remaining = deadline - time.monotonic()
                 _require(remaining > 0, "GNU output timeout")
                 self.condition.wait(remaining)
             _require(not self.error and self.emitted == self.expected, "GNU output count mismatch")
+            start = self.delivered % self.capacity
+            first = min(count, self.capacity - start)
+            self.output[:first] = self.pending[start:start + first]
+            self.output[first:count] = self.pending[:count - first]
+            self.delivered = target
+            return count
 
     def close(self):
         with self.condition:
@@ -352,7 +412,7 @@ def _gnu_worker(pipe, input_storage, output_storage, plugin, sample_rate, timeou
         source = np.frombuffer(input_storage, dtype=np.complex64)
         sink = np.frombuffer(output_storage, dtype=np.complex64)
         graph = _StreamingGraph(plugin, sample_rate, sink)
-        pipe.send_bytes(b"R")
+        pipe.send_bytes(b"R" + struct.pack("<III", graph.numerator, graph.denominator, graph.input_reserve))
         while True:
             command = pipe.recv_bytes(5)
             if command == b"Q":
@@ -360,8 +420,8 @@ def _gnu_worker(pipe, input_storage, output_storage, plugin, sample_rate, timeou
             _require(len(command) == 5 and command[:1] == b"W", "invalid local command")
             count = struct.unpack("<I", command[1:])[0]
             _require(1 <= count <= MAX_SAMPLES, "invalid local sample count")
-            graph.process(source[:count], timeout)
-            pipe.send_bytes(b"D")
+            produced = graph.process(source[:count], timeout)
+            pipe.send_bytes(b"D" + struct.pack("<I", produced))
     except Exception:
         # Plugin exception text is deliberately not exposed to a client or log.
         try:
@@ -380,12 +440,13 @@ def _gnu_worker(pipe, input_storage, output_storage, plugin, sample_rate, timeou
 class GnuProcessor:
     """A persistent scheduler isolated so a stalled plugin can be terminated."""
 
-    def __init__(self, sample_rate, plugin=None, timeout=5.0):
+    def __init__(self, sample_rate, plugin=None, timeout=5.0, cancel=None):
         self.timeout = timeout
+        self.cancel = cancel
         self.process_handle = None
         context = multiprocessing.get_context("spawn")
         self.input_storage = context.RawArray("f", MAX_SAMPLES * 2)
-        self.output_storage = context.RawArray("f", MAX_SAMPLES * 2)
+        self.output_storage = context.RawArray("f", MAX_OUTPUT_SAMPLES * 2)
         self.input = np.frombuffer(self.input_storage, dtype=np.complex64)
         self.output = np.frombuffer(self.output_storage, dtype=np.complex64)
         self.pipe, child_pipe = context.Pipe(duplex=True)
@@ -395,16 +456,25 @@ class GnuProcessor:
         try:
             self.process_handle.start()
             child_pipe.close()
-            self._reply(b"R", "GNU worker startup failed or timed out")
+            ready = self._reply(b"R", "GNU worker startup failed or timed out", 13)
+            self.numerator, self.denominator, self.input_reserve = struct.unpack("<III", ready[1:])
         except Exception:
             child_pipe.close()
             self.close()
             raise ProtocolError("GNU worker startup failed or timed out") from None
 
-    def _reply(self, expected, reason):
+    def _reply(self, expected, reason, length):
         try:
-            _require(self.pipe.poll(self.timeout), reason)
-            _require(self.pipe.recv_bytes(1) == expected, reason)
+            deadline = time.monotonic() + self.timeout
+            while True:
+                _require(self.cancel is None or not self.cancel.is_set(), "GNU processing cancelled")
+                remaining = deadline - time.monotonic()
+                _require(remaining > 0, reason)
+                if self.pipe.poll(min(0.05, remaining)):
+                    break
+            reply = self.pipe.recv_bytes(length)
+            _require(len(reply) == length and reply[:1] == expected, reason)
+            return reply
         except (OSError, EOFError):
             raise ProtocolError(reason) from None
 
@@ -415,8 +485,10 @@ class GnuProcessor:
             # Fixed shared arrays and tiny control messages avoid blocking on a
             # full IQ pipe when a plugin holds the worker's interpreter hostage.
             self.pipe.send_bytes(b"W" + struct.pack("<I", len(samples)))
-            self._reply(b"D", "GNU processing failed or timed out")
-            result = self.output[:len(samples)].copy()
+            reply = self._reply(b"D", "GNU processing failed or timed out", 5)
+            count = struct.unpack("<I", reply[1:])[0]
+            _require(count <= MAX_OUTPUT_SAMPLES, "GNU output limit exceeded")
+            result = self.output[:count].copy()
             _require(np.isfinite(result).all(), "non-finite GNU output")
             return result
         except (OSError, EOFError, ProtocolError):
@@ -452,10 +524,10 @@ class ProcessorFactory:
     plugin: str = None
     timeout: float = 5.0
 
-    def __call__(self, sample_rate):
+    def __call__(self, sample_rate, cancel=None):
         if self.engine == "numpy":
             return NumpyProcessor()
-        return GnuProcessor(sample_rate, self.plugin, self.timeout)
+        return GnuProcessor(sample_rate, self.plugin, self.timeout, cancel)
 
 
 def _configuration(message):
@@ -465,14 +537,22 @@ def _configuration(message):
 
 
 class _Stream:
-    def __init__(self, message, factory):
+    def __init__(self, message, factory, cancel=None):
         self.configuration = _configuration(message)
         self.next_sample = _uint64(message["firstSample"])
         self.ffts = [ReferenceFft(config) for config in message["ffts"]]
         capacity = max((f.config["length"] for f in self.ffts), default=0)
         self.history = np.empty(capacity, dtype=np.complex64)
         self.used = 0
-        self.processor = factory(message["sampleRate"])
+        self.processor = (factory(message["sampleRate"], cancel=cancel) if isinstance(factory, ProcessorFactory)
+                          else factory(message["sampleRate"]))
+        self.numerator = self.processor.numerator
+        self.denominator = self.processor.denominator
+        self.input_reserve = self.processor.input_reserve
+        self.rate = message["sampleRate"] * self.numerator / self.denominator
+        self.origin = self.next_sample
+        self.output_next = 0 if self.numerator != self.denominator else self.next_sample
+        self.output_gap = True
 
     def append(self, values):
         capacity = len(self.history)
@@ -485,9 +565,10 @@ class _Stream:
 
 
 class DspSession:
-    def __init__(self, factory=None, clock=time.monotonic):
+    def __init__(self, factory=None, clock=time.monotonic, cancel=None):
         self.factory = factory if factory is not None else ProcessorFactory()
         self.clock = clock
+        self.cancel = cancel
         self.streams = {}
 
     def process(self, message, payload):
@@ -505,11 +586,22 @@ class DspSession:
             stream = None
         if stream is None:
             _require(len(self.streams) < MAX_STREAMS, "stream limit exceeded")
-            stream = _Stream(message, self.factory)
+            stream = _Stream(message, self.factory, self.cancel)
             self.streams[key] = stream
-        result = stream.processor.process(samples)
-        _require(result.shape == samples.shape and np.isfinite(result).all(),
-                 "invalid processor output")
+        try:
+            result = stream.processor.process(samples)
+            total = first + len(samples) - stream.origin
+            target = (max(0, (total - stream.input_reserve) // stream.denominator) * stream.numerator
+                      if stream.numerator != stream.denominator else first + len(samples))
+            _require(isinstance(result, np.ndarray) and result.ndim == 1
+                     and result.dtype == np.complex64 and len(result) <= MAX_OUTPUT_SAMPLES
+                     and len(result) == target - stream.output_next
+                     and target <= UINT64_MAX and np.isfinite(result).all(),
+                     "invalid processor output")
+        except Exception:
+            del self.streams[key]
+            stream.processor.close()
+            raise
         stream.next_sample = first + len(samples)
         stream.append(result)
         iq = result.astype("<c8", copy=False).tobytes() if message["returnIq"] else b""
@@ -518,7 +610,7 @@ class DspSession:
         spectra = []
         now = self.clock()
         for fft in stream.ffts:
-            frame = fft.compute(stream.history[:stream.used], message["sampleRate"], now)
+            frame = fft.compute(stream.history[:stream.used], stream.rate, now) if len(result) else None
             if frame is not None:
                 metadata, levels = frame
                 metadata["offsetBytes"] = offset
@@ -529,6 +621,15 @@ class DspSession:
             "stream", "generation", "epoch", "firstSample", "sampleRate", "centerHz", "sampleCount")}
         reply.update(type="result", iqBytes=len(iq), spectra=spectra,
                      processingMs=(time.monotonic() - started) * 1000)
+        if stream.numerator != stream.denominator:
+            reply["output"] = {"sampleRate": stream.rate, "firstSample": str(stream.output_next),
+                               "sampleCount": len(result), "originFirstSample": str(stream.origin),
+                               "rateNumerator": stream.numerator, "rateDenominator": stream.denominator,
+                               "inputReserve": stream.input_reserve,
+                               "gap": stream.output_gap}
+        stream.output_next += len(result)
+        if len(result):
+            stream.output_gap = False
         return reply, b"".join(chunks)
 
     def close(self):
@@ -573,11 +674,11 @@ class BridgeServer:
 
     def _serve_client(self, connection):
         authenticated = False
-        session = DspSession(self.factory)
+        session = DspSession(self.factory, cancel=self.stopped)
         try:
             receive_frame(connection, self.timeout,
                           lambda message, size: validate_hello(message, size, self.token))
-            send_frame(connection, {"type": "hello", "version": 1}, timeout=self.timeout)
+            send_frame(connection, {"type": "hello", "version": 1, "rationalRateVersion": 1}, timeout=self.timeout)
             authenticated = True
             while not self.stopped.is_set():
                 message, payload = receive_frame(connection, self.timeout, validate_work)
@@ -647,7 +748,8 @@ def check_runtime(factory):
         for first in (0, 1024):
             tone = (0.25 * np.exp(2j * np.pi * np.arange(first, first + 1024) / 32)).astype(np.complex64)
             result = processor.process(tone)
-            _require(result.shape == tone.shape and np.isfinite(result).all(), "runtime check failed")
+            _require(result.ndim == 1 and len(result) <= MAX_OUTPUT_SAMPLES
+                     and np.isfinite(result).all(), "runtime check failed")
             if factory.plugin is None:
                 _require(np.array_equal(result, tone), "identity check failed")
         fft = ReferenceFft({"id": "check", "length": 1024, "window": 0, "refreshMs": 20})

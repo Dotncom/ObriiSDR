@@ -5,6 +5,12 @@
     "language_name_key": "__language_name"
   },
   "en": {
+    "experiment_export": "Export experiment...",
+    "experiment_open": "Open experiment...",
+    "experiment_stop_rx": "Stop reception before restoring the DSP workspace.",
+    "experiment_no_workspace": "The experiment has no supported DSP workspace.",
+    "experiment_backup_failed": "Could not save the current workspace backup; import cancelled.",
+    "experiment_workspace_failed": "Could not restore the experiment workspace.",
     "open": "Open",
     "file": "File",
     "sample_rate": "Sample rate",
@@ -1089,6 +1095,12 @@
     "product": "product:"
   },
   "uk": {
+    "experiment_export": "Експортувати експеримент...",
+    "experiment_open": "Відкрити експеримент...",
+    "experiment_stop_rx": "Зупиніть приймання перед відновленням робочого місця DSP.",
+    "experiment_no_workspace": "У пакеті немає підтримуваного робочого місця DSP.",
+    "experiment_backup_failed": "Не вдалося зберегти резервну копію поточного макета; імпорт скасовано.",
+    "experiment_workspace_failed": "Не вдалося відновити робоче місце експерименту.",
     "open": "Відкрити",
     "file": "Файл",
     "sample_rate": "Частота семплів",

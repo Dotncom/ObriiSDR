@@ -28,6 +28,17 @@ known FFT. The default GNU block is `multiply_const_cc(1.0)`, an identity. The
 NumPy engine is an explicit software-only identity reference, not a silent GNU
 fallback. Without `--gnu`, GNU integration cases are reported as skipped.
 
+`tools/gnu_radio_protocol_selftest.cpp` is a standalone QtCore/FFTW codec
+regression (build it with `src/core/dspstreamprocessor.cpp` and
+`src/core/fftplannermutex.cpp`, using the native self-test's include/library paths).
+It covers legacy defaults, eight streams, rational metadata, empty output,
+64-bit counters, malformed output and processed FFT axes. No CMake target is
+added by this phase. After compiling it, supply its executable to
+`obrii_gr_bridge_selftest.py --gnu --cpp-codec <executable>` to check actual GNU
+request/result frames with the C++ decoder. Qt and FFTW DLLs must be discoverable
+on that executable's runtime PATH. These are synthetic tests, not RF throughput
+or audio-quality qualification.
+
 ## Local Server
 
 Generate a fresh token for every server launch, keep it out of command lines,
@@ -74,25 +85,56 @@ def make_block(sample_rate):
     return filter.fir_filter_ccc(1, [0.5, 0.25, 0.125])
 ```
 
-The return value must be a GNU `block` or `hier_block2` with exactly one CF32 input
-and one CF32 output, unchanged rate, and exactly one output per input sample. No
-hardware, network, file sources/sinks, message-driven radio control, decimation,
-interpolation, or future-packet-dependent output is supported. The plugin must
-produce every packet's output without zero padding or end-of-stream flushing.
-A filter can retain normal history/delay, but cannot hold back output until a
-subsequent request: the protocol permits only one request in flight.
+Returning just a GNU `block` or `hier_block2` preserves the legacy contract: one
+CF32 input/output, unchanged rate, exactly one output per input. For a bounded
+rational rate change, return `(block, interpolation, decimation)` instead:
+
+```python
+from gnuradio import filter
+
+def make_block(sample_rate):
+    return filter.rational_resampler_ccf(2, 3), 2, 3
+```
+
+The ratio must be reduced, both factors 1..64, output/input at most 2, and output
+rate 1000..2000000 samples/s. The direct block's declared relative rate must agree.
+GNU's polyphase FIR resampler supplies anti-alias/interpolation filtering;
+the adapter does not implement resampling math. `tools/obrii_gr_resampler.py` is
+a runnable local example. No hardware, network/file sources/sinks or radio-control
+messages belong in a plugin. Plugins are selected by local CLI, never by a peer.
+
+Rational mode retains a bounded input history/lookahead reserve R. By default
+`R = (ceil((H-1)/M)+1)*M`, where M is decimation and H is the block's history.
+GNU rational resamplers install taps lazily, so H also includes
+`ceil(len(taps)/interpolation)`. A hierarchy must explicitly return
+`(block, L, M, R)`; R must be a multiple of M, between M and 4096. A direct block
+can also declare R explicitly. It must cover all internal forecast/history needs;
+an insufficient reserve fails by deadline, never by fabricating padding.
+
+After T contiguous input samples since reset, exactly
+`L * floor(max(0, T-R)/M)` samples have been returned. Individual requests can
+return **zero** samples; later requests can return up to 131072. Whole
+rate quanta make accounting independent of network packet sizes. Direct rational
+blocks are scheduled with output multiples divisible by L (maximum 4096).
+Hierarchies must arrange compatible internal work multiples themselves. Rate,
+taps/history requirements and buffering behavior must remain fixed during a
+segment. This is a bounded constant-ratio contract, not arbitrary scheduling.
 
 Each active stream owns a persistent worker process, scheduler, streaming source
 and sink. Contiguous packets use the same block and scheduler; a new vector source
-and `run()` are not created per packet. Per-stream shared input/output arrays and
-source/sink capacities are 65536 complex samples; scheduler work calls are capped
-at 4096 output items and exposed output buffers at 8192 items. The source waits
-for input and never fabricates samples. The sink rejects excess/non-finite output.
+and `run()` are not created per packet. Each stream has fixed shared arrays for
+65536 input and 131072 output complex samples, plus a 139392-sample output ring.
+Scheduler work calls are capped at 4096 output items and exposed output buffers
+at 8192 items. The source waits for input and never fabricates samples. The sink
+rejects non-finite samples, output exceeding admitted input's rational budget, or
+ring overflow. No transaction queue grows while a plugin is stalled.
 
 `--processing-timeout` bounds GNU startup and each transaction (default 5 seconds,
-allowed 0.05..30). Missing output, bad signatures, declared non-unit rate, worker
+allowed 0.05..30). Missing output, bad signatures, invalid rate contracts, worker
 failure, or output-count failure closes the session. Hung workers are terminated;
-shutdown first allows a short graceful stop. Internal plugin allocations and side
+shutdown first allows a short graceful stop. Server cancellation is checked at
+most every 50 ms while waiting for startup/output; teardown escalates from a
+250 ms graceful join to terminate/kill joins of 500 ms each. Internal plugin allocations and side
 effects are not sandboxed: plugins are trusted local code, and must bound internal
 buffers and avoid hardware/network access. Worker isolation supplies a killable
 timeout boundary, not a security sandbox for arbitrary Python or native code.
@@ -101,9 +143,48 @@ Reset/recreate occurs on generation, epoch, sample rate, center frequency, FFT
 configuration (including order, IDs and refresh), explicit `gap`, or
 noncontiguous `firstSample`. A plugin is reconstructed with the new rate; failure
 to support it is an explicit processing error. Session disconnect destroys all
-stream state. At most two stream IDs may exist per connection; a third is rejected,
+stream state, including unreturned lookahead/tail: no end-of-stream flush exists.
+At most eight stream IDs may exist per connection; a ninth is rejected,
 not silently evicted. Reconnect to retire IDs because v1 defines no close-stream
 request. Changing only `returnIq` leaves filter and FFT history intact.
+
+## GRC Adapter Integration
+
+There is no installed Obrii OOT source/sink block or generic GRC network endpoint.
+The runnable integration is a locally exported **hierarchical** CF32 flowgraph
+hosted between the bridge's bounded source and sink. `tools/obrii_gr_hier_resampler.py`
+demonstrates the `gr.hier_block2` pattern with GNU rational resampling and gain:
+
+```powershell
+& .\build\runtime\wifi-phy\python.exe -I -B .\tools\obrii_gr_bridge.py --check --plugin .\tools\obrii_gr_hier_resampler.py
+# With OBRII_DSP_TOKEN already set as above:
+& .\build\runtime\wifi-phy\python.exe -I -B .\tools\obrii_gr_bridge.py --port 7356 --plugin .\tools\obrii_gr_hier_resampler.py
+```
+
+For a GRC design, export Python with Generate Options = Hier Block, exactly one
+complex input Pad Source and one complex output Pad Sink, and a `sample_rate`
+parameter. Do not include hardware sources, Throttle, GUI sinks, or an independently
+running top_block. Put generated code beside a trusted bridge wrapper; load it
+by absolute local path (this also works with Python `-I`):
+
+```python
+import importlib.util
+from pathlib import Path
+
+def make_block(sample_rate):
+    path = Path(__file__).with_name("my_channel.py")
+    spec = importlib.util.spec_from_file_location("my_channel", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    block = module.my_channel(sample_rate=sample_rate)
+    return block, 2, 3, 192  # Example: declare your actual ratio and validated reserve.
+```
+
+Set internal resamplers' output multiples to their interpolation factors; the
+runnable hierarchy example shows this. Validate the chosen reserve and output
+accounting with synthetic irregular packets before using a generated design.
+Tagged-stream lengths, PMT messages, tags, arbitrary multiport graphs and
+variable-rate/demand-driven schedulers are not transported by this adapter.
 
 ## FFT and Wire Details
 
@@ -112,8 +193,10 @@ uint64 decimal strings, finite input/output requirements, and CF32LE/float32LE
 formats follow the contract. Unknown requests/fields, duplicate JSON keys,
 non-finite JSON values, duplicate FFT IDs and malformed payloads are rejected.
 Reply offsets are byte offsets from the beginning of the entire binary payload,
-including returned IQ. Reply metadata echoes the request's stream, generation,
-epoch and first sample; timestamps are not inferred.
+including returned IQ. Top-level metadata still echoes the **input** request.
+Rational replies add `output` with sampleRate, firstSample, sampleCount,
+originFirstSample, rateNumerator, rateDenominator, inputReserve and gap. See the
+[output metadata contract](dsp_stream_protocol.md#rational-output-v1).
 
 The reference uses symmetric `N-1` windows, matching Obrii's existing FFT code:
 rectangular; Hann `(0.5, -0.5)`; Hamming `(0.54, -0.46)`; Blackman-Harris
@@ -127,19 +210,31 @@ Normalization is `20*log10(max(abs(FFT(window*x))/sum(window), 1e-10))`, with
 `Fs * sum(window**2) / sum(window)**2`, not a tabulated asymptotic ENBW. Only the
 newest full FFT history is transformed; partial history emits no FFT. Each FFT's
 monotonic refresh clock is independent and resets with stream state. No averaging,
-one-sided doubling, zero padding, amplitude clipping, or sample-rate conversion
-is applied. Small float32-versus-double numerical differences are expected.
+one-sided doubling, zero padding or amplitude clipping is applied by the FFT.
+FFT bandwidth/RBW use the **processed** sample rate. Small float32-versus-double
+numerical differences are expected.
 
 ## Contract Clarifications for Integration
 
 - V1 specifies the symmetric finite-N windows used by both endpoints.
-- V1 has no stream-retirement message: replacing IDs after two slots requires
+- V1 has no stream-retirement message: replacing IDs after eight slots requires
   reconnecting. Changing a generation on an existing ID does not consume a slot.
 - Config changes include FFT ordering but not `returnIq`.
   `firstSample + sampleCount` must fit uint64, matching the C++ decoder; positions
   never wrap uint64.
-- A 1:1 plugin must produce a complete reply within one work request. Generic
-  buffering/tagged-stream/rate-changing flowgraphs are not automatically adapted.
+- A 1:1 plugin must produce a complete reply within one work request. Rational
+  plugins obey the explicit reserve/quantum contract; generic buffering/tagged
+  streams and variable-rate flowgraphs are not automatically adapted.
+- `DspStreamResult.sampleRate/firstSample/sampleCount/gap` describe processed IQ.
+  Native and older replies default to the input rate/counter; rational counters
+  restart at zero per segment. `originFirstSample` is the input-domain anchor.
+  `inputReserve` is decoder/accounting metadata; clients do not buffer it again.
+  Recorder writers capped at 65536 must split output, advancing firstSample by
+  the chunk offset. Audio consumers must validate their supported rate range.
+  Empty replies advance input admission only; retain the gap until real output.
+- Relative output time is `originFirstSample/inputRate + firstSample/outputRate`.
+  This names a stream position, not UTC or an RF timestamp. It does not compensate
+  plugin FIR group delay/startup alignment, which depends on the selected graph.
 - Tokens are caller-generated per session. The endpoint validates format and
   compares in constant time; it cannot verify randomness or enforce uniqueness
   across independent launches. It provides no loss-free RF guarantee.

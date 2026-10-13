@@ -5,6 +5,8 @@
 #include "appsettingsutils.h"
 #include "dspflowpanel.h"
 #include "dspcomputedialog.h"
+#include "dspbranchsettingswidget.h"
+#include "dspgraphmodel.h"
 #include "frequencycontrol.h"
 #include "tuningutils.h"
 #include "researchanalysisdialog.h"
@@ -31,6 +33,7 @@
 #include <QRadioButton>
 #include <QPointer>
 #include <QSettings>
+#include <QSet>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
@@ -385,6 +388,7 @@ void YourClassName::ensureDspFlowPanel() {
     QSettings settings(persistentSettingsFilePath(), QSettings::IniFormat);
     dspFlowPanel->setConfigurationJson(
         settings.value(QStringLiteral("dspFlow/configuration")).toString());
+    dspFlowPanel->setMainAudioFilterChainWidget(audioFilterChainWidget);
     connect(dspFlowPanel, &DspFlowPanel::configurationChanged, this,
             [this](const QString &json) {
                 QSettings settings(persistentSettingsFilePath(), QSettings::IniFormat);
@@ -767,31 +771,9 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
     syncTimer->setInterval(180);
     syncTimer->start();
 
-    const auto addFrequencyControl = [this, dialog, syncTimer](FrequencyControl *source,
-                                                               double minimum,
-                                                               double maximum,
+    const auto addFrequencyControl = [dialog, syncTimer](FrequencyControl *source,
                                                                const std::function<void()> &apply) {
-        auto *copy = new FrequencyControl(dialog);
-        copy->setRangeHz(minimum, maximum);
-        copy->setValueHz(source->valueHz());
-        copy->setSelectedUnitIndex(source->selectedUnitIndex());
-        copy->setSelectedStepName(source->selectedStepName());
-        connect(copy, &FrequencyControl::valueCommitted, dialog,
-                [source, copy, apply](double value) {
-                    source->setSelectedUnitIndex(copy->selectedUnitIndex());
-                    source->setSelectedStepName(copy->selectedStepName());
-                    source->setValueHz(value);
-                    apply();
-                });
-        connect(source, &FrequencyControl::valueCommitted, copy,
-                [copy](double value) { copy->setValueHz(value); });
-        connect(syncTimer, &QTimer::timeout, copy, [source, copy]() {
-            if (!focusInside(copy) && !qFuzzyCompare(copy->valueHz() + 1.0, source->valueHz() + 1.0)) {
-                copy->setValueHz(source->valueHz());
-            }
-            copy->setEnabled(source->isEnabled());
-        });
-        return copy;
+        return source->createLinkedControl(dialog, syncTimer, apply);
     };
 
     const auto actionButton = [this, dialog](QPushButton *source, const QString &caption) {
@@ -824,7 +806,26 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
     };
 
     QString title;
-    if (type == QStringLiteral("ddc_channelizer") || type == QStringLiteral("branch_fft") ||
+    if (DspBranchSettingsWidget::supportsType(type)) {
+        title = DspBranchSettingsWidget::blockTitle(type, ukrainian);
+        auto *settings = new DspBranchSettingsWidget(type, dspFlowPanel->blockSettings(id), ukrainian, dialog);
+        root->addWidget(settings, 1);
+        connect(settings, &DspBranchSettingsWidget::settingsEdited, dialog,
+                [this, id](const QJsonObject &changes) {
+                    if (!dspFlowPanel) return;
+                    auto value = dspFlowPanel->blockSettings(id);
+                    for (auto it = changes.constBegin(); it != changes.constEnd(); ++it)
+                        value.insert(it.key(), it.value());
+                    dspFlowPanel->setBlockSettings(id, value);
+                });
+        auto *status = new QLabel(dspFlowPanel->branchStatus(id), dialog);
+        status->setWordWrap(true);
+        root->addWidget(status);
+        connect(syncTimer, &QTimer::timeout, status, [this, id, status]() {
+            if (dspFlowPanel) status->setText(dspFlowPanel->branchStatus(id));
+        });
+        if (type == QStringLiteral("branch_audio_filter")) dialog->resize(620, 390);
+    } else if (type == QStringLiteral("ddc_channelizer") || type == QStringLiteral("branch_fft") ||
         type == QStringLiteral("branch_spectrum") || type == QStringLiteral("branch_waterfall")) {
         const auto stored = dspFlowPanel->blockSettings(id);
         title = type == QStringLiteral("ddc_channelizer") ? text("DDC: додаткова IQ-гілка", "DDC: additional IQ branch") :
@@ -858,14 +859,25 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
             decimation->setRange(0, 4096); decimation->setSpecialValueText(QStringLiteral("Auto"));
             decimation->setKeyboardTracking(false); decimation->setValue(stored.value("decimation").toInt(0));
             form->addRow(text("Децимація до ресемплера:", "Decimation before resampler:"), decimation);
-            form->addRow(text("Фільтр:", "Filter:"), new QLabel(QStringLiteral("3-stage prefilter + 32-tap / 64-phase Blackman FIR"), dialog));
-            const auto apply = [this, id, enabled, follow, frequency, bandwidth, rate, decimation, execution]() {
+            auto *firTaps = new QComboBox(dialog);
+            firTaps->setObjectName(QStringLiteral("firTaps"));
+            for (int taps : {16, 32, 64, 128, 256}) firTaps->addItem(QString::number(taps), taps);
+            const int savedTaps = firTaps->findData(stored.value("firTaps").toInt(32));
+            firTaps->setCurrentIndex(savedTaps < 0 ? firTaps->findData(32) : savedTaps);
+            form->addRow(text("Коефіцієнтів FIR:", "FIR taps:"), firTaps);
+            auto *transition = number(text("Перехідна смуга FIR:", "FIR transition band:"),
+                stored.value("transitionHz").toDouble(0.0) / 1000.0, 0.0, 500.0, 3, text(" кГц", " kHz"));
+            transition->setObjectName(QStringLiteral("transitionHz"));
+            transition->setSpecialValueText(text("Авто", "Auto"));
+            const auto apply = [this, id, enabled, follow, frequency, bandwidth, rate, decimation, execution, firTaps, transition]() {
                 auto value = dspFlowPanel->blockSettings(id);
                 value.insert("enabled", enabled->isChecked());
                 value.insert("frequencyHz", follow->isChecked() ? 0.0 : frequency->value()*1.0e6);
                 value.insert("bandwidthHz", bandwidth->value()*1000.0);
                 value.insert("outputRateHz", rate->value()*1000.0);
                 value.insert("decimation", decimation->value());
+                value.insert("firTaps", firTaps->currentData().toInt());
+                value.insert("transitionHz", transition->value() * 1000.0);
                 value.insert("externalProcessing", execution->currentData().toBool());
                 frequency->setEnabled(!follow->isChecked());
                 dspFlowPanel->setBlockSettings(id, value);
@@ -873,7 +885,8 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
             connect(enabled, &QCheckBox::toggled, dialog, [apply](bool) { apply(); });
             connect(execution, QOverload<int>::of(&QComboBox::currentIndexChanged), dialog, [apply](int) { apply(); });
             connect(follow, &QCheckBox::toggled, dialog, [apply](bool) { apply(); });
-            for (auto *spin : {frequency, bandwidth, rate}) connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), dialog, [apply](double) { apply(); });
+            for (auto *spin : {frequency, bandwidth, rate, transition}) connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), dialog, [apply](double) { apply(); });
+            connect(firTaps, QOverload<int>::of(&QComboBox::currentIndexChanged), dialog, [apply](int) { apply(); });
             connect(decimation, QOverload<int>::of(&QSpinBox::valueChanged), dialog, [apply](int) { apply(); });
             auto *record = new QPushButton(text("Запис IQ гілки", "Record branch IQ"), dialog);
             auto *stopRecord = new QPushButton(text("Зупинити запис", "Stop recording"), dialog);
@@ -1064,10 +1077,10 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
     } else if (type == QStringLiteral("frequency_control")) {
         title = text("Частоти", "Frequencies");
         form->addRow(text("Центральна:", "Center:"),
-                     addFrequencyControl(frequencyControl, 0.0, RF_EXPERIMENTAL_MAX_FREQUENCY,
+                     addFrequencyControl(frequencyControl,
                                          [this]() { onFrequencyEntered(); }));
         form->addRow(text("Прослуховування:", "Listening:"),
-                     addFrequencyControl(listeningFrequencyControl, 0.0, RF_EXPERIMENTAL_MAX_FREQUENCY,
+                     addFrequencyControl(listeningFrequencyControl,
                                          [this]() { onListeningFrequencyEntered(); }));
     } else if (type == QStringLiteral("fft")) {
         title = text("FFT і роздільність", "FFT and resolution");
@@ -1729,7 +1742,7 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
     } else if (type == QStringLiteral("channel_filter")) {
         title = text("Канальний фільтр", "Channel filter");
         form->addRow(text("Смуга:", "Bandwidth:"),
-                     addFrequencyControl(bandwidthControl, 10.0, 20000000.0,
+                     addFrequencyControl(bandwidthControl,
                                          [this]() { onBandwidthChanged(); }));
     } else if (type == QStringLiteral("demodulator")) {
         title = text("Демодулятор", "Demodulator");
@@ -1760,7 +1773,7 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         });
         form->addRow(text("Модуляція:", "Modulation:"), modulation);
         form->addRow(text("Смуга:", "Bandwidth:"),
-                     addFrequencyControl(bandwidthControl, 10.0, 20000000.0,
+                     addFrequencyControl(bandwidthControl,
                                          [this]() { onBandwidthChanged(); }));
     } else if (type == QStringLiteral("audio_filter")) {
         title = text("Ланцюг аудіофільтрів", "Audio filter chain");
@@ -1770,16 +1783,65 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         root->addWidget(chain, 1);
         dialog->resize(620, 390);
         const auto syncing = std::make_shared<bool>(false);
-        connect(chain, &AudioFilterChainWidget::configurationChanged, dialog,
-                [this, chain, syncing](const QString &json) {
-                    if (*syncing) return;
-                    *syncing = true;
-                    audioFilterChainWidget->setConfigurationJson(json);
-                    pendingSettings.audioFilterChainJson = json;
-                    if (audioProcessor) audioProcessor->configure(audioProcessorSettings());
-                    savePersistentSettings();
-                    if (isNetworkClientMode()) scheduleRemoteSettingsCommand();
-                    *syncing = false;
+        const auto applyChain = [this, syncing](const QString &json) {
+            if (*syncing || !audioFilterChainWidget) return;
+            *syncing = true;
+            audioFilterChainWidget->setConfigurationJson(json);
+            pendingSettings.audioFilterChainJson = json;
+            if (audioProcessor) audioProcessor->configure(audioProcessorSettings());
+            savePersistentSettings();
+            if (isNetworkClientMode()) scheduleRemoteSettingsCommand();
+            *syncing = false;
+        };
+        connect(chain, &AudioFilterChainWidget::configurationChanged, dialog, applyChain);
+        auto *applyOrder = new QPushButton(text("Застосувати порядок зі зв'язків DSP", "Apply order from DSP links"), dialog);
+        applyOrder->setObjectName(QStringLiteral("dspApplyAudioFilterOrder"));
+        auto *orderStatus = new QLabel(dialog);
+        orderStatus->setWordWrap(true);
+        root->addWidget(applyOrder);
+        root->addWidget(orderStatus);
+        connect(applyOrder, &QPushButton::clicked, dialog,
+                [this, chain, orderStatus, applyChain, text]() {
+                    if (!dspFlowPanel || !audioFilterChainWidget) return;
+                    QString error;
+                    const auto graph = QJsonDocument::fromJson(dspFlowPanel->configurationJson().toUtf8()).object();
+                    const QStringList order = compileDspAudioFilterOrder(graph, &error);
+                    if (!error.isEmpty() || order.isEmpty()) {
+                        orderStatus->setText(error == QStringLiteral("Ambiguous audio filter chain: branches or multiple inputs")
+                            ? text("Порядок не змінено: ланцюг має розгалуження або кілька входів.",
+                                   "Order unchanged: the chain has branches or multiple inputs.")
+                            : text("Порядок не змінено: потрібен один повний ланцюг Демодулятор → фільтри → Аудіовихід без циклів.",
+                                   "Order unchanged: connect one complete Demodulator -> filters -> Audio output chain without cycles."));
+                        return;
+                    }
+                    bool valid = false;
+                    auto stages = decodeAudioFilterChain(audioFilterChainWidget->configurationJson(), &valid);
+                    QHash<QString, AudioFilterStage> byId;
+                    for (const auto &stage : stages) {
+                        if (byId.contains(stage.id)) valid = false;
+                        byId.insert(stage.id, stage);
+                    }
+                    QSet<QString> selected;
+                    for (const QString &stageId : order) {
+                        if (!byId.contains(stageId) || selected.contains(stageId)) valid = false;
+                        selected.insert(stageId);
+                    }
+                    if (!valid) {
+                        orderStatus->setText(text("Порядок не змінено: фільтри на дошці не відповідають поточному аудіоланцюгу.",
+                                                  "Order unchanged: board filters do not match the current audio chain."));
+                        return;
+                    }
+                    // Keep unrelated stages in their existing slots and preserve every stage's parameters.
+                    int next = 0;
+                    for (auto &stage : stages)
+                        if (selected.contains(stage.id)) stage = byId.value(order.at(next++));
+                    const QString json = encodeAudioFilterChain(stages);
+                    if (json != audioFilterChainWidget->configurationJson()) {
+                        chain->setConfigurationJson(json);
+                        applyChain(json);
+                    }
+                    orderStatus->setText(text("Порядок застосовано. Параметри та стан увімкнення фільтрів збережено.",
+                                              "Order applied. Filter parameters and enabled states are preserved."));
                 });
         connect(audioFilterChainWidget, &AudioFilterChainWidget::configurationChanged, chain,
                 [chain, syncing](const QString &json) {

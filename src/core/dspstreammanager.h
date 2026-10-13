@@ -1,5 +1,6 @@
 #pragma once
 #include "dspstreamprocessor.h"
+#include <atomic>
 
 struct DspStreamEndpoint {
     bool enabled = false;
@@ -18,7 +19,12 @@ public:
     ~DspStreamManager();
     void configure(const DspStreamEndpoint &endpoint);
     void clear();
-    DspStreamResult process(const DspStreamBlock &block, bool external);
+    // The flag may be set from another thread, but must outlive this call and
+    // stay asserted until the cancelled call returns.
+    // All manager/socket operations remain serialized on the owning thread.
+    // Cancellation clears transport/backoff; an entered local FFT is not interrupted.
+    DspStreamResult process(const DspStreamBlock &block, bool external,
+                            const std::atomic_bool *cancel = nullptr);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;
