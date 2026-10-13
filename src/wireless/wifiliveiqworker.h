@@ -8,6 +8,7 @@
 #include <QQueue>
 #include <QStringList>
 #include <atomic>
+#include "wifiphydiagnostics.h"
 
 class QProcess;
 class QTimer;
@@ -47,6 +48,8 @@ private:
     std::atomic<double> expectedRate{0.0};
     std::atomic<double> expectedCenter{0.0};
     quint64 packets = 0;
+    WifiPhyDiagnostics phyDiagnostics;
+    bool extendedPhy = false;
     bool stopping = false;
     QProcess *process = nullptr;
     QTimer *timer = nullptr;

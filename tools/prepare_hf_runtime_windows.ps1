@@ -1,4 +1,4 @@
-param([string]$RuntimeDir = 'release/bin')
+param([string]$RuntimeDir = 'build/runtime')
 $ErrorActionPreference = 'Stop'
 $Workspace = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $Runtime = [IO.Path]::GetFullPath((Join-Path $Workspace $RuntimeDir))

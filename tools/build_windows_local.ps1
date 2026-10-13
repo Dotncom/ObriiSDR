@@ -43,6 +43,17 @@ if (-not $VcRedistDir) {
 }
 
 $BuildPath = Join-Path $Workspace $BuildDir
+$RuntimePath = Join-Path $Workspace "build\runtime"
+if ($Clean) {
+    $BuildFullPath = [IO.Path]::GetFullPath($BuildPath).TrimEnd([char]92)
+    $BuildRoot = [IO.Path]::GetFullPath((Join-Path $Workspace 'build')).TrimEnd([char]92) + [char]92
+    $RuntimeFullPath = [IO.Path]::GetFullPath($RuntimePath)
+    if (-not $BuildFullPath.StartsWith($BuildRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        $RuntimeFullPath.Equals($BuildFullPath, [StringComparison]::OrdinalIgnoreCase) -or
+        $RuntimeFullPath.StartsWith($BuildFullPath + [char]92, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "-Clean cannot remove the persistent runtime or a path outside the build tree: $BuildFullPath"
+    }
+}
 if ($Clean -and (Test-Path -LiteralPath $BuildPath)) {
     Remove-Item -LiteralPath $BuildPath -Recurse -Force
 }
@@ -57,6 +68,7 @@ $ConfigureArgs = @(
     "-DFOBOS_STANDARD_ROOT=$Workspace\fobos",
     "-DFOBOS_AGILE_ROOT=$Workspace\fobos_agile",
     "-DFFTW_ROOT=$Workspace\fftw-3.3.5-dll64"
+    "-DOBRII_RUNTIME_OUTPUT_DIR=$RuntimePath"
 )
 
 $BuildArgs = @(
@@ -106,8 +118,8 @@ try {
 
     if ($Deploy) {
         & (Join-Path $PSScriptRoot "deploy_windows.ps1") `
-            -BuildDir (Join-Path $BuildDir $Config) `
-            -DeployDir "release\bin" `
+            -BuildDir $(if ($Config -eq 'Release') { 'build\runtime' } else { Join-Path $BuildDir $Config }) `
+            -DeployDir "build\runtime" `
             -QtRoot $QtRoot `
             -VcRedistDir $VcRedistDir
     }

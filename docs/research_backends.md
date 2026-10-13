@@ -2,7 +2,7 @@
 
 ## Windows
 
-The development/runtime folder is `release/bin`. Research engines run as
+The development/runtime folder is `build/runtime`. Research engines run as
 separate, below-normal-priority processes, not inside the real-time IQ/audio
 callback. Ordinary listening does not launch them or load HDF5.
 

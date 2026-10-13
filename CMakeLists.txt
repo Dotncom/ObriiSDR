@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 6.1.0)
+project(ObriiSDR VERSION 6.1.1)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -171,6 +171,8 @@ set(SOURCES
     src/mainwindow/main_propagation.cpp
     src/research/radiopropagation.cpp
     src/research/radiopropagation.h
+    src/research/maptilerterrain.cpp
+    src/research/maptilerterrain.h
     src/research/propagationlabdialog.cpp
     src/research/propagationlabdialog.h
     src/research/solarconditionswidget.cpp
@@ -421,6 +423,11 @@ if(WIN32)
 endif()
 
 add_executable(ObriiSDR ${SOURCES})
+set(OBRII_RUNTIME_OUTPUT_DIR "" CACHE PATH "Persistent local runtime directory for the Windows application")
+if(WIN32 AND OBRII_RUNTIME_OUTPUT_DIR)
+    set_target_properties(ObriiSDR PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+endif()
 option(FOBOS_ENABLE_HF_PREDICTION "Optional isolated ITU HF planning dialog" ON)
 if(FOBOS_ENABLE_HF_PREDICTION)
     add_subdirectory(src/propagation/ituhf)
@@ -577,6 +584,7 @@ if(FOBOS_BUILD_CW_SELFTEST)
     add_executable(ObriiPropagationSelfTest
         tools/propagation_selftest.cpp
         src/research/radiopropagation.cpp
+        src/research/maptilerterrain.cpp
         src/research/propagationlabdialog.cpp src/research/propagationlabdialog.h
         src/utils/appsettingsutils.cpp
         src/research/solarconditionswidget.cpp src/research/solarconditionswidget.h

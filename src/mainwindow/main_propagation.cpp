@@ -9,7 +9,7 @@ void YourClassName::openPropagationLab() {
     propagationLabDialog->setReferenceMarkers(qthUserMarkers, qthTileDirectory);
     const auto provider=qthOnlineProviderPreset(qthOnlineProviderId);
     propagationLabDialog->setOnlineMapSource(uiText(provider.textKey,provider.fallbackName),
-        resolvedQthOnlineTileUrlTemplate(),qthOnlineAttribution,qthMapLayer);
+        resolvedQthOnlineTileUrlTemplate(),qthOnlineAttribution,qthMapLayer,qthOnlineApiKey);
     propagationLabDialog->show();
     propagationLabDialog->raise();
 }

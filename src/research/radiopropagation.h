@@ -77,6 +77,9 @@ PathResult calculatePath(const Parameters &p, const Elevation &terrain,
                          const std::atomic_bool *cancel = nullptr, int maxPoints = 4096);
 CoverageResult calculateCoverage(const Parameters &p, const std::atomic_bool *cancel = nullptr,
                                  const std::function<void(int)> &progress = {});
+CoverageResult calculateCoverage(const Parameters &p, const Elevation &terrain,
+                                 const std::atomic_bool *cancel = nullptr,
+                                 const std::function<void(int)> &progress = {});
 QColor levelColor(double normalized);
 QImage coverageImage(const CoverageResult &result, int layer,
                      double colorMinimum = Unknown, double colorMaximum = Unknown);

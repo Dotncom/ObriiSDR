@@ -312,18 +312,41 @@ WirelessLabDialog::WirelessLabDialog(bool uk, QWidget *parent)
         if (!interfaceCombo->count()) status->setText(text("No capture interfaces", "Інтерфейсів захоплення немає"));
     });
     connect(wireshark, &QPushButton::clicked, this, [this]() {
-        QString executable = QDir(QFileInfo(programEdit->text()).absolutePath())
-            .filePath(QStringLiteral("wireshark") +
+        const QString wiresharkName = QStringLiteral("wireshark") +
 #ifdef Q_OS_WIN
-                      QStringLiteral(".exe")
+            QStringLiteral(".exe");
 #else
-                      QString()
+            QString();
 #endif
-                      );
-        if (!QFileInfo::exists(executable)) executable = QStandardPaths::findExecutable(QStringLiteral("wireshark"));
+        QString executable = QDir(QFileInfo(programEdit->text()).absolutePath()).filePath(wiresharkName);
+        const QString bundled = QDir(QCoreApplication::applicationDirPath())
+            .filePath(QStringLiteral("wireshark/") + wiresharkName);
+        if (phy->isLiveActive()) {
+            const auto hasExtcap = [](const QString &path) {
+                return QFileInfo::exists(path) && QFileInfo::exists(
+                    QDir(QFileInfo(path).absolutePath()).filePath(
+#ifdef Q_OS_WIN
+                        QStringLiteral("extcap/ObriiWifiExtcap.bat")
+#else
+                        QStringLiteral("extcap/ObriiWifiExtcap")
+#endif
+                        ));
+            };
+            if (hasExtcap(bundled)) executable = bundled;
+            else if (!hasExtcap(executable)) {
+                status->setText(text("Live Wireshark extcap is missing beside Obrii SDR.",
+                                     "Поруч із Obrii SDR відсутній extcap для живого Wireshark."));
+                return;
+            }
+        } else if (!QFileInfo::exists(executable)) {
+            executable = QStandardPaths::findExecutable(QStringLiteral("wireshark"));
+        }
         QStringList arguments;
         if (!profileCombo->currentText().trimmed().isEmpty()) arguments << "-C" << profileCombo->currentText().trimmed();
-        if (!captureFile.isEmpty()) arguments << "-r" << captureFile;
+        if (phy->isLiveActive())
+            arguments << "-k" << "-i" << "obrii_wifi";
+        else if (!captureFile.isEmpty())
+            arguments << "-r" << captureFile;
         QProcess launch; launch.setProgram(executable); launch.setArguments(arguments);
         auto environment = QProcessEnvironment::systemEnvironment();
         environment.remove("QT_PLUGIN_PATH"); environment.remove("QT_QPA_PLATFORM_PLUGIN_PATH"); environment.remove("QT_QPA_PLATFORM");

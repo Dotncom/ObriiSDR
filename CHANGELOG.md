@@ -1,5 +1,21 @@
 # Changelog
 
+## 6.1.1 - 2026-10-13
+- Added opt-in online MapTiler elevations for TX/RX heights, path profiles and
+  coverage, reusing the configured QTH key with temporary in-memory terrain tiles.
+- Fixed elevation HTTPS on Windows installations without Qt OpenSSL support by
+  using Windows TLS. Added cancellable background requests and sanitized errors.
+- Added a bounded, loopback-only packet bus and Wireshark extcap integration for
+  live SDR Wi-Fi frames. The live stream continues when the PCAP file cap is reached.
+- Improved experimental HT/VHT header/data CRC diagnostics for live and recorded
+  IQ, including bandwidth observations and queue-drop statistics. Header detection
+  does not imply successful payload decoding; modern Wi-Fi support is incomplete.
+- Fixed stale HT Python paths after moving the runtime and improved missing-file
+  diagnostics. Updated the matching optional Windows Wireless add-on.
+- Consolidated local Windows builds in build/runtime and excluded Python bytecode
+  caches from source packages. Android remains unchanged and is not included.
+- Added feedback contact: mojamajsternya@gmail.com.
+
 ## 6.1.0 - 2026-10-12
 - Added receive-only live 20 MHz Wi-Fi OFDM decoding from SDR IQ via a bounded
   GNU Radio subprocess, immediate packet table updates, PCAP recording, and

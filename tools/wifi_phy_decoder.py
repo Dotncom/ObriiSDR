@@ -19,6 +19,9 @@ import threading
 import wave
 from collections import Counter
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from wifi_packet_bus import PacketBus, PCAP_HEADER
+
 _print_lock = threading.Lock()
 
 
@@ -191,11 +194,20 @@ class PacketSink(gr.basic_block):
     def __init__(self, filename, frequency, live=False):
         super().__init__(name="Obrii PCAP", in_sig=None, out_sig=None)
         self.file = open(filename, "xb")
-        self.file.write(struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 127))
+        self.file.write(PCAP_HEADER)
         self.frequency = frequency
         self.count = 0
+        self.pcap_packets = 0
         self.limited = False
         self.live = live
+        self.bus = None
+        if live:
+            try:
+                self.bus = PacketBus()
+                self.bus.start()
+            except OSError as error:
+                self.bus = None
+                report({"packet_bus_error": str(error)})
         self.last_report = 0.0
         self.row_window = 0
         self.rows_this_second = 0
@@ -208,7 +220,7 @@ class PacketSink(gr.basic_block):
         self.set_msg_handler(pmt.intern("in"), self.receive)
 
     def receive(self, message):
-        if self.limited or not pmt.is_pair(message):
+        if (self.limited and not self.live) or not pmt.is_pair(message):
             return
         metadata = pmt.car(message)
         encoding = None
@@ -228,20 +240,26 @@ class PacketSink(gr.basic_block):
             return
         if not frame or len(frame) > 65000:
             return
-        if self.file.tell() + len(frame) + 28 > 100 * 1024 * 1024 or self.count >= 500000:
+        if not self.limited and (self.file.tell() + len(frame) + 28 > 100 * 1024 * 1024
+                                 or self.pcap_packets >= 500000):
             self.limited = True
             if self.live:
-                report({"packets": self.count, "limit_reached": True, "ui_drops": self.ui_drops})
-            return
+                report({"pcap_limit_reached": True, "pcap_packets": self.pcap_packets})
+            else:
+                return
         flags = 0xC0 if self.frequency < 3e9 else 0x140
         radiotap = struct.pack("<BBHIHH", 0, 0, 12, 1 << 3, round(self.frequency / 1e6), flags)
         packet = radiotap + frame
         # Upstream does not expose the original RF sample counter. Never fabricate RF timestamps.
         now = time.time()
         seconds = int(now)
-        self.file.write(struct.pack("<IIII", seconds, int((now - seconds) * 1e6), len(packet), len(packet)))
-        self.file.write(packet)
-        self.file.flush()
+        record = struct.pack("<IIII", seconds, int((now - seconds) * 1e6), len(packet), len(packet)) + packet
+        if not self.limited:
+            self.file.write(record)
+            self.file.flush()
+            self.pcap_packets += 1
+        if self.bus:
+            self.bus.publish(record)
         self.count += 1
         with self.packet_stats_lock:
             frame_type = wifi_frame_type(frame)
@@ -268,6 +286,8 @@ class PacketSink(gr.basic_block):
                 self.last_report = now
 
     def close(self):
+        if self.bus:
+            self.bus.close()
         self.file.close()
 
     def packet_snapshot(self):
@@ -453,12 +473,14 @@ def decode(args):
         report({"iq_samples": source.count, "input_rate_hz": rate})
         phy = {**stats.snapshot(sink.count), **sink.packet_snapshot()}
         report({"phy": phy})
-        report({"packets": sink.count, "limit_reached": sink.limited, "ui_drops": sink.ui_drops,
+        report({"packets": sink.count, "pcap_packets": sink.pcap_packets,
+                "limit_reached": sink.limited, "ui_drops": sink.ui_drops,
                 "timestamp_origin": "decoder-wall-clock-not-rf"})
         Path(args.output + ".json").write_text(json.dumps({"schema": "obrii-wifi-phy-v1", "input": "live:stdin" if live else str(Path(args.input).resolve()), "input_sample_rate_hz": rate,
             "record_center_hz": args.center, "channel_hz": args.channel, "phy_sample_rate_hz": 20e6, "packets": sink.count,
             "timestamp_origin": "decoder-wall-clock-not-rf", "rssi_dbm": None, "crc_policy": "upstream-valid-only", "fcs_removed": True, "cancelled": cancelled.is_set(),
-            "live": live, "ui_drops": sink.ui_drops, "input_samples": source.count,
+            "live": live, "ui_drops": sink.ui_drops, "pcap_packets": sink.pcap_packets,
+            "input_samples": source.count,
             "phy_mode": "ht20-experimental" if extended_phy else "legacy",
             "decoder_elapsed_s": round(elapsed, 3),
             "decoder_input_rate_hz": round(source.count / elapsed),

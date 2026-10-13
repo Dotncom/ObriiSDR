@@ -97,7 +97,7 @@ foreach ($file in $files) {
 }
 
 # Public ITU datasets, not the user's HF prediction job/cache directory.
-$HfData = Join-Path $Workspace 'release/bin/itu_hf/data'
+$HfData = Join-Path $Workspace 'build/runtime/itu_hf/data'
 if (Test-Path -LiteralPath $HfData) {
     $DataManifest = Get-Content -LiteralPath (Join-Path $Workspace 'third_party/itu_hf/SOURCE_MANIFEST.json') -Raw | ConvertFrom-Json
     $DataDestination = Join-Path $Stage 'third_party/runtime/itu_hf/data'

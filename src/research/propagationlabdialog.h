@@ -3,6 +3,7 @@
 #include "radiopropagation.h"
 #include <QDialog>
 #include <QPointer>
+#include <QHash>
 class QComboBox;
 class QCheckBox;
 class QDoubleSpinBox;
@@ -17,6 +18,7 @@ class QThread;
 class QTimer;
 class QthMapWidget;
 class PropagationProfileWidget;
+namespace propagation { class MapTilerTerrain; }
 class PropagationLabDialog : public QDialog {
     Q_OBJECT
 public:
@@ -26,7 +28,7 @@ public:
     void setReferenceMarkers(const QVector<qth::UserMarker> &markers, const QString &tileDirectory);
     void setUiTranslator(std::function<QString(const QString &, const QString &)> translate) { uiTranslator = std::move(translate); }
     void setOnlineMapSource(const QString &providerName, const QString &resolvedTemplate,
-                            const QString &attribution, int layerMode);
+                            const QString &attribution, int layerMode, const QString &mapTilerKey = QString());
 protected:
     void closeEvent(QCloseEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -36,6 +38,7 @@ private:
     void updateMarkers();
     void updateReferenceActions();
     void updateEndpointElevations();
+    void cancelEndpointElevationRequest();
     void updateMapSource();
     void calculate(bool coverage);
     void updateRaster();
@@ -63,10 +66,14 @@ private:
     QThread *worker = nullptr;
     QVector<qth::UserMarker> referenceMarkers;
     bool txPresent = true, rxPresent = true;
-    QString savedTileTemplate, savedAttribution;
+    QString savedTileTemplate, savedAttribution, onlineTerrainKey;
+    std::shared_ptr<propagation::MapTilerTerrain> loadedOnlineTerrain;
+    QHash<QString, double> endpointElevationCache;
+    std::shared_ptr<std::atomic_bool> endpointRequestCancel;
+    QString pendingEndpointRequest;
     QthMapWidget *map = nullptr;
-    QComboBox *picking = nullptr, *reference = nullptr, *layer = nullptr, *tiles = nullptr;
-    QCheckBox *online = nullptr;
+    QComboBox *picking = nullptr, *reference = nullptr, *layer = nullptr, *tiles = nullptr, *terrainSource = nullptr;
+    QCheckBox *online = nullptr, *onlineTerrainPermission = nullptr;
     QLineEdit *directory = nullptr;
     QSlider *opacity = nullptr;
     QTabWidget *controls = nullptr;

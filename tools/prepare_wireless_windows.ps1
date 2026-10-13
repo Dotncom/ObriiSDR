@@ -1,4 +1,4 @@
-param([string]$RuntimeDir = 'release/bin')
+param([string]$RuntimeDir = 'build/runtime')
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $Workspace = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
@@ -34,9 +34,20 @@ foreach ($Name in @('MSVCP140.dll', 'MSVCP140_1.dll', 'VCRUNTIME140.dll', 'VCRUN
     $Crt = Join-Path $Runtime $Name
     if (Test-Path -LiteralPath $Crt) { Copy-Item -LiteralPath $Crt -Destination $Destination -Force; $Files += $Name }
 }
+$Extcap = Join-Path $Destination 'extcap/ObriiWifiExtcap.bat'
+New-Item -ItemType Directory -Path (Split-Path -Parent $Extcap) -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $Workspace 'tools/ObriiWifiExtcap.bat') -Destination $Extcap -Force
+$Files += 'extcap/ObriiWifiExtcap.bat'
 $Manifest = $Files | Sort-Object -Unique | ForEach-Object { @{ path = $_; sha256 = (Get-FileHash -LiteralPath (Join-Path $Destination $_)).Hash } }
 @{ version = 1; source = "https://www.wireshark.org/download.html"; upstreamVersion = $Version; installerSha256 = $Hash; files = @($Manifest) } |
     ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Destination 'runtime-manifest.json') -Encoding utf8
 & (Join-Path $Destination 'tshark.exe') -v | Select-Object -First 1
 if ($LASTEXITCODE -ne 0) { throw 'Portable TShark did not start.' }
+$DepsRoot = (Resolve-Path -LiteralPath (Join-Path $Workspace 'build/deps')).Path
+$ResolvedStage = (Resolve-Path -LiteralPath $Stage).Path
+if (-not $ResolvedStage.StartsWith($DepsRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or
+    ((Get-Item -LiteralPath $ResolvedStage).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    throw "Refusing to remove unsafe staging directory: $Stage"
+}
+Remove-Item -LiteralPath $ResolvedStage -Recurse -Force
 Write-Output 'Portable Wireshark/TShark prepared; Npcap drivers/installers and personal profiles are not included.'

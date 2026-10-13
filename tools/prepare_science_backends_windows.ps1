@@ -1,4 +1,4 @@
-param([string]$RuntimeDir = 'release/bin')
+param([string]$RuntimeDir = 'build/runtime')
 $ErrorActionPreference = 'Stop'
 $Workspace = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $Runtime = [IO.Path]::GetFullPath((Join-Path $Workspace $RuntimeDir))
@@ -79,4 +79,13 @@ Export-Manifest $PocketRoot "https://github.com/tomojitakasu/PocketSDR/tree/$Poc
 $SatAssets = Get-ChildItem -LiteralPath (Join-Path $Stage 'resources'), (Join-Path $Stage 'pipelines') -Recurse -File | ForEach-Object { $_.FullName.Substring($Stage.Length + 1).Replace('\', '/') }
 Export-Manifest $SatRoot 'https://github.com/SatDump/SatDump/releases/tag/1.2.2' ($SatFiles + ($SatPlugins | ForEach-Object { 'plugins/' + $_ }) + $SatAssets + $Crt + @('vcomp140.dll', 'LICENSE-SatDump.txt'))
 Export-Manifest $HdfRoot 'https://github.com/HDFGroup/hdf5/releases/tag/hdf5_1.14.6' @('hdf5.dll', 'COPYING')
+$DepsRoot = (Resolve-Path -LiteralPath (Join-Path $Workspace 'build/deps')).Path
+foreach ($TemporaryStage in @($Stage, $HdfStage)) {
+    $ResolvedStage = (Resolve-Path -LiteralPath $TemporaryStage).Path
+    if (-not $ResolvedStage.StartsWith($DepsRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or
+        ((Get-Item -LiteralPath $ResolvedStage).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Refusing to remove unsafe staging directory: $TemporaryStage"
+    }
+    Remove-Item -LiteralPath $ResolvedStage -Recurse -Force
+}
 Write-Output 'Portable research backends prepared. No hardware was opened.'

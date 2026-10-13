@@ -48,6 +48,12 @@ inside the receiver callback.
   The wireless lab duplicates the main spectrum/waterfall update interval
   control; both edit the same persisted setting. Reducing display refresh can
   leave more CPU time for the live PHY, but does not remove IQ drops by itself.
+  With the matching development-build Wireless add-on, press **Wireshark**
+  during live decoding to open the `Obrii SDR live Wi-Fi frames` extcap source.
+  A local bounded packet bus fans out decoded radiotap frames independently of
+  the saved PCAP. Stopping live IQ closes this source; the Wireshark button
+  opens the saved PCAP when live decoding is inactive. The bus is not a virtual
+  network adapter, so it cannot pass host traffic or transmit packets.
 
 The main center-frequency and listening-frequency preset lists include common
 Wi-Fi channels, BLE advertising channels, Bluetooth band center, and selected
@@ -139,7 +145,16 @@ control headers without inventing a sequence number or BSSID. These are
 cumulative diagnostics, also saved under `phy` in the PCAP JSON sidecar.
 For live runs the sidecar records the decoder's effective input rate and
 transport counters (`offered_samples`, `decoded_samples_reported`, and
-`queue_dropped_samples`). A PHY rate below the receiver's sample rate or
+`queue_dropped_samples`, plus `queue_drop_percent`, the share of samples dropped
+by the application queue among samples written or dropped). This does not
+include USB/device-side losses. Experimental HT20 live
+runs additionally save `phy.ht_diagnostics`: `ht_sig_crc_ok`,
+`ht_data_crc_pass`, and `ht_data_crc_fail`. The last two count completed HT
+payload attempts, including STBC and LDPC. A valid HT-SIG header does not
+guarantee that its payload can be decoded; the difference between these
+counters is not a CRC-failure count. The same totals appear in the live PHY
+status without printing every native decoder diagnostic line.
+A PHY rate below the receiver's sample rate or
 nonzero queue drops means the live decoder did not keep pace; it does not by
 itself identify the reason for a failed HT frame.
 Candidates minus valid frames is not an exact CRC-error count: headers may be

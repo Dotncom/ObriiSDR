@@ -1,4 +1,6 @@
 #include "radiopropagation.h"
+#include "maptilerterrain.h"
+#include "publicdatafetch.h"
 #include "propagationlabdialog.h"
 #include "solarconditionswidget.h"
 #include "ft8countrycatalog.h"
@@ -12,6 +14,8 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QImage>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMouseEvent>
@@ -20,7 +24,10 @@
 #include <QSlider>
 #include <QTemporaryDir>
 #include <QTabWidget>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QThread>
+#include <QUrlQuery>
 #include <cmath>
 #include <iostream>
 #include "itm.h"
@@ -30,6 +37,41 @@ int main(int argc,char **argv){
     int failures=0,checks=0;
     auto check=[&](bool condition,const char *name){++checks;if(!condition){++failures;std::cerr<<"FAIL: "<<name<<"\n";}};
     const QString workspace=argc>1?QString::fromLocal8Bit(argv[1]):QDir::currentPath();
+    // Local HTTP fixtures exercise either Qt or the no-OpenSSL Windows fallback.
+    for(int expectedStatus:{200,403,404,429}){
+        QTcpServer server;
+        check(server.listen(QHostAddress::LocalHost),"HTTP fixture listens");
+        QObject::connect(&server,&QTcpServer::newConnection,&server,[&](){
+            auto *socket=server.nextPendingConnection();
+            auto request=std::make_shared<QByteArray>();
+            QObject::connect(socket,&QTcpSocket::readyRead,socket,[socket,request,expectedStatus](){
+                *request+=socket->readAll();
+                if(!request->contains("\r\n\r\n")||socket->property("replied").toBool())return;
+                socket->setProperty("replied",true);
+                const QByteArray body="[[13.405,52.52,35.2]]";
+                socket->write("HTTP/1.1 "+QByteArray::number(expectedStatus)+" Test\r\nContent-Length: "+
+                              QByteArray::number(body.size())+"\r\nConnection: close\r\n\r\n"+body);
+                socket->disconnectFromHost();
+            });
+        });
+        std::atomic_bool cancelFetch{false};
+        QString error;int status=0;QByteArray bytes;
+        auto *request=QThread::create([&](){
+            bytes=fetchPublicData(QUrl(QString("http://127.0.0.1:%1/private-coordinates?key=SECRET_TEST").arg(server.serverPort())),
+                                  cancelFetch,&error,&status);
+        });
+        request->start();QElapsedTimer timeout;timeout.start();
+        while(!request->isFinished()&&timeout.elapsed()<15000){app.processEvents();QThread::msleep(1);}
+        cancelFetch.store(true);request->wait();delete request;
+        check(status==expectedStatus,"HTTP status reaches elevation caller");
+        check(expectedStatus==200?error.isEmpty()&&!bytes.isEmpty():!error.isEmpty()&&bytes.isEmpty(),"HTTP success and failure distinguished");
+        check(!error.contains("SECRET_TEST")&&!error.contains("private-coordinates"),"Network errors never expose key or coordinates");
+    }
+    {
+        std::atomic_bool cancelFetch{true};QString error;int status=123;
+        check(fetchPublicData(QUrl("https://example.invalid/?key=SECRET_TEST"),cancelFetch,&error,&status).isEmpty()&&
+              status==0&&error.contains("cancelled"),"Cancelled elevation request does not start networking");
+    }
     check(signalunits::parse("48 ksps",true)==48000,"ksps input");
     check(signalunits::parse("2,4 Msps",true)==2400000,"Decimal comma Msps input");
     check(signalunits::parse("1 Gsps",true)==1e9,"Gsps input");
@@ -58,6 +100,18 @@ int main(int argc,char **argv){
     check(!std::isfinite(dem.elevation(3,3)),"Missing tile remains unknown");
     set(600,600,-32768);write("N01E000.hgt");
     check(!std::isfinite(dem.elevation(1.5,0.5)),"SRTM void remains unknown");
+    propagation::Parameters onlineParameters;
+    onlineParameters.tx={0.5,0.5};onlineParameters.rx={0.51,0.51};onlineParameters.radiusKm=2;
+    propagation::MapTilerTerrain rgb(onlineParameters,true);
+    const int zoom=rgb.zoomLevel(), count=1<<zoom;
+    const int tileX=int(std::floor((0.5+180.0)/360.0*count));
+    const int tileY=int(std::floor((1.0-std::asinh(std::tan(0.5*3.14159265358979323846/180.0))/3.14159265358979323846)*count/2.0));
+    const int encoded=int(std::lround((123.4+10000.0)*10.0));
+    QImage rgbTile(256,256,QImage::Format_ARGB32);
+    rgbTile.fill(qRgba((encoded>>16)&255,(encoded>>8)&255,encoded&255,255));
+    rgb.insertTile(zoom,tileX,tileY,rgbTile);
+    check(std::abs(rgb.elevation(0.5,0.5)-123.4)<0.11,"MapTiler RGB elevation decoding");
+    check(!std::isfinite(rgb.elevation(15,15)),"Missing online tile stays unknown");
     check(std::abs(propagation::freeSpaceLossDb(1000,100)-72.447783)<0.001,"FSPL reference");
     check(std::abs(propagation::freeSpaceLossDb(2000,100)-propagation::freeSpaceLossDb(1000,100)-6.0206)<0.0001,"FSPL distance doubling");
     propagation::Parameters p;p.tx={0.5,0.5};p.rx=propagation::destination(p.tx,1.0,5000);p.powerW=1;
@@ -78,6 +132,9 @@ int main(int argc,char **argv){
     p.flatTerrain=true;p.gridSize=32;p.radiusKm=2;
     QElapsedTimer clock;clock.start();const auto coverage=propagation::calculateCoverage(p);
     check(coverage.validCells>400&&coverage.error.isEmpty(),"Flat-reference coverage");
+    auto injected=p;injected.flatTerrain=false;
+    const auto supplied=propagation::calculateCoverage(injected,flat);
+    check(supplied.validCells>400&&supplied.error.isEmpty(),"Online elevation callback reaches coverage rays");
     const auto image=propagation::coverageImage(coverage,1);
     check(image.size()==QSize(32,32)&&image.pixelColor(0,0).alpha()==0,"Outside-radius cells transparent");
     std::atomic_bool stop{true};check(propagation::calculateCoverage(p,&stop).cancelled,"Coverage cancellation");
@@ -181,6 +238,13 @@ int main(int argc,char **argv){
         PropagationLabDialog dialog(uk,nullptr,settingsFile);dialog.setAttribute(Qt::WA_DontShowOnScreen);dialog.show();app.processEvents();
         for(auto *c:dialog.findChildren<QCheckBox*>())check(!c->isChecked(),"Network disabled by default");
         dialog.setOnlineMapSource("MapTiler test","https://example.invalid/{z}/{x}/{y}.png?key=TEST_ONLY","Test attribution",2);
+        auto *terrainChoice=dialog.findChild<QComboBox*>("terrain");
+        auto *terrainConsent=dialog.findChild<QCheckBox*>("onlineTerrainPermission");
+        check(terrainChoice&&terrainConsent&&!terrainConsent->isChecked(),"Online elevation requires explicit per-session consent");
+        terrainChoice->setCurrentIndex(2);
+        dialog.findChild<QPushButton*>("calculateCoverage")->click();
+        check(dialog.findChild<QPushButton*>("calculateCoverage")->isEnabled(),"Online elevation does not start without consent");
+        terrainChoice->setCurrentIndex(0);
         auto *source=dialog.findChild<QComboBox*>("propagationMapSource");
         check(source&&source->currentIndex()==3&&source->currentText().contains("MapTiler"),"Saved QTH provider selected without enabling network");
         auto *map=dialog.findChild<QthMapWidget*>();
@@ -377,6 +441,27 @@ int main(int argc,char **argv){
         bool populated=false;for(auto *label:panel.findChildren<QLabel*>())if(label->text().contains("<h3>F10.7:")&&!label->text().contains("F10.7: --"))populated=true;
         check(populated,"NOAA live HTTPS flux displayed");
         QImage rendered(panel.size(),QImage::Format_ARGB32);panel.render(&rendered);rendered.save(output+"/solar-live.png");
+    }
+    if(argc>2&&QString::fromLocal8Bit(argv[2])=="--maptiler-online"){
+        // Opt-in smoke test: reuse only the key, never the user's geographic settings.
+        QSettings settings(qEnvironmentVariable("OBRII_MAPTILER_TEST_SETTINGS"),QSettings::IniFormat);
+        const QString key=settings.value("gpsQth/onlineApiKey").toString().trimmed();
+        check(!key.isEmpty(),"MapTiler smoke key configured");
+        if(!key.isEmpty()){
+            std::atomic_bool cancelled{false};QString error;int status=0;
+            QUrl url("https://api.maptiler.com/elevation/13.405,52.52.json");
+            QUrlQuery query;query.addQueryItem("key",key);url.setQuery(query);
+            const auto bytes=fetchPublicData(url,cancelled,&error,&status);
+            const auto points=QJsonDocument::fromJson(bytes).array();
+            check(status==200&&error.isEmpty()&&points.size()==1&&points[0].toArray().size()==3&&
+                  points[0].toArray()[2].isDouble(),"MapTiler live endpoint elevation via application transport");
+            if(!error.isEmpty())std::cerr<<"MapTiler endpoint: "<<error.toStdString()<<"\n";
+            propagation::Parameters area;area.tx={52.52,13.405};area.rx=area.tx;area.radiusKm=0.1;
+            propagation::MapTilerTerrain terrain(area,true);
+            const bool loaded=terrain.fetch(key,&cancelled);
+            check(loaded&&std::isfinite(terrain.elevation(52.52,13.405)),"MapTiler live terrain download and WebP elevation decode");
+            if(!loaded)std::cerr<<"MapTiler terrain: "<<terrain.error().toStdString()<<"\n";
+        }
     }
     std::cout<<checks<<" checks; "<<failures<<" failures\n";return failures?1:0;
 }

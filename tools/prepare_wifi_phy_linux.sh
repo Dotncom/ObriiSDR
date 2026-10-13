@@ -24,7 +24,7 @@ build_module() {
 build_module gr-foo 9e0e002f5daf18e91ae428478785b74b2061a9f5
 build_module gr-ieee802-11 ad0598e4a874f4b8e1f391a1e0323e80df2b34ff
 mkdir -p "$ROOT/build/linux-release/wireless"
-cp "$ROOT/tools/wifi_phy_decoder.py" "$ROOT/build/linux-release/wireless/"
+cp "$ROOT/tools/wifi_phy_decoder.py" "$ROOT/tools/wifi_packet_bus.py" "$ROOT/tools/wifi_extcap.py" "$ROOT/build/linux-release/wireless/"
 cp "$ROOT/tools/wifi_phy_linux_launcher.sh" "$ROOT/build/linux-release/wireless/python-phy"
 chmod +x "$ROOT/build/linux-release/wireless/python-phy"
 "$ROOT/build/linux-release/wireless/python-phy" -I -B "$ROOT/build/linux-release/wireless/wifi_phy_decoder.py" --check

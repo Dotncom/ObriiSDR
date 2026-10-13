@@ -1,6 +1,6 @@
 param(
     [string]$Version = "",
-    [string]$RuntimeDir = "release\bin",
+    [string]$RuntimeDir = "build\runtime",
     [string]$OutputPath = "",
     [switch]$WirelessAddOn
 )
@@ -8,6 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 $Workspace = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $WorkspacePrefix = $Workspace.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+$ValidatedDirectories = @{}
 function Assert-WorkspacePath([string]$Path) {
     $FullPath = [System.IO.Path]::GetFullPath($Path)
     if (-not $FullPath.StartsWith($WorkspacePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -15,10 +16,13 @@ function Assert-WorkspacePath([string]$Path) {
     }
     $Current = $FullPath
     while ($Current -ne $Workspace) {
+        if ($Current -ne $FullPath -and $ValidatedDirectories.ContainsKey($Current)) { break }
         if (Test-Path -LiteralPath $Current) {
-            if ((Get-Item -LiteralPath $Current -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            $Item = Get-Item -LiteralPath $Current -Force
+            if ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
                 throw "Packaging must not follow a reparse point: $Current"
             }
+            if ($Item.PSIsContainer) { $ValidatedDirectories[$Current] = $true }
         }
         $Current = Split-Path -Parent $Current
     }
@@ -83,7 +87,7 @@ Get-ChildItem -LiteralPath $RuntimePath -Recurse -File -Force | ForEach-Object {
     $Allowed = $false
     if ($ResearchFiles.ContainsKey($Relative)) { $Allowed = $true }
     if ($WirelessAddOn) {
-        $Allowed = $Allowed -or $Relative -in @('wireless/wifi_phy_decoder.py', 'docs/wireless_addon.md')
+        $Allowed = $Allowed -or $Relative -in @('wireless/wifi_phy_decoder.py', 'wireless/wifi_packet_bus.py', 'wireless/wifi_extcap.py', 'docs/wireless_addon.md')
         if (-not $Allowed) { return }
         $Source = Assert-WorkspacePath $File.FullName
         $Destination = Join-Path $Stage $Relative
@@ -112,7 +116,9 @@ Get-ChildItem -LiteralPath $RuntimePath -Recurse -File -Force | ForEach-Object {
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
 }
 $RequiredFiles = if ($WirelessAddOn) {
-    @('wifi-phy/python.exe', 'wifi-ht/python.exe', 'wireshark/tshark.exe', 'wireless/wifi_phy_decoder.py', 'docs/wireless_addon.md')
+    @('wifi-phy/python.exe', 'wifi-ht/python.exe', 'wireshark/tshark.exe',
+      'wireshark/extcap/ObriiWifiExtcap.bat', 'wireless/wifi_phy_decoder.py',
+      'wireless/wifi_packet_bus.py', 'wireless/wifi_extcap.py', 'docs/wireless_addon.md')
 } else {
     @('ObriiSDR.exe', 'Install-Wireless-AddOn.ps1', 'LICENSE', 'translations.json', 'platforms/qwindows.dll')
 }

@@ -1,4 +1,6 @@
 #include "propagationlabdialog.h"
+#include "maptilerterrain.h"
+#include "publicdatafetch.h"
 #include "qthmapwidget.h"
 #include "solarconditionswidget.h"
 #ifdef FOBOS_ENABLE_HF_PREDICTION
@@ -16,6 +18,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMouseEvent>
+#include <QJsonDocument>
+#include <QJsonArray>
 #include <QPainter>
 #include <QPainterPath>
 #include <QProgressBar>
@@ -31,6 +35,7 @@
 #include <QThread>
 #include <QTimer>
 #include <QUrl>
+#include <QUrlQuery>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cmath>
@@ -162,7 +167,7 @@ PropagationLabDialog::PropagationLabDialog(bool ukrainian,QWidget *parent,const 
     rxElevationLabel=new QLabel(this);rxElevationLabel->setObjectName("rxElevation");
     for(auto *label:{txElevationLabel,rxElevationLabel}){
         label->setTextFormat(Qt::PlainText);label->setWordWrap(true);
-        label->setToolTip(text("Terrain elevation / antenna top elevation above mean sea level, from local HGT data. Flat reference assumes 0 m terrain.",u8"Висота рельєфу / верху антени над рівнем моря, з локальних HGT. Рівна поверхня умовно має висоту 0 м."));
+        label->setToolTip(text("Terrain elevation / antenna top elevation above mean sea level. The selected terrain source determines the height. Flat reference assumes 0 m terrain.",u8"Висота рельєфу / верху антени над рівнем моря. Висоту визначає вибране джерело рельєфу. Рівна поверхня умовно має висоту 0 м."));
     }
     link->addRow(text("TX elevation MSL",u8"Висота TX MSL"),txElevationLabel);
     link->addRow(text("RX elevation MSL",u8"Висота RX MSL"),rxElevationLabel);
@@ -177,11 +182,29 @@ PropagationLabDialog::PropagationLabDialog(bool ukrainian,QWidget *parent,const 
     auto *model=new QComboBox(this);model->addItems({text("Terrain + dominant knife edge",u8"Рельєф + головна перешкода"),"ITM / Longley-Rice",text("Free space (reference)",u8"Вільний простір (еталон)")});
     environment->addRow(text("Model",u8"Модель"),model);
     connect(model,qOverload<int>(&QComboBox::currentIndexChanged),this,[this](int i){parameters.model=propagation::Model(i);invalidate();});
-    auto *terrain=new QComboBox(this);terrain->addItems({"SRTM HGT",text("Flat reference (0 m)",u8"Рівна поверхня (0 м)")});environment->addRow(text("Elevation",u8"Висоти"),terrain);
+    terrainSource=new QComboBox(this);
+    terrainSource->addItems({"SRTM HGT",text("Flat reference (0 m)",u8"Рівна поверхня (0 м)"),
+                             text("MapTiler online",u8"MapTiler онлайн")});
+    environment->addRow(text("Elevation",u8"Висоти"),terrainSource);
+    onlineTerrainPermission=new QCheckBox(text("Allow online elevation this session",u8"Дозволити онлайн-висоти в цьому сеансі"),this);
+    onlineTerrainPermission->setObjectName(QStringLiteral("onlineTerrainPermission"));
+    onlineTerrainPermission->setToolTip(text("Requests reveal the TX/RX coordinates and terrain area to MapTiler. Tiles are kept only in memory for the calculation; the MapTiler key comes from QTH map settings.",
+        u8"Запити відкривають MapTiler координати TX/RX і досліджувану область. Тайли зберігаються лише в пам'яті на час розрахунку; ключ береться з налаштувань QTH-мапи."));
+    onlineTerrainPermission->setEnabled(false);
+    environment->addRow(onlineTerrainPermission);
     directory=new QLineEdit(this);directory->setObjectName("terrainDirectory");directory->setPlaceholderText(text("Folder with *.hgt",u8"Папка з *.hgt"));
     auto *browse=new QPushButton("...",this);browse->setMaximumWidth(36);auto *folder=new QHBoxLayout;folder->addWidget(directory);folder->addWidget(browse);
     environment->addRow(text("HGT folder",u8"Папка HGT"),folder);
-    connect(terrain,qOverload<int>(&QComboBox::currentIndexChanged),this,[this](int i){parameters.flatTerrain=i==1;invalidate();});
+    connect(terrainSource,qOverload<int>(&QComboBox::currentIndexChanged),this,[this](int i){
+        parameters.flatTerrain=i==1;
+        directory->setEnabled(i==0);
+        onlineTerrainPermission->setEnabled(i==2);
+        if(i!=2)onlineTerrainPermission->setChecked(false);
+        invalidate();
+    });
+    connect(onlineTerrainPermission,&QCheckBox::toggled,this,[this](bool){
+        invalidate();
+    });
     connect(directory,&QLineEdit::textChanged,this,[this](const QString &s){parameters.terrainDirectory=s;invalidate();});
     connect(browse,&QPushButton::clicked,this,[this](){const auto folder=QFileDialog::getExistingDirectory(this,text("SRTM HGT folder",u8"Папка SRTM HGT"),directory->text());if(!folder.isEmpty())directory->setText(folder);});
     auto *guide=new QPushButton(text("SRTM data source",u8"Джерело висот SRTM"),this);environment->addRow(guide);
@@ -316,7 +339,7 @@ PropagationLabDialog::PropagationLabDialog(bool ukrainian,QWidget *parent,const 
         combo->setObjectName(QString::fromLatin1(key));settingsControls.append(combo);
         connect(combo,qOverload<int>(&QComboBox::currentIndexChanged),this,[this](int){scheduleSave();});
     };
-    registerChoice(model,"model");registerChoice(terrain,"terrain");registerChoice(grid,"gridSize");
+    registerChoice(model,"model");registerChoice(terrainSource,"terrain");registerChoice(grid,"gridSize");
     registerChoice(climate,"climate");registerChoice(pol,"polarization");
     registerChoice(picking,"propagationMarkerClass");registerChoice(tiles,"propagationMapSource");registerChoice(layer,"layer");
     opacity->setObjectName("coverageOpacity");
@@ -336,8 +359,8 @@ PropagationLabDialog::PropagationLabDialog(bool ukrainian,QWidget *parent,const 
     invalidate();
     updateEndpointElevations();
 }
-PropagationLabDialog::~PropagationLabDialog(){saveSettings();cancel.store(true);if(worker){worker->wait();delete worker;}}
-void PropagationLabDialog::closeEvent(QCloseEvent *event){saveSettings();cancel.store(true);if(profileDialog)profileDialog->hide();if(hfDialog)hfDialog->close();QDialog::closeEvent(event);}
+PropagationLabDialog::~PropagationLabDialog(){saveSettings();cancel.store(true);cancelEndpointElevationRequest();if(worker){worker->wait();delete worker;}}
+void PropagationLabDialog::closeEvent(QCloseEvent *event){saveSettings();cancel.store(true);cancelEndpointElevationRequest();elevationTimer->stop();if(profileDialog)profileDialog->hide();if(hfDialog)hfDialog->close();QDialog::closeEvent(event);}
 
 void PropagationLabDialog::setPoint(bool tx,const qth::GeoPosition &point){
     if(worker||!std::isfinite(point.latitude)||!std::isfinite(point.longitude))return;
@@ -455,13 +478,30 @@ void PropagationLabDialog::updateMarkers(){
         distanceLabel->setText(text("Distance TX-RX: ",u8"Відстань TX–RX: ")+value);
     }
 }
+void PropagationLabDialog::cancelEndpointElevationRequest(){
+    if(endpointRequestCancel)endpointRequestCancel->store(true);
+    endpointRequestCancel.reset();pendingEndpointRequest.clear();
+}
 void PropagationLabDialog::updateEndpointElevations(){
     if(!map)return;
+    const bool onlineMode=terrainSource->currentIndex()==2;
     propagation::SrtmTerrain terrain(parameters.terrainDirectory);
+    const auto coordinateKey=[](const qth::GeoPosition &point){
+        return QString::number(point.longitude,'f',6)+QStringLiteral(",")+QString::number(point.latitude,'f',6);
+    };
     QHash<int,QString> details;
     const auto update=[&](bool present,const qth::GeoPosition &point,double antennaHeight,QLabel *label,int id){
-        const double ground=!present?propagation::Unknown:
-            parameters.flatTerrain?0.0:terrain.elevation(point.latitude,point.longitude);
+        double ground=propagation::Unknown;
+        if(present){
+            if(parameters.flatTerrain)ground=0.0;
+            else if(onlineMode&&onlineTerrainPermission->isChecked()){
+                if(loadedOnlineTerrain){
+                    ground=loadedOnlineTerrain->elevation(point.latitude,point.longitude);
+                    if(std::isfinite(ground))endpointElevationCache.insert(coordinateKey(point),ground);
+                }
+                if(!std::isfinite(ground))ground=endpointElevationCache.value(coordinateKey(point),propagation::Unknown);
+            }else if(!onlineMode)ground=terrain.elevation(point.latitude,point.longitude);
+        }
         const QString height=std::isfinite(ground)?
             QStringLiteral("%1 / %2 m MSL").arg(ground,0,'f',1).arg(ground+antennaHeight,0,'f',1):
             QStringLiteral("-- / -- m MSL");
@@ -471,14 +511,59 @@ void PropagationLabDialog::updateEndpointElevations(){
     update(txPresent,parameters.tx,parameters.txHeightM,txElevationLabel,1);
     update(rxPresent,parameters.rx,parameters.rxHeightM,rxElevationLabel,2);
     map->setUserMarkerDetailLabels(details);
+    if(!onlineMode||!onlineTerrainPermission->isChecked()||onlineTerrainKey.isEmpty())return;
+    QStringList locations;
+    if(txPresent)locations<<coordinateKey(parameters.tx);
+    if(rxPresent)locations<<coordinateKey(parameters.rx);
+    bool needsRequest=false;
+    for(const QString &location:locations)if(!endpointElevationCache.contains(location))needsRequest=true;
+    if(!needsRequest||locations.isEmpty())return;
+    const QString signature=locations.join(QLatin1Char(';'));
+    if(endpointRequestCancel&&pendingEndpointRequest==signature)return;
+    cancelEndpointElevationRequest();
+    QUrl url(QStringLiteral("https://api.maptiler.com/elevation/%1.json").arg(signature));
+    QUrlQuery query;query.addQueryItem(QStringLiteral("key"),onlineTerrainKey);url.setQuery(query);
+    const auto cancellation=std::make_shared<std::atomic_bool>(false);
+    endpointRequestCancel=cancellation;
+    pendingEndpointRequest=signature;
+    struct Response { QByteArray bytes; QString error; int http=0; };
+    const auto response=std::make_shared<Response>();
+    // No dialog access from the worker; late replies cannot touch a closed dialog or newer points.
+    auto *requestThread=QThread::create([url,cancellation,response](){
+        response->bytes=fetchPublicData(url,*cancellation,&response->error,&response->http);
+    });
+    connect(requestThread,&QThread::finished,requestThread,&QObject::deleteLater);
+    connect(requestThread,&QThread::finished,this,[this,cancellation,response,locations](){
+        if(cancellation!=endpointRequestCancel||cancellation->load())return;
+        endpointRequestCancel.reset();pendingEndpointRequest.clear();
+        const QJsonArray values=QJsonDocument::fromJson(response->bytes).array();
+        if(!response->error.isEmpty()||response->http!=200||values.size()!=locations.size()){
+            const QString reason=!response->error.isEmpty()?response->error:
+                response->http!=200?QStringLiteral("HTTP %1").arg(response->http):text("Invalid elevation response",u8"Некоректна відповідь сервісу висот");
+            if(status&&!worker)status->setText(text("MapTiler endpoint elevations unavailable: %1",u8"Висоти точок MapTiler недоступні: %1").arg(reason));
+            return;
+        }
+        for(int i=0;i<locations.size();++i){
+            const QJsonArray point=values.at(i).toArray();
+            const double height=point.size()>=3&&point.at(2).isDouble()?point.at(2).toDouble():propagation::Unknown;
+            endpointElevationCache.insert(locations.at(i),std::isfinite(height)?height:propagation::Unknown);
+        }
+        updateEndpointElevations();
+    });
+    requestThread->start(QThread::LowPriority);
 }
 void PropagationLabDialog::setOnlineMapSource(const QString &providerName,const QString &resolvedTemplate,
-                                             const QString &attribution,int layerMode){
+                                             const QString &attribution,int layerMode,const QString &mapTilerKey){
     savedTileTemplate=resolvedTemplate;savedAttribution=attribution;
+    if(onlineTerrainKey!=mapTilerKey.trimmed()){
+        cancelEndpointElevationRequest();
+        onlineTerrainKey=mapTilerKey.trimmed();endpointElevationCache.clear();
+    }
     tiles->setItemText(3,text("QTH: ",u8"QTH: ")+providerName);
     if(!mapProviderInitialized&&!mapSourceRestored)tiles->setCurrentIndex(layerMode==2?3:layerMode==1?1:0);
     mapProviderInitialized=true;
     updateMapSource();
+    if(onlineTerrainPermission->isChecked())updateEndpointElevations();
 }
 void PropagationLabDialog::updateMapSource(){
     const int mode=tiles->currentIndex();
@@ -488,10 +573,11 @@ void PropagationLabDialog::updateMapSource(){
                          mode==1?QthMapWidget::TileLayerMode::LocalXyz:QthMapWidget::TileLayerMode::GridOnly);
 }
 void PropagationLabDialog::invalidate(){
+    cancelEndpointElevationRequest();
     cancel.store(true);result={};updateMarkers();
     if(elevationTimer){
         map->setUserMarkerDetailLabels({});txElevationLabel->setText("-- / -- m MSL");rxElevationLabel->setText("-- / -- m MSL");
-        elevationTimer->start();
+        elevationTimer->start(terrainSource&&terrainSource->currentIndex()==2?500:150);
     }
     if(map)map->setRasterOverlay({}, {}, 0);
     if(status)status->setText(text("Parameters changed; calculate to update the estimate.",u8"Параметри змінено; запустіть розрахунок для оновлення оцінки."));
@@ -506,30 +592,66 @@ void PropagationLabDialog::calculate(bool coverage){
     }
     const QString error=propagation::validate(parameters);
     if(!error.isEmpty()){status->setText(error);return;}
+    const bool useOnlineTerrain=terrainSource->currentIndex()==2;
+    if(useOnlineTerrain&&!onlineTerrainPermission->isChecked()){
+        status->setText(text("Enable online elevation for this session first.",u8"Спочатку дозвольте онлайн-висоти для цього сеансу."));return;
+    }
+    if(useOnlineTerrain&&onlineTerrainKey.isEmpty()){
+        status->setText(text("Set a MapTiler API key in QTH map settings first.",u8"Спочатку вкажіть ключ MapTiler у налаштуваннях QTH-мапи."));return;
+    }
     cancel.store(false);controls->setEnabled(false);picking->setEnabled(false);reference->setEnabled(false);swapButton->setEnabled(false);
     coverageButton->setEnabled(false);pathButton->setEnabled(false);cancelButton->setEnabled(true);map->setPointPickingEnabled(false);
     map->setMarkerEditingEnabled(false);
     status->setText(text("Calculating...",u8"Розрахунок..."));progress->setValue(0);
     const auto snapshot=parameters;
-    worker=QThread::create([this,snapshot,coverage](){
+    const QString apiKey=useOnlineTerrain?onlineTerrainKey:QString();
+    worker=QThread::create([this,snapshot,coverage,useOnlineTerrain,apiKey](){
         propagation::CoverageResult calculated;
-        if(coverage)calculated=propagation::calculateCoverage(snapshot,&cancel,[this](int percent){QMetaObject::invokeMethod(progress,[this,percent](){progress->setValue(percent);},Qt::QueuedConnection);});
+        calculated.parameters=snapshot;
+        std::shared_ptr<propagation::MapTilerTerrain> onlineTerrain;
+        if(useOnlineTerrain){
+            onlineTerrain=std::make_shared<propagation::MapTilerTerrain>(snapshot,coverage);
+            const bool fetched=onlineTerrain->fetch(apiKey,&cancel,[this](int done,int total){
+                if(done%4!=0&&done!=total)return;
+                QMetaObject::invokeMethod(this,[this,done,total](){
+                    progress->setValue(total?done*30/total:0);
+                    status->setText(text("Loading terrain: %1/%2 tiles",u8"Завантаження рельєфу: %1/%2 тайлів").arg(done).arg(total));
+                },Qt::QueuedConnection);
+            });
+            if(!fetched){calculated.error=onlineTerrain->error();calculated.cancelled=cancel.load();}
+            else {
+                const propagation::Elevation elevation=[onlineTerrain](double lat,double lon){return onlineTerrain->elevation(lat,lon);};
+                if(coverage)calculated=propagation::calculateCoverage(snapshot,elevation,&cancel,[this](int percent){
+                    QMetaObject::invokeMethod(progress,[this,percent](){progress->setValue(30+percent*70/100);},Qt::QueuedConnection);
+                });
+                else calculated.path=propagation::calculatePath(snapshot,elevation,&cancel);
+                if(onlineTerrain->missingCount()>0)
+                    calculated.missingTiles<<QString::number(onlineTerrain->missingCount());
+                calculated.cancelled=calculated.cancelled||calculated.path.cancelled;
+            }
+        }else if(coverage)calculated=propagation::calculateCoverage(snapshot,&cancel,[this](int percent){QMetaObject::invokeMethod(progress,[this,percent](){progress->setValue(percent);},Qt::QueuedConnection);});
         else {
             propagation::SrtmTerrain dem(snapshot.terrainDirectory);calculated.parameters=snapshot;
             calculated.path=propagation::calculatePath(snapshot,[&](double lat,double lon){return dem.elevation(lat,lon);},&cancel);
             calculated.missingTiles=dem.unavailableTiles();calculated.cancelled=calculated.path.cancelled;
         }
-        QMetaObject::invokeMethod(this,[this,calculated,coverage](){
+        QMetaObject::invokeMethod(this,[this,calculated,coverage,useOnlineTerrain,onlineTerrain](){
             if(cancel.load()||calculated.cancelled){status->setText(text("Cancelled",u8"Скасовано"));return;}
+            if(useOnlineTerrain&&calculated.error.isEmpty())loadedOnlineTerrain=onlineTerrain;
             if(coverage)result=calculated;else result.path=calculated.path;
             QString info;
             if(coverage)info=text("Valid cells: ",u8"Валідних комірок: ")+QString::number(calculated.validCells)+
                 text("; unknown: ",u8"; невідомих: ")+QString::number(calculated.unknownCells)+
                 text("; ITM warnings: ",u8"; попереджень ITM: ")+QString::number(calculated.warningCells)+
                 text("; <1 km fallback: ",u8"; наближення <1 км: ")+QString::number(calculated.shortPathCells)+". "+calculated.error;
-            else info=calculated.path.valid?text("TX-RX path calculated",u8"Трасу TX–RX розраховано"):calculated.path.error;
-            if(!calculated.missingTiles.isEmpty()) info+="\n"+text("Missing/void HGT: ",u8"Відсутні/невідомі HGT: ")+calculated.missingTiles.join(", ");
+            else info=calculated.path.valid?text("TX-RX path calculated",u8"Трасу TX–RX розраховано"):
+                !calculated.error.isEmpty()?calculated.error:calculated.path.error;
+            if(!calculated.missingTiles.isEmpty()) info+="\n"+
+                (useOnlineTerrain?text("Unavailable terrain tiles: ",u8"Недоступних тайлів рельєфу: "):
+                                  text("Missing/void HGT: ",u8"Відсутні/невідомі HGT: "))+
+                calculated.missingTiles.join(", ");
             status->setText(info);status->setToolTip(info);progress->setValue(100);updateRaster();
+            if(useOnlineTerrain&&loadedOnlineTerrain)updateEndpointElevations();
             if(!coverage|| (profileDialog&&profileDialog->isVisible()))showProfile();
         },Qt::QueuedConnection);
     });

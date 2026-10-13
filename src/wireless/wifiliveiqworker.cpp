@@ -59,6 +59,8 @@ void WifiLiveIqWorker::start(const QString &program, const QStringList &argument
     writtenSamples = lastReportedFedSamples = 0;
     decodedSamples = 0;
     packets = 0;
+    phyDiagnostics = {};
+    extendedPhy = arguments.contains(QStringLiteral("--extended-phy"));
     stopping = false;
     outputBuffer.clear();
     const int outputIndex = arguments.indexOf(QStringLiteral("--output"));
@@ -97,10 +99,19 @@ void WifiLiveIqWorker::start(const QString &program, const QStringList &argument
             success ? QStringLiteral("Completed") : QStringLiteral("PHY exited with code %1").arg(code);
         const double seconds = sessionTimer.isValid() ? sessionTimer.elapsed() / 1000.0 : 0.0;
         const double decoderRate = seconds > 0.0 ? decodedSamples / seconds / 1e6 : 0.0;
+        const quint64 dropped = droppedSamples.load(std::memory_order_relaxed);
+        const double accountedSamples = static_cast<double>(writtenSamples) + dropped;
+        const double dropPercent = accountedSamples > 0
+            ? 100.0 * dropped / accountedSamples : 0.0;
         const QString totals = QStringLiteral(" | PHY %1 MS/s, read %2 M, queue drops %3 M")
             .arg(decoderRate, 0, 'f', 1)
             .arg(decodedSamples / 1e6, 0, 'f', 1)
-            .arg(droppedSamples.load(std::memory_order_relaxed) / 1e6, 0, 'f', 1);
+            .arg(dropped / 1e6, 0, 'f', 1)
+            + QStringLiteral(" (%1%)").arg(dropPercent, 0, 'f', 1)
+            + (extendedPhy ? QStringLiteral(" | HT-SIG %1, HT data pass/fail %2/%3 | VHT-SIG %4, VHT data pass/fail %5/%6")
+                .arg(phyDiagnostics.htSigCrcOk).arg(phyDiagnostics.htDataCrcPass)
+                .arg(phyDiagnostics.htDataCrcFail).arg(phyDiagnostics.vhtSigCrcOk)
+                .arg(phyDiagnostics.vhtDataCrcPass).arg(phyDiagnostics.vhtDataCrcFail) : QString());
         QFile metadata(outputPath + QStringLiteral(".json"));
         if (!outputPath.isEmpty() && metadata.exists() && metadata.size() <= 256 * 1024 &&
             metadata.open(QIODevice::ReadOnly)) {
@@ -108,10 +119,18 @@ void WifiLiveIqWorker::start(const QString &program, const QStringList &argument
             metadata.close();
             if (document.isObject()) {
                 QJsonObject root = document.object();
+                if (extendedPhy && root.value(QStringLiteral("phy")).isObject()) {
+                    QJsonObject phy = root.value(QStringLiteral("phy")).toObject();
+                    phy.insert(QStringLiteral("ht_diagnostics"), phyDiagnostics.htJson());
+                    phy.insert(QStringLiteral("vht_diagnostics"), phyDiagnostics.vhtJson());
+                    root.insert(QStringLiteral("phy"), phy);
+                    emit phyStats(phy);
+                }
                 root.insert(QStringLiteral("transport"), QJsonObject{
                     {QStringLiteral("offered_samples"), static_cast<double>(writtenSamples)},
                     {QStringLiteral("decoded_samples_reported"), static_cast<double>(decodedSamples)},
-                    {QStringLiteral("queue_dropped_samples"), static_cast<double>(droppedSamples.load(std::memory_order_relaxed))},
+                    {QStringLiteral("queue_dropped_samples"), static_cast<double>(dropped)},
+                    {QStringLiteral("queue_drop_percent"), dropPercent},
                     {QStringLiteral("elapsed_s"), seconds},
                     {QStringLiteral("effective_phy_msps"), decoderRate}
                 });
@@ -201,12 +220,12 @@ void WifiLiveIqWorker::flush() {
 void WifiLiveIqWorker::readOutput() {
     if (!process) return;
     outputBuffer += process->readAllStandardOutput();
-    if (outputBuffer.size() > 1024 * 1024) outputBuffer = outputBuffer.right(65536);
+    int start = 0;
     int newline;
-    while ((newline = outputBuffer.indexOf('\n')) >= 0) {
-        const QByteArray line = outputBuffer.left(newline).trimmed();
-        outputBuffer.remove(0, newline + 1);
-        if (line.startsWith("[HT-SIG]") || line.startsWith("[HT-DATA]")) continue;
+    while ((newline = outputBuffer.indexOf('\n', start)) >= 0) {
+        const QByteArray line = outputBuffer.mid(start, newline - start).trimmed();
+        start = newline + 1;
+        if (phyDiagnostics.observe(line)) continue;
         const QJsonDocument document = QJsonDocument::fromJson(line);
         if (!document.isObject()) {
             if (!line.isEmpty()) emit message(QString::fromLocal8Bit(line.left(512)));
@@ -222,13 +241,19 @@ void WifiLiveIqWorker::readOutput() {
         } else if (event.contains(QStringLiteral("packets"))) {
             packets = static_cast<quint64>(event.value(QStringLiteral("packets")).toDouble());
             if (event.value(QStringLiteral("limit_reached")).toBool()) {
-                emit message(QStringLiteral("Live PCAP limit reached."));
-                stop();
+                emit message(QStringLiteral("PCAP file limit reached; live packets continue."));
             }
+        } else if (event.value(QStringLiteral("pcap_limit_reached")).toBool()) {
+            emit message(QStringLiteral("PCAP file limit reached; live packets continue."));
+        } else if (event.contains(QStringLiteral("packet_bus_error"))) {
+            emit message(QStringLiteral("Wireshark live bridge unavailable: ")
+                         + event.value(QStringLiteral("packet_bus_error")).toString());
         } else if (event.contains(QStringLiteral("iq_samples"))) {
             decodedSamples = static_cast<quint64>(event.value(QStringLiteral("iq_samples")).toDouble());
         } else if (event.value(QStringLiteral("phy")).isObject()) {
             emit phyStats(event.value(QStringLiteral("phy")).toObject());
         }
     }
+    if (start > 0) outputBuffer.remove(0, start);
+    if (outputBuffer.size() > 1024 * 1024) outputBuffer = outputBuffer.right(65536);
 }

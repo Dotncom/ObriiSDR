@@ -4,7 +4,7 @@ Obrii SDR is a wideband SDR receiver and research workstation, optimized first
 for RigExpert Fobos SDR hardware while also supporting additional receiver
 backends.
 The current packaged release is Windows-first, with active Linux/Raspberry Pi
-support and a separately maintained Android USB/network client. Version 6.1.0
+support and a separately maintained Android USB/network client. Version 6.1
 adds optional live Wi-Fi IQ decoding, experimental HT20 support, research
 backends for GNSS/LRPT/HF prediction, and expanded measurement tools. It retains
 the 6.0.0 DMR, FT8, signal-generation and terrain-propagation features, plus
@@ -21,18 +21,31 @@ dropping, and multistage channel extraction keep the wideband desktop and
 Raspberry paths responsive. Android is released separately only when its
 package changes.
 
+Patch 6.1.1 adds online MapTiler elevation for terrain profiles and coverage,
+fixes elevation HTTPS on Windows without OpenSSL, and adds live SDR packet
+streaming into Wireshark with clearer experimental HT/VHT diagnostics.
+
+## Feedback
+
+Questions, feedback and bug reports: [mojamajsternya@gmail.com](mailto:mojamajsternya@gmail.com).
+Please include the application version and a short reproduction description.
+Remove API keys, private coordinates and other sensitive data from any attachments.
+
 ## Windows Release Package
 
-Release 6.1.0 provides a Windows x64 core ZIP, an optional Wireless add-on ZIP,
+Release 6.1.1 provides a Windows x64 core ZIP, an optional Wireless add-on ZIP,
 and a Raspberry/Linux source tar.gz. The add-on contains the portable GNU Radio
 Wi-Fi and Wireshark tools; to enable them, run `Install-Wireless-AddOn.ps1` beside
 `ObriiSDR.exe` or extract the add-on into that same folder. See
 `docs/wireless_addon.md`. Npcap is not bundled.
-Extract the Linux source with `tar -xzf ObriiSDR-v6.1.0-raspberry-source.tar.gz`;
+Extract the Linux source with `tar -xzf ObriiSDR-v6.1.1-raspberry-source.tar.gz`;
 the build/run shell scripts have executable permissions. Android packages are
 maintained and released separately.
 
-Use the packaged `release/bin` folder as a self-contained runtime directory.
+Use the extracted Windows core folder as a self-contained runtime directory.
+For local Windows development, the persistent runtime is `build/runtime`;
+compiling the Release target writes `ObriiSDR.exe` there directly. The
+`release/bin` folder is an older runtime copy, not the development launch path.
 Keep `ObriiSDR.exe`, the Qt DLLs, Fobos DLLs, FFTW DLL, libusb DLL, VC runtime
 DLLs, and the `platforms/qwindows.dll` plugin together in the same folder tree.
 
@@ -122,8 +135,8 @@ cmake --build build\fobos-dmr-voice-backend-gpl-vs --config Release
 Copy the resulting backend libraries into the runtime folder:
 
 ```text
-release/bin/dmr_voice_backends/fobos_dmr_voice_mbelib.dll
-release/bin/dmr_voice_backends/fobos_dmr_voice_opendmr.dll
+build/runtime/dmr_voice_backends/fobos_dmr_voice_mbelib.dll
+build/runtime/dmr_voice_backends/fobos_dmr_voice_opendmr.dll
 ```
 
 On Linux/Raspberry Pi the same backend project builds shared libraries with
@@ -223,12 +236,12 @@ folders above. On Linux, install Qt5 Core/Widgets/Network/SerialPort/Multimedia,
 single-precision libraries, libusb, and Linux builds of the standard/agile Fobos
 libraries, or point the three cache paths at local builds.
 
-Build and deploy locally:
+Build locally, then launch `build/runtime/ObriiSDR.exe`. The first deployment
+of runtime DLLs and documentation, or any later refresh of those files, uses
+`-Deploy`. It preserves recordings, logs and existing local config files:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\build_windows_local.ps1
-powershell -ExecutionPolicy Bypass -File tools\deploy_windows.ps1 `
-  -BuildDir build\steamdeck-msvc-release\Release
+powershell -ExecutionPolicy Bypass -File tools\build_windows_local.ps1 -Deploy
 ```
 
 Optional GPL DMR voice backend modules are built separately after the DMR
@@ -258,7 +271,7 @@ You can also sign an already-built executable directly:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\sign_windows.ps1 `
-  -Path release\bin\ObriiSDR.exe `
+  -Path build\runtime\ObriiSDR.exe `
   -PfxPath C:\path\to\certificate.pfx `
   -CertPassword pfx-password
 ```

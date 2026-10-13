@@ -1,5 +1,6 @@
 #include "publicdatafetch.h"
 #include <QEventLoop>
+#include <QElapsedTimer>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -11,14 +12,24 @@
 #include <winhttp.h>
 #endif
 
-QByteArray fetchPublicData(const QUrl &url, const std::atomic_bool &cancel, QString *error) {
+namespace {
+QString httpFailure(int status) {
+    QString reason;
+    if (status == 401 || status == 403) reason = QStringLiteral("; check API key and service access");
+    else if (status == 429) reason = QStringLiteral("; request quota/rate limit exceeded");
+    return QStringLiteral("HTTP %1%2").arg(status).arg(reason);
+}
+}
+
+QByteArray fetchPublicData(const QUrl &url, const std::atomic_bool &cancel, QString *error, int *httpStatus) {
     constexpr int limit = 2 * 1024 * 1024;
     if (error) error->clear();
+    if (httpStatus) *httpStatus = 0;
     if (!url.isValid() || url.host().isEmpty() || !url.userInfo().isEmpty() ||
         (url.scheme() != QStringLiteral("https") && url.scheme() != QStringLiteral("http"))) {
         if (error) *error = QStringLiteral("Invalid public HTTP(S) source URL."); return {};
     }
-    if (cancel) return {};
+    if (cancel) { if (error) *error = QStringLiteral("Request cancelled"); return {}; }
 #ifdef Q_OS_WIN
     if (!QSslSocket::supportsSsl()) {
         HINTERNET session = WinHttpOpen(L"ObriiSDR-PublicData/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -28,6 +39,9 @@ QByteArray fetchPublicData(const QUrl &url, const std::atomic_bool &cancel, QStr
         QByteArray result;
         QUrl current = url;
         bool okay = false;
+        bool tooLarge = false;
+        DWORD lastStatus = 0, networkError = 0;
+        QElapsedTimer deadline; deadline.start();
         for (int redirect = 0; redirect <= 3 && !cancel; ++redirect) {
             const QString host = current.host();
             const bool secure = current.scheme() == QStringLiteral("https");
@@ -45,6 +59,9 @@ QByteArray fetchPublicData(const QUrl &url, const std::atomic_bool &cancel, QStr
             DWORD code = 0, size = sizeof(code);
             okay = okay && WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                 WINHTTP_HEADER_NAME_BY_INDEX, &code, &size, WINHTTP_NO_HEADER_INDEX);
+            if (!okay) networkError = GetLastError();
+            lastStatus = code;
+            if (httpStatus) *httpStatus = static_cast<int>(code);
             QUrl target;
             if (okay && (code == 301 || code == 302 || code == 303 || code == 307 || code == 308)) {
                 wchar_t location[4096]; size = sizeof(location);
@@ -52,13 +69,14 @@ QByteArray fetchPublicData(const QUrl &url, const std::atomic_bool &cancel, QStr
                     target = current.resolved(QUrl(QString::fromWCharArray(location)));
                 okay = false;
             } else if (okay && code == 200) {
-                while (!cancel) {
+                while (!cancel && deadline.elapsed() < 12000) {
                     char chunk[8192]; DWORD count = 0;
-                    if (!WinHttpReadData(request, chunk, sizeof(chunk), &count)) { okay = false; break; }
+                    if (!WinHttpReadData(request, chunk, sizeof(chunk), &count)) { networkError = GetLastError(); okay = false; break; }
                     if (!count) break;
-                    if (result.size() + static_cast<int>(count) > limit) { okay = false; break; }
+                    if (result.size() + static_cast<int>(count) > limit) { tooLarge = true; okay = false; break; }
                     result.append(chunk, static_cast<int>(count));
                 }
+                if (deadline.elapsed() >= 12000) okay = false;
             } else okay = false;
             if (request) WinHttpCloseHandle(request);
             if (connection) WinHttpCloseHandle(connection);
@@ -68,7 +86,16 @@ QByteArray fetchPublicData(const QUrl &url, const std::atomic_bool &cancel, QStr
             current = target;
         }
         WinHttpCloseHandle(session);
-        if (!okay || cancel) { if (error) *error = QStringLiteral("Public data request failed, exceeded limits or was cancelled."); return {}; }
+        if (!okay || cancel) {
+            if (error) {
+                if (cancel) *error = QStringLiteral("Request cancelled");
+                else if (tooLarge) *error = QStringLiteral("Response exceeds the 2 MiB limit");
+                else if (deadline.elapsed() >= 12000) *error = QStringLiteral("Request timed out");
+                else if (lastStatus && lastStatus != 200) *error = httpFailure(static_cast<int>(lastStatus));
+                else *error = QStringLiteral("Windows HTTPS/network error %1").arg(networkError);
+            }
+            return {};
+        }
         return result;
     }
 #endif
@@ -85,9 +112,18 @@ QByteArray fetchPublicData(const QUrl &url, const std::atomic_bool &cancel, QStr
     QObject::connect(reply, &QNetworkReply::downloadProgress, reply, [reply, limit](qint64 count, qint64 total) { if (count > limit || total > limit) reply->abort(); });
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     timeout.start(12000); cancellation.start(100); loop.exec();
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if (httpStatus) *httpStatus = status;
     const QByteArray result = reply->readAll();
     if (reply->error() != QNetworkReply::NoError || result.size() > limit || cancel) {
-        if (error) *error = QStringLiteral("Public data request failed, exceeded limits or was cancelled."); return {};
+        if (error) {
+            if (cancel) *error = QStringLiteral("Request cancelled");
+            else if (!timeout.isActive()) *error = QStringLiteral("Request timed out");
+            else if (status && status != 200) *error = httpFailure(status);
+            else if (url.scheme() == "https" && !QSslSocket::supportsSsl()) *error = QStringLiteral("TLS unavailable; install a compatible OpenSSL runtime");
+            else *error = QStringLiteral("Qt network error %1 (or response limit exceeded)").arg(int(reply->error()));
+        }
+        return {};
     }
     return result;
 }

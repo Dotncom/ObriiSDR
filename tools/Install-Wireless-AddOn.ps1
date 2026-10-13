@@ -1,8 +1,8 @@
 param([string]$ArchivePath = '')
 
 $ErrorActionPreference = 'Stop'
-$Version = '6.1.0'
-$ExpectedSha256 = 'DAEED2FC9D0D7E1C5AF4D24BF4ABB1E0342DD217A1BFECA4D777660D73718581'
+$Version = '6.1.1'
+$ExpectedSha256 = '743DA16E234B9A237DBED3E0C7906506A99DCC0C6C5251C3B2E35CB6AC588495'
 $AssetName = "ObriiSDR-v$Version-wireless-windows-x64.zip"
 $Url = "https://github.com/Dotncom/ObriiSDR/releases/download/v$Version/$AssetName"
 $Destination = [IO.Path]::GetFullPath($PSScriptRoot)

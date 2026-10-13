@@ -6,7 +6,8 @@ does not tune a receiver, transmit RF, or continuously analyze IQ.
 
 ## Terrain and Map
 
-Select a directory containing uncompressed SRTM `.hgt` tiles. For example,
+Choose **SRTM HGT**, **MapTiler online**, or **Flat reference** as the elevation
+source. Local SRTM requires a directory containing uncompressed `.hgt` tiles. For example,
 `N49E030.hgt` covers latitude 49..50 N, longitude 30..31 E; negative tile
 coordinates use `S`/`W`. Both 1201x1201 and 3601x3601 signed big-endian files
 are supported, including NASA's `N49E030.SRTMGL1.hgt` and
@@ -16,27 +17,39 @@ tiles and SRTM voids are never silently replaced with zero elevation.
 
 TX/RX markers and the Link controls display `terrain / antenna top m MSL`:
 for example, `150.0 / 160.0 m MSL` means 150 m terrain plus a 10 m AGL antenna.
-The values use local HGT interpolation and update after point, folder, or antenna
-height changes, without running coverage or requesting elevations online. A
+With local HGT, the values update after point, folder, or antenna height changes
+without running coverage or requesting elevations online. With MapTiler online,
+the endpoint heights are fetched after the separate per-session consent is checked;
+calculation loads the required Terrain RGB tiles into memory before evaluating
+the path or coverage. A
 missing tile/void displays `-- / -- m MSL`; explicit Flat reference uses 0 m
 terrain and is marked as a synthetic reference on the map. Map imagery alone
 cannot supply these elevations.
 
+Windows elevation requests use the system HTTPS transport when OpenSSL is not
+available to Qt, like the base map. No separate OpenSSL installation is needed.
+Requests run off the GUI thread; moving markers or closing the window cancels
+outdated endpoint requests. Error details distinguish network/TLS failures from
+HTTP 401/403 (key or service access) and 429 (quota/rate limit), without including
+API keys or coordinates. Base-map access does not necessarily grant access to the
+elevation service.
+
 Data reference: [NASA SRTMGL1](https://www.earthdata.nasa.gov/data/catalog/lpcloud-srtmgl1-003),
 [SRTM User Guide](https://lpdaac.usgs.gov/documents/179/SRTM_User_Guide_V3.pdf).
 SRTM can include the radar surface of trees/buildings; it is not a detailed
-bare-earth, building, or vegetation propagation model. Download/unpack the
-needed tiles yourself. DEMs and geographic map imagery are separate inputs.
+bare-earth, building, or vegetation propagation model. DEMs and geographic map
+imagery are separate inputs.
 
 The map reuses the QTH map's configured local XYZ directory or online provider
 (including MapTiler and its already saved API key). Select **QTH: provider**
 or the independent OpenStreetMap option. Online tiles still require the separate
 **Allow online map** checkbox: a request discloses the displayed geographic
 area to the provider. Keys are resolved in memory, not copied into exports or
-diagnostic messages. The tool disables online disk caching. Terrain is local
-only: map image tiles do not supply elevations. Download SRTM for the entire
-calculation area, unpack `.hgt`/`.hgt.zip` files into the selected HGT folder,
-and preserve their original names. ZIP archives are not read directly.
+diagnostic messages. The tool disables online map disk caching. Map image
+tiles do not supply elevations; the independent MapTiler Terrain RGB service
+does. For offline use, download SRTM for the entire calculation area, unpack
+`.hgt`/`.hgt.zip` files into the selected HGT folder, and preserve their
+original names. ZIP archives are not read directly.
 
 Choose **Transmitter (TX) / Receiver (RX)** and click to place or replace the
 corresponding point, enter coordinates, or copy an existing QTH user marker.
@@ -68,8 +81,15 @@ after a short idle interval and on close in the per-user `ObriiSDR.ini`
 (`propagationLab` group). This is private local state: points are not written
 to diagnostic logs or included in release packages. Treat an explicit settings
 backup as private because it now includes these points. Resolved provider API
-keys are not copied into this group's settings. Online-map permission remains
-session-only and is never restored automatically. Profile CSV is an explicit
+keys are not copied into this group's settings. Online-map and online-elevation
+permissions remain separate and session-only; neither is restored automatically.
+MapTiler elevation requests disclose the endpoint coordinates and the requested
+terrain area to MapTiler. The QTH map's user-supplied MapTiler key is reused in
+memory. Terrain RGB tiles are held only for the current calculation, not saved
+as a local DEM; the local HGT option remains available offline. Each calculation
+downloads at most 96 terrain tiles and adapts tile zoom to the geographic span,
+so very large areas may have coarser elevation detail. Missing online terrain
+is not replaced with a flat surface. Profile CSV is an explicit
 export that contains TX/RX coordinates. Calculated coverage rasters are not
 persisted; recalculate after reopening.
 

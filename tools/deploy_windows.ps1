@@ -1,6 +1,6 @@
 param(
-    [string]$BuildDir = "build\Desktop_x86_windows_msvc2022_pe_64bit-Release",
-    [string]$DeployDir = "release\bin",
+    [string]$BuildDir = "build\runtime",
+    [string]$DeployDir = "build\runtime",
     [string]$QtRoot = "C:\Qt\5.15.2\msvc2019_64",
     [string]$VcRedistDir = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Redist\MSVC\14.44.35112\x64\Microsoft.VC143.CRT",
     [switch]$Sign,
@@ -69,7 +69,7 @@ $RootFiles = @(
 
 $RtlSdrRuntimeCandidates = @(
     @{ Source = Join-Path $Workspace "rtlsdr\rtlsdr.dll"; Name = "rtlsdr.dll" },
-    @{ Source = Join-Path $Workspace "release\bin\rtlsdr.dll"; Name = "rtlsdr.dll" }
+    @{ Source = Join-Path $DeployPath "rtlsdr.dll"; Name = "rtlsdr.dll" }
 )
 $RtlSdrRuntime = $RtlSdrRuntimeCandidates | Where-Object { Test-Path -LiteralPath $_.Source } | Select-Object -First 1
 if ($RtlSdrRuntime) {
@@ -176,7 +176,7 @@ $ReleaseDocFiles = @(
     "docs\dmr_external_backend.md",
     "docs\gnss_preflight_4.1.md",
     "docs\iq_pipeline_audit.md",
-    "docs\release_notes_6.1.0.md",
+    "docs\release_notes_6.1.1.md",
     "docs\dmr_motorola_privacy.md",
     "docs\performance_and_dmr_audit.md",
     "docs\wireless_lab.md",
@@ -193,6 +193,27 @@ foreach ($DocFile in $ReleaseDocFiles) {
         $DeployDocPath = Join-Path $DeployPath $DocFile
         New-Item -ItemType Directory -Path (Split-Path -Parent $DeployDocPath) -Force | Out-Null
         Copy-Item -LiteralPath $DocPath -Destination $DeployDocPath -Force
+    }
+}
+
+$WirelessScripts = Join-Path $DeployPath 'wireless'
+if (Test-Path -LiteralPath (Join-Path $DeployPath 'wifi-phy/python.exe')) {
+    New-Item -ItemType Directory -Path $WirelessScripts -Force | Out-Null
+    foreach ($Script in @('wifi_phy_decoder.py', 'wifi_packet_bus.py', 'wifi_extcap.py')) {
+        Copy-Item -LiteralPath (Join-Path $Workspace "tools/$Script") -Destination $WirelessScripts -Force
+    }
+}
+$WiresharkPath = Join-Path $DeployPath 'wireshark'
+if (Test-Path -LiteralPath (Join-Path $WiresharkPath 'wireshark.exe')) {
+    $ExtcapPath = Join-Path $WiresharkPath 'extcap/ObriiWifiExtcap.bat'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $ExtcapPath) -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $Workspace 'tools/ObriiWifiExtcap.bat') -Destination $ExtcapPath -Force
+    $ManifestPath = Join-Path $WiresharkPath 'runtime-manifest.json'
+    if (Test-Path -LiteralPath $ManifestPath) {
+        $Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+        $Manifest.files = @($Manifest.files | Where-Object { $_.path -ne 'extcap/ObriiWifiExtcap.bat' }) +
+            @([pscustomobject]@{ path = 'extcap/ObriiWifiExtcap.bat'; sha256 = (Get-FileHash -LiteralPath $ExtcapPath).Hash })
+        $Manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $ManifestPath -Encoding utf8
     }
 }
 
@@ -259,9 +280,6 @@ if (Test-Path -LiteralPath $GopherTrunkExePath) {
 }
 
 $ConfigDeployPath = Join-Path $DeployPath "config"
-if (Test-Path -LiteralPath $ConfigDeployPath) {
-    Remove-Item -LiteralPath $ConfigDeployPath -Recurse -Force
-}
 New-Item -ItemType Directory -Path $ConfigDeployPath -Force | Out-Null
 $ReleaseConfigFiles = @(
     "config\fobosapp_defaults_4.2.json",
@@ -269,19 +287,20 @@ $ReleaseConfigFiles = @(
 )
 foreach ($ConfigFile in $ReleaseConfigFiles) {
     $ConfigSource = Join-Path $Workspace $ConfigFile
-    if (Test-Path -LiteralPath $ConfigSource) {
-        Copy-Item -LiteralPath $ConfigSource -Destination (Join-Path $ConfigDeployPath (Split-Path -Leaf $ConfigSource)) -Force
+    $ConfigDestination = Join-Path $ConfigDeployPath (Split-Path -Leaf $ConfigSource)
+    if ((Test-Path -LiteralPath $ConfigSource) -and -not (Test-Path -LiteralPath $ConfigDestination)) {
+        Copy-Item -LiteralPath $ConfigSource -Destination $ConfigDestination
     }
 }
 
 $RtlDeployPath = Join-Path $DeployPath "rtlsdr"
 $RtlRuntimeFiles = @(
     @{ Source = Join-Path $Workspace "rtlsdr\rtlsdr.dll"; Name = "rtlsdr.dll" },
-    @{ Source = Join-Path $Workspace "release\bin\rtlsdr\rtlsdr.dll"; Name = "rtlsdr.dll" },
+    @{ Source = Join-Path $DeployPath "rtlsdr\rtlsdr.dll"; Name = "rtlsdr.dll" },
     @{ Source = Join-Path $Workspace "rtlsdr\libusb-1.0.dll"; Name = "libusb-1.0.dll" },
-    @{ Source = Join-Path $Workspace "release\bin\rtlsdr\libusb-1.0.dll"; Name = "libusb-1.0.dll" },
+    @{ Source = Join-Path $DeployPath "rtlsdr\libusb-1.0.dll"; Name = "libusb-1.0.dll" },
     @{ Source = Join-Path $Workspace "rtlsdr\rtl_test.exe"; Name = "rtl_test.exe" },
-    @{ Source = Join-Path $Workspace "release\bin\rtlsdr\rtl_test.exe"; Name = "rtl_test.exe" }
+    @{ Source = Join-Path $DeployPath "rtlsdr\rtl_test.exe"; Name = "rtl_test.exe" }
 )
 $RtlSeenNames = @{}
 foreach ($RtlFile in $RtlRuntimeFiles) {

@@ -18,6 +18,7 @@
 #include <QProcessEnvironment>
 #include <QPushButton>
 #include <QSettings>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QThread>
 #include <QVBoxLayout>
@@ -67,7 +68,8 @@ WifiPhyWidget::WifiPhyWidget(bool uk, QWidget *parent) : QWidget(parent), ukrain
     const QString saved = settings.value("phy/python").toString();
     legacyPythonPath = QFileInfo::exists(saved) ? saved : program;
     const QString extendedDefault = QDir(QCoreApplication::applicationDirPath()).filePath("wifi-ht/python.exe");
-    extendedPythonPath = settings.value("phy/extendedPython", extendedDefault).toString();
+    const QString extendedSaved = settings.value("phy/extendedPython", extendedDefault).toString();
+    extendedPythonPath = QFileInfo(extendedSaved).isFile() ? extendedSaved : extendedDefault;
     phyMode = new QComboBox(this);
     phyMode->addItem(text("Legacy a/g (stable)", "Legacy a/g (стабільний)"));
     phyMode->addItem(text("HT20 (experimental)", "HT20 (експериментальний)"));
@@ -111,8 +113,8 @@ WifiPhyWidget::WifiPhyWidget(bool uk, QWidget *parent) : QWidget(parent), ukrain
     status = new QLabel(this); status->setWordWrap(true); layout->addWidget(status);
     phyStatus = new QLabel(this);
     phyStatus->setWordWrap(true);
-    phyStatus->setToolTip(text("Short/long synchronization candidates and decoded legacy SIGNAL headers are not confirmed packets. Only CRC-valid frames enter PCAP. The difference is not an exact CRC-failure count.",
-                                 "Кандидати короткої/довгої синхронізації та декодовані заголовки SIGNAL ще не підтверджені пакети. У PCAP потрапляють лише кадри з правильною CRC. Різниця не є точним лічильником помилок CRC."));
+    phyStatus->setToolTip(text("Synchronization candidates are not confirmed packets. HT/VHT-SIG CRC OK confirms a header, not its payload. Data CRC pass/fail counts completed decode attempts. VHT bandwidth is read from decoded headers; the current data decoder supports only a subset of VHT20. Live IQ queue drops are saved in the JSON sidecar.",
+                                 "Кандидати синхронізації ще не підтверджені пакети. HT/VHT-SIG CRC OK підтверджує заголовок, але не його дані. CRC даних рахує завершені спроби декодування. Ширина VHT прочитана із заголовків; декодер даних підтримує лише частину VHT20. Втрати черги живого IQ зберігаються у JSON-файлі."));
     layout->addWidget(phyStatus);
     const auto showMode = [this] {
         phyStatus->clear();
@@ -132,26 +134,41 @@ WifiPhyWidget::WifiPhyWidget(bool uk, QWidget *parent) : QWidget(parent), ukrain
     connect(liveStartButton, &QPushButton::clicked, this, &WifiPhyWidget::startLive);
     connect(liveStopButton, &QPushButton::clicked, this, &WifiPhyWidget::stopLive);
     connect(openButton, &QPushButton::clicked, this, [this] { emit captureReady(result); });
-    connect(process, &QProcess::readyReadStandardOutput, this, [this] {
-        processOutputBuffer += process->readAllStandardOutput();
-        if (processOutputBuffer.size() > 65536) processOutputBuffer = processOutputBuffer.right(8192);
-        int newline;
-        while ((newline = processOutputBuffer.indexOf('\n')) >= 0) {
-            const QByteArray line = processOutputBuffer.left(newline).trimmed();
-            processOutputBuffer.remove(0, newline + 1);
-            if (line.isEmpty()) continue;
-            if (line.startsWith("[HT-SIG]") || line.startsWith("[HT-DATA]")) continue;
-            const QJsonObject event = QJsonDocument::fromJson(line).object();
-            if (event.value(QStringLiteral("phy")).isObject()) showPhyStats(event.value(QStringLiteral("phy")).toObject());
-            else log->appendPlainText(QString::fromLocal8Bit(line.left(2048)));
-        }
-    });
+    connect(process, &QProcess::readyReadStandardOutput, this, &WifiPhyWidget::readProcessOutput);
     connect(process, &QProcess::errorOccurred, this, [this] {
         status->setText(process->errorString());
         stopButton->setEnabled(false);
         updateLiveButtons();
     });
     connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this](int code, QProcess::ExitStatus exit) {
+        processOutputBuffer += process->readAllStandardOutput();
+        if (!processOutputBuffer.isEmpty() && !processOutputBuffer.endsWith('\n')) processOutputBuffer += '\n';
+        readProcessOutput();
+        if (phyMode->currentIndex() == 1) {
+            QJsonObject phy;
+            QFile metadata(result + QStringLiteral(".json"));
+            if (metadata.exists() && metadata.size() <= 256 * 1024 && metadata.open(QIODevice::ReadOnly)) {
+                const QJsonDocument document = QJsonDocument::fromJson(metadata.readAll());
+                metadata.close();
+                if (document.isObject()) {
+                    QJsonObject root = document.object();
+                    phy = root.value(QStringLiteral("phy")).toObject();
+                    phy.insert(QStringLiteral("ht_diagnostics"), filePhyDiagnostics.htJson());
+                    phy.insert(QStringLiteral("vht_diagnostics"), filePhyDiagnostics.vhtJson());
+                    root.insert(QStringLiteral("phy"), phy);
+                    QSaveFile saved(result + QStringLiteral(".json"));
+                    if (saved.open(QIODevice::WriteOnly)) {
+                        saved.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+                        if (!saved.commit()) log->appendPlainText(text("Could not save PHY diagnostics.", "Не вдалося зберегти діагностику PHY."));
+                    }
+                }
+            }
+            if (phy.isEmpty()) {
+                phy.insert(QStringLiteral("ht_diagnostics"), filePhyDiagnostics.htJson());
+                phy.insert(QStringLiteral("vht_diagnostics"), filePhyDiagnostics.vhtJson());
+            }
+            showPhyStats(phy);
+        }
         startButton->setEnabled(true); stopButton->setEnabled(false);
         updateLiveButtons();
         openButton->setEnabled(QFileInfo(result).size() > 24);
@@ -201,6 +218,21 @@ WifiPhyWidget::WifiPhyWidget(bool uk, QWidget *parent) : QWidget(parent), ukrain
     });
     liveThread->start();
 }
+void WifiPhyWidget::readProcessOutput() {
+    processOutputBuffer += process->readAllStandardOutput();
+    int start = 0;
+    int newline;
+    while ((newline = processOutputBuffer.indexOf('\n', start)) >= 0) {
+        const QByteArray line = processOutputBuffer.mid(start, newline - start).trimmed();
+        start = newline + 1;
+        if (line.isEmpty() || filePhyDiagnostics.observe(line)) continue;
+        const QJsonObject event = QJsonDocument::fromJson(line).object();
+        if (event.value(QStringLiteral("phy")).isObject()) showPhyStats(event.value(QStringLiteral("phy")).toObject());
+        else log->appendPlainText(QString::fromLocal8Bit(line.left(2048)));
+    }
+    if (start > 0) processOutputBuffer.remove(0, start);
+    if (processOutputBuffer.size() > 65536) processOutputBuffer = processOutputBuffer.right(8192);
+}
 WifiPhyWidget::~WifiPhyWidget() {
     stop();
     QMetaObject::invokeMethod(liveWorker, [worker = liveWorker] { worker->stop(); },
@@ -249,8 +281,13 @@ void WifiPhyWidget::startLive() {
     if (!liveAvailable || captureBusy || liveActive || liveStarting || liveStopping || process->state() != QProcess::NotRunning) return;
     const QString script = QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("wireless/wifi_phy_decoder.py"));
     const double selectedChannel = channel->value() * 1e6;
-    if (!QFileInfo::exists(script) || !QFileInfo::exists(python->text().trimmed())) {
-        status->setText(text("Prepare the Wi-Fi PHY runtime first.", "Спочатку підготуйте рушій Wi-Fi PHY."));
+    const QString pythonPath = python->text().trimmed();
+    if (!QFileInfo(script).isFile()) {
+        status->setText(text("Wi-Fi PHY decoder script is missing: %1", "Відсутній скрипт декодера Wi-Fi PHY: %1").arg(script));
+        return;
+    }
+    if (!QFileInfo(pythonPath).isFile()) {
+        status->setText(text("Wi-Fi PHY Python is missing: %1", "Відсутній Python рушія Wi-Fi PHY: %1").arg(pythonPath));
         return;
     }
     if (liveRate < 20e6 || liveRate > 1e9 ||
@@ -282,7 +319,7 @@ void WifiPhyWidget::startLive() {
     updateLiveButtons();
     status->setText(text("Starting live PHY...", "Запуск живого PHY..."));
     QMetaObject::invokeMethod(liveWorker,
-        [worker = liveWorker, program = python->text().trimmed(), arguments, working,
+        [worker = liveWorker, program = pythonPath, arguments, working,
          rate = liveRate, frequency = liveCenter] {
             worker->start(program, arguments, working, rate, frequency);
         }, Qt::QueuedConnection);
@@ -330,6 +367,30 @@ void WifiPhyWidget::showPhyStats(const QJsonObject &stats) {
     for (auto it = extended.begin(); it != extended.end(); ++it)
         modern << QStringLiteral("%1: %2").arg(it.key()).arg(it.value().toInt());
     if (!modern.isEmpty()) result += text("\nExtended CRC-valid: ", "\nРозширені CRC-коректні: ") + modern.join(QStringLiteral(", "));
+    const QJsonObject ht = stats.value(QStringLiteral("ht_diagnostics")).toObject();
+    if (!ht.isEmpty()) {
+        result += text("\nHT: SIG CRC OK %1 | data CRC pass %2 | fail %3",
+                       "\nHT: SIG CRC OK %1 | CRC даних добре %2 | помилка %3")
+            .arg(QString::number(ht.value(QStringLiteral("ht_sig_crc_ok")).toDouble(), 'f', 0),
+                 QString::number(ht.value(QStringLiteral("ht_data_crc_pass")).toDouble(), 'f', 0),
+                 QString::number(ht.value(QStringLiteral("ht_data_crc_fail")).toDouble(), 'f', 0));
+    }
+    const QJsonObject vht = stats.value(QStringLiteral("vht_diagnostics")).toObject();
+    if (!vht.isEmpty()) {
+        result += text("\nVHT: SIG CRC OK %1 | data CRC pass %2 | fail %3",
+                       "\nVHT: SIG CRC OK %1 | CRC даних добре %2 | помилка %3")
+            .arg(QString::number(vht.value(QStringLiteral("vht_sig_crc_ok")).toDouble(), 'f', 0),
+                 QString::number(vht.value(QStringLiteral("vht_data_crc_pass")).toDouble(), 'f', 0),
+                 QString::number(vht.value(QStringLiteral("vht_data_crc_fail")).toDouble(), 'f', 0));
+        const QJsonObject bandwidths = vht.value(QStringLiteral("bandwidth_mhz")).toObject();
+        QStringList bandwidthCounts;
+        for (const char *bandwidth : {"20", "40", "80", "160"}) {
+            const int count = bandwidths.value(QLatin1String(bandwidth)).toInt();
+            if (count > 0) bandwidthCounts << QStringLiteral("%1 MHz: %2").arg(QLatin1String(bandwidth)).arg(count);
+        }
+        if (!bandwidthCounts.isEmpty())
+            result += text(" | header widths ", " | ширина заголовків ") + bandwidthCounts.join(QStringLiteral(", "));
+    }
     const QJsonObject frames = stats.value(QStringLiteral("frame_classes")).toObject();
     if (!frames.isEmpty())
         result += text("\nFrames: management %1 | control %2 | data %3",
@@ -344,12 +405,17 @@ void WifiPhyWidget::showPhyStats(const QJsonObject &stats) {
 void WifiPhyWidget::start() {
     if (liveActive || liveStarting || liveStopping || process->state() != QProcess::NotRunning) return;
     const QString script = QDir(QCoreApplication::applicationDirPath()).filePath("wireless/wifi_phy_decoder.py");
-    if (!QFileInfo::exists(script) || !QFileInfo(input->text()).isFile() || python->text().trimmed().isEmpty()) { status->setText(text("Select an IQ file and prepare the PHY runtime.", "Оберіть запис IQ та підготуйте рушій PHY.")); return; }
+    if (!QFileInfo(script).isFile() || !QFileInfo(python->text().trimmed()).isFile() ||
+        !QFileInfo(input->text()).isFile()) {
+        status->setText(text("Select an IQ file and verify the PHY script and Python paths.",
+                             "Оберіть запис IQ і перевірте шляхи до скрипта та Python рушія PHY."));
+        return;
+    }
     const QString destination = QDir(directory->text()).filePath(QDateTime::currentDateTimeUtc().toString("yyyyMMdd-HHmmss-zzz"));
     if (!QDir().mkpath(destination)) { status->setText(text("Cannot create output folder.", "Не вдалося створити папку результатів.")); return; }
     const QString working = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/wireless-phy";
     if (!QDir().mkpath(working)) return;
-    result = QDir(destination).filePath("wifi.pcap"); cancelled = false; log->clear(); phyStatus->clear(); processOutputBuffer.clear(); openButton->setEnabled(false);
+    result = QDir(destination).filePath("wifi.pcap"); cancelled = false; log->clear(); phyStatus->clear(); processOutputBuffer.clear(); filePhyDiagnostics = {}; openButton->setEnabled(false);
     auto environment = QProcessEnvironment::systemEnvironment();
     environment.insert("PYTHONDONTWRITEBYTECODE", "1"); environment.remove("PYTHONPATH");
     process->setProcessEnvironment(environment); process->setWorkingDirectory(working);

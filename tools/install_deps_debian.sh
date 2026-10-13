@@ -12,6 +12,7 @@ sudo apt-get install -y \
     cmake \
     pkg-config \
     qtbase5-dev \
+    qt5-image-formats-plugins \
     libqt5serialport5-dev \
     qtmultimedia5-dev \
     libqt5multimedia5-plugins \

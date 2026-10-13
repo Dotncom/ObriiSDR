@@ -3,6 +3,7 @@
 #include <QWidget>
 #include <QByteArray>
 #include <QStringList>
+#include "wifiphydiagnostics.h"
 class QProcess;
 class QLineEdit;
 class QComboBox;
@@ -37,6 +38,7 @@ private:
     void updateLiveButtons();
     void saveSettings();
     void showPhyStats(const QJsonObject &stats);
+    void readProcessOutput();
     bool ukrainian, cancelled = false;
     QProcess *process;
     QLineEdit *python, *input, *directory;
@@ -54,5 +56,6 @@ private:
          liveStopping = false, captureBusy = false;
     QString result;
     QByteArray processOutputBuffer;
+    WifiPhyDiagnostics filePhyDiagnostics;
 };
 #endif

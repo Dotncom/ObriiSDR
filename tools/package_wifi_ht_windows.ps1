@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $Workspace = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $Source = (Resolve-Path -LiteralPath (Join-Path $Workspace $SourceDir)).Path
 $Stage = Join-Path $Workspace 'build/wifi-ht-runtime-stage'
-$Destination = Join-Path $Workspace 'release/bin/wifi-ht'
+$Destination = Join-Path $Workspace 'build/runtime/wifi-ht'
 $Commit = 'b3dbd2d476407db92f77056df23c166e4274c507'
 if (Test-Path -LiteralPath $Stage) { throw "Staging directory already exists: $Stage" }
 if (Test-Path -LiteralPath $Destination) { throw "Runtime already exists: $Destination" }

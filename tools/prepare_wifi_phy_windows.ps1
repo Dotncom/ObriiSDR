@@ -1,7 +1,7 @@
 param([switch]$Install)
 $ErrorActionPreference='Stop'
 $Workspace=(Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-$Prefix=Join-Path $Workspace 'release/bin/wifi-phy'
+$Prefix=Join-Path $Workspace 'build/runtime/wifi-phy'
 $Root=Join-Path $Workspace 'build/deps/mamba-root'
 $Mamba=Join-Path $Workspace 'build/deps/micromamba/Library/bin/micromamba.exe'
 if ($Install -or -not (Test-Path -LiteralPath (Join-Path $Prefix 'python.exe'))) {
@@ -32,9 +32,11 @@ foreach($File in Get-ChildItem -LiteralPath $Prefix -Recurse -File) {
         Remove-Item -LiteralPath $Target -Force
     }
 }
-$ScriptDirectory=Join-Path $Workspace 'release/bin/wireless'
+$ScriptDirectory=Join-Path $Workspace 'build/runtime/wireless'
 New-Item -ItemType Directory -Path $ScriptDirectory -Force|Out-Null
-Copy-Item -LiteralPath (Join-Path $Workspace 'tools/wifi_phy_decoder.py') -Destination $ScriptDirectory -Force
+foreach($Script in @('wifi_phy_decoder.py', 'wifi_packet_bus.py', 'wifi_extcap.py')) {
+    Copy-Item -LiteralPath (Join-Path $Workspace "tools/$Script") -Destination $ScriptDirectory -Force
+}
 $Files=Get-ChildItem -LiteralPath $Prefix -Recurse -File|Where-Object { $_.Name -ne 'runtime-manifest.json' -and $_.FullName -notmatch '\\conda-meta\\' }|ForEach-Object {
     @{path=$_.FullName.Substring($AbsolutePrefix.Length+1).Replace('\','/');sha256=(Get-FileHash -LiteralPath $_.FullName).Hash}
 }

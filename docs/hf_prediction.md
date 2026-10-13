@@ -202,7 +202,7 @@ month** plus the shared decile table. Default storage is private local cache:
 - Linux: `~/.local/share/ObriiSDR/itu_hf/data` (Qt respects XDG data location).
 
 The standalone helper install excludes datasets; the parent will include all
-25 public model files in **release/bin/itu_hf/data** alongside the helper/source
+25 public model files in **build/runtime/itu_hf/data** alongside the helper/source
 bundle. That complete release requires no end-user engine/data installation or
 download. The private cache is a development/copy source, not a release
 prerequisite. Runtime defaults already prefer `itu_hf/data` beside the application
@@ -236,10 +236,10 @@ Verified Windows copying sources (all under private AppData):
 - Installed source-preserving bundle:
   `C:/Users/Svyat/AppData/Local/ObriiSDR/itu_hf/stage/itu_hf/`.
   Copy its helper, both DLLs, `source/`, and `source-notices/` into
-  `release/bin/itu_hf/`. This contains no datasets/private job files.
+  `build/runtime/itu_hf/`. This contains no datasets/private job files.
 - All 25 pinned model datasets:
   `C:/Users/Svyat/AppData/Local/ObriiSDR/itu_hf/data/`.
-  Copy only these public files into `release/bin/itu_hf/data/`.
+  Copy only these public files into `build/runtime/itu_hf/data/`.
 - Do not copy sibling `jobs/`, `build/`, `build-linux/`, `toolchain/`, caches,
   or UI test PNGs into the release.
 

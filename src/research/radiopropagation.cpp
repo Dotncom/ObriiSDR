@@ -201,12 +201,11 @@ PathResult calculatePath(const Parameters &p, const Elevation &terrain,
     out.marginDb=out.receivedDbm-p.sensitivityDbm-p.fadeMarginDb;
     out.valid=std::isfinite(out.receivedDbm); return out;
 }
-CoverageResult calculateCoverage(const Parameters &p, const std::atomic_bool *cancel,
+CoverageResult calculateCoverage(const Parameters &p, const Elevation &elevation,
+                                 const std::atomic_bool *cancel,
                                  const std::function<void(int)> &progress) {
     CoverageResult out; out.parameters=p; out.error=validate(p);
     if (!out.error.isEmpty()) return out;
-    SrtmTerrain dem(p.terrainDirectory);
-    Elevation elevation=[&](double lat,double lon){return dem.elevation(lat,lon);};
     out.path=calculatePath(p,elevation,cancel);
     const double angular=p.radiusKm*1000/EarthM;
     const double dLat=degrees(angular);
@@ -236,8 +235,14 @@ CoverageResult calculateCoverage(const Parameters &p, const std::atomic_bool *ca
         const int percent=(y+1)*100/p.gridSize;
         if(progress&&percent!=lastProgress){lastProgress=percent;progress(percent);}
     }
+    if (!out.validCells) out.error=QStringLiteral("No valid coverage cells; check terrain data and model parameters");
+    return out;
+}
+CoverageResult calculateCoverage(const Parameters &p, const std::atomic_bool *cancel,
+                                 const std::function<void(int)> &progress) {
+    SrtmTerrain dem(p.terrainDirectory);
+    auto out = calculateCoverage(p, [&](double lat,double lon){return dem.elevation(lat,lon);}, cancel, progress);
     out.missingTiles=dem.unavailableTiles();
-    if (!out.validCells) out.error=QStringLiteral("No valid coverage cells; check terrain files and model parameters");
     return out;
 }
 QColor levelColor(double value) {
