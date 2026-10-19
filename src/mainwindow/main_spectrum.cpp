@@ -859,10 +859,11 @@ void YourClassName::updateSpectrum() {
     const bool spectrumWorkerAllowed =
         scanVisualSource == QStringLiteral("none") &&
         !networkSpectrumFrameMetadataValid;
+    // Simplified mode only removes optional DSP branches. Keep the core
+    // waterfall producer decoupled from GUI repaint cadence in every mode.
     const bool batchWaterfallRows =
         waterfallWidget && waterfallWidget->isVisible() && !isMinimized() &&
-        spectrumSettings.fftLength < 8388608 &&
-        !spectrumSettings.simplifiedAudioChannelizer;
+        spectrumSettings.fftLength < 8388608;
 
     if (spectrumWorkerAllowed) {
         if (!spectrumFftWorker) {
@@ -1405,8 +1406,13 @@ void YourClassName::updateSpectrum() {
             scaleWidget->setScanSegmentMarkersVisible(displayScanSegmentMarkers);
             scaleWidget->setTuning(scaleListening,
                                    displayCenterFrequency,
-                                   pendingSettings.bandwidth,
-                                   pendingSettings.modulationType);
+                                   effectiveDemodulationBandwidth(
+                                       pendingSettings.bandwidth,
+                                       pendingSettings.modulationType,
+                                       pendingSettings.sstvDemodulationMode),
+                                   effectiveDemodulationModulationType(
+                                       pendingSettings.modulationType,
+                                       pendingSettings.sstvDemodulationMode));
             scaleWidget->setRange(displayMinFrequency, displayMaxFrequency);
         }
         const std::vector<float> &measurementFrequencies =

@@ -1,5 +1,31 @@
 # Changelog
 
+## 6.4.0 - 2026-10-20
+- Added experimental protected DMR Tier II direct/simplex transmission with
+  Motorola ARC4 40-bit and AES-256. Voice LC/EMB privacy indication, repeated
+  PI headers, random MI, late-entry MI rotation and absolute superframe
+  keystream alignment are covered by synthetic round-trip tests.
+- Extended the optional OpenDMR voice-backend ABI with 49-bit AMBE payload
+  encoding and channel coding. Rebuilt backend probes distinguish decode-only
+  mbelib from the privacy-capable OpenDMR encoder without logging key material.
+- Improved native HackRF transmission buffering, stream-liveness checks,
+  underrun handling and shutdown. Voice modulation depth and transmitted
+  bandwidth validation now behave consistently across supported sources.
+- Added native Windows WASAPI microphone capture with WinMM/Qt fallbacks,
+  endpoint refresh and level control. Audio-file, PTT and manual-CW generation
+  use the same bounded TX path with fewer callback gaps.
+- Added FPV analog-video auto-scan for Standard and Agile Fobos operation:
+  scan, candidate hold, ATV lock verification and automatic resume after loss.
+- Improved SSTV/ATV receive and test paths, including NFM-specific channel
+  extraction, short sync-loss holdover and amplitude-preserving ATV processing.
+- Added a collapsible quick amateur-band/demodulation panel, a sweeping-beacon
+  Signal Lab source, and expanded deterministic waveform/SSTV self-tests.
+- Added optional height-based 3D waterfall coloring, selectable monochrome
+  color and gradient depth, with responsive controls and saved settings.
+- Updated English/Ukrainian help, privacy documentation and release packaging.
+  Windows core and Raspberry/Linux source only; the Wireless add-on and Android
+  package are unchanged and are not uploaded with this release.
+
 ## 6.3.0 - 2026-10-14
 - Added independent DDC demodulator, filter-chain and audio-output branches,
   bounded asynchronous external processing and local audio isolation. Simplified

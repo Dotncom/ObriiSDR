@@ -29,6 +29,7 @@ New-Item -ItemType Directory -Path $Stage | Out-Null
 $files = git -C $Workspace -c core.quotepath=false ls-files --cached --others --exclude-standard
 $excludePrefixes = @(
     "android/",
+    "new/",
     "release/",
     "build/",
     "src.Fobos.example/",

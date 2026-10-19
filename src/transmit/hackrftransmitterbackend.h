@@ -28,6 +28,7 @@ public:
     bool isRunning() const override;
 
     bool streamStarted() const;
+    bool hardwareStreamAlive() const;
     quint64 outputSamples() const;
     quint64 sourceUnderrunSamples() const;
     int bufferedSourceSamples() const;
@@ -50,6 +51,7 @@ private:
     std::atomic_bool outputEnabled{true};
     std::atomic<quint64> generatedSamples{0};
     std::atomic<quint64> missingSourceSamples{0};
+    std::atomic<int> bufferedSamples{0};
 };
 
 #endif // HACKRFTRANSMITTERBACKEND_H

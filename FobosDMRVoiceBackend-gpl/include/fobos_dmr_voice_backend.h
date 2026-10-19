@@ -36,7 +36,8 @@ enum fobos_dmr_voice_capability {
     FOBOS_DMR_VOICE_CAP_DECODE_AMBE2450_PAYLOAD49 = 1u << 2,
     FOBOS_DMR_VOICE_CAP_ENCODE_AMBE2450_PAYLOAD49 = 1u << 3,
     FOBOS_DMR_VOICE_CAP_DECODE_CANONICAL_AMBE_FRAME72 = 1u << 4,
-    FOBOS_DMR_VOICE_CAP_ENCODE_CANONICAL_AMBE_FRAME72 = 1u << 5
+    FOBOS_DMR_VOICE_CAP_ENCODE_CANONICAL_AMBE_FRAME72 = 1u << 5,
+    FOBOS_DMR_VOICE_CAP_CANONICAL_FROM_AMBE2450_PAYLOAD49 = 1u << 6
 };
 
 struct fobos_dmr_voice_backend_info {
@@ -141,6 +142,19 @@ FOBOS_DMR_VOICE_API int
 fobos_dmr_voice_encode_canonical_ambe_frame72(fobos_dmr_voice_context *context,
                                               const int16_t *pcm8k_160,
                                               uint8_t *canonical_frame72_bytes);
+
+/*
+ * Apply AMBE channel coding to an already encoded 49-bit payload.
+ *
+ * This optional operation lets the host apply an authorized privacy
+ * keystream to the 49 codec bits before Golay/channel coding. Backends that
+ * advertise FOBOS_DMR_VOICE_CAP_CANONICAL_FROM_AMBE2450_PAYLOAD49 must export
+ * this symbol.
+ */
+FOBOS_DMR_VOICE_API int
+fobos_dmr_voice_canonical_from_ambe2450_payload49(fobos_dmr_voice_context *context,
+                                                  const uint8_t *payload49_bytes,
+                                                  uint8_t *canonical_frame72_bytes);
 
 #ifdef __cplusplus
 }

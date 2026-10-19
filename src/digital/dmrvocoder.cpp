@@ -224,6 +224,9 @@ QString backendCapabilitiesText(quint32 capabilities) {
     if ((capabilities & FOBOS_DMR_VOICE_CAP_ENCODE_CANONICAL_AMBE_FRAME72) != 0) {
         parts << QStringLiteral("canonical-encode");
     }
+    if ((capabilities & FOBOS_DMR_VOICE_CAP_CANONICAL_FROM_AMBE2450_PAYLOAD49) != 0) {
+        parts << QStringLiteral("payload49-channel-code");
+    }
     return parts.isEmpty() ? QStringLiteral("none") : parts.join(QLatin1Char(','));
 }
 
@@ -359,6 +362,9 @@ struct DmrVocoder::Impl {
     using EncodeCanonicalFn = int (*)(fobos_dmr_voice_context *,
                                       const std::int16_t *,
                                       std::uint8_t *);
+    using CanonicalFromPayloadFn = int (*)(fobos_dmr_voice_context *,
+                                           const std::uint8_t *,
+                                           std::uint8_t *);
 
     struct Backend {
         explicit Backend(const QString &filePath)
@@ -401,6 +407,9 @@ struct DmrVocoder::Impl {
                 library.unload();
                 return false;
             }
+
+            canonicalFromPayload = reinterpret_cast<CanonicalFromPayloadFn>(
+                library.resolve("fobos_dmr_voice_canonical_from_ambe2450_payload49"));
 
             info = getInfo();
             if (!info || info->abi_version != FOBOS_DMR_VOICE_ABI_VERSION) {
@@ -450,6 +459,7 @@ struct DmrVocoder::Impl {
         EncodePayloadFn encodePayload = nullptr;
         DecodeCanonicalFn decodeCanonical = nullptr;
         EncodeCanonicalFn encodeCanonical = nullptr;
+        CanonicalFromPayloadFn canonicalFromPayload = nullptr;
     };
 
     Impl() {
@@ -569,6 +579,20 @@ struct DmrVocoder::Impl {
         return backendWith(FOBOS_DMR_VOICE_CAP_ENCODE_CANONICAL_AMBE_FRAME72) != nullptr;
     }
 
+    Backend *privacyEncoder() const {
+        constexpr quint32 required =
+            FOBOS_DMR_VOICE_CAP_ENCODE_AMBE2450_PAYLOAD49 |
+            FOBOS_DMR_VOICE_CAP_CANONICAL_FROM_AMBE2450_PAYLOAD49;
+        for (const std::unique_ptr<Backend> &backend : backends) {
+            if (backend && (backend->capabilities & required) == required &&
+                backend->encodePayload && backend->canonicalFromPayload &&
+                (preferredBackendId.isEmpty() || backendMatchesPreference(backend.get()))) {
+                return backend.get();
+            }
+        }
+        return nullptr;
+    }
+
     bool fallbackAvailable() const {
 #ifdef FOBOSAPP_HAS_MBELIB_NEO
         return preferredBackendId.isEmpty() || preferredBackendId.contains(QStringLiteral("mbelib"), Qt::CaseInsensitive);
@@ -604,6 +628,65 @@ bool DmrVocoder::isAvailable() const {
 
 bool DmrVocoder::canEncode() const {
     return impl && impl->hasBackendEncoder();
+}
+
+bool DmrVocoder::canEncodePrivacy() const {
+    return impl && impl->privacyEncoder();
+}
+
+QByteArray DmrVocoder::encodePayload49(const qint16 *pcm8k160, QString *error) {
+    if (!impl || !pcm8k160) {
+        if (error) *error = QStringLiteral("Invalid DMR encoder input");
+        return {};
+    }
+    Impl::Backend *backend = impl->privacyEncoder();
+    if (!backend || !backend->context) {
+        if (error) *error = QStringLiteral("No privacy-capable DMR AMBE+2 encoder backend is available");
+        return {};
+    }
+    QByteArray payload(7, '\0');
+    const int status = backend->encodePayload(
+        backend->context,
+        reinterpret_cast<const std::int16_t *>(pcm8k160),
+        reinterpret_cast<std::uint8_t *>(payload.data()));
+    if (status != FOBOS_DMR_VOICE_OK) {
+        const char *backendError = backend->lastError ? backend->lastError(backend->context) : nullptr;
+        if (error) {
+            *error = backendError && backendError[0] != '\0'
+                         ? QString::fromUtf8(backendError)
+                         : QStringLiteral("DMR AMBE+2 payload encoding failed (%1)").arg(status);
+        }
+        return {};
+    }
+    payload[6] = static_cast<char>(static_cast<quint8>(payload.at(6)) & 0x80U);
+    return payload;
+}
+
+QByteArray DmrVocoder::canonicalFromPayload49(const QByteArray &payload49, QString *error) {
+    if (!impl || payload49.size() != 7) {
+        if (error) *error = QStringLiteral("Invalid 49-bit AMBE payload");
+        return {};
+    }
+    Impl::Backend *backend = impl->privacyEncoder();
+    if (!backend || !backend->context) {
+        if (error) *error = QStringLiteral("No privacy-capable DMR AMBE+2 encoder backend is available");
+        return {};
+    }
+    QByteArray frame(DMR_VOICE_FRAME_BYTES, '\0');
+    const int status = backend->canonicalFromPayload(
+        backend->context,
+        reinterpret_cast<const std::uint8_t *>(payload49.constData()),
+        reinterpret_cast<std::uint8_t *>(frame.data()));
+    if (status != FOBOS_DMR_VOICE_OK) {
+        const char *backendError = backend->lastError ? backend->lastError(backend->context) : nullptr;
+        if (error) {
+            *error = backendError && backendError[0] != '\0'
+                         ? QString::fromUtf8(backendError)
+                         : QStringLiteral("DMR AMBE+2 channel coding failed (%1)").arg(status);
+        }
+        return {};
+    }
+    return frame;
 }
 
 QByteArray DmrVocoder::encodeCanonicalFrame(const qint16 *pcm8k160, QString *error) {

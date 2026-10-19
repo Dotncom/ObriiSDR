@@ -1,6 +1,7 @@
 #include "experimentbundle.h"
 
 #include <QCryptographicHash>
+#include <QColor>
 #include <QDataStream>
 #include <QDateTime>
 #include <QDir>
@@ -133,13 +134,16 @@ QJsonObject settings(const QJsonObject &input) {
         "spectrumDetectorMode spectrumDetectorFrames spectrumVbwHz spectrumFftOverlapPercent spectrumAverageFrameCount "
         "spectrumAmplitudeUnit spectrumUpdateIntervalMs fftBackendPreference frequencyCalibrationOffsetHz "
         "amplitudeCalibrationOffsetDb waterfallRowsPerFrame waterfallDisplayMode waterfall3DResolutionDivisor "
-        "waterfall3DSurfaceStyle waterfall3DSmoothing waterfall3DLighting waterfall3DHistoryRows waterfall3DSliceScrollStep waterfall3DSliceWidth");
+        "waterfall3DSurfaceStyle waterfall3DSmoothing waterfall3DLighting waterfall3DHistoryRows waterfall3DSliceScrollStep waterfall3DSliceWidth "
+        "waterfall3DMonochromeGradientDepth");
     booleans(out, input, "pskDecoderAfc fftBinWidthModeEnabled rtlAgc simplifiedAudioChannelizer hfNoiseCancelFreeze "
         "hfAudioBlankerEnabled dmrManualTimingEnabled dmrAdaptiveSlicer spectrumScienceMaxHold spectrumScienceMinHold "
         "spectrumScienceAverage spectrumPercentile50 spectrumPercentile90 spectrumPercentile99 calibrationTableEnabled "
-        "waterfall3DMonochrome");
+        "waterfall3DMonochrome waterfall3DHeightGradient");
     if (input.contains("calibrationTable")) out["calibrationTable"] = calibration(input.value("calibrationTable").toArray());
     if (input.contains("audioFilterChainJson")) out["audioFilterChainJson"] = filterChain(input.value("audioFilterChainJson"));
+    const QString monochromeColor = input.value("waterfall3DMonochromeColor").toString();
+    if (QColor(monochromeColor).isValid()) out["waterfall3DMonochromeColor"] = monochromeColor;
     out["audioEnabled"] = false; out["syncEnabled"] = false;
     return out;
 }
@@ -176,10 +180,10 @@ QJsonObject workspace(const QJsonObject &input) {
             "displayMode minimumDbfs maximumDbfs rowsPerFrame resolutionDivisor historyRows fftWindowType spectrumGradientOpacity "
             "waterfall3DSurfaceStyle waterfall3DSmoothing waterfall3DLighting waterfall3DSliceScrollStep waterfall3DSliceWidth "
             "waterfall3DSpectrumSliceScrollStep waterfall3DSpectrumSliceRows workspaceCanvasScale workspaceGroupOrder "
-            "dockedSettingsSector dockedSettingsY");
+            "dockedSettingsSector dockedSettingsY waterfall3DMonochromeGradientDepth");
         booleans(s, parameters, "mainFftRouteExplicit levelOverride secondSpectrum colorSpectrum gpuPrepared "
             "spectrumGradientFill showSpectrumFps showWaterfallFps showExtendedSpectrumInfo waterfallAreaMeasurementEnabled "
-            "waterfall3DFixedPlane waterfall3DMonochrome waterfall3DSpectrumSliceCapture waterfall3DSpectrumSliceCaptureFixed "
+            "waterfall3DFixedPlane waterfall3DMonochrome waterfall3DHeightGradient waterfall3DSpectrumSliceCapture waterfall3DSpectrumSliceCaptureFixed "
             "waterfall3DVncSliceInput workspaceAutoFit workspaceAutoWidth workspaceGroupLayout workspaceGroupLocked dockedSettingsExpanded paused");
         for (const auto &key : {"bindingId", "workspaceGroupId"}) {
             const auto value = parameters.value(key).toString();
@@ -190,6 +194,8 @@ QJsonObject workspace(const QJsonObject &input) {
         }
         if (parameters.value("workspaceGroupCuts").isArray())
             s["workspaceGroupCuts"] = numericArray(parameters.value("workspaceGroupCuts").toArray(), 64);
+        const QString monochromeColor = parameters.value("waterfall3DMonochromeColor").toString();
+        if (QColor(monochromeColor).isValid()) s["waterfall3DMonochromeColor"] = monochromeColor;
         if (filter) {
             const auto f = filterParameters(parameters);
             for (auto it = f.begin(); it != f.end(); ++it) s.insert(it.key(), it.value());

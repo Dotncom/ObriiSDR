@@ -133,6 +133,8 @@ private:
     int networkIqLastLoggedDmrOutputRate = 0;
     int networkIqLastLoggedDmrDecimationFactor = 0;
     float networkIqAgcLevel = 0.01f;
+    float networkIqAtvBlockGain = 0.0f;
+    double networkIqLastLoggedAtvOutputRate = 0.0;
     std::complex<float> networkHfNoiseCancelCoeff = {0.0f, 0.0f};
     std::complex<float> networkHfNoiseCancelRefDecimationSum = {0.0f, 0.0f};
     QByteArray networkIqFrameBuffer;

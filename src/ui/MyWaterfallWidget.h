@@ -69,6 +69,9 @@ public:
     void set3DModifierFreeSliceInput(bool enabled);
     void set3DFixedPlane(bool enabled);
     void set3DMonochrome(bool enabled);
+    void set3DHeightGradient(bool enabled);
+    void set3DMonochromeColor(const QColor &color);
+    void set3DMonochromeGradientDepth(int percent);
     void setAlternativeInterfaceMode(bool enabled);
     void setAlternativeSpectrumGradientFill(bool enabled);
     void setAlternativeSpectrumGradientOpacity(int percent);

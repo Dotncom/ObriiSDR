@@ -50,6 +50,7 @@ void YourClassName::updateUiFromPendingSettings() {
         }
         comboBox->blockSignals(false);
     }
+    updateQuickHamPanel();
     rebuildReceiverModeChoices();
     updateReceiverSpecificControls();
     if (clkBox) {
@@ -186,8 +187,13 @@ void YourClassName::updateUiFromPendingSettings() {
     if (scaleWidget) {
         scaleWidget->setTuning(pendingSettings.listeningFrequency,
                                pendingSettings.centerFrequency,
-                               pendingSettings.bandwidth,
-                               pendingSettings.modulationType);
+                               effectiveDemodulationBandwidth(
+                                   pendingSettings.bandwidth,
+                                   pendingSettings.modulationType,
+                                   pendingSettings.sstvDemodulationMode),
+                               effectiveDemodulationModulationType(
+                                   pendingSettings.modulationType,
+                                   pendingSettings.sstvDemodulationMode));
     }
     if (scaleSlider) {
         scaleSlider->blockSignals(true);
@@ -490,6 +496,10 @@ void YourClassName::updateUiFromPendingSettings() {
         fpvHunterControls->setWidthValues(fpvHunterSettings.minWidthMhz,
                                           fpvHunterSettings.maxWidthMhz,
                                           fpvHunterSettings.thresholdDb);
+        fpvHunterControls->setAutoScanChecked(fpvAutoScanArmed);
+        fpvHunterControls->setAutoScanValues(fpvAutoScanDwellMs,
+                                             fpvAutoScanLossTimeoutMs,
+                                             fpvAutoScanMinimumLockPercent);
     }
     if (digitalVideoHunterControls) {
         digitalVideoHunterControls->setDetectChecked(digitalVideoHunterSettings.enabled);

@@ -187,10 +187,38 @@ SignalLabIqPreviewData buildSignalLabIqPreview(const SignalLabGenerationResult &
         for (int index : symbolIndices) data.symbolTimes.append(double(index) / result.sampleRate);
         data.durationSeconds = double(result.iq.size()) / result.sampleRate;
         const int timeCount = (std::min)(result.iq.size(), 1600);
-        data.timeSpanSeconds = double(timeCount - 1) / result.sampleRate;
+        data.timeSpanSeconds = data.durationSeconds;
         data.timePoints.reserve(timeCount);
+        data.timeMinimumI.reserve(timeCount);
+        data.timeMaximumI.reserve(timeCount);
+        data.timeMinimumQ.reserve(timeCount);
+        data.timeMaximumQ.reserve(timeCount);
         for (int x = 0; x < timeCount; ++x) {
-            data.timePoints.append(result.iq[x]);
+            const int begin = static_cast<int>(
+                static_cast<qint64>(x) * result.iq.size() / timeCount);
+            const int end = (std::max)(begin + 1, static_cast<int>(
+                static_cast<qint64>(x + 1) * result.iq.size() / timeCount));
+            std::complex<double> mean(0.0, 0.0);
+            float minimumI = 1.0f;
+            float maximumI = -1.0f;
+            float minimumQ = 1.0f;
+            float maximumQ = -1.0f;
+            const int boundedEnd = (std::min)(end, result.iq.size());
+            for (int index = begin; index < boundedEnd; ++index) {
+                const auto sample = result.iq[index];
+                mean += sample;
+                minimumI = (std::min)(minimumI, sample.real());
+                maximumI = (std::max)(maximumI, sample.real());
+                minimumQ = (std::min)(minimumQ, sample.imag());
+                maximumQ = (std::max)(maximumQ, sample.imag());
+            }
+            const double bucketSamples = (std::max)(1, boundedEnd - begin);
+            data.timePoints.append(static_cast<std::complex<float>>(
+                mean / bucketSamples));
+            data.timeMinimumI.append(minimumI);
+            data.timeMaximumI.append(maximumI);
+            data.timeMinimumQ.append(minimumQ);
+            data.timeMaximumQ.append(maximumQ);
         }
         const int constellationCount = (std::min)(result.iq.size(), 2500);
         data.continuousTrajectory = constellationCount == result.iq.size();
@@ -214,6 +242,10 @@ void SignalLabPreviewWidget::setResult(const SignalLabGenerationResult &result) 
 
 void SignalLabPreviewWidget::setData(const SignalLabIqPreviewData &data) {
     timePoints = data.timePoints;
+    timeMinimumI = data.timeMinimumI;
+    timeMaximumI = data.timeMaximumI;
+    timeMinimumQ = data.timeMinimumQ;
+    timeMaximumQ = data.timeMaximumQ;
     constellation = data.samples;
     symbols = data.symbols;
     timeSpanSeconds = data.timeSpanSeconds;
@@ -222,6 +254,10 @@ void SignalLabPreviewWidget::setData(const SignalLabIqPreviewData &data) {
 
 void SignalLabPreviewWidget::clear() {
     timePoints.clear();
+    timeMinimumI.clear();
+    timeMaximumI.clear();
+    timeMinimumQ.clear();
+    timeMaximumQ.clear();
     constellation.clear();
     symbols.clear();
     timeSpanSeconds = 0.0;
@@ -255,6 +291,25 @@ void SignalLabPreviewWidget::paintEvent(QPaintEvent *) {
         iPath.reserve(timePoints.size());
         qPath.reserve(timePoints.size());
         const double half = timeRect.height() * 0.46;
+        if (timeMinimumI.size() == timePoints.size() &&
+            timeMaximumI.size() == timePoints.size()) {
+            const auto drawEnvelope = [&](const QVector<float> &minimum,
+                                          const QVector<float> &maximum,
+                                          const QColor &color) {
+                painter.setPen(QPen(color, 1.0));
+                for (int index = 0; index < minimum.size(); ++index) {
+                    const double x = timeRect.left() +
+                        static_cast<double>(index) * timeRect.width() /
+                            (minimum.size() - 1);
+                    painter.drawLine(QPointF(x, timeRect.center().y() -
+                                                  (std::clamp)(maximum[index], -1.0f, 1.0f) * half),
+                                     QPointF(x, timeRect.center().y() -
+                                                  (std::clamp)(minimum[index], -1.0f, 1.0f) * half));
+                }
+            };
+            drawEnvelope(timeMinimumI, timeMaximumI, QColor(42, 210, 154, 95));
+            drawEnvelope(timeMinimumQ, timeMaximumQ, QColor(75, 155, 255, 75));
+        }
         for (int index = 0; index < timePoints.size(); ++index) {
             const double x = timeRect.left() +
                 static_cast<double>(index) * timeRect.width() / (timePoints.size() - 1);

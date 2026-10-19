@@ -1,12 +1,16 @@
 #include "transmitdialog.h"
 
 #include "appsettingsutils.h"
+#include "dmrprivacyutils.h"
 #include "dmrtransmitencoder.h"
 #include "hackrfbackend.h"
 #include "sstvimageeditordialog.h"
 #include "signallabdialog.h"
 #include "signalunits.h"
 #include "transmitmediagenerator.h"
+#ifdef _WIN32
+#include "windowsmicrophonecapture.h"
+#endif
 
 #include <QApplication>
 #include <QCheckBox>
@@ -26,6 +30,7 @@
 #include <QJsonObject>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QPainter>
 #include <QPlainTextEdit>
@@ -33,6 +38,7 @@
 #include <QPushButton>
 #include <QSaveFile>
 #include <QSettings>
+#include <QSlider>
 #include <QSpinBox>
 #include <QStringList>
 #include <QStyle>
@@ -53,6 +59,66 @@
 #include <cstring>
 #include <utility>
 
+#ifdef FOBOSAPP_HAS_QT_MULTIMEDIA
+namespace {
+QString audioInputErrorText(QAudio::Error error) {
+    switch (error) {
+    case QAudio::NoError: return QStringLiteral("no error");
+    case QAudio::OpenError: return QStringLiteral("device open error");
+    case QAudio::IOError: return QStringLiteral("device I/O error");
+    case QAudio::UnderrunError: return QStringLiteral("capture overrun");
+    case QAudio::FatalError: return QStringLiteral("fatal audio backend error");
+    }
+    return QStringLiteral("unknown audio error");
+}
+
+bool supportedAudioCaptureFormat(const QAudioFormat &format) {
+    if (format.codec() != QStringLiteral("audio/pcm") ||
+        format.sampleRate() < 8000 || format.sampleRate() > 192000 ||
+        format.channelCount() < 1 || format.channelCount() > 2) {
+        return false;
+    }
+    if (format.sampleType() == QAudioFormat::Float) {
+        return format.sampleSize() == 32;
+    }
+    if (format.sampleType() == QAudioFormat::SignedInt) {
+        return format.sampleSize() == 8 || format.sampleSize() == 16 ||
+               format.sampleSize() == 24 || format.sampleSize() == 32;
+    }
+    return format.sampleType() == QAudioFormat::UnSignedInt && format.sampleSize() == 8;
+}
+}
+#endif
+
+namespace {
+bool constrainVoiceDeviation(TxConfiguration &configuration) {
+    if (configuration.signalBandwidthHz <= 0.0) return false;
+    double maximumDeviation = 0.0;
+    if (configuration.modulation == TxModulation::Nfm) {
+        // Reserve at least half of the one-sided channel width for voice.
+        maximumDeviation = configuration.signalBandwidthHz * 0.25;
+    } else if (configuration.modulation == TxModulation::Wfm) {
+        // Broadcast-style FM conventionally uses roughly 75 kHz in 200 kHz.
+        maximumDeviation = configuration.signalBandwidthHz * 0.40;
+    }
+    if (maximumDeviation <= 0.0 || configuration.deviationHz <= maximumDeviation) {
+        return false;
+    }
+    configuration.deviationHz = (std::max)(100.0, maximumDeviation);
+    return true;
+}
+
+float softLimitMicrophone(float sample) {
+    constexpr float LinearLimit = 0.85f;
+    constexpr float RemainingHeadroom = 1.0f - LinearLimit;
+    const float magnitude = std::abs(sample);
+    if (magnitude <= LinearLimit) return sample;
+    const float limited = LinearLimit + RemainingHeadroom *
+        std::tanh((magnitude - LinearLimit) / RemainingHeadroom);
+    return std::copysign(limited, sample);
+}
+}
+
 class TxWaveformPreviewWidget final : public QWidget {
 public:
     explicit TxWaveformPreviewWidget(QWidget *parent = nullptr) : QWidget(parent) {
@@ -61,27 +127,44 @@ public:
     }
 
     void setIq(const QVector<std::complex<float>> &samples) {
-        points.clear();
+        iMinimum.clear();
+        iMaximum.clear();
+        qMinimum.clear();
+        qMaximum.clear();
         if (!samples.isEmpty()) {
             const int target = (std::min)(samples.size(), 1800);
-            points.reserve(target);
+            iMinimum.reserve(target);
+            iMaximum.reserve(target);
+            qMinimum.reserve(target);
+            qMaximum.reserve(target);
             for (int x = 0; x < target; ++x) {
                 const int begin = static_cast<int>((static_cast<qint64>(x) * samples.size()) / target);
                 const int end = (std::max)(begin + 1,
                     static_cast<int>((static_cast<qint64>(x + 1) * samples.size()) / target));
-                float peak = 0.0f;
+                float minI = 1.0f;
+                float maxI = -1.0f;
+                float minQ = 1.0f;
+                float maxQ = -1.0f;
                 for (int i = begin; i < (std::min)(end, samples.size()); ++i) {
-                    const float value = samples[i].real();
-                    if (std::abs(value) > std::abs(peak)) peak = value;
+                    minI = (std::min)(minI, samples[i].real());
+                    maxI = (std::max)(maxI, samples[i].real());
+                    minQ = (std::min)(minQ, samples[i].imag());
+                    maxQ = (std::max)(maxQ, samples[i].imag());
                 }
-                points.append(peak);
+                iMinimum.append(minI);
+                iMaximum.append(maxI);
+                qMinimum.append(minQ);
+                qMaximum.append(maxQ);
             }
         }
         update();
     }
 
     void clear() {
-        points.clear();
+        iMinimum.clear();
+        iMaximum.clear();
+        qMinimum.clear();
+        qMaximum.clear();
         update();
     }
 
@@ -95,22 +178,35 @@ protected:
         for (int x = 0; x < width(); x += (std::max)(1, width() / 10)) {
             painter.drawLine(x, 0, x, height());
         }
-        if (points.size() < 2) return;
-        QPolygonF path;
-        path.reserve(points.size());
+        if (iMinimum.size() < 2) return;
         const double half = height() * 0.46;
-        for (int i = 0; i < points.size(); ++i) {
-            const double x = static_cast<double>(i) * (width() - 1) /
-                             static_cast<double>(points.size() - 1);
-            const double y = height() * 0.5 - (std::clamp)(points[i], -1.0f, 1.0f) * half;
-            path.append(QPointF(x, y));
-        }
-        painter.setPen(QPen(QColor(42, 210, 154), 1.2));
-        painter.drawPolyline(path);
+        const auto drawEnvelope = [&](const QVector<float> &minimum,
+                                      const QVector<float> &maximum,
+                                      const QColor &color) {
+            painter.setPen(QPen(color, 1.0));
+            for (int i = 0; i < minimum.size(); ++i) {
+                const double x = static_cast<double>(i) * (width() - 1) /
+                                 static_cast<double>(minimum.size() - 1);
+                const double top = height() * 0.5 -
+                    (std::clamp)(maximum[i], -1.0f, 1.0f) * half;
+                const double bottom = height() * 0.5 -
+                    (std::clamp)(minimum[i], -1.0f, 1.0f) * half;
+                painter.drawLine(QPointF(x, top), QPointF(x, bottom));
+            }
+        };
+        drawEnvelope(iMinimum, iMaximum, QColor(42, 210, 154, 220));
+        drawEnvelope(qMinimum, qMaximum, QColor(75, 155, 255, 190));
+        painter.setPen(QColor(42, 210, 154));
+        painter.drawText(7, 16, QStringLiteral("I"));
+        painter.setPen(QColor(75, 155, 255));
+        painter.drawText(20, 16, QStringLiteral("Q"));
     }
 
 private:
-    QVector<float> points;
+    QVector<float> iMinimum;
+    QVector<float> iMaximum;
+    QVector<float> qMinimum;
+    QVector<float> qMaximum;
 };
 
 TransmitDialog::TransmitDialog(const QString &language, QWidget *parent)
@@ -224,7 +320,7 @@ void TransmitDialog::buildUi() {
     txGainSpin->setRange(0, 47);
     txGainSpin->setSuffix(QStringLiteral(" dB"));
     watchdogSpin = new QSpinBox(hardwareBox);
-    watchdogSpin->setRange(1, 180);
+    watchdogSpin->setRange(1, 3600);
     watchdogSpin->setValue(30);
     watchdogSpin->setSuffix(QStringLiteral(" s"));
     rfAmpCheck = new QCheckBox(hardwareBox);
@@ -288,6 +384,14 @@ void TransmitDialog::buildUi() {
     audioRefreshButton = new QToolButton(signalBox);
     audioRefreshButton->setAutoRaise(true);
     audioRefreshButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
+    microphoneLevelSlider = new QSlider(Qt::Horizontal, signalBox);
+    microphoneLevelSlider->setRange(0, 130);
+    microphoneLevelSlider->setValue(100);
+    microphoneLevelSlider->setSingleStep(1);
+    microphoneLevelSlider->setPageStep(5);
+    microphoneLevelValueLabel = new QLabel(signalBox);
+    microphoneLevelValueLabel->setMinimumWidth(88);
+    microphoneLevelValueLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     signalBandwidthCombo = new QComboBox(signalBox);
     signalBandwidthCombo->setEditable(true);
     signalBandwidthCombo->setInsertPolicy(QComboBox::NoInsert);
@@ -301,6 +405,7 @@ void TransmitDialog::buildUi() {
     signalBandwidthCombo->addItem(QStringLiteral("5 kHz - packet data"), 5000.0);
     signalBandwidthCombo->addItem(QStringLiteral("6 kHz - AM voice"), 6000.0);
     signalBandwidthCombo->addItem(QStringLiteral("8.33 kHz"), 8330.0);
+    signalBandwidthCombo->addItem(QStringLiteral("10 kHz - wide AM voice"), 10000.0);
     signalBandwidthCombo->addItem(QStringLiteral("12.5 kHz - NFM / SSTV"), 12500.0);
     signalBandwidthCombo->addItem(QStringLiteral("25 kHz - NFM / SSTV"), 25000.0);
     signalBandwidthCombo->addItem(QStringLiteral("50 kHz"), 50000.0);
@@ -331,10 +436,10 @@ void TransmitDialog::buildUi() {
     gaussianBtSpin->setRange(0.20, 1.00);
     gaussianBtSpin->setDecimals(2);
     gaussianBtSpin->setSingleStep(0.05);
-    askDepthSpin = new QSpinBox(signalBox);
-    askDepthSpin->setRange(1, 100);
-    askDepthSpin->setSuffix(QStringLiteral(" %"));
-    askDepthSpin->setValue(70);
+    modulationDepthSpin = new QSpinBox(signalBox);
+    modulationDepthSpin->setRange(0, 100);
+    modulationDepthSpin->setSuffix(QStringLiteral(" %"));
+    modulationDepthSpin->setValue(amDepthPercent);
     invertDataCheck = new QCheckBox(signalBox);
     ft8UtcCheck = new QCheckBox(signalBox);
     ft8SlotCombo = new QComboBox(signalBox);
@@ -352,13 +457,14 @@ void TransmitDialog::buildUi() {
     modeLabel = new QLabel(signalBox);
     sourceLabel = new QLabel(signalBox);
     audioInputLabel = new QLabel(signalBox);
+    microphoneLevelLabel = new QLabel(signalBox);
     deviationLabel = new QLabel(signalBox);
     signalBandwidthLabel = new QLabel(signalBox);
     toneLabel = new QLabel(signalBox);
     cwSpeedLabel = new QLabel(signalBox);
     symbolRateLabel = new QLabel(signalBox);
     gaussianBtLabel = new QLabel(signalBox);
-    askDepthLabel = new QLabel(signalBox);
+    modulationDepthLabel = new QLabel(signalBox);
     signal->addWidget(basebandLabel, 0, 0);
     signal->addWidget(sampleRateCombo, 0, 1);
     signal->addWidget(levelLabel, 0, 2);
@@ -370,24 +476,27 @@ void TransmitDialog::buildUi() {
     signal->addWidget(audioInputLabel, 2, 0);
     signal->addWidget(audioInputCombo, 2, 1, 1, 2);
     signal->addWidget(audioRefreshButton, 2, 3);
-    signal->addWidget(deviationLabel, 3, 0);
-    signal->addWidget(deviationSpin, 3, 1);
-    signal->addWidget(toneLabel, 3, 2);
-    signal->addWidget(toneSpin, 3, 3);
-    signal->addWidget(signalBandwidthLabel, 4, 0);
-    signal->addWidget(signalBandwidthCombo, 4, 1, 1, 3);
-    signal->addWidget(cwSpeedLabel, 5, 0);
-    signal->addWidget(cwWpmSpin, 5, 1);
-    signal->addWidget(ft8UtcCheck, 5, 2);
-    signal->addWidget(ft8SlotCombo, 5, 3);
-    signal->addWidget(symbolRateLabel, 6, 0);
-    signal->addWidget(symbolRateSpin, 6, 1);
-    signal->addWidget(gaussianBtLabel, 6, 2);
-    signal->addWidget(gaussianBtSpin, 6, 3);
-    signal->addWidget(askDepthLabel, 7, 0);
-    signal->addWidget(askDepthSpin, 7, 1);
-    signal->addWidget(invertDataCheck, 7, 2, 1, 2);
-    signal->addWidget(liveKeyButton, 8, 0, 1, 4);
+    signal->addWidget(microphoneLevelLabel, 3, 0);
+    signal->addWidget(microphoneLevelSlider, 3, 1, 1, 2);
+    signal->addWidget(microphoneLevelValueLabel, 3, 3);
+    signal->addWidget(deviationLabel, 4, 0);
+    signal->addWidget(deviationSpin, 4, 1);
+    signal->addWidget(toneLabel, 4, 2);
+    signal->addWidget(toneSpin, 4, 3);
+    signal->addWidget(signalBandwidthLabel, 5, 0);
+    signal->addWidget(signalBandwidthCombo, 5, 1, 1, 3);
+    signal->addWidget(cwSpeedLabel, 6, 0);
+    signal->addWidget(cwWpmSpin, 6, 1);
+    signal->addWidget(ft8UtcCheck, 6, 2);
+    signal->addWidget(ft8SlotCombo, 6, 3);
+    signal->addWidget(symbolRateLabel, 7, 0);
+    signal->addWidget(symbolRateSpin, 7, 1);
+    signal->addWidget(gaussianBtLabel, 7, 2);
+    signal->addWidget(gaussianBtSpin, 7, 3);
+    signal->addWidget(modulationDepthLabel, 8, 0);
+    signal->addWidget(modulationDepthSpin, 8, 1);
+    signal->addWidget(invertDataCheck, 8, 2, 1, 2);
+    signal->addWidget(liveKeyButton, 9, 0, 1, 4);
     signal->setColumnStretch(1, 1);
     signal->setColumnStretch(3, 1);
 
@@ -414,6 +523,18 @@ void TransmitDialog::buildUi() {
     dmrCallTypeCombo = new QComboBox(dmrBox);
     dmrCallTypeCombo->addItem(QStringLiteral("Group"), false);
     dmrCallTypeCombo->addItem(QStringLiteral("Private"), true);
+    dmrPrivacyLabel = new QLabel(dmrBox);
+    dmrPrivacyCombo = new QComboBox(dmrBox);
+    dmrPrivacyCombo->addItem(QStringLiteral("None"), DMR_PRIVACY_NONE);
+    dmrPrivacyCombo->addItem(QStringLiteral("ARC4 (40-bit)"), DMR_PRIVACY_ARC4);
+    dmrPrivacyCombo->addItem(QStringLiteral("AES-256"), DMR_PRIVACY_AES256);
+    dmrPrivacyKeyIdLabel = new QLabel(dmrBox);
+    dmrPrivacyKeyIdSpin = new QSpinBox(dmrBox);
+    dmrPrivacyKeyIdSpin->setRange(0, 255);
+    dmrPrivacyKeyLabel = new QLabel(dmrBox);
+    dmrPrivacyKeyEdit = new QLineEdit(dmrBox);
+    dmrPrivacyKeyEdit->setMaxLength(64);
+    dmrPrivacyKeyEdit->setEchoMode(QLineEdit::PasswordEchoOnEdit);
     dmr->addWidget(dmrColorCodeLabel, 0, 0);
     dmr->addWidget(dmrColorCodeSpin, 0, 1);
     dmr->addWidget(dmrTimeslotLabel, 0, 2);
@@ -424,6 +545,12 @@ void TransmitDialog::buildUi() {
     dmr->addWidget(dmrSourceIdSpin, 1, 1, 1, 2);
     dmr->addWidget(dmrDestinationIdLabel, 1, 3);
     dmr->addWidget(dmrDestinationIdSpin, 1, 4, 1, 2);
+    dmr->addWidget(dmrPrivacyLabel, 2, 0);
+    dmr->addWidget(dmrPrivacyCombo, 2, 1, 1, 2);
+    dmr->addWidget(dmrPrivacyKeyIdLabel, 2, 3);
+    dmr->addWidget(dmrPrivacyKeyIdSpin, 2, 4, 1, 2);
+    dmr->addWidget(dmrPrivacyKeyLabel, 3, 0);
+    dmr->addWidget(dmrPrivacyKeyEdit, 3, 1, 1, 5);
     dmr->setColumnStretch(1, 1);
     dmr->setColumnStretch(4, 1);
     dmrBox->setVisible(false);
@@ -503,10 +630,16 @@ void TransmitDialog::buildUi() {
     ft8StartTimer->setTimerType(Qt::PreciseTimer);
     progressTimer->setInterval(40);
     sourceTimer = new QTimer(this);
-    sourceTimer->setInterval(20);
+    sourceTimer->setInterval(10);
+    sourceTimer->setTimerType(Qt::PreciseTimer);
+    microphoneLevelApplyTimer = new QTimer(this);
+    microphoneLevelApplyTimer->setSingleShot(true);
+    microphoneLevelApplyTimer->setInterval(120);
     connect(progressTimer, &QTimer::timeout, this, [this]() { updateProgress(); });
     connect(ft8StartTimer, &QTimer::timeout, this, [this]() { beginTextWaveform(); });
     connect(sourceTimer, &QTimer::timeout, this, [this]() { processLiveSource(); });
+    connect(microphoneLevelApplyTimer, &QTimer::timeout,
+            this, [this]() { applyMicrophoneLevel(); });
     connect(modulationCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, [this]() {
                 applyModulationPreset(selectedModulation());
@@ -522,6 +655,8 @@ void TransmitDialog::buildUi() {
     });
     connect(sourceCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, [this]() { updateModeUi(); });
+    connect(dmrPrivacyCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, [this]() { updateModeUi(); });
     connect(ft8UtcCheck, &QCheckBox::toggled, this, [this]() { updateModeUi(); });
     connect(audioRefreshButton, &QToolButton::clicked, this, [this]() {
         populateAudioInputs();
@@ -535,6 +670,21 @@ void TransmitDialog::buildUi() {
                              QString::fromUtf8(u8"Зараз немає доступного мікрофонного входу")),
                   !found);
     });
+    connect(audioInputCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, [this]() {
+                if (isVisible()) microphoneLevelApplyTimer->start();
+            });
+    connect(microphoneLevelSlider, &QSlider::valueChanged, this, [this]() {
+        updateMicrophoneLevelText();
+        const int boostDb = (std::max)(0, microphoneLevelSlider->value() - 100);
+        microphoneSoftwareGain = static_cast<float>(std::pow(10.0, boostDb / 20.0));
+#ifdef FOBOSAPP_HAS_QT_MULTIMEDIA
+        if (audioInput) {
+            audioInput->setVolume((std::min)(100, microphoneLevelSlider->value()) / 100.0);
+        }
+#endif
+        if (isVisible()) microphoneLevelApplyTimer->start();
+    });
     connect(signalBandwidthCombo, &QComboBox::currentTextChanged,
             this, [this]() { applyLiveSignalShape(); });
     connect(deviationSpin, qOverload<double>(&QDoubleSpinBox::valueChanged),
@@ -543,14 +693,24 @@ void TransmitDialog::buildUi() {
             this, [this]() { applyLiveSignalShape(); });
     connect(gaussianBtSpin, qOverload<double>(&QDoubleSpinBox::valueChanged),
             this, [this]() { applyLiveSignalShape(); });
-    connect(askDepthSpin, qOverload<int>(&QSpinBox::valueChanged),
-            this, [this]() { applyLiveSignalShape(); });
+    connect(modulationDepthSpin, qOverload<int>(&QSpinBox::valueChanged),
+            this, [this](int value) {
+                if (selectedModulation() == TxModulation::Am) {
+                    amDepthPercent = value;
+                } else if (selectedModulation() == TxModulation::Ask) {
+                    askDepthPercent = value;
+                }
+                applyLiveSignalShape();
+            });
     connect(invertDataCheck, &QCheckBox::toggled,
             this, [this]() { applyLiveSignalShape(); });
-    connect(liveKeyButton, &QPushButton::pressed, this, [this]() { setLiveKey(true); });
-    connect(liveKeyButton, &QPushButton::released, this, [this]() { setLiveKey(false); });
-    connect(liveKeyButton, &QPushButton::clicked, this, [this]() {
-        if (!(activeBackend && activeBackend->isRunning())) {
+    connect(liveKeyButton, &QPushButton::pressed, this, [this]() {
+        if (activeBackend && activeBackend->isRunning()) setLiveKey(true);
+    });
+    connect(liveKeyButton, &QPushButton::released, this, [this]() {
+        if (activeBackend && activeBackend->isRunning()) {
+            setLiveKey(false);
+        } else {
             startTransmission();
         }
         if (activeBackend && activeBackend->isRunning()) {
@@ -652,6 +812,39 @@ void TransmitDialog::populateAudioInputs() {
     qWarning().noquote() << "[TX audio] Qt Multimedia microphone support is unavailable";
 #endif
 }
+
+void TransmitDialog::updateMicrophoneLevelText() {
+    if (!microphoneLevelSlider || !microphoneLevelValueLabel) return;
+    const int value = microphoneLevelSlider->value();
+    microphoneLevelValueLabel->setText(
+        value <= 100
+            ? QStringLiteral("%1 %").arg(value)
+            : QStringLiteral("100 % / +%1 dB").arg(value - 100));
+}
+
+void TransmitDialog::applyMicrophoneLevel() {
+    if (!microphoneLevelSlider) return;
+    const int value = microphoneLevelSlider->value();
+    const float systemLevel = (std::min)(100, value) / 100.0f;
+    const int boostDb = (std::max)(0, value - 100);
+    microphoneSoftwareGain = static_cast<float>(std::pow(10.0, boostDb / 20.0));
+#ifdef FOBOSAPP_HAS_QT_MULTIMEDIA
+    if (audioInput) audioInput->setVolume(systemLevel);
+#endif
+#ifdef _WIN32
+    const QString requestedDevice = audioInputCombo->currentData().toString();
+    if (!requestedDevice.isEmpty() && windowsMicrophoneCapture &&
+        windowsMicrophoneCapture->isRunning()) {
+        QString error;
+        if (!WindowsMicrophoneCapture::setDeviceLevel(requestedDevice, systemLevel,
+                                                       &error, nullptr) &&
+            !error.isEmpty()) {
+            qWarning().noquote() << "[TX audio] microphone level change failed" << error;
+        }
+    }
+#endif
+}
+
 void TransmitDialog::populateHackRfDevices() {
     const int previousDevice = deviceCombo->currentData().toInt();
     deviceCombo->clear();
@@ -794,6 +987,15 @@ void TransmitDialog::updateTexts() {
     modeLabel->setText(text(QStringLiteral("Mode:"), QString::fromUtf8(u8"Режим:")));
     sourceLabel->setText(text(QStringLiteral("Source:"), QString::fromUtf8(u8"Джерело:")));
     audioInputLabel->setText(text(QStringLiteral("Microphone input:"), QString::fromUtf8(u8"Мікрофонний вхід:")));
+    microphoneLevelLabel->setText(
+        text(QStringLiteral("Microphone level / boost:"),
+             QString::fromUtf8(u8"Рівень / підсилення мікрофона:")));
+    const QString microphoneLevelHelp = text(
+        QStringLiteral("0-100% controls the selected Windows microphone endpoint. Above 100%, the endpoint remains at 100% and Obrii adds up to +30 dB of software gain. Software gain cannot restore samples that the driver returns as digital silence."),
+        QString::fromUtf8(u8"0-100% керує вибраним мікрофонним входом Windows. Вище 100% системний рівень лишається 100%, а Obrii додає до +30 dB програмного підсилення. Програмне підсилення не відновить семпли, якщо драйвер повертає цифрову тишу."));
+    microphoneLevelSlider->setToolTip(microphoneLevelHelp);
+    microphoneLevelValueLabel->setToolTip(microphoneLevelHelp);
+    updateMicrophoneLevelText();
     audioRefreshButton->setToolTip(text(QStringLiteral("Refresh microphone devices"),
                                         QString::fromUtf8(u8"Оновити список мікрофонів")));
     const TxModulation modulation = selectedModulation();
@@ -824,6 +1026,7 @@ void TransmitDialog::updateTexts() {
     setSignalBandwidthText(5000.0, QStringLiteral("5 kHz - packet data"), QString::fromUtf8(u8"5 кГц - пакетні дані"));
     setSignalBandwidthText(6000.0, QStringLiteral("6 kHz - AM voice"), QString::fromUtf8(u8"6 кГц - голос AM"));
     setSignalBandwidthText(8330.0, QStringLiteral("8.33 kHz - channel"), QString::fromUtf8(u8"8,33 кГц - канал"));
+    setSignalBandwidthText(10000.0, QStringLiteral("10 kHz - wide AM voice"), QString::fromUtf8(u8"10 кГц - широкий голос AM"));
     setSignalBandwidthText(12500.0, QStringLiteral("12.5 kHz - NFM / SSTV"), QString::fromUtf8(u8"12,5 кГц - NFM / SSTV"));
     setSignalBandwidthText(25000.0, QStringLiteral("25 kHz - NFM / SSTV"), QString::fromUtf8(u8"25 кГц - NFM / SSTV"));
     setSignalBandwidthText(50000.0, QStringLiteral("50 kHz - wide FM"), QString::fromUtf8(u8"50 кГц - широка FM"));
@@ -854,8 +1057,14 @@ void TransmitDialog::updateTexts() {
                                   QString::fromUtf8(u8"Символьна швидкість:")));
     gaussianBtLabel->setText(text(QStringLiteral("Gaussian BT:"),
                                   QString::fromUtf8(u8"Gaussian BT:")));
-    askDepthLabel->setText(text(QStringLiteral("ASK depth:"),
-                                QString::fromUtf8(u8"Глибина ASK:")));
+    modulationDepthLabel->setText(
+        text(QStringLiteral("Modulation depth:"),
+             QString::fromUtf8(u8"Глибина модуляції:")));
+    const QString modulationDepthHelp = text(
+        QStringLiteral("AM: carrier amplitude modulation index. ASK: difference between mark and space amplitudes. FM uses deviation instead; this control does not change IQ output amplitude."),
+        QString::fromUtf8(u8"AM: індекс амплітудної модуляції несучої. ASK: різниця амплітуд між mark і space. Для FM використовується девіація; цей регулятор не змінює вихідну амплітуду IQ."));
+    modulationDepthLabel->setToolTip(modulationDepthHelp);
+    modulationDepthSpin->setToolTip(modulationDepthHelp);
     dmrColorCodeLabel->setText(text(QStringLiteral("Color Code:"), QString::fromUtf8(u8"Color Code:")));
     dmrTimeslotLabel->setText(text(QStringLiteral("Time slot:"), QString::fromUtf8(u8"Таймслот:")));
     dmrSourceIdLabel->setText(text(QStringLiteral("Source ID:"), QString::fromUtf8(u8"ID джерела:")));
@@ -863,6 +1072,10 @@ void TransmitDialog::updateTexts() {
     dmrCallTypeLabel->setText(text(QStringLiteral("Call type:"), QString::fromUtf8(u8"Тип виклику:")));
     dmrCallTypeCombo->setItemText(0, text(QStringLiteral("Group"), QString::fromUtf8(u8"Груповий")));
     dmrCallTypeCombo->setItemText(1, text(QStringLiteral("Private"), QString::fromUtf8(u8"Приватний")));
+    dmrPrivacyLabel->setText(text(QStringLiteral("Privacy:"), QString::fromUtf8(u8"Шифрування:")));
+    dmrPrivacyCombo->setItemText(0, text(QStringLiteral("None"), QString::fromUtf8(u8"Вимкнено")));
+    dmrPrivacyKeyIdLabel->setText(QStringLiteral("KID:"));
+    dmrPrivacyKeyLabel->setText(text(QStringLiteral("Key (hex):"), QString::fromUtf8(u8"Ключ (hex):")));
     invertDataCheck->setText(text(QStringLiteral("Invert data polarity"),
                                   QString::fromUtf8(u8"Інвертувати полярність даних")));
     symbolRateSpin->setToolTip(text(
@@ -908,10 +1121,11 @@ void TransmitDialog::updateTexts() {
                 : QStringLiteral("background:#6b7078;color:white;font-weight:600;"));
     }
     liveKeyButton->setToolTip(
-        text(QStringLiteral("Click the button once to focus it. While focused, hold Space to transmit; "
-                            "release Space to stop. F12 works anywhere in this window."),
-             QString::fromUtf8(u8"Клацніть кнопку один раз, щоб передати їй фокус. Після цього утримуйте "
-                               u8"Пробіл для передачі та відпустіть для зупинки. F12 працює в усьому вікні.")));
+        text(QStringLiteral("When gray, click once to start and arm transmission. When green, hold Space "
+                            "or hold this button to transmit; release to stop. F12 works anywhere in this window."),
+             QString::fromUtf8(u8"Коли кнопка сіра, клацніть один раз для запуску й підготовки передачі. "
+                               u8"Коли зелена, утримуйте Пробіл або саму кнопку для передачі; відпустіть "
+                               u8"для зупинки. F12 працює в усьому вікні.")));
     mediaModeLabel->setText(text(QStringLiteral("Image/video mode:"), QString::fromUtf8(u8"Режим зображення/відео:")));
     mediaPathLabel->setText(mediaPath.isEmpty()
                                 ? text(QStringLiteral("No media file selected"),
@@ -1122,7 +1336,11 @@ QString TransmitDialog::signalShapeSummary(const TxConfiguration &configuration)
             configuration.modulation == TxModulation::Gmsk) {
             summary += QStringLiteral(" | BT: %1").arg(configuration.gaussianBt, 0, 'f', 2);
         }
-        if (configuration.modulation == TxModulation::Ask) {
+        if (configuration.modulation == TxModulation::Am) {
+            summary += text(QStringLiteral(" | AM depth: %1%"),
+                            QString::fromUtf8(u8" | глибина AM: %1%"))
+                           .arg(configuration.amDepth * 100.0f, 0, 'f', 0);
+        } else if (configuration.modulation == TxModulation::Ask) {
             summary += text(QStringLiteral(" | ASK depth: %1%"),
                             QString::fromUtf8(u8" | глибина ASK: %1%"))
                            .arg(configuration.askDepth * 100.0f, 0, 'f', 0);
@@ -1142,7 +1360,8 @@ void TransmitDialog::applyLiveSignalShape() {
     next.toneHz = toneSpin->value();
     next.symbolRate = symbolRateSpin->value();
     next.gaussianBt = gaussianBtSpin->value();
-    next.askDepth = static_cast<float>(askDepthSpin->value()) / 100.0f;
+    next.amDepth = static_cast<float>(amDepthPercent) / 100.0f;
+    next.askDepth = static_cast<float>(askDepthPercent) / 100.0f;
     next.invertData = invertDataCheck->isChecked();
     if (!validateSignalBandwidth(next)) return;
     activeConfiguration = next;
@@ -1152,12 +1371,13 @@ void TransmitDialog::applyLiveSignalShape() {
     setStatus(text(QStringLiteral("Live TX shaping updated. %1"),
                    QString::fromUtf8(u8"Формування TX оновлено наживо. %1"))
                   .arg(summary));
-    qInfo().noquote() << "[TX shaping] live update"
+    qDebug().noquote() << "[TX shaping] live update"
                       << "modulation" << TransmitWaveformGenerator::modulationName(activeConfiguration.modulation)
                       << "bandwidthHz" << activeConfiguration.signalBandwidthHz
                       << "deviationHz" << activeConfiguration.deviationHz
                       << "symbolRate" << activeConfiguration.symbolRate
                       << "gaussianBt" << activeConfiguration.gaussianBt
+                      << "amDepth" << activeConfiguration.amDepth
                       << "askDepth" << activeConfiguration.askDepth
                       << "invertData" << activeConfiguration.invertData
                       << "audioLowPassHz"
@@ -1169,7 +1389,11 @@ bool TransmitDialog::writeActiveIq(const std::complex<float> *samples, int count
         if (error) *error = QStringLiteral("No active transmitter backend");
         return false;
     }
-    if (TransmitWaveformGenerator::limitSignalBandwidth(activeConfiguration, samples, count,
+    // DMR is already pulse-shaped as continuous-phase 4FSK by
+    // DmrTransmitEncoder. Re-filtering the complex IQ here changes its phase
+    // trajectory and destroys the intended constant-envelope waveform.
+    if (activeConfiguration.modulation != TxModulation::Dmr &&
+        TransmitWaveformGenerator::limitSignalBandwidth(activeConfiguration, samples, count,
                                                          &bandwidthLimitedIq,
                                                          &bandwidthLimiterState)) {
         return activeBackend->writeIq(bandwidthLimitedIq.constData(), bandwidthLimitedIq.size(), error);
@@ -1188,7 +1412,8 @@ TxConfiguration TransmitDialog::configurationFromUi() const {
     configuration.cwWpm = cwWpmSpin->value();
     configuration.symbolRate = symbolRateSpin->value();
     configuration.gaussianBt = gaussianBtSpin->value();
-    configuration.askDepth = static_cast<float>(askDepthSpin->value()) / 100.0f;
+    configuration.amDepth = static_cast<float>(amDepthPercent) / 100.0f;
+    configuration.askDepth = static_cast<float>(askDepthPercent) / 100.0f;
     configuration.invertData = invertDataCheck->isChecked();
     configuration.alignFt8ToUtcSlot = ft8UtcCheck->isChecked();
     configuration.ft8SlotParity = ft8SlotCombo->currentData().toInt();
@@ -1197,6 +1422,12 @@ TxConfiguration TransmitDialog::configurationFromUi() const {
     configuration.dmrSourceId = static_cast<std::uint32_t>(dmrSourceIdSpin->value());
     configuration.dmrDestinationId = static_cast<std::uint32_t>(dmrDestinationIdSpin->value());
     configuration.dmrPrivateCall = dmrCallTypeCombo->currentData().toBool();
+    configuration.dmrPrivacyMode = dmrPrivacyCombo->currentData().toInt();
+    configuration.dmrPrivacyKeyId = dmrPrivacyKeyIdSpin->value();
+    QString privacyHex = dmrPrivacyKeyEdit->text().trimmed();
+    privacyHex.remove(QLatin1Char(' '));
+    privacyHex.remove(QLatin1Char('-'));
+    configuration.dmrPrivacyKey = QByteArray::fromHex(privacyHex.toLatin1());
     configuration.deviceIndex = deviceCombo->currentData().toInt();
     configuration.deviceSampleRate = deviceSampleRateCombo->currentData().toInt();
     configuration.bandwidthHz = static_cast<std::uint32_t>(bandwidthCombo->currentData().toUInt());
@@ -1213,7 +1444,7 @@ void TransmitDialog::applyModulationPreset(TxModulation modulation) {
     switch (modulation) {
     case TxModulation::Am:
     case TxModulation::Dsb:
-        setBandwidth(6000.0);
+        setBandwidth(10000.0);
         break;
     case TxModulation::Nfm:
         deviationSpin->setValue(2500.0);
@@ -1317,6 +1548,14 @@ void TransmitDialog::updateModeUi() {
     if (auto *box = findChild<QGroupBox *>(QStringLiteral("txMessageBox"))) box->setVisible(textSource);
     if (auto *box = findChild<QGroupBox *>(QStringLiteral("txMediaBox"))) box->setVisible(mediaSource);
     if (dmrBox) dmrBox->setVisible(dmrMode);
+    const bool privacyEnabled = dmrMode &&
+                                dmrPrivacyCombo->currentData().toInt() != DMR_PRIVACY_NONE;
+    dmrPrivacyKeyIdSpin->setEnabled(privacyEnabled);
+    dmrPrivacyKeyEdit->setEnabled(privacyEnabled);
+    dmrPrivacyKeyEdit->setPlaceholderText(
+        dmrPrivacyCombo->currentData().toInt() == DMR_PRIVACY_AES256
+            ? QStringLiteral("64 hex digits")
+            : QStringLiteral("10 hex digits"));
     mediaModeCombo->setEnabled(imageSource);
     mediaEditButton->setEnabled(imageSource && !mediaPath.isEmpty());
     mediaPauseButton->setEnabled(source == QStringLiteral("audio-file") ||
@@ -1324,6 +1563,7 @@ void TransmitDialog::updateModeUi() {
     const bool microphoneAvailable = audioInputCombo->count() > 0 &&
                                      !audioInputCombo->currentData().toString().isEmpty();
     audioInputCombo->setEnabled(microphoneSource && microphoneAvailable);
+    microphoneLevelSlider->setEnabled(microphoneSource && microphoneAvailable);
     audioRefreshButton->setEnabled(microphoneSource && !(activeBackend && activeBackend->isRunning()));
     const bool digitalText = TransmitWaveformGenerator::isDigitalTextMode(modulation);
     const bool fskMode = modulation == TxModulation::Fsk ||
@@ -1340,7 +1580,11 @@ void TransmitDialog::updateModeUi() {
     symbolRateSpin->setEnabled(digitalText);
     gaussianBtSpin->setEnabled(modulation == TxModulation::Gfsk ||
                                modulation == TxModulation::Gmsk);
-    askDepthSpin->setEnabled(modulation == TxModulation::Ask);
+    const bool depthMode = modulation == TxModulation::Am || modulation == TxModulation::Ask;
+    modulationDepthSpin->setEnabled(depthMode);
+    modulationDepthSpin->setValue(modulation == TxModulation::Ask
+                                      ? askDepthPercent
+                                      : amDepthPercent);
     invertDataCheck->setEnabled(digitalText);
     ft8UtcCheck->setEnabled(modulation == TxModulation::Ft8);
     ft8SlotCombo->setEnabled(modulation == TxModulation::Ft8 && ft8UtcCheck->isChecked());
@@ -1365,6 +1609,7 @@ void TransmitDialog::updateModeUi() {
 
 void TransmitDialog::startTransmission() {
     if (activeBackend && activeBackend->isRunning()) return;
+    hackRfStoppedStreamPolls = 0;
     activeBackend = selectedBackend();
     if (activeBackend->isRfCapable()) {
         if (!armCheck->isChecked()) {
@@ -1565,6 +1810,20 @@ void TransmitDialog::beginTextWaveform() {
 }
 void TransmitDialog::startMicrophoneSimulation(TxConfiguration configuration) {
 #ifdef FOBOSAPP_HAS_QT_MULTIMEDIA
+#ifdef _WIN32
+    if (windowsMicrophoneCapture) {
+        windowsMicrophoneCapture->stop();
+        delete windowsMicrophoneCapture;
+        windowsMicrophoneCapture = nullptr;
+    }
+#endif
+    if (audioInput) {
+        audioInput->disconnect(this);
+        audioInput->stop();
+        delete audioInput;
+        audioInput = nullptr;
+        audioDevice = nullptr;
+    }
     populateAudioInputs();
     const QString requestedDevice = audioInputCombo->currentData().toString();
     const QList<QAudioDeviceInfo> devices = QAudioDeviceInfo::availableDevices(QAudio::AudioInput);
@@ -1585,23 +1844,30 @@ void TransmitDialog::startMicrophoneSimulation(TxConfiguration configuration) {
                        QString::fromUtf8(u8"Зараз немає доступного мікрофонного входу. Оновіть список пристроїв і перевірте дозволи мікрофона у Windows.")), true);
         return;
     }
-    QAudioFormat format;
-    format.setCodec(QStringLiteral("audio/pcm"));
-    format.setSampleRate(configuration.sampleRate);
-    format.setChannelCount(1);
-    format.setSampleSize(16);
-    format.setSampleType(QAudioFormat::SignedInt);
-    format.setByteOrder(QAudioFormat::LittleEndian);
-    if (!selected.isFormatSupported(format)) {
-        format = selected.nearestFormat(format);
-    }
-    if (format.channelCount() != 1 || format.sampleSize() != 16 ||
-        format.sampleType() != QAudioFormat::SignedInt) {
-        setStatus(text(QStringLiteral("The selected microphone does not provide supported mono 16-bit PCM"),
-                       QString::fromUtf8(u8"Обраний мікрофон не підтримує потрібний mono 16-bit PCM")), true);
+    QAudioFormat requestedFormat;
+    requestedFormat.setCodec(QStringLiteral("audio/pcm"));
+    requestedFormat.setSampleRate(48000);
+    requestedFormat.setChannelCount(1);
+    requestedFormat.setSampleSize(16);
+    requestedFormat.setSampleType(QAudioFormat::SignedInt);
+    requestedFormat.setByteOrder(QAudioFormat::LittleEndian);
+    // Prefer a well-defined format. Qt 5 can report a legacy 11025 Hz/8-bit
+    // endpoint as the Windows native format even though its byte stream uses
+    // unsigned PCM semantics, producing a near-full-scale DC offset.
+    QAudioFormat format = selected.isFormatSupported(requestedFormat)
+                              ? requestedFormat
+                              : selected.nearestFormat(requestedFormat);
+    if (!supportedAudioCaptureFormat(format)) format = selected.preferredFormat();
+    if (!supportedAudioCaptureFormat(format)) {
+        setStatus(text(QStringLiteral("The selected microphone format is unsupported (%1 Hz, %2 channel(s), %3-bit PCM). Try another input device."),
+                       QString::fromUtf8(u8"Формат обраного мікрофона не підтримується (%1 Гц, %2 канал(и), %3-bit PCM). Спробуйте інший вхід."))
+                      .arg(format.sampleRate())
+                      .arg(format.channelCount())
+                      .arg(format.sampleSize()), true);
         return;
     }
     configuration.sampleRate = format.sampleRate();
+    const bool deviationAdjusted = constrainVoiceDeviation(configuration);
     if (!validateSignalBandwidth(configuration)) return;
     configuration.liveSource = true;
     activeConfiguration = configuration;
@@ -1629,19 +1895,87 @@ void TransmitDialog::startMicrophoneSimulation(TxConfiguration configuration) {
         setStatus(error, true);
         return;
     }
-    audioInput = new QAudioInput(selected, format, this);
-    audioInput->setBufferSize((std::max)(4096, format.sampleRate() / 5 * 2));
-    audioDevice = audioInput->start();
-    if (!audioDevice) {
-        activeBackend->stop();
-        armCheck->setChecked(false);
-        audioInput->deleteLater();
-        audioInput = nullptr;
-        setStatus(text(QStringLiteral("Could not start microphone capture"),
-                       QString::fromUtf8(u8"Не вдалося запустити захоплення мікрофона")), true);
-        return;
+    audioCaptureChannels = format.channelCount();
+    audioCaptureSampleSize = format.sampleSize();
+    audioCaptureSampleType = static_cast<int>(format.sampleType());
+    audioCaptureLittleEndian = format.byteOrder() == QAudioFormat::LittleEndian;
+    audioCapturePendingBytes.clear();
+    microphoneDiagnosticFrames = 0;
+    microphoneDiagnosticNonZeroFrames = 0;
+    microphoneDcPreviousInput = 0.0f;
+    microphoneDcPreviousOutput = 0.0f;
+    microphoneSilenceWarned = false;
+    microphoneDiagnosticTimer.restart();
+    microphoneRmsDb = -120.0f;
+    microphonePeakDb = -120.0f;
+    const int microphoneLevelValue = microphoneLevelSlider->value();
+    const float microphoneSystemLevel =
+        (std::min)(100, microphoneLevelValue) / 100.0f;
+    const int microphoneBoostDb = (std::max)(0, microphoneLevelValue - 100);
+    microphoneSoftwareGain =
+        static_cast<float>(std::pow(10.0, microphoneBoostDb / 20.0));
+    bool nativeCapture = false;
+#ifdef _WIN32
+    windowsMicrophoneCapture = new WindowsMicrophoneCapture(this);
+    connect(windowsMicrophoneCapture, &WindowsMicrophoneCapture::pcmReady,
+            this, [this](const QByteArray &pcm) { processMicrophoneBytes(pcm); });
+    QString nativeCaptureError;
+    nativeCapture = windowsMicrophoneCapture->start(requestedDevice, 48000,
+                                                     microphoneSystemLevel,
+                                                     &nativeCaptureError);
+    if (nativeCapture) {
+        audioCaptureChannels = 1;
+        audioCaptureSampleSize = 16;
+        audioCaptureSampleType = static_cast<int>(QAudioFormat::SignedInt);
+        audioCaptureLittleEndian = true;
+        qInfo().noquote() << "[TX audio] capture backend"
+                          << windowsMicrophoneCapture->backendName()
+                          << "requestedDevice" << requestedDevice
+                          << "available" << WindowsMicrophoneCapture::deviceNames().join(QStringLiteral(" | "));
+    } else {
+        qWarning().noquote() << "[TX audio] Native Windows capture unavailable; falling back to Qt"
+                             << nativeCaptureError;
+        delete windowsMicrophoneCapture;
+        windowsMicrophoneCapture = nullptr;
     }
-    connect(audioDevice, &QIODevice::readyRead, this, [this]() { readMicrophone(); });
+#endif
+    if (!nativeCapture) {
+        audioInput = new QAudioInput(selected, format, this);
+        audioInput->setVolume(microphoneSystemLevel);
+        const int captureBytesPerFrame =
+            (std::max)(1, format.channelCount()) * (std::max)(1, format.sampleSize() / 8);
+        audioInput->setBufferSize(
+            (std::max)(4096, format.sampleRate() / 5 * captureBytesPerFrame));
+        connect(audioInput, &QAudioInput::stateChanged, this, [this](QAudio::State state) {
+            if (state != QAudio::StoppedState || !audioInput ||
+                audioInput->error() == QAudio::NoError) {
+                return;
+            }
+            const QString detail = audioInputErrorText(audioInput->error());
+            QTimer::singleShot(0, this, [this, detail]() {
+                if (!audioInput || !activeBackend || !activeBackend->isRunning()) return;
+                stopTransmission(text(QStringLiteral("Microphone capture stopped: %1"),
+                                      QString::fromUtf8(u8"Захоплення мікрофона зупинилося: %1"))
+                                     .arg(detail));
+            });
+        });
+        audioDevice = audioInput->start();
+        if (!audioDevice) {
+            const QString detail = audioInputErrorText(audioInput->error());
+            activeBackend->stop();
+            audioInput->disconnect(this);
+            audioInput->stop();
+            delete audioInput;
+            audioInput = nullptr;
+            audioDevice = nullptr;
+            setStatus(text(QStringLiteral("Could not start microphone capture from '%1': %2. Refresh the list and check Windows microphone privacy/exclusive-mode settings."),
+                           QString::fromUtf8(u8"Не вдалося запустити захоплення мікрофона '%1': %2. Оновіть список і перевірте дозволи Windows та монопольний режим пристрою."))
+                          .arg(selected.deviceName(), detail), true);
+            return;
+        }
+        connect(audioDevice, &QIODevice::readyRead, this, [this]() { readMicrophone(); });
+        qInfo() << "[TX audio] capture backend Qt Multimedia";
+    }
     plannedDurationSeconds = activeBackend->isRfCapable() ? watchdogSpin->value() : 180.0;
     textSimulation = false;
     elapsedTimer.restart();
@@ -1659,11 +1993,16 @@ void TransmitDialog::startMicrophoneSimulation(TxConfiguration configuration) {
     qInfo().noquote() << "[TX shaping] start"
                       << "microphone" << selected.deviceName()
                       << "sampleRate" << configuration.sampleRate
+                      << "channels" << audioCaptureChannels
+                      << "sampleSize" << audioCaptureSampleSize
+                      << "sampleType" << audioCaptureSampleType
+                      << "byteOrder" << (audioCaptureLittleEndian ? "little" : "big")
                       << "modulation" << TransmitWaveformGenerator::modulationName(configuration.modulation)
                       << "bandwidthHz" << configuration.signalBandwidthHz
                       << "deviationHz" << configuration.deviationHz
                       << "audioLowPassHz"
-                      << TransmitWaveformGenerator::audioLowPassCutoffHz(configuration);
+                      << TransmitWaveformGenerator::audioLowPassCutoffHz(configuration)
+                      << "deviationAdjusted" << deviationAdjusted;
     setStatus(activeBackend->isRfCapable()
                   ? (pttMode
                          ? text(QStringLiteral("Microphone PTT is armed. Focus the PTT button and hold Space, "
@@ -1683,7 +2022,9 @@ void TransmitDialog::startMicrophoneSimulation(TxConfiguration configuration) {
 
 void TransmitDialog::startManualCw(TxConfiguration configuration) {
     configuration.modulation = TxModulation::Cw;
-    configuration.liveSource = false;
+    // Manual keying is produced incrementally. Wait for a useful reserve
+    // instead of starting the HackRF stream from a single 20 ms block.
+    configuration.liveSource = true;
     activeConfiguration = configuration;
     QString error;
     if (!activeBackend || !activeBackend->start(configuration, &error) ||
@@ -1713,15 +2054,23 @@ void TransmitDialog::startManualCw(TxConfiguration configuration) {
 void TransmitDialog::startAudioFile(TxConfiguration configuration) {
     if (mediaPath.isEmpty()) chooseMediaFile();
     if (mediaPath.isEmpty()) return;
-    configuration.sampleRate = (std::min)(configuration.sampleRate, 192000);
+    // Voice/media audio needs enough Nyquist headroom even when a low-rate
+    // digital preset was selected previously. RF shaping remains controlled
+    // independently by the requested TX signal bandwidth.
+    configuration.sampleRate = (std::clamp)(configuration.sampleRate, 48000, 192000);
     const TxAudioMedia media = TransmitMediaGenerator::loadWav(mediaPath, configuration.sampleRate);
     if (!media.ok()) {
         setStatus(media.error, true);
         return;
     }
     configuration.sampleRate = media.sampleRate;
+    constrainVoiceDeviation(configuration);
     if (!validateSignalBandwidth(configuration)) return;
     configuration.liveSource = true;
+    const int mediaDurationMilliseconds = static_cast<int>(
+        (static_cast<qint64>(media.samples.size()) * 1000) / media.sampleRate);
+    configuration.prebufferMilliseconds =
+        (std::clamp)(mediaDurationMilliseconds, 20, 400);
     activeConfiguration = configuration;
     QString error;
     if (configuration.modulation == TxModulation::Dmr &&
@@ -1749,8 +2098,8 @@ void TransmitDialog::startAudioFile(TxConfiguration configuration) {
     textSimulation = false;
     elapsedTimer.restart();
     progressTimer->start();
-    sourceTimer->setInterval(20);
-    for (int i = 0; i < 6 && activeBackend && activeBackend->isRunning(); ++i) processLiveSource();
+    sourceTimer->setInterval(10);
+    processLiveSource();
     if (!activeBackend || !activeBackend->isRunning()) return;
     sourceTimer->start();
     startButton->setEnabled(false);
@@ -1817,6 +2166,32 @@ void TransmitDialog::startImageTransmission(TxConfiguration configuration) {
     configuration.liveSource = true;
     const bool fmVideo = requestedMode == QStringLiteral("atv-fm");
     configuration.modulation = fmVideo ? TxModulation::Nfm : TxModulation::Am;
+    // ATV frames are generated ahead of time, so give HackRF a generous
+    // reserve before its first USB transfer. A 200 ms voice-style prebuffer
+    // can be consumed by a single large transfer before the GUI timer refills
+    // the queue.
+    configuration.prebufferMilliseconds = 750;
+    // A voice/SSTV bandwidth can remain selected when the source is changed to
+    // ATV. Applying that filter to a 15.625 kHz raster removes the sync edges
+    // and almost all horizontal detail before the samples reach the backend.
+    // Preserve deliberate ATV presets, but replace stale narrow-band values.
+    constexpr double minimumAtvBandwidthHz = 500000.0;
+    constexpr double defaultAtvBandwidthHz = 1500000.0;
+    if (configuration.signalBandwidthHz > 0.0 &&
+        configuration.signalBandwidthHz < minimumAtvBandwidthHz) {
+        const double previousBandwidthHz = configuration.signalBandwidthHz;
+        configuration.signalBandwidthHz = (std::min)(
+            defaultAtvBandwidthHz,
+            static_cast<double>(configuration.sampleRate) * 0.75);
+        const int bandwidthIndex = signalBandwidthCombo
+                                       ? signalBandwidthCombo->findData(
+                                             configuration.signalBandwidthHz)
+                                       : -1;
+        if (bandwidthIndex >= 0) signalBandwidthCombo->setCurrentIndex(bandwidthIndex);
+        qWarning().noquote() << "[ATV TX] replacing narrow stale bandwidth"
+                             << previousBandwidthHz << "Hz with"
+                             << configuration.signalBandwidthHz << "Hz";
+    }
     if (!validateSignalBandwidth(configuration)) return;
     atvFrame = TransmitMediaGenerator::generateAtvFrame(image, configuration, fmVideo);
     if (atvFrame.isEmpty()) {
@@ -1824,7 +2199,25 @@ void TransmitDialog::startImageTransmission(TxConfiguration configuration) {
                        QString::fromUtf8(u8"Не вдалося сформувати кадр аналогового відео")), true);
         return;
     }
+    // The raster repeats unchanged. Filter it once instead of running the
+    // relatively expensive bandwidth limiter for every 18 ms frame while the
+    // HackRF callback is already consuming the source queue.
+    QVector<std::complex<float>> filteredAtvFrame;
+    TxBandwidthLimiterState atvLimiterState;
+    if (TransmitWaveformGenerator::limitSignalBandwidth(
+            configuration, atvFrame.constData(), atvFrame.size(),
+            &filteredAtvFrame, &atvLimiterState)) {
+        atvFrame = std::move(filteredAtvFrame);
+    }
     activeConfiguration = configuration;
+    qInfo().noquote() << "[ATV TX] frame ready"
+                      << "mode" << (fmVideo ? "FM" : "AM")
+                      << "sampleRate" << configuration.sampleRate
+                      << "signalBandwidthHz" << configuration.signalBandwidthHz
+                      << "deviationHz" << configuration.deviationHz
+                      << "samples" << atvFrame.size()
+                      << "durationMs"
+                      << (1000.0 * atvFrame.size() / configuration.sampleRate);
     QString error;
     if (!activeBackend || !activeBackend->start(configuration, &error)) {
         armCheck->setChecked(false);
@@ -1841,6 +2234,12 @@ void TransmitDialog::startImageTransmission(TxConfiguration configuration) {
     const int frameMs = (std::max)(1, qRound(1000.0 * atvFrame.size() / configuration.sampleRate));
     sourceTimer->setInterval(frameMs);
     for (int i = 0; i < 6 && activeBackend && activeBackend->isRunning(); ++i) processLiveSource();
+    if (activeBackend == &hackRf) {
+        qInfo().noquote() << "[ATV TX] initial queue"
+                          << "bufferedSamples" << hackRf.bufferedSourceSamples()
+                          << "streamStarted" << hackRf.streamStarted()
+                          << "hardwareAlive" << hackRf.hardwareStreamAlive();
+    }
     sourceTimer->start();
     startButton->setEnabled(false);
     stopButton->setEnabled(true);
@@ -1860,8 +2259,25 @@ bool TransmitDialog::configureDmrEncoder(const TxConfiguration &configuration, Q
     parameters.sourceId = configuration.dmrSourceId;
     parameters.destinationId = configuration.dmrDestinationId;
     parameters.privateCall = configuration.dmrPrivateCall;
+    parameters.privacyMode = configuration.dmrPrivacyMode;
+    parameters.privacyKeyId = configuration.dmrPrivacyKeyId;
+    parameters.privacyKey = configuration.dmrPrivacyKey;
     dmrCallActive = false;
-    return dmrEncoder->configure(parameters, error);
+    const bool configured = dmrEncoder->configure(parameters, error);
+    qInfo().noquote() << "[DMR TX] configure"
+                      << "ok" << configured
+                      << "sampleRate" << parameters.outputSampleRate
+                      << "CC" << parameters.colorCode
+                      << "TS" << parameters.timeslot
+                      << "source" << parameters.sourceId
+                      << "destination" << parameters.destinationId
+                      << "call" << (parameters.privateCall ? "private" : "group")
+                      << "privacy"
+                      << (parameters.privacyMode == DMR_PRIVACY_ARC4
+                              ? "ARC4"
+                              : (parameters.privacyMode == DMR_PRIVACY_AES256 ? "AES-256" : "none"))
+                      << "KID" << parameters.privacyKeyId;
+    return configured;
 }
 
 bool TransmitDialog::beginDmrCall(QString *error) {
@@ -1869,11 +2285,32 @@ bool TransmitDialog::beginDmrCall(QString *error) {
         if (error) *error = QStringLiteral("DMR encoder is not configured");
         return false;
     }
+    // PTT keeps the RF backend open between calls, so DMR controls remain
+    // editable while idle. Re-read them for every call instead of retaining
+    // the privacy/key state that was active when the backend first started.
+    const TxConfiguration uiConfiguration = configurationFromUi();
+    activeConfiguration.dmrColorCode = uiConfiguration.dmrColorCode;
+    activeConfiguration.dmrTimeslot = uiConfiguration.dmrTimeslot;
+    activeConfiguration.dmrSourceId = uiConfiguration.dmrSourceId;
+    activeConfiguration.dmrDestinationId = uiConfiguration.dmrDestinationId;
+    activeConfiguration.dmrPrivateCall = uiConfiguration.dmrPrivateCall;
+    activeConfiguration.dmrPrivacyMode = uiConfiguration.dmrPrivacyMode;
+    activeConfiguration.dmrPrivacyKeyId = uiConfiguration.dmrPrivacyKeyId;
+    activeConfiguration.dmrPrivacyKey = uiConfiguration.dmrPrivacyKey;
+    if (!configureDmrEncoder(activeConfiguration, error)) return false;
     const QVector<std::complex<float>> iq = dmrEncoder->begin(error);
     if (iq.isEmpty()) return false;
     if (!writeActiveIq(iq.constData(), iq.size(), error)) return false;
     dmrCallActive = true;
     preview->setIq(iq);
+    qInfo().noquote() << "[DMR TX] call begin"
+                      << "iqSamples" << iq.size()
+                      << "MI"
+                      << QStringLiteral("0x%1").arg(dmrEncoder->currentPrivacyMiValue(), 8, 16,
+                                                    QLatin1Char('0')).toUpper()
+                      << "durationMs"
+                      << (1000.0 * static_cast<double>(iq.size()) /
+                          static_cast<double>(activeConfiguration.sampleRate));
     return true;
 }
 
@@ -1891,6 +2328,12 @@ bool TransmitDialog::finishDmrCall(QString *error) {
     }
     dmrCallActive = false;
     dmrFinishing = false;
+    qInfo().noquote() << "[DMR TX] call end"
+                      << "ok" << ok
+                      << "iqSamples" << iq.size()
+                      << "durationMs"
+                      << (1000.0 * static_cast<double>(iq.size()) /
+                          static_cast<double>(activeConfiguration.sampleRate));
     return ok;
 }
 
@@ -1910,36 +2353,70 @@ void TransmitDialog::processLiveSource() {
     if (source == QStringLiteral("manual-cw")) {
         if (!liveKeyPressed) return;
         const int count = (std::max)(1, activeConfiguration.sampleRate / 50);
-        QVector<std::complex<float>> iq(count);
-        const double step = 2.0 * 3.14159265358979323846 * activeConfiguration.toneHz /
-                            activeConfiguration.sampleRate;
-        for (int i = 0; i < count; ++i) {
-            iq[i] = std::polar(activeConfiguration.level, static_cast<float>(manualCwPhase));
-            manualCwPhase = std::remainder(manualCwPhase + step, 2.0 * 3.14159265358979323846);
+        const int target = activeBackend == &hackRf ? activeConfiguration.sampleRate / 4 : count;
+        int guard = 0;
+        while (activeBackend && activeBackend->isRunning() &&
+               (activeBackend != &hackRf || hackRf.bufferedSourceSamples() < target) &&
+               guard++ < 16) {
+            QVector<std::complex<float>> iq(count);
+            const double step = 2.0 * 3.14159265358979323846 * activeConfiguration.toneHz /
+                                activeConfiguration.sampleRate;
+            for (int i = 0; i < count; ++i) {
+                iq[i] = std::polar(activeConfiguration.level, static_cast<float>(manualCwPhase));
+                manualCwPhase = std::remainder(manualCwPhase + step, 2.0 * 3.14159265358979323846);
+            }
+            if (!writeActiveIq(iq.constData(), iq.size(), &error)) {
+                stopTransmission(error);
+                return;
+            }
+            preview->setIq(iq);
         }
-        if (!writeActiveIq(iq.constData(), iq.size(), &error)) stopTransmission(error);
-        else preview->setIq(iq);
         return;
     }
     if (source == QStringLiteral("audio-file")) {
         if (mediaPosition >= mediaAudio.size()) {
+            if (activeBackend == &hackRf && hackRf.bufferedSourceSamples() > 1) return;
             stopTransmission(text(QStringLiteral("Audio file transmission complete"),
                                   QString::fromUtf8(u8"Передачу аудіофайлу завершено")));
             return;
         }
-        const int count = (std::min)(activeConfiguration.sampleRate / 50,
-                                     mediaAudio.size() - mediaPosition);
-        QVector<float> chunk(count);
-        std::copy_n(mediaAudio.constData() + mediaPosition, count, chunk.data());
-        mediaPosition += count;
-        const QVector<std::complex<float>> iq = modulateActiveAudio(chunk, &error);
-        if (!error.isEmpty()) stopTransmission(error);
-        else if (!iq.isEmpty() && !writeActiveIq(iq.constData(), iq.size(), &error)) stopTransmission(error);
-        else preview->setIq(iq);
+        const int target = activeBackend == &hackRf ? activeConfiguration.sampleRate / 2
+                                                     : activeConfiguration.sampleRate / 50;
+        int guard = 0;
+        while (mediaPosition < mediaAudio.size() && activeBackend && activeBackend->isRunning() &&
+               (activeBackend != &hackRf || hackRf.bufferedSourceSamples() < target) &&
+               guard++ < 16) {
+            const int count = (std::min)(activeConfiguration.sampleRate / 50,
+                                         mediaAudio.size() - mediaPosition);
+            QVector<float> chunk(count);
+            std::copy_n(mediaAudio.constData() + mediaPosition, count, chunk.data());
+            mediaPosition += count;
+            const QVector<std::complex<float>> iq = modulateActiveAudio(chunk, &error);
+            if (!error.isEmpty()) {
+                stopTransmission(error);
+                return;
+            }
+            if (!iq.isEmpty() && !writeActiveIq(iq.constData(), iq.size(), &error)) {
+                stopTransmission(error);
+                return;
+            }
+            preview->setIq(iq);
+        }
         return;
     }
     if (source == QStringLiteral("image-atv") && !atvFrame.isEmpty()) {
-        if (!writeActiveIq(atvFrame.constData(), atvFrame.size(), &error)) stopTransmission(error);
+        const int target = activeBackend == &hackRf
+                               ? activeConfiguration.sampleRate
+                               : atvFrame.size();
+        int guard = 0;
+        do {
+            if (!activeBackend->writeIq(atvFrame.constData(), atvFrame.size(), &error)) {
+                stopTransmission(error);
+                return;
+            }
+            ++guard;
+        } while (activeBackend == &hackRf && activeBackend->isRunning() &&
+                 hackRf.bufferedSourceSamples() < target && guard < 128);
     }
 }
 
@@ -1978,10 +2455,8 @@ void TransmitDialog::setLiveKey(bool pressed) {
                 : QStringLiteral("background:#218c4c;color:white;font-weight:600;"));
     if (sourceCombo->currentData().toString() == QStringLiteral("manual-cw")) {
         if (pressed) {
-            sourceTimer->setInterval(20);
-            for (int i = 0; i < 5 && activeBackend && activeBackend->isRunning(); ++i) {
-                processLiveSource();
-            }
+            sourceTimer->setInterval(10);
+            processLiveSource();
             sourceTimer->start();
         } else {
             sourceTimer->stop();
@@ -2036,14 +2511,125 @@ void TransmitDialog::editMediaImage() {
 void TransmitDialog::readMicrophone() {
 #ifdef FOBOSAPP_HAS_QT_MULTIMEDIA
     if (!audioDevice || !activeBackend || !activeBackend->isRunning()) return;
-    QByteArray bytes = audioDevice->readAll();
-    const int samples = bytes.size() / static_cast<int>(sizeof(qint16));
+    processMicrophoneBytes(audioDevice->readAll());
+#endif
+}
+
+void TransmitDialog::processMicrophoneBytes(const QByteArray &newBytes) {
+#ifdef FOBOSAPP_HAS_QT_MULTIMEDIA
+    if (newBytes.isEmpty() || !activeBackend || !activeBackend->isRunning()) return;
+    audioCapturePendingBytes.append(newBytes);
+    const int bytesPerValue = audioCaptureSampleSize / 8;
+    const int bytesPerFrame = bytesPerValue * audioCaptureChannels;
+    const int samples = bytesPerFrame > 0 ? audioCapturePendingBytes.size() / bytesPerFrame : 0;
     if (samples <= 0) return;
-    if (pttMode && !liveKeyPressed) return;
+    const int completeBytes = samples * bytesPerFrame;
+    const QByteArray bytes = audioCapturePendingBytes.left(completeBytes);
+    audioCapturePendingBytes.remove(0, completeBytes);
+    if (pttMode && !liveKeyPressed) {
+        audioCapturePendingBytes.clear();
+        return;
+    }
     QVector<float> audio(samples);
-    const auto *pcm = reinterpret_cast<const qint16 *>(bytes.constData());
-    for (int i = 0; i < samples; ++i) {
-        audio[i] = static_cast<float>(pcm[i]) / 32768.0f;
+    const char *data = bytes.constData();
+    double sumSquares = 0.0;
+    double rawSum = 0.0;
+    float peak = 0.0f;
+    qint64 nonZeroFrames = 0;
+    const float dcAlpha = static_cast<float>(
+        std::exp(-2.0 * 3.14159265358979323846 * 35.0 /
+                 (std::max)(8000, activeConfiguration.sampleRate)));
+    bool decodeEightBitAsUnsigned =
+        audioCaptureSampleType == static_cast<int>(QAudioFormat::UnSignedInt);
+#ifdef Q_OS_WIN
+    // WAVE_FORMAT_PCM defines 8-bit samples as unsigned. Some Qt 5 Windows
+    // plugins nevertheless label the endpoint as SignedInt.
+    decodeEightBitAsUnsigned = true;
+#endif
+    for (int frame = 0; frame < samples; ++frame) {
+        float mixed = 0.0f;
+        for (int channel = 0; channel < audioCaptureChannels; ++channel) {
+            const char *value = data + frame * bytesPerFrame + channel * bytesPerValue;
+            float sample = 0.0f;
+            if (audioCaptureSampleSize == 8 && decodeEightBitAsUnsigned) {
+                sample = (static_cast<int>(static_cast<unsigned char>(value[0])) - 128) / 128.0f;
+            } else if (audioCaptureSampleSize == 8) {
+                sample = static_cast<float>(static_cast<qint8>(value[0])) / 128.0f;
+            } else if (audioCaptureSampleSize == 16) {
+                const quint16 raw = audioCaptureLittleEndian
+                                        ? static_cast<quint16>(static_cast<unsigned char>(value[0])) |
+                                              (static_cast<quint16>(static_cast<unsigned char>(value[1])) << 8)
+                                        : static_cast<quint16>(static_cast<unsigned char>(value[1])) |
+                                              (static_cast<quint16>(static_cast<unsigned char>(value[0])) << 8);
+                sample = static_cast<float>(static_cast<qint16>(raw)) / 32768.0f;
+            } else if (audioCaptureSampleSize == 24) {
+                quint32 raw = audioCaptureLittleEndian
+                                  ? static_cast<quint32>(static_cast<unsigned char>(value[0])) |
+                                        (static_cast<quint32>(static_cast<unsigned char>(value[1])) << 8) |
+                                        (static_cast<quint32>(static_cast<unsigned char>(value[2])) << 16)
+                                  : static_cast<quint32>(static_cast<unsigned char>(value[2])) |
+                                        (static_cast<quint32>(static_cast<unsigned char>(value[1])) << 8) |
+                                        (static_cast<quint32>(static_cast<unsigned char>(value[0])) << 16);
+                if (raw & 0x00800000u) raw |= 0xff000000u;
+                sample = static_cast<float>(static_cast<qint32>(raw) / 8388608.0);
+            } else if (audioCaptureSampleType == static_cast<int>(QAudioFormat::Float)) {
+                unsigned char ordered[4];
+                for (int byte = 0; byte < 4; ++byte) {
+                    ordered[byte] = static_cast<unsigned char>(
+                        value[audioCaptureLittleEndian ? byte : 3 - byte]);
+                }
+                float raw = 0.0f;
+                std::memcpy(&raw, ordered, sizeof(raw));
+                sample = (std::clamp)(raw, -1.0f, 1.0f);
+            } else {
+                quint32 raw = 0;
+                for (int byte = 0; byte < 4; ++byte) {
+                    raw |= static_cast<quint32>(static_cast<unsigned char>(
+                               value[audioCaptureLittleEndian ? byte : 3 - byte]))
+                           << (8 * byte);
+                }
+                sample = static_cast<float>(static_cast<qint32>(raw) / 2147483648.0);
+            }
+            mixed += sample;
+        }
+        const float rawMixed = mixed / static_cast<float>(audioCaptureChannels);
+        rawSum += rawMixed;
+        const float dcBlocked = rawMixed - microphoneDcPreviousInput +
+                                dcAlpha * microphoneDcPreviousOutput;
+        microphoneDcPreviousInput = rawMixed;
+        microphoneDcPreviousOutput = dcBlocked;
+        audio[frame] = softLimitMicrophone(dcBlocked * microphoneSoftwareGain);
+        sumSquares += static_cast<double>(dcBlocked) * dcBlocked;
+        peak = (std::max)(peak, std::abs(dcBlocked));
+        if (std::abs(dcBlocked) > 1.0e-7f) ++nonZeroFrames;
+    }
+    const float rms = static_cast<float>(std::sqrt(sumSquares / samples));
+    microphoneRmsDb = 20.0f * std::log10((std::max)(rms, 1.0e-6f));
+    microphonePeakDb = 20.0f * std::log10((std::max)(peak, 1.0e-6f));
+    microphoneDiagnosticFrames += samples;
+    microphoneDiagnosticNonZeroFrames += nonZeroFrames;
+    if (!microphoneDiagnosticTimer.isValid() || microphoneDiagnosticTimer.elapsed() >= 1000) {
+        qDebug().noquote() << "[TX audio] microphone PCM"
+                           << "frames" << microphoneDiagnosticFrames
+                           << "nonZero" << microphoneDiagnosticNonZeroFrames
+                           << "rmsDbfs" << microphoneRmsDb
+                           << "peakDbfs" << microphonePeakDb
+                           << "softwareBoostDb"
+                           << (std::max)(0, microphoneLevelSlider->value() - 100)
+                           << "rawDc" << (rawSum / samples)
+                           << "pendingBytes" << audioCapturePendingBytes.size();
+        if (!microphoneSilenceWarned && microphoneDiagnosticFrames >= 8000 &&
+            microphonePeakDb < -80.0f) {
+            microphoneSilenceWarned = true;
+            const QString warning = text(
+                QStringLiteral("Windows is returning digital silence from the selected microphone. Check the hardware microphone-mute key, Windows Privacy & security > Microphone, and the input level in Sound settings."),
+                QString::fromUtf8(u8"Windows повертає цифрову тишу з обраного мікрофона. Перевірте апаратну кнопку вимкнення мікрофона, Конфіденційність і безпека > Мікрофон та рівень входу в параметрах звуку."));
+            qWarning().noquote() << "[TX audio]" << warning;
+            setStatus(warning, true);
+        }
+        microphoneDiagnosticFrames = 0;
+        microphoneDiagnosticNonZeroFrames = 0;
+        microphoneDiagnosticTimer.restart();
     }
     QString error;
     const QVector<std::complex<float>> iq = modulateActiveAudio(audio, &error);
@@ -2081,6 +2667,22 @@ void TransmitDialog::updateProgress() {
                                 : elapsed / denominator;
     progressBar->setValue((std::min)(1000, qRound(1000.0 * progress)));
     if (activeBackend == &hackRf) {
+        if (hackRf.streamStarted() && !hackRf.hardwareStreamAlive()) {
+            ++hackRfStoppedStreamPolls;
+            if (hackRfStoppedStreamPolls >= 3) {
+                qWarning().noquote()
+                    << "[HackRFTX] USB stream stopped unexpectedly"
+                    << "outputSamples" << hackRf.outputSamples()
+                    << "bufferedSourceSamples" << hackRf.bufferedSourceSamples();
+                armCheck->setChecked(false);
+                stopTransmission(text(
+                    QStringLiteral("HackRF USB stream stopped unexpectedly. Reduce the TX device sample rate or move the receiver to another USB controller."),
+                    QString::fromUtf8(u8"USB-потік HackRF несподівано зупинився. Зменште семплрейт передавача або перенесіть приймач на інший USB-контролер.")));
+                return;
+            }
+        } else {
+            hackRfStoppedStreamPolls = 0;
+        }
         const double seconds = hackRf.configuration().deviceSampleRate > 0
                                    ? static_cast<double>(hackRf.outputSamples()) /
                                          hackRf.configuration().deviceSampleRate
@@ -2091,7 +2693,14 @@ void TransmitDialog::updateProgress() {
                 .arg(hackRf.outputSamples() / 1000000.0, 0, 'f', 2)
                 .arg(hackRf.bufferedSourceSamples())
                 .arg(hackRf.sourceUnderrunSamples()) +
-            QStringLiteral(" | ") + signalShapeSummary(activeConfiguration));
+            QStringLiteral(" | ") + signalShapeSummary(activeConfiguration) +
+            ((sourceCombo->currentData().toString() == QStringLiteral("microphone") ||
+              sourceCombo->currentData().toString() == QStringLiteral("microphone-ptt"))
+                 ? text(QStringLiteral(" | mic RMS %1 dBFS / peak %2 dBFS"),
+                        QString::fromUtf8(u8" | мікр. RMS %1 dBFS / пік %2 dBFS"))
+                       .arg(microphoneRmsDb, 0, 'f', 1)
+                       .arg(microphonePeakDb, 0, 'f', 1)
+                 : QString()));
         Q_UNUSED(seconds)
     }
     double safetyLimit = activeBackend->isRfCapable() ? watchdogSpin->value() : 180.0;
@@ -2114,16 +2723,31 @@ void TransmitDialog::updateProgress() {
 
 void TransmitDialog::stopTransmission(const QString &reason) {
     progressTimer->stop();
+    hackRfStoppedStreamPolls = 0;
     if (ft8StartTimer) ft8StartTimer->stop();
     pendingTextIq.clear();
     pendingTextIq.squeeze();
     sourceTimer->stop();
 #ifdef FOBOSAPP_HAS_QT_MULTIMEDIA
     if (audioInput) {
+        audioInput->disconnect(this);
         audioInput->stop();
-        audioInput->deleteLater();
+        delete audioInput;
         audioInput = nullptr;
         audioDevice = nullptr;
+    }
+    audioCapturePendingBytes.clear();
+    microphoneDiagnosticFrames = 0;
+    microphoneDiagnosticNonZeroFrames = 0;
+    microphoneDcPreviousInput = 0.0f;
+    microphoneDcPreviousOutput = 0.0f;
+    microphoneSilenceWarned = false;
+#endif
+#ifdef _WIN32
+    if (windowsMicrophoneCapture) {
+        windowsMicrophoneCapture->stop();
+        delete windowsMicrophoneCapture;
+        windowsMicrophoneCapture = nullptr;
     }
 #endif
     const bool hadSamples = activeBackend == &simulator && !simulator.capturedIq().isEmpty();
@@ -2138,6 +2762,8 @@ void TransmitDialog::stopTransmission(const QString &reason) {
     dmrFinishing = false;
     liveKeyPressed = false;
     pttMode = false;
+    microphoneRmsDb = -120.0f;
+    microphonePeakDb = -120.0f;
     automaticFt8Active = false;
     bandwidthLimiterState.reset();
     bandwidthLimitedIq.clear();
@@ -2219,6 +2845,10 @@ void TransmitDialog::setStatus(const QString &message, bool error) {
 
 void TransmitDialog::loadSettings() {
     QSettings settings(persistentSettingsFilePath(), QSettings::IniFormat);
+    amDepthPercent = (std::clamp)(
+        settings.value(QStringLiteral("transmit/amDepthPercent"), 90).toInt(), 0, 100);
+    askDepthPercent = (std::clamp)(
+        settings.value(QStringLiteral("transmit/askDepthPercent"), 70).toInt(), 0, 100);
     frequencySpin->setValue(settings.value(QStringLiteral("transmit/frequencyMhz"), 144.300).toDouble());
     const int mode = settings.value(QStringLiteral("transmit/modulation"),
                                     static_cast<int>(TxModulation::Nfm)).toInt();
@@ -2227,6 +2857,9 @@ void TransmitDialog::loadSettings() {
     const QString savedAudioInput = settings.value(QStringLiteral("transmit/audioInputDevice")).toString();
     const int savedAudioInputIndex = audioInputCombo->findData(savedAudioInput);
     if (savedAudioInputIndex >= 0) audioInputCombo->setCurrentIndex(savedAudioInputIndex);
+    microphoneLevelSlider->setValue(
+        settings.value(QStringLiteral("transmit/microphoneLevelBoost"), 100).toInt());
+    updateMicrophoneLevelText();
     const int sampleRate = settings.value(QStringLiteral("transmit/sampleRate"), 48000).toInt();
     int rateIndex = sampleRateCombo->findData(sampleRate);
     if (rateIndex < 0) {
@@ -2257,8 +2890,9 @@ void TransmitDialog::loadSettings() {
                                             symbolRateSpin->value()).toDouble());
     gaussianBtSpin->setValue(settings.value(QStringLiteral("transmit/gaussianBt"),
                                              gaussianBtSpin->value()).toDouble());
-    askDepthSpin->setValue(settings.value(QStringLiteral("transmit/askDepthPercent"),
-                                           askDepthSpin->value() > 0 ? askDepthSpin->value() : 70).toInt());
+    modulationDepthSpin->setValue(selectedModulation() == TxModulation::Ask
+                                      ? askDepthPercent
+                                      : amDepthPercent);
     invertDataCheck->setChecked(settings.value(QStringLiteral("transmit/invertData"), false).toBool());
     ft8UtcCheck->setChecked(settings.value(QStringLiteral("transmit/alignFt8Utc"), true).toBool());
     const int ft8SlotIndex = ft8SlotCombo->findData(settings.value(QStringLiteral("transmit/ft8SlotParity"), -1).toInt());
@@ -2272,6 +2906,12 @@ void TransmitDialog::loadSettings() {
     const bool dmrPrivateCall = settings.value(QStringLiteral("transmit/dmrPrivateCall"), false).toBool();
     const int dmrCallTypeIndex = dmrCallTypeCombo->findData(dmrPrivateCall);
     if (dmrCallTypeIndex >= 0) dmrCallTypeCombo->setCurrentIndex(dmrCallTypeIndex);
+    const int dmrPrivacyMode = settings.value(QStringLiteral("transmit/dmrPrivacyMode"),
+                                              DMR_PRIVACY_NONE).toInt();
+    const int dmrPrivacyIndex = dmrPrivacyCombo->findData(dmrPrivacyMode);
+    if (dmrPrivacyIndex >= 0) dmrPrivacyCombo->setCurrentIndex(dmrPrivacyIndex);
+    dmrPrivacyKeyIdSpin->setValue(settings.value(QStringLiteral("transmit/dmrPrivacyKeyId"), 0).toInt());
+    dmrPrivacyKeyEdit->setText(settings.value(QStringLiteral("transmit/dmrPrivacyKeyHex")).toString());
     const QString backend = settings.value(QStringLiteral("transmit/backend"),
                                            QStringLiteral("simulator-iq-file")).toString();
     const int backendIndex = backendCombo->findData(backend);
@@ -2310,6 +2950,8 @@ void TransmitDialog::saveSettings() const {
     settings.setValue(QStringLiteral("transmit/sampleRate"), configurationFromUi().sampleRate);
     settings.setValue(QStringLiteral("transmit/audioInputDevice"),
                       audioInputCombo->currentData().toString());
+    settings.setValue(QStringLiteral("transmit/microphoneLevelBoost"),
+                      microphoneLevelSlider->value());
     settings.setValue(QStringLiteral("transmit/levelPercent"), levelSpin->value());
     settings.setValue(QStringLiteral("transmit/deviationHz"), deviationSpin->value());
     settings.setValue(QStringLiteral("transmit/signalBandwidthHz"), signalBandwidthFromUi());
@@ -2317,7 +2959,8 @@ void TransmitDialog::saveSettings() const {
     settings.setValue(QStringLiteral("transmit/cwWpm"), cwWpmSpin->value());
     settings.setValue(QStringLiteral("transmit/symbolRate"), symbolRateSpin->value());
     settings.setValue(QStringLiteral("transmit/gaussianBt"), gaussianBtSpin->value());
-    settings.setValue(QStringLiteral("transmit/askDepthPercent"), askDepthSpin->value());
+    settings.setValue(QStringLiteral("transmit/amDepthPercent"), amDepthPercent);
+    settings.setValue(QStringLiteral("transmit/askDepthPercent"), askDepthPercent);
     settings.setValue(QStringLiteral("transmit/invertData"), invertDataCheck->isChecked());
     settings.setValue(QStringLiteral("transmit/alignFt8Utc"), ft8UtcCheck->isChecked());
     settings.setValue(QStringLiteral("transmit/ft8SlotParity"), ft8SlotCombo->currentData().toInt());
@@ -2326,6 +2969,9 @@ void TransmitDialog::saveSettings() const {
     settings.setValue(QStringLiteral("transmit/dmrSourceId"), dmrSourceIdSpin->value());
     settings.setValue(QStringLiteral("transmit/dmrDestinationId"), dmrDestinationIdSpin->value());
     settings.setValue(QStringLiteral("transmit/dmrPrivateCall"), dmrCallTypeCombo->currentData().toBool());
+    settings.setValue(QStringLiteral("transmit/dmrPrivacyMode"), dmrPrivacyCombo->currentData().toInt());
+    settings.setValue(QStringLiteral("transmit/dmrPrivacyKeyId"), dmrPrivacyKeyIdSpin->value());
+    settings.setValue(QStringLiteral("transmit/dmrPrivacyKeyHex"), dmrPrivacyKeyEdit->text().trimmed());
     settings.setValue(QStringLiteral("transmit/backend"), backendCombo->currentData().toString());
     settings.setValue(QStringLiteral("transmit/hackRfDeviceIndex"), deviceCombo->currentData().toInt());
     settings.setValue(QStringLiteral("transmit/deviceSampleRate"), deviceSampleRateCombo->currentData().toInt());

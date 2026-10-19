@@ -13,6 +13,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QCheckBox>
+#include <QColor>
 #include <QContextMenuEvent>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -137,6 +138,19 @@ QColor workspaceWaterfallColor(float normalizedValue, float contrast, float sens
     return QColor(int(base.red() * contrastFactor + blue * (1.0f - contrastFactor)),
                   int(base.green() * contrastFactor + blue * (1.0f - contrastFactor)),
                   int(base.blue() * contrastFactor + blue * (1.0f - contrastFactor)));
+}
+
+QColor workspaceMonochromeColor(float normalizedValue,
+                                const QColor &baseColor,
+                                int depthPercent) {
+    const float t = std::clamp(normalizedValue, 0.0f, 1.0f);
+    const float depth = std::clamp(float(depthPercent) / 100.0f, 0.0f, 1.0f);
+    const float lowFactor = 1.0f - 0.86f * depth;
+    const float highFactor = 1.0f + 0.38f * depth;
+    const float factor = lowFactor + (highFactor - lowFactor) * std::sqrt(t);
+    return QColor::fromRgbF(std::clamp(baseColor.redF() * factor, 0.0, 1.0),
+                            std::clamp(baseColor.greenF() * factor, 0.0, 1.0),
+                            std::clamp(baseColor.blueF() * factor, 0.0, 1.0));
 }
 struct DspWorkspaceProfile {
     QString name;
@@ -539,6 +553,18 @@ public:
         waterfall3DFixedPlane_ = nextFixedPlane;
         waterfall3DMonochrome_ =
             value(QStringLiteral("waterfall3DMonochrome"), false).toBool();
+        waterfall3DHeightGradient_ =
+            value(QStringLiteral("waterfall3DHeightGradient"), false).toBool();
+        const QColor nextMonochromeColor(
+            value(QStringLiteral("waterfall3DMonochromeColor"),
+                  QStringLiteral("#2d68c4")).toString());
+        waterfall3DMonochromeColor_ = nextMonochromeColor.isValid()
+                                          ? nextMonochromeColor
+                                          : QColor(45, 104, 196);
+        waterfall3DMonochromeGradientDepth_ = std::clamp(
+            value(QStringLiteral("waterfall3DMonochromeGradientDepth"), 100).toInt(),
+            0,
+            100);
         waterfall3DSurfaceStyle_ = std::clamp(
             value(QStringLiteral("waterfall3DSurfaceStyle"), 0).toInt(), 0, 1);
         waterfall3DSmoothing_ = std::clamp(
@@ -1594,7 +1620,9 @@ private:
                         const QPainterPath &path = surfacePaths[pathIndex];
                         if (path.isEmpty()) continue;
                         QColor surface = waterfall3DMonochrome_
-                            ? QColor(45, 104, 196)
+                            ? workspaceMonochromeColor(colorLevel,
+                                                       waterfall3DMonochromeColor_,
+                                                       waterfall3DMonochromeGradientDepth_)
                             : workspaceWaterfallColor(colorLevel, contrast_, sensitivity_);
                         if (waterfall3DLighting_ > 0) {
                             const qreal shadePosition =
@@ -1613,27 +1641,37 @@ private:
             if (row.rowIndex == nearestDrawnIndex) { frontRow = &row; break; }
         }
         if (spectrumGradientFill_ && frontRow && frontRow->tops.size() > 1) {
+            const QPointF gradientBase = projectWaterfallPoint(
+                projection, 0.5, frontRow->historyPosition, 0.0);
+            const QPointF gradientTop = projectWaterfallPoint(
+                projection, 0.5, frontRow->historyPosition, 1.0);
+            QLinearGradient amplitudeGradient(gradientBase, gradientTop);
+            constexpr int GradientStops = 24;
+            for (int stop = 0; stop <= GradientStops; ++stop) {
+                const float amplitude = static_cast<float>(stop) /
+                                        static_cast<float>(GradientStops);
+                QColor color;
+                if (waterfall3DMonochrome_) {
+                    color = workspaceMonochromeColor(
+                        amplitude,
+                        waterfall3DMonochromeColor_,
+                        waterfall3DMonochromeGradientDepth_);
+                } else if (colorSpectrum_) {
+                    color = workspaceWaterfallColor(amplitude, contrast_, sensitivity_);
+                } else {
+                    color = QColor::fromRgbF(0.0,
+                                             0.14 + 0.86 * amplitude,
+                                             0.04 + 0.30 * amplitude);
+                }
+                color.setAlphaF(0.96 * double(spectrumGradientOpacity_) / 100.0);
+                amplitudeGradient.setColorAt(amplitude, color);
+            }
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(amplitudeGradient);
             for (int index = 1; index < frontRow->tops.size(); ++index) {
-                const float level = 0.5f * (frontRow->normalized[index - 1] +
-                                            frontRow->normalized[index]);
-                QColor accent = waterfall3DMonochrome_
-                    ? QColor(72, 138, 232)
-                    : (colorSpectrum_
-                           ? workspaceWaterfallColor(level, contrast_, sensitivity_)
-                           : QColor(64, 224, 139));
-                QColor upper = accent;
-                upper.setAlphaF(0.98 * double(spectrumGradientOpacity_) / 100.0);
-                QColor lower = accent.darker(220);
-                lower.setAlphaF(0.22 * double(spectrumGradientOpacity_) / 100.0);
-                QLinearGradient gradient((frontRow->tops[index - 1] + frontRow->tops[index]) * 0.5,
-                                         (frontRow->bases[index - 1] + frontRow->bases[index]) * 0.5);
-                gradient.setColorAt(0.0, upper);
-                gradient.setColorAt(1.0, lower);
                 QPolygonF strip;
                 strip << frontRow->bases[index - 1] << frontRow->tops[index - 1]
                       << frontRow->tops[index] << frontRow->bases[index];
-                painter.setPen(Qt::NoPen);
-                painter.setBrush(gradient);
                 painter.drawPolygon(strip);
             }
         }
@@ -1661,7 +1699,9 @@ private:
         for (int bucket = 0; bucket < kContourBuckets; ++bucket) {
             const float level = (float(bucket) + 0.5f) / float(kContourBuckets);
             QColor color = waterfall3DMonochrome_
-                ? QColor(72, 138, 232)
+                ? workspaceMonochromeColor(level,
+                                           waterfall3DMonochromeColor_,
+                                           waterfall3DMonochromeGradientDepth_)
                 : (colorSpectrum_
                        ? workspaceWaterfallColor(level, contrast_, sensitivity_)
                        : QColor(64, 224, 139));
@@ -1693,7 +1733,10 @@ private:
                 const float level = row.normalized[middle];
                 if (havePrevious) {
                     const QColor color = waterfall3DMonochrome_
-                        ? QColor(72, 138, 232)
+                        ? workspaceMonochromeColor(
+                              0.5f * (previousLevel + level),
+                              waterfall3DMonochromeColor_,
+                              waterfall3DMonochromeGradientDepth_)
                         : workspaceWaterfallColor(
                               0.5f * (previousLevel + level), contrast_, sensitivity_);
                     painter.setPen(QPen(color, 2.4, Qt::SolidLine, Qt::RoundCap));
@@ -2069,6 +2112,9 @@ private:
     bool waterfall3DFixedPlane_ = false;
     bool cameraOverrideActive_ = false;
     bool waterfall3DMonochrome_ = false;
+    bool waterfall3DHeightGradient_ = false;
+    QColor waterfall3DMonochromeColor_ = QColor(45, 104, 196);
+    int waterfall3DMonochromeGradientDepth_ = 100;
     int waterfall3DSurfaceStyle_ = 0;
     int waterfall3DSmoothing_ = 0;
     int waterfall3DLighting_ = 0;
@@ -3052,6 +3098,17 @@ private:
         }
         nativeWaterfall_->set3DMonochrome(
             value(QStringLiteral("waterfall3DMonochrome"), false).toBool());
+        nativeWaterfall_->set3DHeightGradient(
+            value(QStringLiteral("waterfall3DHeightGradient"), false).toBool());
+        const QColor monochromeColor(
+            value(QStringLiteral("waterfall3DMonochromeColor"),
+                  QStringLiteral("#2d68c4")).toString());
+        nativeWaterfall_->set3DMonochromeColor(
+            monochromeColor.isValid() ? monochromeColor : QColor(45, 104, 196));
+        nativeWaterfall_->set3DMonochromeGradientDepth(std::clamp(
+            value(QStringLiteral("waterfall3DMonochromeGradientDepth"), 100).toInt(),
+            0,
+            100));
         nativeWaterfall_->setAlternativeSpectrumGradientFill(
             value(QStringLiteral("spectrumGradientFill"), false).toBool());
         nativeWaterfall_->setAlternativeSpectrumGradientOpacity(std::clamp(

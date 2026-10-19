@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 
 namespace {
 constexpr int HackRfSuccess = 0;
@@ -57,12 +58,18 @@ bool HackRfTransmitterBackend::start(const TxConfiguration &configuration, QStri
     currentConfiguration.txVgaGainDb = (std::clamp)(configuration.txVgaGainDb, 0, 47);
     sourcePosition = 0.0;
     sourceQueue.clear();
+    bufferedSamples.store(0, std::memory_order_relaxed);
     generatedSamples.store(0, std::memory_order_relaxed);
     missingSourceSamples.store(0, std::memory_order_relaxed);
     stopping.store(false, std::memory_order_release);
     outputEnabled.store(true, std::memory_order_release);
 
-    int status = openHackRfDeviceSafely(&device, currentConfiguration.deviceIndex);
+    int status = -1;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        status = openHackRfDeviceSafely(&device, currentConfiguration.deviceIndex);
+        if (status == HackRfSuccess) break;
+        if (attempt < 3) QThread::msleep(40);
+    }
     if (status == HackRfSuccess) {
         status = setHackRfAmpEnabledSafely(device, false);
     }
@@ -102,7 +109,8 @@ bool HackRfTransmitterBackend::start(const TxConfiguration &configuration, QStri
                       << "deviceRate" << currentConfiguration.deviceSampleRate
                       << "bandwidthHz" << bandwidth
                       << "txVgaDb" << currentConfiguration.txVgaGainDb
-                      << "rfAmp" << currentConfiguration.rfAmpEnabled;
+                      << "rfAmp" << currentConfiguration.rfAmpEnabled
+                      << "txUnderrunLimit" << currentConfiguration.txUnderrunLimit;
     if (error) error->clear();
     return true;
 }
@@ -130,14 +138,19 @@ bool HackRfTransmitterBackend::writeIq(const std::complex<float> *samples,
             if (error) *error = QStringLiteral("HackRF TX source queue exceeded the 30 second limit");
             return false;
         }
-        sourceQueue.reserve(sourceQueue.size() + count);
-        for (int index = 0; index < count; ++index) {
-            sourceQueue.append(samples[index]);
-        }
+        const int previousSize = sourceQueue.size();
+        sourceQueue.resize(previousSize + count);
+        std::copy_n(samples, count, sourceQueue.data() + previousSize);
+        bufferedSamples.store(
+            (std::max)(0, sourceQueue.size() - static_cast<int>(sourcePosition)),
+            std::memory_order_release);
     }
     if (!streaming.load(std::memory_order_acquire)) {
+        const qint64 prebufferSamples =
+            (static_cast<qint64>(currentConfiguration.sampleRate) *
+             (std::clamp)(currentConfiguration.prebufferMilliseconds, 20, 2000)) / 1000;
         const bool prebuffered = !currentConfiguration.liveSource ||
-                                 bufferedSourceSamples() >= currentConfiguration.sampleRate / 10;
+                                 bufferedSourceSamples() >= prebufferSamples;
         if (prebuffered && !beginStreaming(error)) {
             return false;
         }
@@ -171,12 +184,17 @@ bool HackRfTransmitterBackend::setOutputEnabled(bool enabled, QString *error) {
     }
     outputEnabled.store(enabled, std::memory_order_release);
     if (!enabled) {
+        stopping.store(true, std::memory_order_release);
         const bool wasStreaming = streaming.exchange(false, std::memory_order_acq_rel);
         if (device && wasStreaming) stopHackRfTxSafely(device);
         if (device) setHackRfAmpEnabledSafely(device, false);
-        QMutexLocker locker(&queueMutex);
-        sourceQueue.clear();
-        sourcePosition = 0.0;
+        {
+            QMutexLocker locker(&queueMutex);
+            sourceQueue.clear();
+            sourcePosition = 0.0;
+            bufferedSamples.store(0, std::memory_order_release);
+        }
+        stopping.store(false, std::memory_order_release);
     }
     if (error) error->clear();
     return true;
@@ -189,7 +207,11 @@ bool HackRfTransmitterBackend::beginStreaming(QString *error) {
     }
     int status = setHackRfAmpEnabledSafely(device, currentConfiguration.rfAmpEnabled);
     if (status == HackRfSuccess) {
-        status = startHackRfTxSafely(device, &HackRfTransmitterBackend::transferCallback, this);
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            status = startHackRfTxSafely(device, &HackRfTransmitterBackend::transferCallback, this);
+            if (status == HackRfSuccess) break;
+            if (attempt < 3) QThread::msleep(30);
+        }
     }
     if (status != HackRfSuccess) {
         setHackRfAmpEnabledSafely(device, false);
@@ -210,8 +232,7 @@ int HackRfTransmitterBackend::transferCallback(HackRfTransfer *transfer) {
 }
 
 int HackRfTransmitterBackend::fillTransfer(HackRfTransfer *transfer) {
-    if (!transfer || !transfer->buffer || transfer->bufferLength <= 0 ||
-        stopping.load(std::memory_order_acquire)) {
+    if (!transfer || !transfer->buffer || transfer->bufferLength <= 0) {
         return -1;
     }
     int bytes = transfer->validLength > 0
@@ -221,11 +242,20 @@ int HackRfTransmitterBackend::fillTransfer(HackRfTransfer *transfer) {
     auto *output = reinterpret_cast<qint8 *>(transfer->buffer);
     const int complexSamples = bytes / 2;
     quint64 missing = 0;
-    {
+    constexpr int OutputChunkSamples = 2048;
+    int outputIndex = 0;
+    while (outputIndex < complexSamples) {
+        if (stopping.load(std::memory_order_acquire)) {
+            std::memset(output + outputIndex * 2, 0,
+                        static_cast<std::size_t>((complexSamples - outputIndex) * 2));
+            break;
+        }
+        const int chunkEnd = (std::min)(complexSamples,
+                                        outputIndex + OutputChunkSamples);
         QMutexLocker locker(&queueMutex);
         const double step = static_cast<double>(currentConfiguration.sampleRate) /
                             static_cast<double>(currentConfiguration.deviceSampleRate);
-        for (int index = 0; index < complexSamples; ++index) {
+        for (int index = outputIndex; index < chunkEnd; ++index) {
             const int first = static_cast<int>(sourcePosition);
             const int second = first + 1;
             std::complex<float> value(0.0f, 0.0f);
@@ -244,6 +274,10 @@ int HackRfTransmitterBackend::fillTransfer(HackRfTransfer *transfer) {
             sourceQueue.remove(0, removable);
             sourcePosition -= removable;
         }
+        bufferedSamples.store(
+            (std::max)(0, sourceQueue.size() - static_cast<int>(sourcePosition)),
+            std::memory_order_release);
+        outputIndex = chunkEnd;
     }
     transfer->validLength = bytes;
     generatedSamples.fetch_add(static_cast<quint64>(complexSamples), std::memory_order_relaxed);
@@ -255,6 +289,8 @@ void HackRfTransmitterBackend::stop() {
     stopping.store(true, std::memory_order_release);
     const bool wasStreaming = streaming.exchange(false, std::memory_order_acq_rel);
     running.store(false, std::memory_order_release);
+    QElapsedTimer stopTimer;
+    stopTimer.start();
     if (device && wasStreaming) {
         stopHackRfTxSafely(device);
     }
@@ -264,12 +300,14 @@ void HackRfTransmitterBackend::stop() {
     if (wasStreaming) {
         qInfo().noquote() << "[HackRFTX] stopped"
                           << "outputSamples" << generatedSamples.load(std::memory_order_relaxed)
-                          << "zeroFillSamples" << missingSourceSamples.load(std::memory_order_relaxed);
+                          << "zeroFillSamples" << missingSourceSamples.load(std::memory_order_relaxed)
+                          << "stopMs" << stopTimer.elapsed();
     }
     closeDevice();
     QMutexLocker locker(&queueMutex);
     sourceQueue.clear();
     sourcePosition = 0.0;
+    bufferedSamples.store(0, std::memory_order_release);
 }
 
 void HackRfTransmitterBackend::closeDevice() {
@@ -287,6 +325,10 @@ bool HackRfTransmitterBackend::streamStarted() const {
     return streaming.load(std::memory_order_acquire);
 }
 
+bool HackRfTransmitterBackend::hardwareStreamAlive() const {
+    return device && isHackRfStreamingSafely(device);
+}
+
 quint64 HackRfTransmitterBackend::outputSamples() const {
     return generatedSamples.load(std::memory_order_relaxed);
 }
@@ -296,8 +338,7 @@ quint64 HackRfTransmitterBackend::sourceUnderrunSamples() const {
 }
 
 int HackRfTransmitterBackend::bufferedSourceSamples() const {
-    QMutexLocker locker(&queueMutex);
-    return (std::max)(0, sourceQueue.size() - static_cast<int>(sourcePosition));
+    return bufferedSamples.load(std::memory_order_acquire);
 }
 
 const TxConfiguration &HackRfTransmitterBackend::configuration() const {

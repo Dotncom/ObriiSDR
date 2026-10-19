@@ -1901,6 +1901,8 @@ void DataProcessor::resetNetworkIqState() {
     networkIqLastLoggedDmrOutputRate = 0;
     networkIqLastLoggedDmrDecimationFactor = 0;
     networkIqAgcLevel = 0.01f;
+    networkIqAtvBlockGain = 0.0f;
+    networkIqLastLoggedAtvOutputRate = 0.0;
     networkHfNoiseCancelCoeff = {0.0f, 0.0f};
     networkHfNoiseCancelRefDecimationSum = {0.0f, 0.0f};
     networkIqFrameBuffer.clear();
@@ -1984,15 +1986,69 @@ void DataProcessor::emitChannelIqFrame(const float *samples,
     }
 
     const bool dmrChannelMode = settings.modulationType == MOD_DMR;
+    const bool atvChannelMode = settings.modulationType == MOD_ATV;
     const bool adaptiveNoiseCancel = settings.inputMode == INPUT_HF_NOISE_CANCEL;
     if (!dmrChannelMode && !adaptiveNoiseCancel) {
         const IqChannelizer::Result result =
             networkIqChannelizer.processFloatIq(samples,
                                                 floatCount,
                                                 settings,
-                                                networkIqChannelizerOutput);
+                                                networkIqChannelizerOutput,
+                                                !atvChannelMode);
         if (!result.valid || result.outputRate <= 0.0) {
             return;
+        }
+
+        // Fast sample-by-sample AGC removes the amplitude envelope that carries
+        // AM video, including horizontal and vertical sync. For ATV, establish
+        // one gain for the complete channelizer block and move it slowly between
+        // blocks. This preserves every line's relative levels while still making
+        // weak receiver IQ usable by the video decoder.
+        float outputGain = 1.0f;
+        if (atvChannelMode && !networkIqChannelizerOutput.empty()) {
+            double power = 0.0;
+            float peak = 0.0f;
+            int complexSamples = 0;
+            for (std::size_t i = 0; i + 1 < networkIqChannelizerOutput.size(); i += 2U) {
+                const float iSample = networkIqChannelizerOutput[i];
+                const float qSample = networkIqChannelizerOutput[i + 1U];
+                const float magnitudeSquared = iSample * iSample + qSample * qSample;
+                if (!std::isfinite(magnitudeSquared)) {
+                    continue;
+                }
+                power += magnitudeSquared;
+                peak = (std::max)(peak, std::sqrt(magnitudeSquared));
+                ++complexSamples;
+            }
+            const float rms = complexSamples > 0
+                                  ? static_cast<float>(std::sqrt(power / complexSamples))
+                                  : 0.0f;
+            const float desiredFromRms = 0.28f / (std::max)(rms, 1.0e-6f);
+            const float desiredFromPeak = 0.82f / (std::max)(peak, 1.0e-6f);
+            const float desiredGain = (std::clamp)((std::min)(desiredFromRms,
+                                                              desiredFromPeak),
+                                                   0.25f,
+                                                   128.0f);
+            if (networkIqAtvBlockGain <= 0.0f || !std::isfinite(networkIqAtvBlockGain)) {
+                networkIqAtvBlockGain = desiredGain;
+            } else {
+                const float coefficient = desiredGain < networkIqAtvBlockGain ? 0.05f : 0.002f;
+                networkIqAtvBlockGain += coefficient * (desiredGain - networkIqAtvBlockGain);
+            }
+            outputGain = networkIqAtvBlockGain;
+
+            if (std::abs(networkIqLastLoggedAtvOutputRate - result.outputRate) > 0.5) {
+                networkIqLastLoggedAtvOutputRate = result.outputRate;
+                qDebug() << "[ATV channel IQ] amplitude-preserving channelizer"
+                         << "inputRate" << result.inputRate
+                         << "targetRate" << result.targetRate
+                         << "outputRate" << result.outputRate
+                         << "decimation" << result.decimationFactor
+                         << "cutoffHz" << result.cutoff
+                         << "blockGain" << outputGain
+                         << "blockRms" << rms
+                         << "blockPeak" << peak;
+            }
         }
         if (std::abs(networkIqFrameSampleRate - result.outputRate) > 0.5) {
             networkIqFrameBuffer.clear();
@@ -2001,8 +2057,8 @@ void DataProcessor::emitChannelIqFrame(const float *samples,
         const int frameSamples =
             channelizerFrameSamplesForRate(result.outputRate, NETWORK_CHANNEL_FRAME_SAMPLES);
         for (std::size_t i = 0; i + 1 < networkIqChannelizerOutput.size(); i += 2U) {
-            appendInt16Le(networkIqFrameBuffer, networkIqChannelizerOutput[i]);
-            appendInt16Le(networkIqFrameBuffer, networkIqChannelizerOutput[i + 1U]);
+            appendInt16Le(networkIqFrameBuffer, networkIqChannelizerOutput[i] * outputGain);
+            appendInt16Le(networkIqFrameBuffer, networkIqChannelizerOutput[i + 1U] * outputGain);
             if (networkIqFrameBuffer.size() >=
                 frameSamples * FLOATS_PER_IQ_SAMPLE * static_cast<int>(sizeof(qint16))) {
                 emit iqFrameReady(networkIqFrameBuffer,

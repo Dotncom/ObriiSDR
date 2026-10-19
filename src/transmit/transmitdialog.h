@@ -7,6 +7,7 @@
 #include "signallabgenerator.h"
 
 #include <QDialog>
+#include <QByteArray>
 #include <QElapsedTimer>
 #include <QImage>
 #include <QVector>
@@ -20,16 +21,21 @@ class QComboBox;
 class QDoubleSpinBox;
 class QGroupBox;
 class QLabel;
+class QLineEdit;
 class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
 class QSpinBox;
+class QSlider;
 class QTimer;
 class QToolButton;
 class QIODevice;
 class TxWaveformPreviewWidget;
 class DmrTransmitEncoder;
 class SignalLabDialog;
+#ifdef _WIN32
+class WindowsMicrophoneCapture;
+#endif
 
 #ifdef FOBOSAPP_HAS_QT_MULTIMEDIA
 class QAudioInput;
@@ -65,6 +71,8 @@ private:
     void buildUi();
     void populateAudioInputs();
     void populateHackRfDevices();
+    void applyMicrophoneLevel();
+    void updateMicrophoneLevelText();
     void updateModeUi();
     void applyModulationPreset(TxModulation modulation);
     void updateTexts();
@@ -80,6 +88,7 @@ private:
     void startAudioFile(TxConfiguration configuration);
     void startImageTransmission(TxConfiguration configuration);
     void readMicrophone();
+    void processMicrophoneBytes(const QByteArray &bytes);
     void processLiveSource();
     QVector<std::complex<float>> modulateActiveAudio(const QVector<float> &audio,
                                                      QString *error);
@@ -117,6 +126,8 @@ private:
     QComboBox *audioInputCombo = nullptr;
     QComboBox *ft8SlotCombo = nullptr;
     QToolButton *audioRefreshButton = nullptr;
+    QSlider *microphoneLevelSlider = nullptr;
+    QLabel *microphoneLevelValueLabel = nullptr;
     QComboBox *sampleRateCombo = nullptr;
     QComboBox *deviceSampleRateCombo = nullptr;
     QComboBox *bandwidthCombo = nullptr;
@@ -132,7 +143,7 @@ private:
     QSpinBox *cwWpmSpin = nullptr;
     QDoubleSpinBox *symbolRateSpin = nullptr;
     QDoubleSpinBox *gaussianBtSpin = nullptr;
-    QSpinBox *askDepthSpin = nullptr;
+    QSpinBox *modulationDepthSpin = nullptr;
     QCheckBox *invertDataCheck = nullptr;
     QCheckBox *ft8UtcCheck = nullptr;
     QGroupBox *dmrBox = nullptr;
@@ -141,6 +152,9 @@ private:
     QSpinBox *dmrSourceIdSpin = nullptr;
     QSpinBox *dmrDestinationIdSpin = nullptr;
     QComboBox *dmrCallTypeCombo = nullptr;
+    QComboBox *dmrPrivacyCombo = nullptr;
+    QSpinBox *dmrPrivacyKeyIdSpin = nullptr;
+    QLineEdit *dmrPrivacyKeyEdit = nullptr;
     QPlainTextEdit *messageEdit = nullptr;
     QPushButton *startButton = nullptr;
     QPushButton *stopButton = nullptr;
@@ -167,18 +181,24 @@ private:
     QLabel *mediaPathLabel = nullptr;
     QLabel *mediaModeLabel = nullptr;
     QLabel *audioInputLabel = nullptr;
+    QLabel *microphoneLevelLabel = nullptr;
     QLabel *deviationLabel = nullptr;
     QLabel *signalBandwidthLabel = nullptr;
     QLabel *toneLabel = nullptr;
     QLabel *cwSpeedLabel = nullptr;
     QLabel *symbolRateLabel = nullptr;
     QLabel *gaussianBtLabel = nullptr;
-    QLabel *askDepthLabel = nullptr;
+    QLabel *modulationDepthLabel = nullptr;
     QLabel *dmrColorCodeLabel = nullptr;
     QLabel *dmrTimeslotLabel = nullptr;
     QLabel *dmrSourceIdLabel = nullptr;
     QLabel *dmrDestinationIdLabel = nullptr;
     QLabel *dmrCallTypeLabel = nullptr;
+    QLabel *dmrPrivacyLabel = nullptr;
+    QLabel *dmrPrivacyKeyIdLabel = nullptr;
+    QLabel *dmrPrivacyKeyLabel = nullptr;
+    int amDepthPercent = 90;
+    int askDepthPercent = 70;
     QLabel *statusLabel = nullptr;
     QLabel *statsLabel = nullptr;
     QProgressBar *progressBar = nullptr;
@@ -187,13 +207,18 @@ private:
     QTimer *progressTimer = nullptr;
     QTimer *ft8StartTimer = nullptr;
     QTimer *sourceTimer = nullptr;
+    QTimer *microphoneLevelApplyTimer = nullptr;
     QElapsedTimer elapsedTimer;
+    int hackRfStoppedStreamPolls = 0;
     double plannedDurationSeconds = 0.0;
     QVector<std::complex<float>> pendingTextIq;
     bool textSimulation = false;
     bool automaticFt8Active = false;
     bool pttMode = false;
     bool liveKeyPressed = false;
+    float microphoneRmsDb = -120.0f;
+    float microphonePeakDb = -120.0f;
+    float microphoneSoftwareGain = 1.0f;
     bool mediaPaused = false;
     QString mediaPath;
     QImage preparedMediaImage;
@@ -205,6 +230,20 @@ private:
 #ifdef FOBOSAPP_HAS_QT_MULTIMEDIA
     QAudioInput *audioInput = nullptr;
     QIODevice *audioDevice = nullptr;
+    int audioCaptureChannels = 1;
+    int audioCaptureSampleSize = 16;
+    int audioCaptureSampleType = 0;
+    bool audioCaptureLittleEndian = true;
+    QByteArray audioCapturePendingBytes;
+    QElapsedTimer microphoneDiagnosticTimer;
+    qint64 microphoneDiagnosticFrames = 0;
+    qint64 microphoneDiagnosticNonZeroFrames = 0;
+    float microphoneDcPreviousInput = 0.0f;
+    float microphoneDcPreviousOutput = 0.0f;
+    bool microphoneSilenceWarned = false;
+#endif
+#ifdef _WIN32
+    WindowsMicrophoneCapture *windowsMicrophoneCapture = nullptr;
 #endif
 };
 

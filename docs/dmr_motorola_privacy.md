@@ -45,6 +45,26 @@ Legacy saved forwarding-checkbox values are ignored during settings import.
 The UI and DSP board identify the selected backend's decryption capabilities:
 native ARC4/AES-256, DSD-neo ARC4/AES-256, Gopher ARC4 only (no DMR AES).
 
+## Transmission
+
+The transmit dialog supports clear voice, Motorola ARC4 40-bit privacy and
+AES-256. Select DMR, choose the privacy mode and KID, and enter exactly 10
+ARC4 or 64 AES hexadecimal digits. The transmit key is stored in the local
+application settings for reuse, but is never printed in diagnostics.
+
+Protected calls set the Voice LC and EMB privacy indicators, send repeated
+CRC/BPTC-protected PI headers with a fresh random MI, and carry the next MI in
+the A-F late-entry fragments. Encryption is applied to the 49 AMBE payload
+bits before the 72-bit AMBE channel code is regenerated. This is important:
+XORing an already channel-coded frame is not compatible with DMR receivers.
+The transmitter advances the keystream by the absolute 18-frame superframe
+ordinal and rotates MI at each superframe boundary.
+
+Interoperability still depends on matching the radio's algorithm, KID, key,
+Color Code, time slot, call type and destination. AES operation may also
+depend on radio firmware and feature licensing. Use protected transmission
+only where the operator is authorized and local radio rules permit it.
+
 ## Verification And Limits
 
 `ObriiDmrPrivacySelfTest` checks RFC 6229 RC4 and NIST SP800-38A AES-256-OFB
@@ -63,8 +83,9 @@ Synthetic 24/48 kHz PCM tests end blocks at sync and inside the trailing half
 of A, checking that exactly three frames arrive with their RF positions intact.
 
 Verbose diagnostics include mode, key width, PI/late-entry counts and reasons
-for muted frames. They never print keys or decrypted AMBE. No new UI control,
-network upload, FFT/IQ processing or persistent recording is introduced.
+for muted frames. Transmit diagnostics include mode, KID and MI. They never
+print keys or decrypted AMBE. No network key upload, FFT/IQ processing or
+persistent decrypted recording is introduced.
 
 Protocol references: the existing Gopher adapter's verified DMRA timing,
 DSD's PI/late-entry/OFB conventions, and the [DSD-neo privacy documentation](https://github.com/arancormonk/dsd-neo/blob/main/docs/decryption-profiles.md).

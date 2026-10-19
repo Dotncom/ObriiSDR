@@ -52,6 +52,7 @@ public slots:
 signals:
     void frameReady(const QImage &frame);
     void statusChanged(const QString &status);
+    void analogLockMetrics(int hsyncPercent, bool verticalSync, double levelSpan);
 
 private:
     enum class SstvDecodeFamily {
@@ -142,6 +143,7 @@ private:
     double activeListeningFrequency = 0.0;
     int activeInputMode = 0;
     int samplesPerLine = 0;
+    double lineSamplePhase = 0.0;
     QVector<float> currentLine;
     QImage raster;
     int nextLine = 0;
@@ -165,6 +167,7 @@ private:
     int testPatternLine = 0;
     int hSyncLockedLines = 0;
     int hSyncObservedLines = 0;
+    int lastHSyncPercent = 0;
 
     double ncoPhase = 0.0;
     std::complex<float> decimationSum = {0.0f, 0.0f};

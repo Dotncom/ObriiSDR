@@ -15,6 +15,8 @@
 #include <QAbstractButton>
 #include <QButtonGroup>
 #include <QCheckBox>
+#include <QColor>
+#include <QColorDialog>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -531,6 +533,11 @@ visualization.insert(QStringLiteral("historyRows"), waterfall3DHistoryRows);
     visualization.insert(QStringLiteral("waterfallAreaMeasurementEnabled"), waterfallAreaMeasurementEnabled);
     visualization.insert(QStringLiteral("waterfall3DFixedPlane"), waterfall3DFixedPlane);
     visualization.insert(QStringLiteral("waterfall3DMonochrome"), waterfall3DMonochrome);
+    visualization.insert(QStringLiteral("waterfall3DHeightGradient"), waterfall3DHeightGradient);
+    visualization.insert(QStringLiteral("waterfall3DMonochromeColor"),
+                         waterfall3DMonochromeColor.name(QColor::HexRgb));
+    visualization.insert(QStringLiteral("waterfall3DMonochromeGradientDepth"),
+                         waterfall3DMonochromeGradientDepth);
     visualization.insert(QStringLiteral("waterfall3DSurfaceStyle"), waterfall3DSurfaceStyle);
     visualization.insert(QStringLiteral("waterfall3DSmoothing"), waterfall3DSmoothing);
     visualization.insert(QStringLiteral("waterfall3DLighting"), waterfall3DLighting);
@@ -1210,6 +1217,9 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         QSlider *workspaceContrast = nullptr;
         QCheckBox *workspaceFixedPlane = nullptr;
         QCheckBox *workspaceMonochrome = nullptr;
+        QCheckBox *workspaceHeightGradient = nullptr;
+        QPushButton *workspaceMonochromeColor = nullptr;
+        QSlider *workspaceMonochromeDepth = nullptr;
         QComboBox *workspaceResolution = nullptr;
         QComboBox *workspaceSurface = nullptr;
         QComboBox *workspaceSmoothing = nullptr;
@@ -1258,14 +1268,45 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
                 text("Зафіксувати площину", "Fix plane"), dialog);
             workspaceMonochrome = new QCheckBox(
                 text("Однотонний синій 3D", "Monochrome blue 3D"), dialog);
+            workspaceHeightGradient = new QCheckBox(
+                text("Градієнт за висотою", "Height gradient"), dialog);
+            workspaceMonochromeColor = new QPushButton(dialog);
+            QColor workspaceBaseColor(blockSettings.value(
+                QStringLiteral("waterfall3DMonochromeColor")).toString(
+                    waterfall3DMonochromeColor.name(QColor::HexRgb)));
+            if (!workspaceBaseColor.isValid()) workspaceBaseColor = QColor(45, 104, 196);
+            workspaceMonochromeColor->setProperty(
+                "selectedColor", workspaceBaseColor.name(QColor::HexRgb));
+            workspaceMonochromeColor->setText(
+                workspaceBaseColor.name(QColor::HexRgb).toUpper());
+            workspaceMonochromeColor->setStyleSheet(QStringLiteral(
+                "QPushButton { background:%1; color:%2; }")
+                .arg(workspaceBaseColor.name(QColor::HexRgb),
+                     (workspaceBaseColor.lightnessF() > 0.58 ? QColor(Qt::black)
+                                                             : QColor(Qt::white))
+                         .name(QColor::HexRgb)));
             workspaceFixedPlane->setChecked(
                 blockSettings.value(QStringLiteral("waterfall3DFixedPlane")).toBool(
                     waterfall3DFixedPlane));
             workspaceMonochrome->setChecked(
                 blockSettings.value(QStringLiteral("waterfall3DMonochrome")).toBool(
                     waterfall3DMonochrome));
+            workspaceHeightGradient->setChecked(
+                blockSettings.value(QStringLiteral("waterfall3DHeightGradient")).toBool(
+                    waterfall3DHeightGradient));
             form->addRow(QString(), workspaceFixedPlane);
             form->addRow(QString(), workspaceMonochrome);
+            form->addRow(QString(), workspaceHeightGradient);
+            form->addRow(text("Колір 3D:", "3D color:"), workspaceMonochromeColor);
+            form->addRow(text("Глибина градієнта:", "Gradient depth:"),
+                         valueSlider(&workspaceMonochromeDepth,
+                                     dialog,
+                                     0,
+                                     100,
+                                     blockSettings.value(QStringLiteral(
+                                         "waterfall3DMonochromeGradientDepth"))
+                                         .toInt(waterfall3DMonochromeGradientDepth),
+                                     QStringLiteral("%")));
             workspaceResolution = new QComboBox(dialog);
             for (int divisor : {1, 2, 4, 8, 16, 32, 64})
                 workspaceResolution->addItem(QStringLiteral("1/%1").arg(divisor), divisor);
@@ -1398,7 +1439,9 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
                                              workspaceColor, workspaceGradient,
                                              workspaceGradientOpacity, workspaceSensitivity,
                                              workspaceContrast, workspaceFixedPlane,
-                                             workspaceMonochrome, workspaceResolution,
+                                             workspaceMonochrome, workspaceHeightGradient,
+                                             workspaceMonochromeColor, workspaceMonochromeDepth,
+                                             workspaceResolution,
                                              workspaceSurface, workspaceSmoothing, workspaceLighting,
                                              workspaceHistory, workspaceFrequencyStep,
                                              workspaceFrequencyWidth, workspaceSpectrumStep,
@@ -1433,6 +1476,15 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
             if (workspaceMonochrome)
                 settings.insert(QStringLiteral("waterfall3DMonochrome"),
                                 workspaceMonochrome->isChecked());
+            if (workspaceHeightGradient)
+                settings.insert(QStringLiteral("waterfall3DHeightGradient"),
+                                workspaceHeightGradient->isChecked());
+            if (workspaceMonochromeColor)
+                settings.insert(QStringLiteral("waterfall3DMonochromeColor"),
+                                workspaceMonochromeColor->property("selectedColor").toString());
+            if (workspaceMonochromeDepth)
+                settings.insert(QStringLiteral("waterfall3DMonochromeGradientDepth"),
+                                workspaceMonochromeDepth->value());
             if (workspaceResolution) {
                 settings.insert(QStringLiteral("resolutionDivisor"),
                                 workspaceResolution->currentData().toInt());
@@ -1499,6 +1551,32 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         if (workspaceMonochrome)
             connect(workspaceMonochrome, &QCheckBox::toggled, dialog,
                     [applyWorkspaceSettings](bool) { applyWorkspaceSettings(); });
+        if (workspaceHeightGradient)
+            connect(workspaceHeightGradient, &QCheckBox::toggled, dialog,
+                    [applyWorkspaceSettings](bool) { applyWorkspaceSettings(); });
+        if (workspaceMonochromeColor) {
+            connect(workspaceMonochromeColor, &QPushButton::clicked, dialog,
+                    [workspaceMonochromeColor, applyWorkspaceSettings, dialog]() {
+                        QColor current(workspaceMonochromeColor->property("selectedColor").toString());
+                        const QColor selected = QColorDialog::getColor(
+                            current.isValid() ? current : QColor(45, 104, 196), dialog);
+                        if (!selected.isValid()) return;
+                        workspaceMonochromeColor->setProperty(
+                            "selectedColor", selected.name(QColor::HexRgb));
+                        workspaceMonochromeColor->setText(
+                            selected.name(QColor::HexRgb).toUpper());
+                        workspaceMonochromeColor->setStyleSheet(QStringLiteral(
+                            "QPushButton { background:%1; color:%2; }")
+                            .arg(selected.name(QColor::HexRgb),
+                                 (selected.lightnessF() > 0.58 ? QColor(Qt::black)
+                                                              : QColor(Qt::white))
+                                     .name(QColor::HexRgb)));
+                        applyWorkspaceSettings();
+                    });
+        }
+        if (workspaceMonochromeDepth)
+            connect(workspaceMonochromeDepth, &QSlider::valueChanged, dialog,
+                    [applyWorkspaceSettings](int) { applyWorkspaceSettings(); });
         for (QComboBox *combo : {workspaceResolution, workspaceSurface,
                                  workspaceSmoothing, workspaceLighting}) {
             if (combo) connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), dialog,
@@ -1973,12 +2051,33 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
             text("Зафіксувати площину", "Fix plane"), dialog);
         auto *profileMonochrome = new QCheckBox(
             text("Однотонний синій 3D", "Monochrome blue 3D"), dialog);
+        auto *profileHeightGradient = new QCheckBox(
+            text("Градієнт за висотою", "Height gradient"), dialog);
+        auto *profileMonochromeColor = new QPushButton(dialog);
+        QColor profileBaseColor(stored.value(
+            QStringLiteral("waterfall3DMonochromeColor")).toString(
+                waterfall3DMonochromeColor.name(QColor::HexRgb)));
+        if (!profileBaseColor.isValid()) profileBaseColor = QColor(45, 104, 196);
+        profileMonochromeColor->setProperty(
+            "selectedColor", profileBaseColor.name(QColor::HexRgb));
+        profileMonochromeColor->setText(profileBaseColor.name(QColor::HexRgb).toUpper());
+        profileMonochromeColor->setStyleSheet(QStringLiteral(
+            "QPushButton { background:%1; color:%2; }")
+            .arg(profileBaseColor.name(QColor::HexRgb),
+                 (profileBaseColor.lightnessF() > 0.58 ? QColor(Qt::black)
+                                                       : QColor(Qt::white))
+                     .name(QColor::HexRgb)));
         profileFixedPlane->setChecked(
             stored.value(QStringLiteral("waterfall3DFixedPlane")).toBool(waterfall3DFixedPlane));
         profileMonochrome->setChecked(
             stored.value(QStringLiteral("waterfall3DMonochrome")).toBool(waterfall3DMonochrome));
+        profileHeightGradient->setChecked(
+            stored.value(QStringLiteral("waterfall3DHeightGradient")).toBool(
+                waterfall3DHeightGradient));
         profileFixedPlane->setVisible(waterfall3DProfile);
         profileMonochrome->setVisible(waterfall3DProfile);
+        profileHeightGradient->setVisible(waterfall3DProfile);
+        profileMonochromeColor->setVisible(waterfall3DProfile);
         QComboBox *profileResolution = nullptr;
         QComboBox *profileSurface = nullptr;
         QComboBox *profileSmoothing = nullptr;
@@ -1991,9 +2090,21 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         QCheckBox *profileCapture = nullptr;
         QCheckBox *profileCaptureFixed = nullptr;
         QCheckBox *profileVncInput = nullptr;
+        QSlider *profileMonochromeDepth = nullptr;
         if (waterfall3DProfile) {
             form->addRow(QString(), profileFixedPlane);
             form->addRow(QString(), profileMonochrome);
+            form->addRow(QString(), profileHeightGradient);
+            form->addRow(text("Колір 3D:", "3D color:"), profileMonochromeColor);
+            form->addRow(text("Глибина градієнта:", "Gradient depth:"),
+                         valueSlider(&profileMonochromeDepth,
+                                     dialog,
+                                     0,
+                                     100,
+                                     stored.value(QStringLiteral(
+                                         "waterfall3DMonochromeGradientDepth"))
+                                         .toInt(waterfall3DMonochromeGradientDepth),
+                                     QStringLiteral("%")));
             profileResolution = new QComboBox(dialog);
             for (int divisor : {1, 2, 4, 8, 16, 32, 64})
                 profileResolution->addItem(QStringLiteral("1/%1").arg(divisor), divisor);
@@ -2075,7 +2186,9 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         const auto applyProfile = [this, id, spectrumProfile, waterfall3DProfile,
                                    minimum, maximum, profileSensitivity, profileContrast,
                                    profileMode, profileColor, profileGradient, profileOpacity,
-                                   profileFixedPlane, profileMonochrome, profileResolution,
+                                   profileFixedPlane, profileMonochrome, profileHeightGradient,
+                                   profileMonochromeColor, profileMonochromeDepth,
+                                   profileResolution,
                                    profileSurface, profileSmoothing, profileLighting, profileHistory,
                                    profileFrequencyStep, profileFrequencyWidth, profileSpectrumStep,
                                    profileSpectrumRows, profileCapture, profileCaptureFixed,
@@ -2109,6 +2222,12 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
                                 profileFixedPlane->isChecked());
                 settings.insert(QStringLiteral("waterfall3DMonochrome"),
                                 profileMonochrome->isChecked());
+                settings.insert(QStringLiteral("waterfall3DHeightGradient"),
+                                profileHeightGradient->isChecked());
+                settings.insert(QStringLiteral("waterfall3DMonochromeColor"),
+                                profileMonochromeColor->property("selectedColor").toString());
+                settings.insert(QStringLiteral("waterfall3DMonochromeGradientDepth"),
+                                profileMonochromeDepth->value());
                 settings.insert(QStringLiteral("resolutionDivisor"),
                                 profileResolution->currentData().toInt());
                 settings.insert(QStringLiteral("waterfall3DSurfaceStyle"),
@@ -2175,6 +2294,28 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
                 [applyProfile](bool) { applyProfile(); });
         connect(profileMonochrome, &QCheckBox::toggled, dialog,
                 [applyProfile](bool) { applyProfile(); });
+        connect(profileHeightGradient, &QCheckBox::toggled, dialog,
+                [applyProfile](bool) { applyProfile(); });
+        connect(profileMonochromeColor, &QPushButton::clicked, dialog,
+                [profileMonochromeColor, applyProfile, dialog]() {
+                    QColor current(profileMonochromeColor->property("selectedColor").toString());
+                    const QColor selected = QColorDialog::getColor(
+                        current.isValid() ? current : QColor(45, 104, 196), dialog);
+                    if (!selected.isValid()) return;
+                    profileMonochromeColor->setProperty(
+                        "selectedColor", selected.name(QColor::HexRgb));
+                    profileMonochromeColor->setText(selected.name(QColor::HexRgb).toUpper());
+                    profileMonochromeColor->setStyleSheet(QStringLiteral(
+                        "QPushButton { background:%1; color:%2; }")
+                        .arg(selected.name(QColor::HexRgb),
+                             (selected.lightnessF() > 0.58 ? QColor(Qt::black)
+                                                          : QColor(Qt::white))
+                                 .name(QColor::HexRgb)));
+                    applyProfile();
+                });
+        if (profileMonochromeDepth)
+            connect(profileMonochromeDepth, &QSlider::valueChanged, dialog,
+                    [applyProfile](int) { applyProfile(); });
         if (profileResolution)
             connect(profileResolution, QOverload<int>::of(&QComboBox::currentIndexChanged), dialog,
                     [applyProfile](int) { applyProfile(); });

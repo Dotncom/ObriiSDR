@@ -1,6 +1,9 @@
 #include "dmrtransmitencoder.h"
+#include "digital/dmrprivacycodec.h"
+#include "utils/dmrprivacyutils.h"
 
 #include <QtGlobal>
+#include <QRandomGenerator>
 
 #include <algorithm>
 #include <array>
@@ -17,7 +20,11 @@ constexpr int ActiveBurstBytes = 33;
 constexpr int FillBytes = 39;
 constexpr int VoiceLcHeaderType = 0x01;
 constexpr int TerminatorWithLcType = 0x02;
-constexpr int HeaderRepeats = 3;
+constexpr int PrivacyIndicatorHeaderType = 0x00;
+// Direct-mode receivers need more acquisition time than a duplex repeater.
+// This matches the established MMDVM simplex transmit sequence.
+constexpr int HeaderRepeats = 8;
+constexpr int PrivacyHeaderRepeats = 3;
 constexpr int TerminatorRepeats = 2;
 constexpr int TxPreambleBytes = 240;
 
@@ -86,6 +93,23 @@ quint32 golay2087(quint8 value) {
     const quint32 shifted = static_cast<quint32>(value) << 11U;
     const quint32 code19 = shifted | polynomialRemainder(shifted, 18, 0x0C75, 11);
     return (code19 << 1U) | static_cast<quint32>(parity(code19));
+}
+
+quint32 golay24128(quint16 value) {
+    const quint32 shifted = static_cast<quint32>(value & 0x0FFFU) << 11U;
+    const quint32 code23 = shifted | polynomialRemainder(shifted, 22, 0x0C75, 11);
+    return (code23 << 1U) | static_cast<quint32>(parity(code23));
+}
+
+quint16 crcCcitt(const QByteArray &bytes) {
+    quint16 crc = 0;
+    for (char raw : bytes) {
+        crc ^= static_cast<quint16>(static_cast<quint8>(raw)) << 8U;
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = static_cast<quint16>((crc << 1U) ^ ((crc & 0x8000U) ? 0x1021U : 0U));
+        }
+    }
+    return crc;
 }
 
 quint16 qr1676(quint8 value) {
@@ -169,7 +193,7 @@ QByteArray lcPayload(const DmrTxParameters &p) {
     QByteArray lc(9, '\0');
     lc[0] = static_cast<char>(p.privateCall ? 0x03 : 0x00);
     lc[1] = 0x00;
-    lc[2] = 0x00;
+    lc[2] = static_cast<char>(p.privacyMode == DMR_PRIVACY_NONE ? 0x00 : 0x40);
     lc[3] = static_cast<char>((p.destinationId >> 16U) & 0xFFU);
     lc[4] = static_cast<char>((p.destinationId >> 8U) & 0xFFU);
     lc[5] = static_cast<char>(p.destinationId & 0xFFU);
@@ -227,8 +251,10 @@ void addSlotType(QByteArray &burst, const DmrTxParameters &p, int dataType) {
     for (int bit = 0; bit < 10; ++bit) setBit(burst, 156 + bit, (code & (1U << (9 - bit))) != 0U);
 }
 
-void addEmb(QByteArray &burst, int colorCode, int lcss) {
-    const quint8 value = static_cast<quint8>(((colorCode & 0x0F) << 3) | (lcss & 0x03));
+void addEmb(QByteArray &burst, int colorCode, bool privacy, int lcss) {
+    const quint8 value = static_cast<quint8>(((colorCode & 0x0F) << 3) |
+                                             (privacy ? 0x04 : 0x00) |
+                                             (lcss & 0x03));
     const quint16 code = qr1676(value);
     for (int bit = 0; bit < 8; ++bit) setBit(burst, 108 + bit, (code & (1U << (15 - bit))) != 0U);
     for (int bit = 0; bit < 8; ++bit) setBit(burst, 148 + bit, (code & (1U << (7 - bit))) != 0U);
@@ -249,6 +275,10 @@ bool DmrTransmitEncoder::canEncodeVoice() const {
     return vocoder.canEncode();
 }
 
+quint32 DmrTransmitEncoder::currentPrivacyMiValue() const {
+    return currentPrivacyMi;
+}
+
 bool DmrTransmitEncoder::configure(const DmrTxParameters &next, QString *error) {
     if (next.outputSampleRate < InternalSampleRate || next.outputSampleRate > 1000000) {
         if (error) *error = QStringLiteral("DMR generator rate must be between 24 kHz and 1 MHz");
@@ -263,6 +293,24 @@ bool DmrTransmitEncoder::configure(const DmrTxParameters &next, QString *error) 
     if (!vocoder.canEncode()) {
         if (error) *error = QStringLiteral("No DMR AMBE+2 encoder backend is available (OpenDMR backend required)");
         return false;
+    }
+    if (next.privacyMode != DMR_PRIVACY_NONE &&
+        next.privacyMode != DMR_PRIVACY_ARC4 &&
+        next.privacyMode != DMR_PRIVACY_AES256) {
+        if (error) *error = QStringLiteral("Unsupported DMR privacy mode");
+        return false;
+    }
+    if (next.privacyMode != DMR_PRIVACY_NONE) {
+        const int requiredBytes = next.privacyMode == DMR_PRIVACY_ARC4 ? 5 : 32;
+        if (next.privacyKey.size() != requiredBytes ||
+            next.privacyKeyId < 0 || next.privacyKeyId > 255) {
+            if (error) *error = QStringLiteral("Invalid DMR privacy key or KID");
+            return false;
+        }
+        if (!vocoder.canEncodePrivacy()) {
+            if (error) *error = QStringLiteral("The selected AMBE backend cannot encode protected DMR voice");
+            return false;
+        }
     }
     parameters = next;
     parameters.level = (std::clamp)(parameters.level, 0.0f, 0.95f);
@@ -283,6 +331,10 @@ void DmrTransmitEncoder::resetCallState() {
     symbolHistory.fill(0.0f);
     phase = 0.0;
     voiceBurstIndex = 0;
+    currentPrivacyMi = 0;
+    nextPrivacyMi = 0;
+    privacyStream.clear();
+    privacyLateEntry.fill(0);
     active = false;
     vocoder.reset();
 }
@@ -299,10 +351,26 @@ QVector<std::complex<float>> DmrTransmitEncoder::begin(QString *error) {
     }
     resetCallState();
     active = true;
+    if (parameters.privacyMode != DMR_PRIVACY_NONE) {
+        quint32 mi = parameters.privacyMiProvided
+                         ? parameters.privacyMi
+                         : QRandomGenerator::system()->generate();
+        if (!parameters.privacyMiProvided && mi == 0U) mi = 1U;
+        if (!preparePrivacySuperframe(mi, error)) {
+            active = false;
+            return {};
+        }
+    }
     QVector<std::complex<float>> result;
     appendIq(result, modulateBytes(QByteArray(TxPreambleBytes, static_cast<char>(0x5F))));
     const QByteArray header = buildLinkControlBurst(parameters, false);
     for (int repeat = 0; repeat < HeaderRepeats; ++repeat) appendIq(result, modulateBurst(header));
+    if (parameters.privacyMode != DMR_PRIVACY_NONE) {
+        const QByteArray privacyHeader = buildPrivacyIndicatorBurst(parameters, currentPrivacyMi);
+        for (int repeat = 0; repeat < PrivacyHeaderRepeats; ++repeat) {
+            appendIq(result, modulateBurst(privacyHeader));
+        }
+    }
     return result;
 }
 
@@ -324,6 +392,63 @@ QByteArray DmrTransmitEncoder::buildLinkControlBurst(const DmrTxParameters &p, b
     return burst;
 }
 
+QByteArray DmrTransmitEncoder::buildPrivacyIndicatorBurst(const DmrTxParameters &p,
+                                                          quint32 mi) {
+    if (p.privacyMode != DMR_PRIVACY_ARC4 && p.privacyMode != DMR_PRIVACY_AES256) return {};
+    QByteArray payload(10, '\0');
+    const int algorithm = p.privacyMode == DMR_PRIVACY_ARC4 ? 1 : 5;
+    payload[0] = static_cast<char>(0x20 | algorithm);
+    payload[1] = static_cast<char>(0x10); // Motorola feature-set ID.
+    payload[2] = static_cast<char>(p.privacyKeyId & 0xFF);
+    payload[3] = static_cast<char>((mi >> 24U) & 0xFFU);
+    payload[4] = static_cast<char>((mi >> 16U) & 0xFFU);
+    payload[5] = static_cast<char>((mi >> 8U) & 0xFFU);
+    payload[6] = static_cast<char>(mi & 0xFFU);
+    payload[7] = static_cast<char>((p.destinationId >> 16U) & 0xFFU);
+    payload[8] = static_cast<char>((p.destinationId >> 8U) & 0xFFU);
+    payload[9] = static_cast<char>(p.destinationId & 0xFFU);
+    const quint16 crc = static_cast<quint16>(crcCcitt(payload) ^ 0xFFFFU ^ 0x6969U);
+    payload.append(static_cast<char>((crc >> 8U) & 0xFFU));
+    payload.append(static_cast<char>(crc & 0xFFU));
+
+    const std::array<bool, 196> coded = bptc19696(payload);
+    QByteArray burst(ActiveBurstBytes, '\0');
+    for (int bit = 0; bit < 98; ++bit) setBit(burst, bit, coded[static_cast<std::size_t>(bit)]);
+    for (int bit = 98; bit < 196; ++bit) setBit(burst, bit + 68, coded[static_cast<std::size_t>(bit)]);
+    addSlotType(burst, p, PrivacyIndicatorHeaderType);
+    addSync(burst, p.timeslot == 2 ? DirectTs2DataSync : DirectTs1DataSync);
+    return burst;
+}
+
+std::array<int, 18> DmrTransmitEncoder::buildLateEntryFragments(quint32 nextMi) {
+    quint8 crc = 0;
+    for (int bit = 31; bit >= 0; --bit) {
+        const int top = (crc >> 3) ^ ((nextMi >> bit) & 1U);
+        crc = static_cast<quint8>(((crc << 1U) ^ (top ? 3U : 0U)) & 0x0FU);
+    }
+    const quint64 message = (static_cast<quint64>(nextMi) << 4U) | (crc ^ 0x0FU);
+    quint64 parityBits = 0;
+    for (int block = 0; block < 3; ++block) {
+        const int shift = 24 - block * 12;
+        const quint16 data = static_cast<quint16>((message >> shift) & 0x0FFFU);
+        parityBits = (parityBits << 12U) | (golay24128(data) & 0x0FFFU);
+    }
+    std::array<int, 18> fragments{};
+    int messageShift = 32;
+    int parityShift = 32;
+    for (int frame = 0; frame < 3; ++frame) {
+        for (int burst = 0; burst < 3; ++burst) {
+            fragments[static_cast<std::size_t>(burst * 3 + frame)] =
+                static_cast<int>((message >> messageShift) & 0x0FU);
+            fragments[static_cast<std::size_t>((burst + 3) * 3 + frame)] =
+                static_cast<int>((parityBits >> parityShift) & 0x0FU);
+            messageShift -= 4;
+            parityShift -= 4;
+        }
+    }
+    return fragments;
+}
+
 QByteArray DmrTransmitEncoder::canonicalToOnAir(const QByteArray &canonicalFrame) {
     if (canonicalFrame.size() != 9) return {};
     QByteArray result(9, '\0');
@@ -335,18 +460,30 @@ QByteArray DmrTransmitEncoder::canonicalToOnAir(const QByteArray &canonicalFrame
 
 QByteArray DmrTransmitEncoder::buildVoiceBurst(const DmrTxParameters &p,
                                                 int burstIndex,
-                                                const std::array<QByteArray, 3> &canonicalFrames) {
+                                                const std::array<QByteArray, 3> &canonicalFrames,
+                                                const std::array<int, 18> *lateEntryFragments) {
     std::array<QByteArray, 3> frames = {canonicalToOnAir(canonicalFrames[0]),
                                         canonicalToOnAir(canonicalFrames[1]),
                                         canonicalToOnAir(canonicalFrames[2])};
     if (frames[0].size() != 9 || frames[1].size() != 9 || frames[2].size() != 9) return {};
+    const int sequence = ((burstIndex % 6) + 6) % 6;
+    if (lateEntryFragments) {
+        static constexpr std::array<int, 4> positions = {71, 67, 63, 59};
+        for (int frame = 0; frame < 3; ++frame) {
+            const int fragment = (*lateEntryFragments)[static_cast<std::size_t>(sequence * 3 + frame)];
+            for (int bit = 0; bit < 4; ++bit) {
+                setBit(frames[static_cast<std::size_t>(frame)],
+                       positions[static_cast<std::size_t>(bit)],
+                       ((fragment >> (3 - bit)) & 1) != 0);
+            }
+        }
+    }
     QByteArray burst(ActiveBurstBytes, '\0');
     for (int bit = 0; bit < 72; ++bit) setBit(burst, bit, bitAt(frames[0], bit));
     for (int bit = 0; bit < 36; ++bit) setBit(burst, 72 + bit, bitAt(frames[1], bit));
     for (int bit = 36; bit < 72; ++bit) setBit(burst, 120 + bit, bitAt(frames[1], bit));
     for (int bit = 0; bit < 72; ++bit) setBit(burst, 192 + bit, bitAt(frames[2], bit));
 
-    const int sequence = ((burstIndex % 6) + 6) % 6;
     if (sequence == 0) {
         addSync(burst, p.timeslot == 2 ? DirectTs2VoiceSync : DirectTs1VoiceSync);
     } else {
@@ -358,7 +495,7 @@ QByteArray DmrTransmitEncoder::buildVoiceBurst(const DmrTxParameters &p,
             }
             lcss = sequence == 1 ? 1 : (sequence == 4 ? 2 : 3);
         }
-        addEmb(burst, p.colorCode, lcss);
+        addEmb(burst, p.colorCode, p.privacyMode != DMR_PRIVACY_NONE, lcss);
     }
     return burst;
 }
@@ -431,10 +568,47 @@ void DmrTransmitEncoder::appendIq(QVector<std::complex<float>> &target,
 }
 
 bool DmrTransmitEncoder::encodePcmFrame(const std::array<qint16, 160> &pcm, QString *error) {
-    const QByteArray canonical = vocoder.encodeCanonicalFrame(pcm.data(), error);
+    QByteArray canonical;
+    if (parameters.privacyMode == DMR_PRIVACY_NONE) {
+        canonical = vocoder.encodeCanonicalFrame(pcm.data(), error);
+    } else {
+        QByteArray payload = vocoder.encodePayload49(pcm.data(), error);
+        const int ordinal = voiceBurstIndex * 3 + pendingCanonicalFrames.size();
+        if (payload.size() != 7 || privacyStream.size() != 126 || ordinal < 0 || ordinal >= 18) {
+            if (error && error->isEmpty()) *error = QStringLiteral("DMR privacy stream is not aligned");
+            return false;
+        }
+        for (int byte = 0; byte < 6; ++byte) {
+            payload[byte] = static_cast<char>(static_cast<quint8>(payload.at(byte)) ^
+                                              static_cast<quint8>(privacyStream.at(ordinal * 7 + byte)));
+        }
+        payload[6] = static_cast<char>((static_cast<quint8>(payload.at(6)) ^
+                                        static_cast<quint8>(privacyStream.at(ordinal * 7 + 6))) & 0x80U);
+        canonical = vocoder.canonicalFromPayload49(payload, error);
+    }
     if (canonical.size() != 9) return false;
     pendingCanonicalFrames.append(canonical);
     return true;
+}
+
+bool DmrTransmitEncoder::preparePrivacySuperframe(quint32 mi, QString *error) {
+    currentPrivacyMi = mi;
+    nextPrivacyMi = DmrPrivacyCodec::nextMi(mi, parameters.privacyMode == DMR_PRIVACY_AES256);
+    privacyStream = DmrPrivacyCodec::voiceKeystream(parameters.privacyMode,
+                                                    parameters.privacyKey,
+                                                    currentPrivacyMi);
+    privacyLateEntry = buildLateEntryFragments(nextPrivacyMi);
+    if (privacyStream.size() != 126) {
+        if (error) *error = QStringLiteral("Could not initialize the DMR privacy keystream");
+        return false;
+    }
+    return true;
+}
+
+void DmrTransmitEncoder::advancePrivacySuperframe(QString *error) {
+    if (parameters.privacyMode != DMR_PRIVACY_NONE) {
+        preparePrivacySuperframe(nextPrivacyMi, error);
+    }
 }
 
 QVector<std::complex<float>> DmrTransmitEncoder::encodeReadyAudio(QString *error) {
@@ -448,9 +622,13 @@ QVector<std::complex<float>> DmrTransmitEncoder::encodeReadyAudio(QString *error
             const std::array<QByteArray, 3> voice = {pendingCanonicalFrames[0],
                                                     pendingCanonicalFrames[1],
                                                     pendingCanonicalFrames[2]};
-            appendIq(result, modulateBurst(buildVoiceBurst(parameters, voiceBurstIndex, voice)));
+            appendIq(result, modulateBurst(buildVoiceBurst(
+                parameters, voiceBurstIndex, voice,
+                parameters.privacyMode == DMR_PRIVACY_NONE ? nullptr : &privacyLateEntry)));
             pendingCanonicalFrames.clear();
             voiceBurstIndex = (voiceBurstIndex + 1) % 6;
+            if (voiceBurstIndex == 0) advancePrivacySuperframe(error);
+            if (error && !error->isEmpty()) return {};
         }
     }
     return result;
@@ -500,7 +678,9 @@ QVector<std::complex<float>> DmrTransmitEncoder::finish(QString *error) {
         const std::array<QByteArray, 3> voice = {pendingCanonicalFrames[0],
                                                 pendingCanonicalFrames[1],
                                                 pendingCanonicalFrames[2]};
-        appendIq(result, modulateBurst(buildVoiceBurst(parameters, voiceBurstIndex, voice)));
+        appendIq(result, modulateBurst(buildVoiceBurst(
+            parameters, voiceBurstIndex, voice,
+            parameters.privacyMode == DMR_PRIVACY_NONE ? nullptr : &privacyLateEntry)));
         pendingCanonicalFrames.clear();
     }
     const QByteArray terminator = buildLinkControlBurst(parameters, true);

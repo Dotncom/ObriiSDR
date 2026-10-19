@@ -296,6 +296,35 @@ void YourClassName::continueUsbDeviceRefresh() {
     const bool found = std::any_of(availableFobosDevices.cbegin(), availableFobosDevices.cend(),
                                   [](const FobosDeviceInfo &info) { return info.present; });
     const bool selectedMissing = pendingSettings.deviceIndex >= 0 && !selectedFobosDeviceInfo().present;
+    const bool selectedFobosReady = !isExternalReceiverBackendSelected() &&
+                                    selectedFobosDeviceInfo().present;
+    if (!hasActiveFobosDevice() && selectedFobosReady) {
+        // Enumeration uses temporary handles. Give the USB driver a brief moment
+        // to release them, then prepare the same idle session that startup creates.
+        // Start intentionally launches only the reader, so without this step a
+        // hot-plugged Fobos is visible in the list but cannot be started.
+        usbDeviceRefreshTimer->stop();
+        QTimer::singleShot(250, this, [this]() {
+            if (closeShutdownInProgress || isNetworkClientMode() || !isIdle() ||
+                (processor && processor->isRunning()) || hasActiveFobosDevice() ||
+                isExternalReceiverBackendSelected() || !selectedFobosDeviceInfo().present) {
+                return;
+            }
+
+            if (prepareFobosSessionFromSettings(QStringLiteral("USB refresh hot-plug"))) {
+                updateUiForRunState();
+                if (networkMode == NetworkMode::Server) {
+                    sendServerStateToClients();
+                }
+                return;
+            }
+
+            if (--usbDeviceRefreshPassesRemaining > 0 && usbDeviceRefreshTimer) {
+                usbDeviceRefreshTimer->start();
+            }
+        });
+        return;
+    }
     if (hasActiveFobosDevice() || (found && !selectedMissing) || --usbDeviceRefreshPassesRemaining <= 0) {
         usbDeviceRefreshTimer->stop();
     }

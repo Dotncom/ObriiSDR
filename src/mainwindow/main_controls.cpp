@@ -47,8 +47,13 @@ void YourClassName::updateCentralFrequency() {
        if (scaleWidget) {
            scaleWidget->setTuning(pendingSettings.listeningFrequency,
                                   pendingSettings.centerFrequency,
-                                  pendingSettings.bandwidth,
-                                  pendingSettings.modulationType);
+                                  effectiveDemodulationBandwidth(
+                                      pendingSettings.bandwidth,
+                                      pendingSettings.modulationType,
+                                      pendingSettings.sstvDemodulationMode),
+                                  effectiveDemodulationModulationType(
+                                      pendingSettings.modulationType,
+                                      pendingSettings.sstvDemodulationMode));
        }
        return;
    }
@@ -77,8 +82,30 @@ void YourClassName::updateTuningFromScale(double tunedListeningFrequency, double
         listeningFrequencyControl->setValueHz(pendingSettings.listeningFrequency);
     }
     settingRange();
+    updateQuickHamPanel();
     if (isNetworkClientMode()) {
         scheduleRemoteSettingsCommand(0);
+    }
+}
+
+void YourClassName::updateQuickHamPanel() {
+    if (quickHamBandButtonGroup) {
+        const double frequency = pendingSettings.inputMode == INPUT_RF
+                                     ? pendingSettings.centerFrequency
+                                     : pendingSettings.listeningFrequency;
+        for (QAbstractButton *button : quickHamBandButtonGroup->buttons()) {
+            const double low = button->property("bandLowHz").toDouble();
+            const double high = button->property("bandHighHz").toDouble();
+            const QSignalBlocker blocker(button);
+            button->setChecked(std::isfinite(frequency) && frequency >= low && frequency <= high);
+        }
+    }
+    if (quickHamModeButtonGroup) {
+        for (QAbstractButton *button : quickHamModeButtonGroup->buttons()) {
+            const QSignalBlocker blocker(button);
+            button->setChecked(quickHamModeButtonGroup->id(button) ==
+                               pendingSettings.modulationType);
+        }
     }
 }
 
@@ -113,9 +140,12 @@ void YourClassName::showTuneContextMenu(double frequency, const QPoint &globalPo
 
 void YourClassName::tuneSignalCenterAt(double frequency) {
     double listeningTarget = frequency;
-    if (isUpperSidebandMode(pendingSettings.modulationType)) {
+    const int effectiveModulationType = effectiveDemodulationModulationType(
+        pendingSettings.modulationType,
+        pendingSettings.sstvDemodulationMode);
+    if (isUpperSidebandMode(effectiveModulationType)) {
         listeningTarget = frequency - pendingSettings.bandwidth * 0.5;
-    } else if (isLowerSidebandMode(pendingSettings.modulationType)) {
+    } else if (isLowerSidebandMode(effectiveModulationType)) {
         listeningTarget = frequency + pendingSettings.bandwidth * 0.5;
     }
     const double visibleSpanHz = std::isfinite(maxFrequency) && std::isfinite(minFrequency) && maxFrequency > minFrequency
@@ -218,6 +248,7 @@ void YourClassName::panSpectrumView(int deltaPixels, int widthPixels) {
 
 void YourClassName::onModulationChanged(int id) {
     pendingSettings.modulationType = id;
+    updateQuickHamPanel();
     if (cwDecoderControlsWidget) {
         cwDecoderControlsWidget->setVisible(id == MOD_CW);
     }
@@ -649,8 +680,13 @@ void YourClassName::onBandwidthChanged() {
     if (scaleWidget) {
         scaleWidget->setTuning(pendingSettings.listeningFrequency,
                                pendingSettings.centerFrequency,
-                               pendingSettings.bandwidth,
-                               pendingSettings.modulationType);
+                               effectiveDemodulationBandwidth(
+                                   pendingSettings.bandwidth,
+                                   pendingSettings.modulationType,
+                                   pendingSettings.sstvDemodulationMode),
+                               effectiveDemodulationModulationType(
+                                   pendingSettings.modulationType,
+                                   pendingSettings.sstvDemodulationMode));
     }
 
     savePersistentSettings();
@@ -1068,6 +1104,7 @@ void YourClassName::onListeningFrequencyEntered() {
     }
     qDebug() << "Frequency set to" << listeningFrequency << "Hz";
     settingRange();
+    updateQuickHamPanel();
     savePersistentSettings();
     if (isNetworkClientMode()) {
         scheduleRemoteSettingsCommand(0);
@@ -1125,6 +1162,7 @@ void YourClassName::onFrequencyEntered() {
         }
     }
     settingRange();
+    updateQuickHamPanel();
     const bool deferSettingsSaveForLiveAgile =
         runState == RadioRunState::Running &&
         activeFobosApiKind == FobosApiKind::Agile &&

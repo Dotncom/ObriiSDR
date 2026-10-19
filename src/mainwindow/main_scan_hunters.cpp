@@ -212,6 +212,7 @@ void YourClassName::updateFpvHunter(const std::vector<float> &frequencies,
     fpvHunterLastResult = FpvHunterDetector::analyze(frequencies,
                                                      magnitudes,
                                                      fpvHunterSettings);
+    const FpvHunterCandidate currentDetectedCandidate = fpvHunterLastResult.best;
     fpvHunterCandidates = fpvHunterLastResult.candidateList;
     fpvHunterCandidateIndex = -1;
     if (!fpvHunterCandidates.empty()) {
@@ -364,7 +365,32 @@ void YourClassName::updateFpvHunter(const std::vector<float> &frequencies,
     fpvHunterControls->setStatusText(statusText);
     updateFpvHunterControls();
 
+    if (fpvAutoScanArmed &&
+        runState == RadioRunState::Running &&
+        !fpvAutoScanController.active()) {
+        startFpvAutoScan();
+    }
+    if (fpvAutoScanController.active()) {
+        if (currentDetectedCandidate.valid &&
+            std::isfinite(currentDetectedCandidate.centerHz) &&
+            fpvHunterTrack.stable) {
+            const FpvAutoScanController::Action action =
+                fpvAutoScanController.observeCandidate(currentDetectedCandidate.centerHz,
+                                                        true,
+                                                        fpvHunterNowMs);
+            if (action == FpvAutoScanController::Action::LockCandidate) {
+                lockFpvAutoScanCandidate(currentDetectedCandidate);
+            }
+        }
+        if (fpvAutoScanController.tick(fpvHunterNowMs) ==
+            FpvAutoScanController::Action::ResumeScan) {
+            resumeFpvAutoScan();
+        }
+        updateFpvAutoScanStatus();
+    }
+
     if (fpvHunterFollowEnabled &&
+        !fpvAutoScanController.active() &&
         fpvHunterCandidateIndex >= 0 &&
         fpvHunterCandidateIndex < static_cast<int>(fpvHunterCandidates.size())) {
         const FpvHunterCandidate &candidate =
@@ -400,10 +426,14 @@ void YourClassName::updateFpvHunterControls() {
         fpvHunterControls->setCandidateIndex(enabled ? fpvHunterCandidateIndex : -1,
                                              enabled ? static_cast<int>(fpvHunterCandidates.size()) : 0);
         fpvHunterControls->setFollowChecked(fpvHunterFollowEnabled);
-        fpvHunterControls->setFollowEnabled(enabled && hasCandidate);
+        fpvHunterControls->setFollowEnabled(enabled && hasCandidate && !fpvAutoScanArmed);
         fpvHunterControls->setTuneEnabled(enabled && (hasCandidate ||
                                                       fpvHunterLastResult.best.valid ||
                                                       fpvHunterTrack.valid));
+        fpvHunterControls->setAutoScanChecked(fpvAutoScanArmed);
+        fpvHunterControls->setAutoScanValues(fpvAutoScanDwellMs,
+                                             fpvAutoScanLossTimeoutMs,
+                                             fpvAutoScanMinimumLockPercent);
         if (!enabled) {
             fpvHunterCandidates.clear();
             fpvHunterCandidateIndex = -1;
@@ -571,7 +601,7 @@ void YourClassName::clearFpvHunterHistory() {
 }
 
 void YourClassName::applyFpvHunterPresetToScan() {
-    if (!fpvHunterControls || !agileScanRangesEdit || !agileScanStepSpin) {
+    if (!fpvHunterControls) {
         return;
     }
 
@@ -582,23 +612,342 @@ void YourClassName::applyFpvHunterPresetToScan() {
         return;
     }
 
-    agileScanRangesMhz = ranges;
-    agileScanStepMhz = step;
-    agileScanEnabled = true;
-    if (agileScanCheckbox) {
-        QSignalBlocker blocker(agileScanCheckbox);
-        agileScanCheckbox->setChecked(true);
-    }
-    {
-        QSignalBlocker blocker(agileScanRangesEdit);
-        agileScanRangesEdit->setText(agileScanRangesMhz);
-    }
-    {
-        QSignalBlocker blocker(agileScanStepSpin);
-        agileScanStepSpin->setValue(agileScanStepMhz);
+    const bool useNativeAgile = activeFobosApiKind == FobosApiKind::Agile &&
+                                (isIdle() || agileScanRunning);
+    if (useNativeAgile) {
+        agileScanRangesMhz = ranges;
+        agileScanStepMhz = step;
+        agileScanAutoStepSampleRate = false;
+        agileScanEnabled = true;
+        standardScanEnabled = false;
+        if (agileScanCheckbox) {
+            const QSignalBlocker blocker(agileScanCheckbox);
+            agileScanCheckbox->setChecked(true);
+        }
+        if (standardScanCheckbox) {
+            const QSignalBlocker blocker(standardScanCheckbox);
+            standardScanCheckbox->setChecked(false);
+        }
+        if (agileScanRangesEdit) {
+            const QSignalBlocker blocker(agileScanRangesEdit);
+            agileScanRangesEdit->setText(agileScanRangesMhz);
+        }
+        if (agileScanStepSpin) {
+            const QSignalBlocker blocker(agileScanStepSpin);
+            agileScanStepSpin->setValue(agileScanStepMhz);
+        }
+    } else {
+        const double coverageStepMhz = (std::max)(step, pendingSettings.sampleRate / 1000000.0);
+        QString error;
+        const QVector<double> centers = parseAgileScanFrequenciesMhz(ranges, coverageStepMhz, &error);
+        if (!error.isEmpty() || centers.size() < AGILE_SCAN_MIN_POINTS) {
+            fpvHunterControls->setAutoScanStatusText(
+                error.isEmpty() ? QStringLiteral("FPV scan needs at least two centers") : error);
+            return;
+        }
+        standardScanCentersMhz = formatMhzList(centers);
+        standardScanEnabled = true;
+        agileScanEnabled = false;
+        if (standardScanCheckbox) {
+            const QSignalBlocker blocker(standardScanCheckbox);
+            standardScanCheckbox->setChecked(true);
+        }
+        if (agileScanCheckbox) {
+            const QSignalBlocker blocker(agileScanCheckbox);
+            agileScanCheckbox->setChecked(false);
+        }
+        if (standardScanCentersEdit) {
+            const QSignalBlocker blocker(standardScanCentersEdit);
+            standardScanCentersEdit->setText(standardScanCentersMhz);
+        }
     }
     updateAgileScanControls();
+    if (runState == RadioRunState::Running) {
+        if (useNativeAgile) {
+            applyAgileScanSettings(false);
+        } else {
+            applyStandardScanSettings(false);
+        }
+    }
     savePersistentSettings();
+}
+
+void YourClassName::startFpvAutoScan() {
+    if (!fpvAutoScanArmed || fpvAutoScanController.active() ||
+        runState != RadioRunState::Running || pendingSettings.inputMode != INPUT_RF) {
+        updateFpvAutoScanStatus();
+        return;
+    }
+
+    if (!fpvHunterClock.isValid()) {
+        fpvHunterClock.start();
+    }
+    fpvAutoScanSnapshot.valid = true;
+    fpvAutoScanSnapshot.agileEnabled = agileScanEnabled;
+    fpvAutoScanSnapshot.standardEnabled = standardScanEnabled;
+    fpvAutoScanSnapshot.agileAutoStep = agileScanAutoStepSampleRate;
+    fpvAutoScanSnapshot.agileRangesMhz = agileScanRangesMhz;
+    fpvAutoScanSnapshot.agileStepMhz = agileScanStepMhz;
+    fpvAutoScanSnapshot.standardCentersMhz = standardScanCentersMhz;
+    fpvAutoScanSnapshot.standardDwellMs = standardScanDwellMs;
+
+    FpvAutoScanController::Settings settings;
+    settings.verificationTimeoutMs = (std::max)(3500, fpvAutoScanDwellMs * 3);
+    settings.signalLossTimeoutMs = fpvAutoScanLossTimeoutMs;
+    settings.minimumHsyncPercent = fpvAutoScanMinimumLockPercent;
+    fpvAutoScanController.setSettings(settings);
+    fpvAutoScanController.start(fpvHunterClock.elapsed());
+    fpvAutoScanBackend = agileScanRunning
+                             ? FpvAutoScanBackend::AgileNative
+                             : FpvAutoScanBackend::StandardRetune;
+
+    fpvHunterSettings.enabled = true;
+    fpvHunterFollowEnabled = false;
+    if (!configureFpvAutoScanBackend(true)) {
+        stopFpvAutoScan(true);
+        if (fpvHunterControls) {
+            fpvHunterControls->setAutoScanStatusText(QStringLiteral("Auto scan could not start"));
+        }
+        return;
+    }
+    fpvHunterTrack = {};
+    updateFpvHunterControls();
+    updateFpvAutoScanStatus();
+}
+
+bool YourClassName::configureFpvAutoScanBackend(bool startScanning) {
+    if (!fpvHunterControls || fpvAutoScanBackend == FpvAutoScanBackend::None) {
+        return false;
+    }
+    const QString spec = fpvHunterControls->currentPresetSpec();
+    const QString ranges = agileScanPresetRanges(spec);
+    const double presetStepMhz = agileScanPresetStepMhz(spec, 5.0);
+    if (ranges.isEmpty()) {
+        return false;
+    }
+
+    if (fpvAutoScanBackend == FpvAutoScanBackend::AgileNative) {
+        standardScanEnabled = false;
+        resetStandardScanState(true);
+        agileScanRangesMhz = ranges;
+        agileScanStepMhz = (std::max)(presetStepMhz, pendingSettings.sampleRate / 1000000.0);
+        agileScanAutoStepSampleRate = false;
+        agileScanEnabled = startScanning;
+        if (agileScanRangesEdit) {
+            const QSignalBlocker blocker(agileScanRangesEdit);
+            agileScanRangesEdit->setText(agileScanRangesMhz);
+        }
+        if (agileScanStepSpin) {
+            const QSignalBlocker blocker(agileScanStepSpin);
+            agileScanStepSpin->setValue(agileScanStepMhz);
+        }
+        if (agileScanCheckbox) {
+            const QSignalBlocker blocker(agileScanCheckbox);
+            agileScanCheckbox->setChecked(startScanning);
+        }
+        if (standardScanCheckbox) {
+            const QSignalBlocker blocker(standardScanCheckbox);
+            standardScanCheckbox->setChecked(false);
+        }
+        updateAgileScanControls();
+        return startScanning ? applyAgileScanSettings(false) : applyAgileScanSettings(true);
+    }
+
+    if (agileScanRunning) {
+        applyAgileScanSettings(true);
+    }
+    agileScanEnabled = false;
+    const double coverageStepMhz =
+        (std::max)(presetStepMhz, pendingSettings.sampleRate / 1000000.0);
+    QString error;
+    const QVector<double> centers = parseAgileScanFrequenciesMhz(ranges, coverageStepMhz, &error);
+    if (!error.isEmpty() || centers.size() < AGILE_SCAN_MIN_POINTS) {
+        if (fpvHunterControls) {
+            fpvHunterControls->setAutoScanStatusText(
+                error.isEmpty() ? QStringLiteral("FPV scan needs at least two centers") : error);
+        }
+        return false;
+    }
+
+    standardScanCentersMhz = formatMhzList(centers);
+    standardScanDwellMs = fpvAutoScanDwellMs;
+    standardScanEnabled = startScanning;
+    if (standardScanCentersEdit) {
+        const QSignalBlocker blocker(standardScanCentersEdit);
+        standardScanCentersEdit->setText(standardScanCentersMhz);
+    }
+    if (standardScanDwellSpin) {
+        const QSignalBlocker blocker(standardScanDwellSpin);
+        standardScanDwellSpin->setValue(standardScanDwellMs);
+    }
+    if (standardScanCheckbox) {
+        const QSignalBlocker blocker(standardScanCheckbox);
+        standardScanCheckbox->setChecked(startScanning);
+    }
+    if (agileScanCheckbox) {
+        const QSignalBlocker blocker(agileScanCheckbox);
+        agileScanCheckbox->setChecked(false);
+    }
+    updateAgileScanControls();
+    return startScanning ? applyStandardScanSettings(false) : applyStandardScanSettings(true);
+}
+
+void YourClassName::lockFpvAutoScanCandidate(const FpvHunterCandidate &candidate) {
+    if (!fpvAutoScanController.active() || !candidate.valid) {
+        return;
+    }
+    bool stopped = true;
+    if (fpvAutoScanBackend == FpvAutoScanBackend::AgileNative) {
+        stopped = applyAgileScanSettings(true);
+        agileScanEnabled = false;
+        if (agileScanCheckbox) {
+            const QSignalBlocker blocker(agileScanCheckbox);
+            agileScanCheckbox->setChecked(false);
+        }
+    } else if (fpvAutoScanBackend == FpvAutoScanBackend::StandardRetune) {
+        standardScanEnabled = false;
+        stopped = applyStandardScanSettings(true);
+        if (standardScanCheckbox) {
+            const QSignalBlocker blocker(standardScanCheckbox);
+            standardScanCheckbox->setChecked(false);
+        }
+    }
+    if (!stopped) {
+        fpvAutoScanController.candidateTuneFailed(fpvHunterClock.elapsed());
+        resumeFpvAutoScan();
+        return;
+    }
+    if (videoHSyncCheckbox) {
+        const QSignalBlocker blocker(videoHSyncCheckbox);
+        videoHSyncCheckbox->setChecked(true);
+    }
+    if (videoVSyncCheckbox) {
+        const QSignalBlocker blocker(videoVSyncCheckbox);
+        videoVSyncCheckbox->setChecked(true);
+    }
+    tuneFpvHunterCandidateValue(candidate, false);
+    updateFpvAutoScanStatus();
+}
+
+void YourClassName::resumeFpvAutoScan() {
+    if (!fpvAutoScanArmed || !fpvAutoScanController.active() ||
+        runState != RadioRunState::Running) {
+        return;
+    }
+    fpvHunterTrack = {};
+    fpvHunterCandidates.clear();
+    fpvHunterCandidateIndex = -1;
+    configureFpvAutoScanBackend(true);
+    updateFpvAutoScanStatus();
+}
+
+void YourClassName::stopFpvAutoScan(bool restorePreviousScan) {
+    if (fpvAutoScanBackend == FpvAutoScanBackend::AgileNative) {
+        applyAgileScanSettings(true);
+    } else if (fpvAutoScanBackend == FpvAutoScanBackend::StandardRetune) {
+        applyStandardScanSettings(true);
+    }
+    fpvAutoScanController.stop();
+    fpvAutoScanBackend = FpvAutoScanBackend::None;
+
+    if (restorePreviousScan && fpvAutoScanSnapshot.valid) {
+        agileScanEnabled = fpvAutoScanSnapshot.agileEnabled;
+        standardScanEnabled = fpvAutoScanSnapshot.standardEnabled;
+        agileScanAutoStepSampleRate = fpvAutoScanSnapshot.agileAutoStep;
+        agileScanRangesMhz = fpvAutoScanSnapshot.agileRangesMhz;
+        agileScanStepMhz = fpvAutoScanSnapshot.agileStepMhz;
+        standardScanCentersMhz = fpvAutoScanSnapshot.standardCentersMhz;
+        standardScanDwellMs = fpvAutoScanSnapshot.standardDwellMs;
+        if (agileScanCheckbox) {
+            const QSignalBlocker blocker(agileScanCheckbox);
+            agileScanCheckbox->setChecked(agileScanEnabled);
+        }
+        if (standardScanCheckbox) {
+            const QSignalBlocker blocker(standardScanCheckbox);
+            standardScanCheckbox->setChecked(standardScanEnabled);
+        }
+        if (agileScanRangesEdit) {
+            const QSignalBlocker blocker(agileScanRangesEdit);
+            agileScanRangesEdit->setText(agileScanRangesMhz);
+        }
+        if (agileScanStepSpin) {
+            const QSignalBlocker blocker(agileScanStepSpin);
+            agileScanStepSpin->setValue(agileScanStepMhz);
+        }
+        if (standardScanCentersEdit) {
+            const QSignalBlocker blocker(standardScanCentersEdit);
+            standardScanCentersEdit->setText(standardScanCentersMhz);
+        }
+        if (standardScanDwellSpin) {
+            const QSignalBlocker blocker(standardScanDwellSpin);
+            standardScanDwellSpin->setValue(standardScanDwellMs);
+        }
+        if (runState == RadioRunState::Running) {
+            if (agileScanEnabled) {
+                applyAgileScanSettings(false);
+            } else if (standardScanEnabled) {
+                applyStandardScanSettings(false);
+            }
+        }
+    }
+    fpvAutoScanSnapshot = {};
+    updateAgileScanControls();
+    updateFpvAutoScanStatus();
+}
+
+void YourClassName::handleFpvAnalogLockMetrics(int hsyncPercent,
+                                               bool verticalSync,
+                                               double levelSpan) {
+    Q_UNUSED(levelSpan)
+    if (!fpvAutoScanController.active()) {
+        return;
+    }
+    if (!fpvHunterClock.isValid()) {
+        fpvHunterClock.start();
+    }
+    fpvAutoScanController.observeVideoLock(hsyncPercent,
+                                           verticalSync,
+                                           fpvHunterClock.elapsed());
+    updateFpvAutoScanStatus();
+}
+
+void YourClassName::updateFpvAutoScanStatus() {
+    if (!fpvHunterControls) {
+        return;
+    }
+    if (!fpvAutoScanArmed) {
+        fpvHunterControls->setAutoScanStatusText(QStringLiteral("Auto scan: off"));
+        return;
+    }
+    if (runState != RadioRunState::Running && !fpvAutoScanController.active()) {
+        fpvHunterControls->setAutoScanStatusText(QStringLiteral("Auto scan: armed; press Start"));
+        return;
+    }
+
+    const QString backend = fpvAutoScanBackend == FpvAutoScanBackend::AgileNative
+                                ? QStringLiteral("Agile scan")
+                                : QStringLiteral("live retune");
+    switch (fpvAutoScanController.state()) {
+    case FpvAutoScanController::State::Scanning:
+        fpvHunterControls->setAutoScanStatusText(
+            QStringLiteral("Auto scan: searching (%1)").arg(backend));
+        break;
+    case FpvAutoScanController::State::VerifyingVideo:
+        fpvHunterControls->setAutoScanStatusText(
+            QStringLiteral("Auto scan: verifying %1 MHz, HSync %2%")
+                .arg(fpvAutoScanController.lockedCenterHz() / 1000000.0, 0, 'f', 3)
+                .arg(fpvAutoScanController.lastHsyncPercent()));
+        break;
+    case FpvAutoScanController::State::Decoding:
+        fpvHunterControls->setAutoScanStatusText(
+            QStringLiteral("Auto scan: video locked at %1 MHz, HSync %2%")
+                .arg(fpvAutoScanController.lockedCenterHz() / 1000000.0, 0, 'f', 3)
+                .arg(fpvAutoScanController.lastHsyncPercent()));
+        break;
+    case FpvAutoScanController::State::Idle:
+        fpvHunterControls->setAutoScanStatusText(QStringLiteral("Auto scan: ready"));
+        break;
+    }
 }
 
 void YourClassName::tuneFpvHunterCandidate() {

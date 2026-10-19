@@ -1235,6 +1235,31 @@ void MyWaterfallWidget::set3DMonochrome(bool enabled) {
     }
     update();
 }
+
+void MyWaterfallWidget::set3DHeightGradient(bool enabled) {
+    {
+        QMutexLocker locker(&mutex);
+        waterfall3DRenderer->setHeightGradient(enabled);
+    }
+    update();
+}
+
+void MyWaterfallWidget::set3DMonochromeColor(const QColor &color) {
+    {
+        QMutexLocker locker(&mutex);
+        waterfall3DRenderer->setMonochromeColor(color);
+    }
+    update();
+}
+
+void MyWaterfallWidget::set3DMonochromeGradientDepth(int percent) {
+    {
+        QMutexLocker locker(&mutex);
+        waterfall3DRenderer->setMonochromeGradientDepth(percent);
+    }
+    update();
+}
+
 void MyWaterfallWidget::setAlternativeInterfaceMode(bool enabled) {
     {
         QMutexLocker locker(&mutex);

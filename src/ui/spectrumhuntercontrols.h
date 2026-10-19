@@ -8,6 +8,7 @@ class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
 class QPushButton;
+class QSpinBox;
 
 class SpectrumHunterControls : public QGroupBox {
     Q_OBJECT
@@ -39,6 +40,15 @@ public:
     void setCandidateNavigationEnabled(bool enabled);
     void setCandidateIndex(int index, int count);
     void setStatusText(const QString &text);
+    void setAutoScanVisible(bool visible);
+    void setAutoScanChecked(bool checked);
+    void setAutoScanValues(int dwellMs, int lossTimeoutMs, int minimumLockPercent);
+    void setAutoScanStatusText(const QString &text);
+    void setAutoScanUiText(const QString &enabledText,
+                           const QString &enabledTooltip,
+                           const QString &dwellText,
+                           const QString &lossText,
+                           const QString &lockText);
     void setUiText(const QString &title,
                    const QString &detectTooltip,
                    const QString &detectText,
@@ -64,6 +74,10 @@ signals:
     void followToggled(bool checked);
     void previousCandidateRequested();
     void nextCandidateRequested();
+    void autoScanToggled(bool checked);
+    void autoScanDwellChanged(int value);
+    void autoScanLossTimeoutChanged(int value);
+    void autoScanMinimumLockChanged(int value);
 
 private:
     QCheckBox *detectCheckbox = nullptr;
@@ -81,6 +95,15 @@ private:
     QDoubleSpinBox *maxWidthSpin = nullptr;
     QDoubleSpinBox *thresholdSpin = nullptr;
     QLabel *statusLabel = nullptr;
+    QWidget *autoScanWidget = nullptr;
+    QCheckBox *autoScanCheckbox = nullptr;
+    QLabel *autoScanDwellLabel = nullptr;
+    QSpinBox *autoScanDwellSpin = nullptr;
+    QLabel *autoScanLossLabel = nullptr;
+    QSpinBox *autoScanLossSpin = nullptr;
+    QLabel *autoScanLockLabel = nullptr;
+    QSpinBox *autoScanLockSpin = nullptr;
+    QLabel *autoScanStatusLabel = nullptr;
 };
 
 #endif // SPECTRUMHUNTERCONTROLS_H

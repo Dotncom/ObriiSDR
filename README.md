@@ -4,10 +4,12 @@ Obrii SDR is a wideband SDR receiver and research workstation, optimized first
 for RigExpert Fobos SDR hardware while also supporting additional receiver
 backends.
 The current packaged release is Windows-first, with active Linux/Raspberry Pi
-support and a separately maintained Android USB/network client. Version 6.3
-adds independent DSP audio branches, board Undo/Redo, configurable DDC/PFB
-processing and portable experiment folders, alongside the DSP stream manager,
-LAN FFT offload, GNU Radio bridge and connection diagnostics.
+support and a separately maintained Android USB/network client. Version 6.4
+adds protected DMR direct-mode transmission, FPV video auto-scan, a repaired
+Windows microphone path, wider SSTV/ATV coverage, quick amateur-band tuning,
+and additional 3D waterfall presentation controls. It retains the independent
+DSP audio branches, configurable DDC/PFB processing, portable experiment folders,
+LAN FFT offload, GNU Radio bridge and connection diagnostics from 6.3.
 It retains live Wi-Fi IQ decoding, experimental HT20 support, research
 backends for GNSS/LRPT/HF prediction, and expanded measurement tools. It retains
 the 6.0.0 DMR, FT8, signal-generation and terrain-propagation features, plus
@@ -24,8 +26,10 @@ dropping, and multistage channel extraction keep the wideband desktop and
 Raspberry paths responsive. Android is released separately only when its
 package changes.
 
-Release 6.3.0 also synchronizes DSP frequency limits and presets with the main
-controls and improves safe routing, editing history and remote processing.
+Release 6.4.0 also improves HackRF TX buffering and stop handling, signal-lab
+generation and decoder self-tests. Protected DMR TX requires the optional
+OpenDMR backend and matching authorized keys; repeater wake-up and trunk
+signaling are not implemented.
 Remote processing is opt-in and experimental; update both computers, use a
 trusted LAN and run the connection test before enabling IQ transfer. The receiver
 and audio path remain local. See `docs/dsp_stream_manager.md` for limits and setup.
@@ -38,15 +42,15 @@ Remove API keys, private coordinates and other sensitive data from any attachmen
 
 ## Windows Release Package
 
-Release 6.3.0 provides a Windows x64 core ZIP and a Raspberry/Linux source tar.gz.
+Release 6.4.0 provides a Windows x64 core ZIP and a Raspberry/Linux source tar.gz.
 No Wireless add-on or Android package is uploaded with this release.
-The unchanged optional Wireless add-on from 6.1.1 is also compatible with 6.3.0;
+The unchanged optional Wireless add-on from 6.1.1 is also compatible with 6.4.0;
 it does not need to be downloaded again for an existing installation.
 The add-on contains the portable GNU Radio
 Wi-Fi and Wireshark tools; to enable them, run `Install-Wireless-AddOn.ps1` beside
 `ObriiSDR.exe` or extract the add-on into that same folder. See
 `docs/wireless_addon.md`. Npcap is not bundled.
-Extract the Linux source with `tar -xzf ObriiSDR-v6.3.0-raspberry-source.tar.gz`;
+Extract the Linux source with `tar -xzf ObriiSDR-v6.4.0-raspberry-source.tar.gz`;
 the build/run shell scripts have executable permissions. Android packages are
 maintained and released separately.
 
@@ -70,10 +74,12 @@ map providers, and UI settings. The desktop app provides
 `Settings... -> Settings backup -> Export settings... / Import settings...` for
 making a separate backup or moving settings to another computer.
 
-DMR voice remains experimental. The transmitter can generate clear Tier II direct/simplex
-voice bursts from microphone/PTT/WAV with Color Code, time slot and radio IDs; it does not
-yet implement TX privacy, repeater wake-up or trunk signaling. AMBE+2 encoding requires
-the optional OpenDMR backend. Windows packages may include optional
+DMR voice remains experimental. The transmitter can generate clear or protected Tier II
+direct/simplex voice bursts from microphone/PTT/WAV with Color Code, time slot and radio
+IDs. Motorola ARC4 40-bit and AES-256 TX privacy are supported with PI headers, MI
+late-entry signaling and per-superframe key-stream alignment; repeater wake-up and trunk
+signaling are not yet implemented. AMBE+2 encoding, including protected TX, requires the
+optional OpenDMR backend. Windows packages may include optional
 `dmr_voice_backends/fobos_dmr_voice_*.dll` GPL backend modules. See
 `THIRD_PARTY_LICENSES.txt` and `licenses/dmr_voice_backend/` before
 redistributing AMBE-capable binaries.
@@ -427,7 +433,9 @@ export FOBOSAPP_ANDROID_KEY_PASSWORD=...
 - DMR clear voice and supplied-key Motorola ARC4/AES-256 reception have been
   tested on real signals. Compatibility and weak-signal quality still vary;
   Hytera Basic remains unverified, Hytera Full and complete Tier III grant
-  following are not implemented. DMR TX is an unverified clear Tier II direct beta.
+  following are not implemented. DMR TX supports clear, Motorola ARC4 40-bit
+  and AES-256 Tier II direct/simplex calls through the optional OpenDMR encoder;
+  repeater wake-up and trunk signaling are not implemented.
 - The new WEFAX, LRPT, and analog video paths are beta features and need more
   testing with real signals.
 - Meteor LRPT currently provides a QPSK IQ monitor, not a final decoded image.

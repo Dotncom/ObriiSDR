@@ -1,6 +1,7 @@
 #include "videoprocessor.h"
 
 #include <QColor>
+#include <QDebug>
 #include <QPainter>
 
 #include <algorithm>
@@ -47,6 +48,7 @@ constexpr double SSTV_VIS_BREAK_SECONDS = 0.010;
 constexpr double SSTV_VIS_LEADER_TONE_HZ = 1900.0;
 constexpr double SSTV_VIS_ZERO_TONE_HZ = 1300.0;
 constexpr double SSTV_VIS_ONE_TONE_HZ = 1100.0;
+constexpr int SSTV_MAX_PREDICTED_SYNC_LINES = 8;
 constexpr int APT_WIDTH = 2080;
 constexpr int APT_DISPLAY_HEIGHT = 800;
 constexpr double APT_PIXEL_RATE = 4160.0;
@@ -123,7 +125,13 @@ double clampDouble(double value, double low, double high) {
 }
 
 double videoTargetRate(const RadioSettings &settings) {
-    return clampDouble((std::max)(1200000.0, settings.bandwidth * 0.75), 1200000.0, 6000000.0);
+    // Keep the decimated IQ Nyquist limit comfortably above the wanted video
+    // passband. The old 1.2 MS/s floor could fold a 1.5 MHz ATV signal back
+    // into itself before the post-decimation filter, leaving only unstable
+    // stripes even though the RF signal occupied the requested bandwidth.
+    return clampDouble((std::max)(2500000.0, settings.bandwidth * 2.4),
+                       2500000.0,
+                       8000000.0);
 }
 
 double videoCutoff(const RadioSettings &settings, double outputRate) {
@@ -217,6 +225,7 @@ void VideoProcessor::configure(bool newEnabled,
 void VideoProcessor::reset() {
     activeSampleRate = 0.0;
     samplesPerLine = 0;
+    lineSamplePhase = 0.0;
     currentLine.clear();
     fmPreviousValid = false;
     fmPrevI = 1.0f;
@@ -230,6 +239,7 @@ void VideoProcessor::reset() {
     autoInvertActive = false;
     hSyncLockedLines = 0;
     hSyncObservedLines = 0;
+    lastHSyncPercent = 0;
     resetChannelizer();
     resetRaster();
 }
@@ -587,6 +597,7 @@ void VideoProcessor::processIqFrame(const QByteArray &iqData, double sampleRate,
     if (std::abs(activeSampleRate - sampleRate) > 1.0 || samplesPerLine != newSamplesPerLine) {
         activeSampleRate = sampleRate;
         samplesPerLine = (std::max)(1, newSamplesPerLine);
+        lineSamplePhase = 0.0;
         currentLine.clear();
         fmPreviousValid = false;
         resetRaster();
@@ -679,6 +690,7 @@ void VideoProcessor::processFloatIqSnapshot(const std::vector<float> &iqSamples,
     if (std::abs(activeSampleRate - outputRate) > 1.0 || samplesPerLine != newSamplesPerLine) {
         activeSampleRate = outputRate;
         samplesPerLine = (std::max)(1, newSamplesPerLine);
+        lineSamplePhase = 0.0;
         currentLine.clear();
         fmPreviousValid = false;
         resetRaster();
@@ -797,10 +809,12 @@ void VideoProcessor::processSstvBuffer() {
                                       sstvAudioBuffer.begin() + headerEndSample);
             }
             sstvVisSearchOffset = 0;
-            emitStatus(QStringLiteral("SSTV VIS %1: %2 (%3)")
+            emitStatus(QStringLiteral("SSTV VIS %1: %2 (%3), offset %4 Hz, confidence %5")
                            .arg(visCode)
                            .arg(sstvModeName(visCode))
-                           .arg(supported ? QStringLiteral("supported") : QStringLiteral("unsupported")),
+                           .arg(supported ? QStringLiteral("supported") : QStringLiteral("unsupported"))
+                           .arg(sstvToneOffsetHz, 0, 'f', 0)
+                           .arg(visConfidence, 0, 'f', 1),
                        true);
             if (!supported) {
                 sstvAudioBuffer.clear();
@@ -832,7 +846,8 @@ void VideoProcessor::processSstvBuffer() {
         int lineStart = findSstvLineStart(&score);
         bool predictedLine = false;
         if (lineStart < 0) {
-            if (sstvFrameActive && sstvLineOverlapActive && sstvLostSyncCount < 4) {
+            if (sstvFrameActive && sstvLineOverlapActive &&
+                sstvLostSyncCount < SSTV_MAX_PREDICTED_SYNC_LINES) {
                 lineStart = guardSamples;
                 predictedLine = true;
                 ++sstvLostSyncCount;
@@ -841,9 +856,9 @@ void VideoProcessor::processSstvBuffer() {
         }
         if (lineStart < 0) {
             const double holdoverSeconds = (std::clamp)(
-                activeSstvLineSeconds() * 3.4,
+                activeSstvLineSeconds() * (SSTV_MAX_PREDICTED_SYNC_LINES + 0.4),
                 0.70,
-                2.00);
+                4.00);
             const int holdoverSamples = qRound(holdoverSeconds * sstvSampleRate);
             if (sstvFrameActive && sstvSamplesSinceLastSync > holdoverSamples) {
                 sstvFrameActive = false;
@@ -946,9 +961,10 @@ void VideoProcessor::processSstvBuffer() {
 
         if (predictedLine &&
             (!sstvStatusTimer.isValid() || sstvStatusTimer.elapsed() >= STATUS_INTERVAL_MS)) {
-            emitStatus(QStringLiteral("SSTV %1: predicted line timing, missed sync %2/4")
+            emitStatus(QStringLiteral("SSTV %1: predicted line timing, missed sync %2/%3")
                            .arg(sstvModeName(sstvLastVisCode))
-                           .arg(sstvLostSyncCount),
+                           .arg(sstvLostSyncCount)
+                           .arg(SSTV_MAX_PREDICTED_SYNC_LINES),
                        true);
             sstvStatusTimer.restart();
         }
@@ -1172,40 +1188,28 @@ int VideoProcessor::detectSstvVisCode(double *confidence, int *headerEndSample) 
         const int visStart = secondLeaderStart + leaderSamples;
 
         const int probeStart = start + leaderProbeOffset;
-        double firstCrossing = -1.0;
-        double lastCrossing = -1.0;
-        int crossingCount = 0;
-        for (int sample = probeStart + 1;
-             sample < probeStart + leaderProbeSamples;
-             ++sample) {
-            const double previous = sstvAudioBuffer[static_cast<std::size_t>(sample - 1)];
-            const double current = sstvAudioBuffer[static_cast<std::size_t>(sample)];
-            if (previous < 0.0 && current >= 0.0) {
-                const double denominator = current - previous;
-                const double fraction = std::abs(denominator) > 1.0e-9
-                                            ? -previous / denominator
-                                            : 0.0;
-                const double crossing = static_cast<double>(sample - 1) + fraction;
-                if (firstCrossing < 0.0) {
-                    firstCrossing = crossing;
-                }
-                lastCrossing = crossing;
-                ++crossingCount;
+        // Zero-crossing counts are unreliable on a discriminator output: a
+        // small amount of wideband FM noise can add crossings even when the
+        // 1900 Hz leader is clearly dominant. A compact Goertzel bank costs
+        // a little more CPU during acquisition, but gives deterministic VIS
+        // lock and supplies the common tone offset used for all VIS bits.
+        double leaderProbeEnergy = 0.0;
+        double measuredLeaderHz = SSTV_VIS_LEADER_TONE_HZ;
+        for (double offsetHz = -175.0; offsetHz <= 175.0; offsetHz += 25.0) {
+            const double candidateHz = SSTV_VIS_LEADER_TONE_HZ + offsetHz;
+            const double energy = toneEnergy(sstvAudioBuffer,
+                                             probeStart,
+                                             leaderProbeSamples,
+                                             candidateHz);
+            if (energy > leaderProbeEnergy) {
+                leaderProbeEnergy = energy;
+                measuredLeaderHz = candidateHz;
             }
         }
-        if (crossingCount < 20 || lastCrossing <= firstCrossing) {
+        if (leaderProbeEnergy < 5.0e-6) {
             continue;
         }
-        const double measuredLeaderHz =
-            (crossingCount - 1) * static_cast<double>(sstvSampleRate) /
-            (lastCrossing - firstCrossing);
-        const double toneOffset = (std::clamp)(measuredLeaderHz - SSTV_VIS_LEADER_TONE_HZ,
-                                               -150.0,
-                                               150.0);
-        if (std::abs(measuredLeaderHz - (SSTV_VIS_LEADER_TONE_HZ + toneOffset)) > 25.0 ||
-            std::abs(measuredLeaderHz - SSTV_VIS_LEADER_TONE_HZ) > 175.0) {
-            continue;
-        }
+        const double toneOffset = measuredLeaderHz - SSTV_VIS_LEADER_TONE_HZ;
         const double leader1 = toneEnergy(sstvAudioBuffer,
                                           probeStart,
                                           leaderProbeSamples,
@@ -1254,8 +1258,8 @@ int VideoProcessor::detectSstvVisCode(double *confidence, int *headerEndSample) 
         const double fullLeaderRatio = (fullLeader1 / (fullLeader1Comp + 1.0e-8) +
                                         fullLeader2 / (fullLeader2Comp + 1.0e-8)) * 0.5;
         const double leaderRatio = shortLeaderRatio * 0.25 + fullLeaderRatio * 0.75;
-        if (shortLeaderRatio < 1.8 || fullLeaderRatio < 3.2 ||
-            fullLeader1 < 2.0e-5 || fullLeader2 < 2.0e-5) {
+        if (shortLeaderRatio < 1.45 || fullLeaderRatio < 2.2 ||
+            fullLeader1 < 5.0e-6 || fullLeader2 < 5.0e-6) {
             continue;
         }
 
@@ -1289,7 +1293,7 @@ int VideoProcessor::detectSstvVisCode(double *confidence, int *headerEndSample) 
         const double breakRatio = breakEnergy / (breakComp + 1.0e-8);
         const double startRatio = startBit / (startComp + 1.0e-8);
         const double stopRatio = stopBit / (stopComp + 1.0e-8);
-        if (breakRatio < 1.8 || startRatio < 1.8 || stopRatio < 1.8) {
+        if (breakRatio < 1.45 || startRatio < 1.45 || stopRatio < 1.45) {
             continue;
         }
         const double framingRatio = (breakRatio + startRatio + stopRatio) / 3.0;
@@ -1343,7 +1347,7 @@ int VideoProcessor::detectSstvVisCode(double *confidence, int *headerEndSample) 
     }
     const int lastChecked = firstStart + ((maxStart - firstStart) / step) * step;
     sstvVisSearchOffset = lastChecked + step;
-    if (bestConfidence >= 3.0) {
+    if (bestConfidence >= 2.5) {
         sstvToneOffsetHz = bestToneOffset;
         return bestCode;
     }
@@ -2524,7 +2528,22 @@ void VideoProcessor::appendVideoSample(float sample) {
         sample = 0.0f;
     }
     currentLine.push_back(sample);
-    if (currentLine.size() >= samplesPerLine) {
+
+    bool lineComplete = false;
+    if (activeSampleRate > 0.0 && configuredLineRate > 0.0) {
+        // Preserve fractional line cadence (for example 153.6 samples at
+        // 2.4 MS/s). Rounding every line to 154 accumulates almost a full
+        // sample of timing error every 2.5 lines and makes HSync drift.
+        lineSamplePhase += configuredLineRate;
+        if (lineSamplePhase + 1.0e-9 >= activeSampleRate) {
+            lineSamplePhase -= activeSampleRate;
+            lineComplete = true;
+        }
+    } else {
+        lineComplete = currentLine.size() >= samplesPerLine;
+    }
+
+    if (lineComplete) {
         renderCurrentLine();
         currentLine.clear();
     }
@@ -2602,6 +2621,7 @@ void VideoProcessor::renderCurrentLine() {
         if (vSync && lineSpan >= HSYNC_MIN_SPAN && syncFraction > 0.32f) {
             nextLine = 0;
             currentLine.clear();
+            emit analogLockMetrics(lastHSyncPercent, true, lineSpan);
             emitStatus(QStringLiteral("Video VSync lock"), false);
             return;
         }
@@ -2644,6 +2664,8 @@ void VideoProcessor::renderCurrentLine() {
             const int lockPercent = static_cast<int>(std::lround(
                 100.0 * static_cast<double>(hSyncLockedLines) /
                 static_cast<double>((std::max)(1, hSyncObservedLines))));
+            lastHSyncPercent = lockPercent;
+            emit analogLockMetrics(lockPercent, false, levelMax - levelMin);
             emitStatus(QStringLiteral("Video HSync %1%, %2 samples/line%3, level %4")
                            .arg(lockPercent)
                            .arg(samplesPerLine)
@@ -2720,6 +2742,11 @@ void VideoProcessor::renderCurrentLine() {
 
 void VideoProcessor::emitStatus(const QString &status, bool force) {
     if (force || !statusTimer.isValid() || statusTimer.elapsed() >= STATUS_INTERVAL_MS) {
+        if (status.startsWith(QStringLiteral("SSTV"))) {
+            qDebug().noquote() << "[SSTV]" << status;
+        } else if (status.startsWith(QStringLiteral("Video"))) {
+            qDebug().noquote() << "[Analog video]" << status;
+        }
         emit statusChanged(status);
         statusTimer.restart();
     }

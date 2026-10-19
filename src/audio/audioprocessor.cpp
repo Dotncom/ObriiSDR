@@ -241,10 +241,13 @@ bool AudioProcessor::processIndependentIq(const std::vector<float> &iq,
                                          const RadioSettings &settings,
                                          bool discontinuity, std::vector<short> &pcm) {
     pcm.clear();
+    const bool supportedModulation =
+        (settings.modulationType >= MOD_AM && settings.modulationType <= MOD_WFM) ||
+        settings.modulationType == MOD_SSTV;
     if (running.load() || settings.inputMode != INPUT_RF ||
         !std::isfinite(settings.sampleRate) || settings.sampleRate < 48000.0 ||
         settings.sampleRate > 2000000.0 || iq.size() % 2 || iq.size() > 262144U ||
-        settings.modulationType < MOD_AM || settings.modulationType > MOD_WFM) return false;
+        !supportedModulation) return false;
     configure(settings);
     const bool requestedReset = demodulatorResetRequested.exchange(false);
     if (discontinuity || requestedReset) resetDemodulatorState();
@@ -982,6 +985,8 @@ void AudioProcessor::processDemodulatorBlock(const std::vector<float>& iqBlock,
                                      ? sstvDemodulationModulationType(
                                            settings.sstvDemodulationMode)
                                      : modulationType;
+    const bool sstvNfm = modulationType == MOD_SSTV &&
+                         demodulationType == MOD_NFM;
     if (modulationType == MOD_DMR) {
         processDmrIqDemodulatorBlock(iqBlock, dmrBasebandSamples, dmrBasebandSampleRate, settings);
         return;
@@ -991,10 +996,18 @@ void AudioProcessor::processDemodulatorBlock(const std::vector<float>& iqBlock,
     int inputMode = sourceInputMode;
     const std::vector<float> *demodIq = &iqBlock;
     bool channelizedInput = false;
+    // Every SSTV demodulator needs a phase-accurate, properly anti-aliased
+    // narrow channel. The inexpensive streaming decimator is adequate for
+    // listening, but at wide RF rates its boxcar response folds enough noise
+    // into NFM to corrupt the tightly timed VIS tones.
+    const bool preciseSstvChannelizer = modulationType == MOD_SSTV;
     if (sourceInputMode != INPUT_HF_NOISE_CANCEL &&
-        !settings.simplifiedAudioChannelizer) {
+        (!settings.simplifiedAudioChannelizer || preciseSstvChannelizer)) {
         RadioSettings channelSettings = settings;
         channelSettings.modulationType = demodulationType;
+        if (sstvNfm) {
+            channelSettings.bandwidth = (std::max)(channelSettings.bandwidth, 25000.0);
+        }
         if (settings.liveDigitalSyncEnabled &&
             std::isfinite(settings.liveDigitalSyncCarrierOffsetHz)) {
             channelSettings.listeningFrequency +=
@@ -1035,7 +1048,12 @@ void AudioProcessor::processDemodulatorBlock(const std::vector<float>& iqBlock,
                               ? 0.0
                               : settings.listeningFrequency - settings.centerFrequency;
     const double phaseIncrement = -TWO_PI * fShift / rfInputRate;
-    const double bandwidth = settings.bandwidth;
+    // The normal SSTV preset is the 3 kHz audio passband used by SSB.  It is
+    // too narrow when the same tone stream is carried by NFM: deviation and
+    // the 2.3 kHz top tone both have to fit in the RF channel.
+    const double bandwidth = sstvNfm
+                                 ? (std::max)(settings.bandwidth, 25000.0)
+                                 : settings.bandwidth;
     const int decimationFactor = channelizedInput
                                      ? 1
                                      : channelDecimationFactor(rfInputRate,
@@ -1053,7 +1071,7 @@ void AudioProcessor::processDemodulatorBlock(const std::vector<float>& iqBlock,
         1.0
         ));
     const bool digitalAudioMode = isDigitalAudioMode(modulationType);
-    const bool fastFm = settings.simplifiedAudioChannelizer &&
+    const bool fastFm = !sstvNfm && settings.simplifiedAudioChannelizer &&
         (demodulationType == MOD_NFM || demodulationType == MOD_WFM ||
          demodulationType == MOD_ATV || demodulationType == MOD_APT || demodulationType == MOD_FSK);
     const bool rotateIq = fShift != 0.0 || ncoPhase != 0.0;
@@ -1338,6 +1356,11 @@ void AudioProcessor::processDemodulatorBlock(const std::vector<float>& iqBlock,
             fmPreviousValid = true;
             if (demodulationType == MOD_FSK || demodulationType == MOD_DMR) {
                 demodulatedSample *= 10.0f;
+            } else if (sstvNfm) {
+                // SSTV tones encode their value directly as audio frequency.
+                // Voice deemphasis tilts 1.1..2.3 kHz enough to weaken VIS and
+                // line-sync decisions, so keep the discriminator response flat.
+                demodulatedSample *= 4.0f;
             } else {
                 fmDeemphasisState += fmDeemphasisAlpha * (demodulatedSample - fmDeemphasisState);
                 demodulatedSample = fmDeemphasisState *
@@ -1418,7 +1441,10 @@ void AudioProcessor::processDemodulatorBlock(const std::vector<float>& iqBlock,
         while (audioResamplePhase >= 1.0) {
             audioResamplePhase -= 1.0;
 
-            amDcEstimate += (digitalAudioMode ? 0.0001f : 0.0005f) *
+            const float dcTrackingAlpha = sstvNfm
+                                              ? 0.0026f
+                                              : (digitalAudioMode ? 0.0001f : 0.0005f);
+            amDcEstimate += dcTrackingAlpha *
                             (demodulatedSample - amDcEstimate);
             float acSample = demodulatedSample - amDcEstimate;
             if (demodAudioHighPassAlpha > 0.0f) {
@@ -1612,7 +1638,12 @@ void AudioProcessor::SDRThread() {
                                << (settings.modulationType == MOD_DMR ?
                                    (dmrLastLoggedDecimationFactor <= DmrCicDecimator::MaxFixedPointFactor ?
                                         "dmr-cic5" : "dmr-box5") :
-                                   (settings.simplifiedAudioChannelizer ? "simplified" : "multistage"))
+                                   (settings.modulationType == MOD_SSTV &&
+                                    sstvDemodulationModulationType(settings.sstvDemodulationMode) == MOD_NFM
+                                        ? "sstv-nfm-multistage"
+                                        : (settings.simplifiedAudioChannelizer
+                                               ? "simplified"
+                                               : "multistage")))
                                << "realtimeRatio" << producedRatio
                                << "configuredRate" << settings.sampleRate
                                << "estimatedRate" << iqStats.sampleRateEstimate

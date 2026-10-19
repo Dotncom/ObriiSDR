@@ -90,6 +90,7 @@ void SignalLabDialog::buildUi() {
     addWaveform(QStringLiteral("Pulse train"), SignalLabWaveform::Pulse);
     addWaveform(QStringLiteral("Multi-tone"), SignalLabWaveform::MultiTone);
     addWaveform(QStringLiteral("Linear chirp"), SignalLabWaveform::LinearChirp);
+    addWaveform(QStringLiteral("Sweeping beacon"), SignalLabWaveform::SweepingBeacon);
     addWaveform(QStringLiteral("Complex white noise"), SignalLabWaveform::WhiteNoise);
     addWaveform(QStringLiteral("BPSK"), SignalLabWaveform::Bpsk);
     addWaveform(QStringLiteral("QPSK"), SignalLabWaveform::Qpsk);
@@ -162,6 +163,54 @@ void SignalLabDialog::buildUi() {
                             QString::fromUtf8(u8"Коефіцієнт заповнення:"), basicBox), dutySpin);
     basic->addRow(makeLabel(QStringLiteral("Tone list (Hz):"),
                             QString::fromUtf8(u8"Список тонів (Гц):"), basicBox), multiToneEdit);
+
+    sweepBox = new QGroupBox(parameters);
+    sweepBox->setObjectName(QStringLiteral("signalLabSweepBox"));
+    QFormLayout *sweep = new QFormLayout(sweepBox);
+    sweepStartSpin = new QDoubleSpinBox(sweepBox);
+    sweepStartSpin->setDecimals(1);
+    sweepStartSpin->setSingleStep(100.0);
+    sweepStartSpin->setSuffix(QStringLiteral(" Hz"));
+    sweepStopSpin = new QDoubleSpinBox(sweepBox);
+    sweepStopSpin->setDecimals(1);
+    sweepStopSpin->setSingleStep(100.0);
+    sweepStopSpin->setSuffix(QStringLiteral(" Hz"));
+    sweepBandwidthSpin = new QDoubleSpinBox(sweepBox);
+    sweepBandwidthSpin->setDecimals(1);
+    sweepBandwidthSpin->setSingleStep(100.0);
+    sweepBandwidthSpin->setSuffix(QStringLiteral(" Hz"));
+    sweepBandwidthSpin->setSpecialValueText(text(QStringLiteral("Carrier"),
+                                                  QString::fromUtf8(u8"Несуча")));
+    sweepPeriodSpin = new QDoubleSpinBox(sweepBox);
+    sweepPeriodSpin->setRange(0.001, 3600.0);
+    sweepPeriodSpin->setDecimals(3);
+    sweepPeriodSpin->setSingleStep(0.1);
+    sweepPeriodSpin->setSuffix(QStringLiteral(" s"));
+    sweepModeCombo = new QComboBox(sweepBox);
+    sweepModeCombo->addItem(QStringLiteral("Ping-pong"),
+                            static_cast<int>(SignalLabSweepMode::PingPong));
+    sweepModeCombo->addItem(QStringLiteral("Forward restart"),
+                            static_cast<int>(SignalLabSweepMode::RestartForward));
+    sweepModeCombo->addItem(QStringLiteral("Reverse restart"),
+                            static_cast<int>(SignalLabSweepMode::RestartReverse));
+    sweep->addRow(makeLabel(QStringLiteral("Start offset:"),
+                            QString::fromUtf8(u8"Початковий зсув:"), sweepBox),
+                  sweepStartSpin);
+    sweep->addRow(makeLabel(QStringLiteral("Stop offset:"),
+                            QString::fromUtf8(u8"Кінцевий зсув:"), sweepBox),
+                  sweepStopSpin);
+    sweep->addRow(makeLabel(QStringLiteral("Signal bandwidth:"),
+                            QString::fromUtf8(u8"Ширина сигналу:"), sweepBox),
+                  sweepBandwidthSpin);
+    sweep->addRow(makeLabel(QStringLiteral("One-way pass period:"),
+                            QString::fromUtf8(u8"Період одного проходу:"), sweepBox),
+                  sweepPeriodSpin);
+    sweep->addRow(makeLabel(QStringLiteral("Sweep path:"),
+                            QString::fromUtf8(u8"Траєкторія руху:"), sweepBox),
+                  sweepModeCombo);
+    sweepBox->setToolTip(text(
+        QStringLiteral("Offsets are relative to the transmitter center. Ping-pong returns smoothly; restart modes jump to the opposite edge after every pass. Zero bandwidth generates a pure carrier."),
+        QString::fromUtf8(u8"Зсуви рахуються від центра передавача. Маятник плавно повертається; режими перезапуску після кожного проходу стрибають на протилежний край. Нульова ширина створює чисту несучу.")));
 
     digitalBox = new QGroupBox(parameters);
     digitalBox->setObjectName(QStringLiteral("signalLabDigitalBox"));
@@ -242,6 +291,7 @@ void SignalLabDialog::buildUi() {
 
     left->addWidget(commonBox);
     left->addWidget(basicBox);
+    left->addWidget(sweepBox);
     left->addWidget(digitalBox);
     left->addWidget(ofdmBox);
     left->addStretch(1);
@@ -400,6 +450,8 @@ void SignalLabDialog::updateTexts() {
     }
     basicBox->setTitle(text(QStringLiteral("Basic and composite forms"),
                             QString::fromUtf8(u8"Прості та складені форми")));
+    sweepBox->setTitle(text(QStringLiteral("Sweeping beacon"),
+                             QString::fromUtf8(u8"Плаваючий маячок")));
     digitalBox->setTitle(text(QStringLiteral("Quadrature modulation"),
                               QString::fromUtf8(u8"Квадратурна модуляція")));
     ofdmBox->setTitle(QStringLiteral("OFDM"));
@@ -414,7 +466,7 @@ void SignalLabDialog::updateTexts() {
         QStringLiteral("Carrier"), QStringLiteral("Sine / DSB"), QStringLiteral("Square"),
         QStringLiteral("Triangle"), QStringLiteral("Sawtooth"), QStringLiteral("Pulse train"),
         QStringLiteral("Multi-tone"), QStringLiteral("Linear chirp"),
-        QStringLiteral("Complex white noise"), QStringLiteral("BPSK"), QStringLiteral("QPSK"),
+        QStringLiteral("Sweeping beacon"), QStringLiteral("Complex white noise"), QStringLiteral("BPSK"), QStringLiteral("QPSK"),
         QStringLiteral("8PSK"), QStringLiteral("pi/4-DQPSK"), QStringLiteral("16-QAM"),
         QStringLiteral("64-QAM"), QStringLiteral("256-QAM"), QStringLiteral("2-FSK"),
         QStringLiteral("2-GFSK"), QStringLiteral("OFDM")};
@@ -423,13 +475,21 @@ void SignalLabDialog::updateTexts() {
         QString::fromUtf8(u8"Прямокутний"), QString::fromUtf8(u8"Трикутний"),
         QString::fromUtf8(u8"Пилкоподібний"), QString::fromUtf8(u8"Послідовність імпульсів"),
         QString::fromUtf8(u8"Багатотоновий"), QString::fromUtf8(u8"Лінійний chirp"),
-        QString::fromUtf8(u8"Комплексний білий шум"), QStringLiteral("BPSK"),
+        QString::fromUtf8(u8"Плаваючий маячок"), QString::fromUtf8(u8"Комплексний білий шум"), QStringLiteral("BPSK"),
         QStringLiteral("QPSK"), QStringLiteral("8PSK"), QStringLiteral("pi/4-DQPSK"),
         QStringLiteral("16-QAM"), QStringLiteral("64-QAM"), QStringLiteral("256-QAM"),
         QStringLiteral("2-FSK"), QStringLiteral("2-GFSK"), QStringLiteral("OFDM")};
     for (int i = 0; i < waveformCombo->count() && i < englishWaveforms.size(); ++i) {
         waveformCombo->setItemText(i, text(englishWaveforms[i], ukrainianWaveforms[i]));
     }
+    sweepModeCombo->setItemText(0, text(QStringLiteral("Ping-pong"),
+                                        QString::fromUtf8(u8"Маятник")));
+    sweepModeCombo->setItemText(1, text(QStringLiteral("Forward restart"),
+                                        QString::fromUtf8(u8"Від початку з повтором")));
+    sweepModeCombo->setItemText(2, text(QStringLiteral("Reverse restart"),
+                                        QString::fromUtf8(u8"Від кінця з повтором")));
+    sweepBandwidthSpin->setSpecialValueText(text(QStringLiteral("Carrier"),
+                                                  QString::fromUtf8(u8"Несуча")));
 
     generateButton->setText(text(QStringLiteral("Generate / preview"),
                                  QString::fromUtf8(u8"Згенерувати / перегляд")));
@@ -453,20 +513,22 @@ void SignalLabDialog::updateTexts() {
 void SignalLabDialog::updateModeUi() {
     const SignalLabWaveform waveform =
         static_cast<SignalLabWaveform>(waveformCombo->currentData().toInt());
+    const bool sweeping = waveform == SignalLabWaveform::SweepingBeacon;
     const bool basic = static_cast<int>(waveform) <=
-                       static_cast<int>(SignalLabWaveform::WhiteNoise);
+                       static_cast<int>(SignalLabWaveform::WhiteNoise) || sweeping;
     const bool ofdm = waveform == SignalLabWaveform::Ofdm;
     const bool digital = !basic;
     const bool fsk = waveform == SignalLabWaveform::Fsk2 ||
                      waveform == SignalLabWaveform::Gfsk2;
-    basicBox->setVisible(basic);
+    basicBox->setVisible(basic && !sweeping);
+    sweepBox->setVisible(sweeping);
     digitalBox->setVisible(digital);
     ofdmBox->setVisible(ofdm);
     durationSpin->setEnabled(!ofdm);
     symbolRateSpin->setEnabled(digital && !ofdm);
     rolloffSpin->setEnabled(digital && !ofdm);
     fskDeviationSpin->setEnabled(fsk);
-    seedSpin->setEnabled(digital || waveform == SignalLabWaveform::WhiteNoise);
+    seedSpin->setEnabled(digital || waveform == SignalLabWaveform::WhiteNoise || sweeping);
 
     toneSpin->setEnabled(waveform == SignalLabWaveform::Sine ||
                          waveform == SignalLabWaveform::Square ||
@@ -487,6 +549,9 @@ void SignalLabDialog::updateSampleRateLimits() {
     centerOffsetSpin->setRange(-maximum, maximum);
     toneSpin->setRange(-maximum, maximum);
     secondToneSpin->setRange(-maximum, maximum);
+    sweepStartSpin->setRange(-maximum, maximum);
+    sweepStopSpin->setRange(-maximum, maximum);
+    sweepBandwidthSpin->setRange(0.0, sampleRate * 0.9);
     fskDeviationSpin->setMaximum(maximum);
     symbolRateSpin->setMaximum(sampleRate * 0.45);
 }
@@ -501,6 +566,14 @@ SignalLabConfiguration SignalLabDialog::configurationFromUi() const {
     configuration.centerOffsetHz = centerOffsetSpin->value();
     configuration.toneFrequencyHz = toneSpin->value();
     configuration.secondFrequencyHz = secondToneSpin->value();
+    configuration.sweepBandwidthHz = sweepBandwidthSpin->value();
+    configuration.sweepPeriodSeconds = sweepPeriodSpin->value();
+    configuration.sweepMode = static_cast<SignalLabSweepMode>(
+        sweepModeCombo->currentData().toInt());
+    if (configuration.waveform == SignalLabWaveform::SweepingBeacon) {
+        configuration.toneFrequencyHz = sweepStartSpin->value();
+        configuration.secondFrequencyHz = sweepStopSpin->value();
+    }
     configuration.dutyCycle = dutySpin->value() / 100.0;
     configuration.multiToneFrequencies = multiToneEdit->text();
     configuration.symbolRate = symbolRateSpin->value();
@@ -661,6 +734,18 @@ void SignalLabDialog::exportCurrent() {
     metadata.insert(QStringLiteral("occupied_bandwidth_hz"),
                     lastResult.occupiedBandwidthHz);
     metadata.insert(QStringLiteral("center_offset_hz"), configuration.centerOffsetHz);
+    if (configuration.waveform == SignalLabWaveform::SweepingBeacon) {
+        metadata.insert(QStringLiteral("sweep_start_offset_hz"),
+                        configuration.toneFrequencyHz);
+        metadata.insert(QStringLiteral("sweep_stop_offset_hz"),
+                        configuration.secondFrequencyHz);
+        metadata.insert(QStringLiteral("sweep_bandwidth_hz"),
+                        configuration.sweepBandwidthHz);
+        metadata.insert(QStringLiteral("sweep_one_way_period_s"),
+                        configuration.sweepPeriodSeconds);
+        metadata.insert(QStringLiteral("sweep_mode"),
+                        SignalLabGenerator::sweepModeName(configuration.sweepMode));
+    }
     metadata.insert(QStringLiteral("peak"), lastResult.peak);
     metadata.insert(QStringLiteral("rms"), lastResult.rms);
     metadata.insert(QStringLiteral("papr_db"), lastResult.paprDb);
@@ -717,6 +802,18 @@ void SignalLabDialog::loadSettings() {
                                       1000.0).toDouble());
     secondToneSpin->setValue(settings.value(QStringLiteral("transmit/signalLab/secondTone"),
                                             3000.0).toDouble());
+    sweepStartSpin->setValue(settings.value(
+        QStringLiteral("transmit/signalLab/sweepStart"), -5000.0).toDouble());
+    sweepStopSpin->setValue(settings.value(
+        QStringLiteral("transmit/signalLab/sweepStop"), 5000.0).toDouble());
+    sweepBandwidthSpin->setValue(settings.value(
+        QStringLiteral("transmit/signalLab/sweepBandwidth"), 1000.0).toDouble());
+    sweepPeriodSpin->setValue(settings.value(
+        QStringLiteral("transmit/signalLab/sweepPeriod"), 1.0).toDouble());
+    index = sweepModeCombo->findData(settings.value(
+        QStringLiteral("transmit/signalLab/sweepMode"),
+        static_cast<int>(SignalLabSweepMode::PingPong)).toInt());
+    if (index >= 0) sweepModeCombo->setCurrentIndex(index);
     dutySpin->setValue(settings.value(QStringLiteral("transmit/signalLab/duty"),
                                       50.0).toDouble());
     multiToneEdit->setText(settings.value(
@@ -781,9 +878,19 @@ void SignalLabDialog::saveSettings() const {
     settings.setValue(QStringLiteral("transmit/signalLab/centerOffset"),
                       configuration.centerOffsetHz);
     settings.setValue(QStringLiteral("transmit/signalLab/tone"),
-                      configuration.toneFrequencyHz);
+                      toneSpin->value());
     settings.setValue(QStringLiteral("transmit/signalLab/secondTone"),
-                      configuration.secondFrequencyHz);
+                      secondToneSpin->value());
+    settings.setValue(QStringLiteral("transmit/signalLab/sweepStart"),
+                      sweepStartSpin->value());
+    settings.setValue(QStringLiteral("transmit/signalLab/sweepStop"),
+                      sweepStopSpin->value());
+    settings.setValue(QStringLiteral("transmit/signalLab/sweepBandwidth"),
+                      configuration.sweepBandwidthHz);
+    settings.setValue(QStringLiteral("transmit/signalLab/sweepPeriod"),
+                      configuration.sweepPeriodSeconds);
+    settings.setValue(QStringLiteral("transmit/signalLab/sweepMode"),
+                      static_cast<int>(configuration.sweepMode));
     settings.setValue(QStringLiteral("transmit/signalLab/duty"), dutySpin->value());
     settings.setValue(QStringLiteral("transmit/signalLab/multiTone"),
                       configuration.multiToneFrequencies);

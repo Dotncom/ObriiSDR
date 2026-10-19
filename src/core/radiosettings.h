@@ -69,6 +69,22 @@ inline int sstvDemodulationModulationType(int mode) {
     }
 }
 
+inline int effectiveDemodulationModulationType(int modulationType,
+                                               int sstvDemodulationMode) {
+    return modulationType == MOD_SSTV
+               ? sstvDemodulationModulationType(sstvDemodulationMode)
+               : modulationType;
+}
+
+inline double effectiveDemodulationBandwidth(double bandwidth,
+                                              int modulationType,
+                                              int sstvDemodulationMode) {
+    return modulationType == MOD_SSTV &&
+                   normalizedSstvDemodulationMode(sstvDemodulationMode) == SSTV_DEMOD_NFM
+               ? (std::max)(bandwidth, 25000.0)
+               : bandwidth;
+}
+
 enum InputMode {
     INPUT_RF = 0,
     INPUT_HF_COMBINED = 1,

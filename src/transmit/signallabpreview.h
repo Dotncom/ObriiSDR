@@ -36,6 +36,10 @@ SignalLabSpectralPreviewData buildSignalLabSpectralPreview(
 
 struct SignalLabIqPreviewData {
     QVector<std::complex<float>> timePoints;
+    QVector<float> timeMinimumI;
+    QVector<float> timeMaximumI;
+    QVector<float> timeMinimumQ;
+    QVector<float> timeMaximumQ;
     QVector<std::complex<float>> samples;
     QVector<double> sampleTimes;
     QVector<std::complex<float>> symbols;
@@ -62,6 +66,10 @@ protected:
 
 private:
     QVector<std::complex<float>> timePoints;
+    QVector<float> timeMinimumI;
+    QVector<float> timeMaximumI;
+    QVector<float> timeMinimumQ;
+    QVector<float> timeMaximumQ;
     QVector<std::complex<float>> constellation;
     QVector<std::complex<float>> symbols;
     double timeSpanSeconds = 0.0;

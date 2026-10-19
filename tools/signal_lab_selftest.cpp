@@ -154,6 +154,54 @@ void testSpectralPreview() {
                 "Zero padding falsely improved the actual RBW");
     }
 }
+void testSweepingBeacon() {
+    SignalLabConfiguration config;
+    config.waveform = SignalLabWaveform::SweepingBeacon;
+    config.sampleRate = 48000;
+    config.durationSeconds = 0.45;
+    config.amplitude = 0.8;
+    config.toneFrequencyHz = -6000;
+    config.secondFrequencyHz = 6000;
+    config.sweepBandwidthHz = 0;
+    config.sweepPeriodSeconds = 0.2;
+    config.sweepMode = SignalLabSweepMode::PingPong;
+    auto result = SignalLabGenerator::generate(config);
+    require(result.ok() && std::abs(result.occupiedBandwidthHz - 12000) < 0.01,
+            "Pure sweeping beacon generation failed");
+    const auto instantaneousHz = [&](int sample) {
+        const auto delta = result.iq[sample] * std::conj(result.iq[sample - 1]);
+        return std::arg(delta) * config.sampleRate / (2.0 * pi);
+    };
+    require(std::abs(instantaneousHz(4800)) < 1.0 &&
+            std::abs(instantaneousHz(9600) - 6000) < 1.0 &&
+            std::abs(instantaneousHz(14400)) < 1.0,
+            "Ping-pong beacon frequency trajectory is wrong");
+
+    config.sweepMode = SignalLabSweepMode::RestartForward;
+    result = SignalLabGenerator::generate(config);
+    require(result.ok() && std::abs(instantaneousHz(4800)) < 1.0 &&
+            std::abs(instantaneousHz(9599) - 5998.75) < 2.0 &&
+            std::abs(instantaneousHz(9600) + 6000) < 1.0,
+            "Forward-restart beacon trajectory is wrong");
+
+    config.sweepMode = SignalLabSweepMode::RestartReverse;
+    result = SignalLabGenerator::generate(config);
+    require(result.ok() && std::abs(instantaneousHz(1) - 5998.75) < 2.0 &&
+            std::abs(instantaneousHz(4800)) < 1.0,
+            "Reverse-restart beacon trajectory is wrong");
+
+    config.sweepMode = SignalLabSweepMode::PingPong;
+    config.sweepBandwidthHz = 2400;
+    result = SignalLabGenerator::generate(config);
+    require(result.ok() && std::abs(result.occupiedBandwidthHz - 14400) < 0.01 &&
+            result.samplesPerSymbol == 0,
+            "Band-limited sweeping beacon width or preview metadata is wrong");
+    config.toneFrequencyHz = 22000;
+    config.secondFrequencyHz = 22000;
+    config.sweepBandwidthHz = 5000;
+    require(!SignalLabGenerator::generate(config).ok(),
+            "Out-of-Nyquist sweeping beacon was accepted");
+}
 void renderPreview(const QString &path) {
     SignalLabConfiguration config;
     config.waveform = SignalLabWaveform::Qam16;
@@ -333,10 +381,21 @@ void testResearchConstellation(const QString &path) {
 }
 }
 int main(int argc, char **argv) {
+    if (argc == 2 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--beacon-only")) {
+        try {
+            testSweepingBeacon();
+            std::cout << "Signal Lab sweeping beacon trajectories and bandwidth: PASS\n";
+            return 0;
+        } catch (const std::exception &error) {
+            std::cerr << error.what() << '\n';
+            return 1;
+        }
+    }
     QApplication app(argc, argv);
     try {
         testSymbols();
         testSpectralPreview();
+        testSweepingBeacon();
         testConstellation3D(argc == 2 ? QString::fromLocal8Bit(argv[1]) + QStringLiteral(".3d.png") : QString());
         testResearchConstellation(argc == 2 ? QString::fromLocal8Bit(argv[1]) + QStringLiteral(".research-3d.png") : QString());
         if (argc == 2) renderPreview(QString::fromLocal8Bit(argv[1]));

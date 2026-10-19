@@ -301,6 +301,34 @@ void YourClassName::applyUiLanguage() {
             QStringLiteral("waterfall_3d_monochrome_tooltip"),
             QStringLiteral("Render the 3D surface in a calm solid blue instead of amplitude colors.")));
     }
+    if (waterfall3DHeightGradientCheckbox) {
+        waterfall3DHeightGradientCheckbox->setText(uiText(
+            QStringLiteral("waterfall_3d_height_gradient"),
+            QStringLiteral("Height gradient")));
+        waterfall3DHeightGradientCheckbox->setToolTip(uiText(
+            QStringLiteral("waterfall_3d_height_gradient_tooltip"),
+            QStringLiteral("Color the entire 3D geometry by absolute height, from a dark base to the peak color.")));
+    }
+    if (waterfall3DMonochromeColorLabel) {
+        waterfall3DMonochromeColorLabel->setText(uiText(
+            QStringLiteral("waterfall_3d_monochrome_color"),
+            QStringLiteral("3D color:")));
+    }
+    if (waterfall3DMonochromeColorButton) {
+        waterfall3DMonochromeColorButton->setToolTip(uiText(
+            QStringLiteral("waterfall_3d_monochrome_color_tooltip"),
+            QStringLiteral("Choose the base color used by monochrome 3D rendering.")));
+    }
+    if (waterfall3DMonochromeGradientDepthLabel) {
+        waterfall3DMonochromeGradientDepthLabel->setText(uiText(
+            QStringLiteral("waterfall_3d_monochrome_gradient_depth"),
+            QStringLiteral("Gradient depth:")));
+    }
+    if (waterfall3DMonochromeGradientDepthSlider) {
+        waterfall3DMonochromeGradientDepthSlider->setToolTip(uiText(
+            QStringLiteral("waterfall_3d_monochrome_gradient_depth_tooltip"),
+            QStringLiteral("Set the brightness range between the base and the tops of monochrome 3D geometry.")));
+    }
     if (waterfall3DAlternativeViewCheckbox) {
         waterfall3DAlternativeViewCheckbox->setText(uiText(
             QStringLiteral("waterfall_3d_alternative_view"),
@@ -749,6 +777,16 @@ void YourClassName::applySpectrumHunterTranslations() {
                 QStringLiteral("FPV Hunter"),
                 QStringLiteral("fpv_hunter_tooltip"),
                 QStringLiteral("Detect wide FPV-like video carriers in the current spectrum"));
+    if (fpvHunterControls) {
+        fpvHunterControls->setAutoScanUiText(
+            uiText(QStringLiteral("fpv_auto_scan_decode"),
+                   QStringLiteral("Auto scan + decode")),
+            uiText(QStringLiteral("fpv_auto_scan_decode_tooltip"),
+                   QStringLiteral("Scan the selected preset, stop on a stable analog video carrier, verify sync, then resume after signal loss")),
+            uiText(QStringLiteral("dwell_short"), QStringLiteral("Dwell:")),
+            uiText(QStringLiteral("loss_short"), QStringLiteral("Loss:")),
+            uiText(QStringLiteral("hsync_short"), QStringLiteral("HSync:")));
+    }
     applyHunter(digitalVideoHunterControls,
                 QStringLiteral("digital_video_hunter"),
                 QStringLiteral("Digital Video Hunter"),

@@ -1,4 +1,7 @@
 #include "videoprocessor.h"
+#include "audioprocessor.h"
+#include "transmitmediagenerator.h"
+#include "transmitwaveformgenerator.h"
 
 #include <QCoreApplication>
 #include <QDebug>
@@ -6,12 +9,251 @@
 #include <QStringList>
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cmath>
+#include <vector>
 
 namespace {
 constexpr int SampleRate = 48000;
 constexpr double TwoPi = 6.28318530717958647692;
+constexpr int HilbertTaps = 63;
+constexpr int HilbertDelay = HilbertTaps / 2;
+
+double hilbertCoefficient(int tap) {
+    const int n = tap - HilbertDelay;
+    if (n == 0 || (n & 1) == 0) return 0.0;
+    const double ideal = 2.0 / (3.14159265358979323846 * n);
+    const double window = 0.54 +
+                          0.46 * std::cos(3.14159265358979323846 * n /
+                                          static_cast<double>(HilbertDelay));
+    return ideal * window;
+}
+
+std::vector<float> pcmSamples(const QByteArray &pcm) {
+    std::vector<float> samples;
+    samples.reserve(static_cast<std::size_t>(pcm.size() / 2));
+    const auto *raw = reinterpret_cast<const unsigned char *>(pcm.constData());
+    for (int offset = 0; offset + 1 < pcm.size(); offset += 2) {
+        const quint16 bits = static_cast<quint16>(raw[offset]) |
+                             (static_cast<quint16>(raw[offset + 1]) << 8);
+        samples.push_back(static_cast<qint16>(bits) / 32768.0f);
+    }
+    return samples;
+}
+
+std::vector<float> modulateSsb(const std::vector<float> &audio, bool lowerSideband) {
+    std::vector<float> iq;
+    iq.reserve(audio.size() * 2U);
+    std::array<float, HilbertTaps> history{};
+    int writeIndex = 0;
+    for (float sample : audio) {
+        history[static_cast<std::size_t>(writeIndex)] = sample;
+        double quadrature = 0.0;
+        for (int tap = 0; tap < HilbertTaps; ++tap) {
+            int historyIndex = writeIndex - tap;
+            if (historyIndex < 0) historyIndex += HilbertTaps;
+            quadrature += hilbertCoefficient(tap) *
+                          history[static_cast<std::size_t>(historyIndex)];
+        }
+        int delayedIndex = writeIndex - HilbertDelay;
+        if (delayedIndex < 0) delayedIndex += HilbertTaps;
+        const float delayed = history[static_cast<std::size_t>(delayedIndex)];
+        writeIndex = (writeIndex + 1) % HilbertTaps;
+        iq.push_back(delayed * 0.72f);
+        iq.push_back(static_cast<float>(quadrature) *
+                     (lowerSideband ? -0.72f : 0.72f));
+    }
+    return iq;
+}
+
+std::vector<float> modulateNfm(const std::vector<float> &audio,
+                               int rfSampleRate = SampleRate,
+                               double deviationHz = 2500.0,
+                               double carrierOffsetHz = 0.0,
+                               bool amplitudeFading = false) {
+    const int oversample = (std::max)(1, rfSampleRate / SampleRate);
+    std::vector<float> iq;
+    iq.reserve(audio.size() * static_cast<std::size_t>(oversample) * 2U);
+    double phase = 0.0;
+    std::size_t rfIndex = 0;
+    for (float sample : audio) {
+        for (int subSample = 0; subSample < oversample; ++subSample, ++rfIndex) {
+            phase = std::remainder(
+                phase + TwoPi * (carrierOffsetHz + deviationHz * sample) / rfSampleRate,
+                TwoPi);
+            const double fading = amplitudeFading
+                                      ? 0.58 + 0.34 * std::sin(
+                                                     TwoPi * 7.3 * rfIndex / rfSampleRate)
+                                      : 0.72;
+            iq.push_back(static_cast<float>(fading * std::cos(phase)));
+            iq.push_back(static_cast<float>(fading * std::sin(phase)));
+        }
+    }
+    return iq;
+}
+
+bool decodeIqThroughReceiver(const std::vector<float> &iq,
+                             const RadioSettings &settings,
+                             const char *label,
+                             int expectedVis,
+                             const QString &expectedMode,
+                             const QSize &expectedSize) {
+    AudioProcessor receiver;
+    receiver.setLocalPlaybackEnabled(false);
+    std::vector<short> demodulated;
+    std::vector<short> blockPcm;
+    constexpr std::size_t IqBlockSamples = 32768;
+    bool firstBlock = true;
+    const std::size_t iqSampleCount = iq.size() / 2U;
+    for (std::size_t first = 0; first < iqSampleCount; first += IqBlockSamples) {
+        const std::size_t count = (std::min)(IqBlockSamples, iqSampleCount - first);
+        const std::vector<float> block(iq.begin() + static_cast<std::ptrdiff_t>(first * 2U),
+                                       iq.begin() + static_cast<std::ptrdiff_t>((first + count) * 2U));
+        if (!receiver.processIndependentIq(block, settings, firstBlock, blockPcm)) {
+            std::fprintf(stderr, "%s SSTV receiver rejected IQ\n", label);
+            return false;
+        }
+        firstBlock = false;
+        demodulated.insert(demodulated.end(), blockPcm.begin(), blockPcm.end());
+    }
+
+    VideoProcessor decoder;
+    QStringList statuses;
+    QImage frame;
+    QObject::connect(&decoder, &VideoProcessor::statusChanged,
+                     [&statuses](const QString &status) { statuses.append(status); });
+    QObject::connect(&decoder, &VideoProcessor::frameReady,
+                     [&frame](const QImage &next) { frame = next; });
+    decoder.configureSstv(true);
+    constexpr int PcmChunkSamples = 960;
+    for (std::size_t first = 0; first < demodulated.size(); first += PcmChunkSamples) {
+        const std::size_t count = (std::min)(static_cast<std::size_t>(PcmChunkSamples),
+                                             demodulated.size() - first);
+        const QByteArray bytes(
+            reinterpret_cast<const char *>(demodulated.data() + first),
+            static_cast<int>(count * sizeof(short)));
+        decoder.processSstvPcmFrame(bytes, SampleRate);
+    }
+
+    const QString visNeedle = QStringLiteral("VIS %1").arg(expectedVis);
+    const bool visDetected = std::any_of(statuses.cbegin(), statuses.cend(),
+                                         [&visNeedle, &expectedMode](const QString &status) {
+                                             return status.contains(visNeedle) &&
+                                                    status.contains(expectedMode);
+                                         });
+    const bool pixelsDecoded = frame.size() == expectedSize &&
+                               frame.pixel(0, 0) != qRgb(8, 10, 12);
+    if (!visDetected || !pixelsDecoded) {
+        qWarning().noquote() << label << "SSTV pipeline failed:"
+                             << statuses.join(QStringLiteral(" | "));
+        return false;
+    }
+    qInfo() << label << "SSTV IQ pipeline PASS" << demodulated.size() << "PCM samples";
+    return true;
+}
+
+bool decodeThroughReceiver(const QByteArray &sourcePcm,
+                           int sstvDemodulationMode,
+                           const char *label,
+                           bool simplifiedChannelizer = false,
+                           int rfSampleRate = SampleRate,
+                           double deviationHz = 2500.0,
+                           double carrierOffsetHz = 0.0) {
+    const std::vector<float> audio = pcmSamples(sourcePcm);
+    const std::vector<float> iq = sstvDemodulationMode == SSTV_DEMOD_NFM
+                                      ? modulateNfm(audio,
+                                                    rfSampleRate,
+                                                    deviationHz,
+                                                    carrierOffsetHz,
+                                                    simplifiedChannelizer)
+                                      : modulateSsb(audio,
+                                                    sstvDemodulationMode == SSTV_DEMOD_LSB);
+
+    RadioSettings settings;
+    settings.inputMode = INPUT_RF;
+    settings.sampleRate = rfSampleRate;
+    settings.centerFrequency = 145500000.0;
+    settings.listeningFrequency = settings.centerFrequency + carrierOffsetHz;
+    settings.bandwidth = 3000.0;
+    settings.modulationType = MOD_SSTV;
+    settings.sstvDemodulationMode = sstvDemodulationMode;
+    settings.simplifiedAudioChannelizer = simplifiedChannelizer;
+    settings.audioFilterChainJson = QStringLiteral("[]");
+    return decodeIqThroughReceiver(iq,
+                                   settings,
+                                   label,
+                                   44,
+                                   QStringLiteral("Martin M1"),
+                                   QSize(320, 256));
+}
+
+bool decodeGeneratedTxNfm() {
+    QImage image(320, 240, QImage::Format_RGB32);
+    image.fill(QColor(190, 70, 220));
+    TxAudioMedia media = TransmitMediaGenerator::generateSstv(
+        image, QStringLiteral("robot36"), SampleRate);
+    if (!media.ok()) {
+        qWarning().noquote() << "Generated NFM SSTV media failed:" << media.error;
+        return false;
+    }
+
+    const int usefulAudioSamples = (std::min)(media.samples.size(), SampleRate * 3);
+    media.samples.resize(usefulAudioSamples);
+    TxConfiguration configuration;
+    configuration.modulation = TxModulation::Nfm;
+    configuration.sampleRate = SampleRate;
+    configuration.level = 0.72f;
+    configuration.deviationHz = 2500.0;
+    configuration.signalBandwidthHz = 12500.0;
+    const QVector<std::complex<float>> baseband =
+        TransmitWaveformGenerator::modulateAudio(configuration, media.samples);
+    if (baseband.isEmpty()) return false;
+
+    constexpr int RfSampleRate = 384000;
+    constexpr double CarrierOffsetHz = 40000.0;
+    constexpr double ResidualTuneErrorHz = 275.0;
+    constexpr int Interpolation = RfSampleRate / SampleRate;
+    std::vector<float> iq;
+    iq.reserve(static_cast<std::size_t>(baseband.size()) * Interpolation * 2U);
+    double carrierPhase = 0.0;
+    std::size_t rfIndex = 0;
+    for (int source = 0; source < baseband.size(); ++source) {
+        const std::complex<float> first = baseband[source];
+        const std::complex<float> second = baseband[(std::min)(source + 1, baseband.size() - 1)];
+        for (int subSample = 0; subSample < Interpolation; ++subSample, ++rfIndex) {
+            const float fraction = static_cast<float>(subSample) / Interpolation;
+            const std::complex<float> interpolated = first + (second - first) * fraction;
+            const float fading = static_cast<float>(
+                0.70 + 0.20 * std::sin(TwoPi * 5.7 * rfIndex / RfSampleRate));
+            const std::complex<float> shifted = interpolated * fading *
+                std::polar(1.0f, static_cast<float>(carrierPhase));
+            iq.push_back(std::real(shifted));
+            iq.push_back(std::imag(shifted));
+            carrierPhase = std::remainder(
+                carrierPhase + TwoPi * CarrierOffsetHz / RfSampleRate,
+                TwoPi);
+        }
+    }
+
+    RadioSettings settings;
+    settings.inputMode = INPUT_RF;
+    settings.sampleRate = RfSampleRate;
+    settings.centerFrequency = 145500000.0;
+    settings.listeningFrequency = settings.centerFrequency +
+                                  CarrierOffsetHz - ResidualTuneErrorHz;
+    settings.bandwidth = 12500.0;
+    settings.modulationType = MOD_SSTV;
+    settings.sstvDemodulationMode = SSTV_DEMOD_NFM;
+    settings.simplifiedAudioChannelizer = false;
+    settings.audioFilterChainJson = QStringLiteral("[]");
+    return decodeIqThroughReceiver(iq,
+                                   settings,
+                                   "Generated TX NFM",
+                                   8,
+                                   QStringLiteral("Robot 36"),
+                                   QSize(320, 240));
+}
 
 void appendTone(QByteArray &pcm,
                 double frequencyHz,
@@ -31,6 +273,29 @@ void appendTone(QByteArray &pcm,
 
 void appendSilence(QByteArray &pcm, double seconds) {
     pcm.append(QByteArray(qRound(seconds * SampleRate) * static_cast<int>(sizeof(qint16)), '\0'));
+}
+
+void addPcmInterference(QByteArray &pcm,
+                        int firstSample,
+                        int sampleCount,
+                        double frequencyHz,
+                        double amplitude) {
+    const int availableSamples = pcm.size() / static_cast<int>(sizeof(qint16));
+    const int endSample = (std::min)(availableSamples, firstSample + sampleCount);
+    auto *raw = reinterpret_cast<unsigned char *>(pcm.data());
+    for (int sample = (std::max)(0, firstSample); sample < endSample; ++sample) {
+        const int byteOffset = sample * static_cast<int>(sizeof(qint16));
+        const quint16 bits = static_cast<quint16>(raw[byteOffset]) |
+                             (static_cast<quint16>(raw[byteOffset + 1]) << 8);
+        const int original = static_cast<qint16>(bits);
+        const int interference = qRound(
+            amplitude * std::sin(TwoPi * frequencyHz * sample / SampleRate));
+        const qint16 mixed = static_cast<qint16>((std::clamp)(original + interference,
+                                                              -32768,
+                                                              32767));
+        raw[byteOffset] = static_cast<unsigned char>(mixed & 0xff);
+        raw[byteOffset + 1] = static_cast<unsigned char>((mixed >> 8) & 0xff);
+    }
 }
 
 void appendVis(QByteArray &pcm, int visCode, double &phase, double toneOffsetHz) {
@@ -130,6 +395,11 @@ int main(int argc, char **argv) {
     constexpr double TimingScale = 0.997;
     appendSilence(pcm, 1.2037);
     appendVis(pcm, 44, phase, ToneOffsetHz);
+    addPcmInterference(pcm,
+                       qRound(1.2037 * SampleRate),
+                       qRound(0.910 * SampleRate),
+                       7400.0,
+                       6500.0);
     for (int line = 0; line < 6; ++line) {
         appendMartinM1Line(pcm, phase, ToneOffsetHz, TimingScale);
         if (line == 1) {
@@ -255,5 +525,15 @@ int main(int argc, char **argv) {
             SampleRate);
     }
     if (falseFrames != 0) return 12;
+    if (!decodeThroughReceiver(pcm, SSTV_DEMOD_LSB, "LSB")) return 13;
+    if (!decodeThroughReceiver(pcm, SSTV_DEMOD_NFM, "NFM")) return 14;
+    if (!decodeThroughReceiver(pcm,
+                               SSTV_DEMOD_NFM,
+                               "NFM high-rate streaming",
+                               true,
+                               384000,
+                               5000.0,
+                               40000.0)) return 15;
+    if (!decodeGeneratedTxNfm()) return 16;
     return 0;
 }

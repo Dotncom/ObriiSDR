@@ -283,8 +283,13 @@ void YourClassName::displayNetworkSpectrumFrame(const QJsonObject &frame) {
         frame.value("showScanSegmentMarkers").toBool(!frameScanSegments.isEmpty());
     const double displayCenterFrequency = frameCenterFrequency;
     const double displayListeningFrequency = pendingSettings.listeningFrequency;
-    const double displayBandwidth = pendingSettings.bandwidth;
-    const int displayModulationType = pendingSettings.modulationType;
+    const double displayBandwidth = effectiveDemodulationBandwidth(
+        pendingSettings.bandwidth,
+        pendingSettings.modulationType,
+        pendingSettings.sstvDemodulationMode);
+    const int displayModulationType = effectiveDemodulationModulationType(
+        pendingSettings.modulationType,
+        pendingSettings.sstvDemodulationMode);
 
     if (scaleWidget) {
         scaleWidget->setScanSegments(frameScanSegments);
@@ -499,8 +504,13 @@ void YourClassName::displayNetworkSpectrumFrameBinary(const QJsonObject &frame, 
         frame.value("showScanSegmentMarkers").toBool(!frameScanSegments.isEmpty());
     const double displayCenterFrequency = frameCenterFrequency;
     const double displayListeningFrequency = pendingSettings.listeningFrequency;
-    const double displayBandwidth = pendingSettings.bandwidth;
-    const int displayModulationType = pendingSettings.modulationType;
+    const double displayBandwidth = effectiveDemodulationBandwidth(
+        pendingSettings.bandwidth,
+        pendingSettings.modulationType,
+        pendingSettings.sstvDemodulationMode);
+    const int displayModulationType = effectiveDemodulationModulationType(
+        pendingSettings.modulationType,
+        pendingSettings.sstvDemodulationMode);
 
     if (scaleWidget) {
         scaleWidget->setScanSegments(frameScanSegments);

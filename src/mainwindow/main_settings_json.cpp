@@ -229,6 +229,11 @@ QJsonObject YourClassName::settingsToJson() const {
     settings["waterfall3DSpectrumSliceCaptureFixed"] = waterfall3DSpectrumSliceCaptureFixed;
     settings["waterfall3DFixedPlane"] = waterfall3DFixedPlane;
     settings["waterfall3DMonochrome"] = waterfall3DMonochrome;
+    settings["waterfall3DHeightGradient"] = waterfall3DHeightGradient;
+    settings["waterfall3DMonochromeColor"] =
+        waterfall3DMonochromeColor.name(QColor::HexRgb);
+    settings["waterfall3DMonochromeGradientDepth"] =
+        waterfall3DMonochromeGradientDepth;
     settings["waterfall3DAlternativeView"] = waterfall3DAlternativeView;
     settings["waterfall3DVncSliceInput"] = waterfall3DVncSliceInput;
     settings["alternativeInterfaceMode"] = alternativeInterfaceMode;
@@ -742,6 +747,19 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
         readBool("waterfall3DSpectrumSliceCaptureFixed", waterfall3DSpectrumSliceCaptureFixed);
     waterfall3DFixedPlane = readBool("waterfall3DFixedPlane", waterfall3DFixedPlane);
     waterfall3DMonochrome = readBool("waterfall3DMonochrome", waterfall3DMonochrome);
+    waterfall3DHeightGradient =
+        readBool("waterfall3DHeightGradient", waterfall3DHeightGradient);
+    const QColor importedMonochromeColor(
+        readString("waterfall3DMonochromeColor",
+                   waterfall3DMonochromeColor.name(QColor::HexRgb)));
+    if (importedMonochromeColor.isValid()) {
+        waterfall3DMonochromeColor = importedMonochromeColor;
+    }
+    waterfall3DMonochromeGradientDepth = (std::clamp)(
+        readInt("waterfall3DMonochromeGradientDepth",
+                waterfall3DMonochromeGradientDepth),
+        0,
+        100);
     waterfall3DAlternativeView = readBool("waterfall3DAlternativeView", waterfall3DAlternativeView);
     waterfall3DVncSliceInput =
         readBool("waterfall3DVncSliceInput", waterfall3DVncSliceInput);
@@ -778,6 +796,29 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
         QSignalBlocker blocker(waterfall3DMonochromeCheckbox);
         waterfall3DMonochromeCheckbox->setChecked(waterfall3DMonochrome);
     }
+    if (waterfall3DHeightGradientCheckbox) {
+        QSignalBlocker blocker(waterfall3DHeightGradientCheckbox);
+        waterfall3DHeightGradientCheckbox->setChecked(waterfall3DHeightGradient);
+    }
+    if (waterfall3DMonochromeColorButton) {
+        const QColor textColor = waterfall3DMonochromeColor.lightnessF() > 0.58
+                                     ? Qt::black : Qt::white;
+        waterfall3DMonochromeColorButton->setText(
+            waterfall3DMonochromeColor.name(QColor::HexRgb).toUpper());
+        waterfall3DMonochromeColorButton->setStyleSheet(QStringLiteral(
+            "QPushButton { background-color: %1; color: %2; border: 1px solid #707780; padding: 3px 8px; }")
+            .arg(waterfall3DMonochromeColor.name(QColor::HexRgb),
+                 textColor.name(QColor::HexRgb)));
+    }
+    if (waterfall3DMonochromeGradientDepthSlider) {
+        QSignalBlocker blocker(waterfall3DMonochromeGradientDepthSlider);
+        waterfall3DMonochromeGradientDepthSlider->setValue(
+            waterfall3DMonochromeGradientDepth);
+    }
+    if (waterfall3DMonochromeGradientDepthValueLabel) {
+        waterfall3DMonochromeGradientDepthValueLabel->setText(
+            QStringLiteral("%1%").arg(waterfall3DMonochromeGradientDepth));
+    }
     if (waterfall3DAlternativeViewCheckbox) {
         QSignalBlocker blocker(waterfall3DAlternativeViewCheckbox);
         waterfall3DAlternativeViewCheckbox->setChecked(waterfall3DAlternativeView);
@@ -795,6 +836,10 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
         waterfallWidget->set3DSpectrumSliceCaptureFixed(waterfall3DSpectrumSliceCaptureFixed);
         waterfallWidget->set3DFixedPlane(waterfall3DFixedPlane);
         waterfallWidget->set3DMonochrome(waterfall3DMonochrome);
+        waterfallWidget->set3DHeightGradient(waterfall3DHeightGradient);
+        waterfallWidget->set3DMonochromeColor(waterfall3DMonochromeColor);
+        waterfallWidget->set3DMonochromeGradientDepth(
+            waterfall3DMonochromeGradientDepth);
         waterfallWidget->set3DModifierFreeSliceInput(waterfall3DVncSliceInput);
     }
     if (!settingsJson.contains("waterfall3DAlternativeView") &&

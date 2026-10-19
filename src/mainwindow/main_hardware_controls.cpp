@@ -259,7 +259,14 @@ void YourClassName::settingRange() {
     double newMax = newMin + newRange;
     minFrequency = newMin;
     maxFrequency = newMax;
-    scaleWidget->setTuning(pendingSettings.listeningFrequency, globalFrequency, globalBandwidth, globalModulationType);
+    scaleWidget->setTuning(
+        pendingSettings.listeningFrequency,
+        globalFrequency,
+        effectiveDemodulationBandwidth(globalBandwidth,
+                                       globalModulationType,
+                                       pendingSettings.sstvDemodulationMode),
+        effectiveDemodulationModulationType(globalModulationType,
+                                            pendingSettings.sstvDemodulationMode));
     scaleWidget->setRange(minFrequency, maxFrequency);
     updateFineTuneLabel();
 }

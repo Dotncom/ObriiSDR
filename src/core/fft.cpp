@@ -532,12 +532,11 @@ bool FFTResult::computePreparedSnapshot(const RadioSettings &settings,
     const double sampleRate = settings.sampleRate;
     double centerFrequency = settings.centerFrequency;
     const int inputMode = settings.inputMode;
+    // Simplified mode trims optional DSP branches and uses the lower-cost
+    // audio channelizer. The main spectrum remains a core receiver function,
+    // so large-FFT post-processing must keep its normal bounded parallelism.
     auto processBins = [&](int count, auto function) {
-        if (settings.simplifiedAudioChannelizer) {
-            function(0, count);
-        } else {
-            parallelForBins(count, function);
-        }
+        parallelForBins(count, function);
     };
     QElapsedTimer profileTimer;
     if (profileFrame) {

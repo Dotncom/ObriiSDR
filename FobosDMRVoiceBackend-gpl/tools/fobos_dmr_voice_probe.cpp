@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <vector>
 
 int main() {
     const fobos_dmr_voice_backend_info *info = fobos_dmr_voice_get_backend_info();
@@ -40,12 +41,33 @@ int main() {
         std::cout << "  last error: " << fobos_dmr_voice_get_last_error(context) << "\n";
     }
 
-    std::array<uint8_t, 7> encoded_payload = {};
-    const int encode_status =
-        fobos_dmr_voice_encode_ambe2450_payload49(context,
-                                                  pcm.data(),
-                                                  encoded_payload.data());
-    std::cout << "  payload encode status: " << encode_status << "\n";
+#if defined(FOBOS_DMR_VOICE_PROBE_HAS_PAYLOAD_CHANNEL_CODE)
+    const uint32_t payload_encode_caps =
+        FOBOS_DMR_VOICE_CAP_ENCODE_AMBE2450_PAYLOAD49 |
+        FOBOS_DMR_VOICE_CAP_CANONICAL_FROM_AMBE2450_PAYLOAD49;
+    if ((info->capability_flags & payload_encode_caps) == payload_encode_caps) {
+        std::array<uint8_t, 7> encoded_payload = {};
+        const int encode_status =
+            fobos_dmr_voice_encode_ambe2450_payload49(context,
+                                                      pcm.data(),
+                                                      encoded_payload.data());
+        std::cout << "  payload encode status: " << encode_status << "\n";
+
+        std::array<uint8_t, 9> payload_canonical_frame = {};
+        const int payload_canonical_status =
+            fobos_dmr_voice_canonical_from_ambe2450_payload49(
+                context, encoded_payload.data(), payload_canonical_frame.data());
+        std::cout << "  payload channel-code status: " << payload_canonical_status << "\n";
+        if (encode_status != FOBOS_DMR_VOICE_OK ||
+            payload_canonical_status != FOBOS_DMR_VOICE_OK) {
+            std::cerr << "49-bit AMBE payload encode/channel-code path failed\n";
+            fobos_dmr_voice_destroy(context);
+            return 3;
+        }
+    }
+#else
+    std::cout << "  payload encode/channel-code path: not available\n";
+#endif
 
     std::array<uint8_t, 9> canonical_frame = {};
     const int canonical_encode_status =
@@ -82,6 +104,8 @@ int main() {
         int failed_frames = 0;
         int total_errors = 0;
         int nonzero_output_samples = 0;
+        std::vector<int16_t> decoded_samples;
+        decoded_samples.reserve(frame_count * samples_per_frame);
 
         for (int frame = 0; frame < frame_count; ++frame) {
             std::array<int16_t, samples_per_frame> tone = {};
@@ -126,6 +150,7 @@ int main() {
             for (const int16_t sample : decoded) {
                 output_energy += static_cast<double>(sample) *
                                  static_cast<double>(sample);
+                decoded_samples.push_back(sample);
                 if (sample != 0) {
                     ++nonzero_output_samples;
                 }
@@ -136,6 +161,25 @@ int main() {
             static_cast<double>(frame_count * samples_per_frame);
         const double input_rms = std::sqrt(input_energy / denominator);
         const double output_rms = std::sqrt(output_energy / denominator);
+        double tone_i = 0.0;
+        double tone_q = 0.0;
+        double measured_energy = 0.0;
+        const int settle_samples = 10 * samples_per_frame;
+        for (int i = settle_samples; i < static_cast<int>(decoded_samples.size()); ++i) {
+            const double phase = 2.0 * pi * tone_hz *
+                                 static_cast<double>(i) / static_cast<double>(sample_rate);
+            const double sample = decoded_samples[static_cast<std::size_t>(i)];
+            tone_i += sample * std::cos(phase);
+            tone_q += sample * std::sin(phase);
+            measured_energy += sample * sample;
+        }
+        const int measured_samples =
+            (std::max)(0, static_cast<int>(decoded_samples.size()) - settle_samples);
+        const double tone_energy_ratio =
+            measured_samples > 0 && measured_energy > 0.0
+                ? 2.0 * (tone_i * tone_i + tone_q * tone_q) /
+                      (static_cast<double>(measured_samples) * measured_energy)
+                : 0.0;
         std::cout << "  canonical tone frames: " << ok_frames
                   << "/" << frame_count
                   << ", failed: " << failed_frames
@@ -143,7 +187,14 @@ int main() {
                   << ", input RMS: " << input_rms
                   << ", output RMS: " << output_rms
                   << ", output nonzero: " << nonzero_output_samples
+                  << ", 440 Hz energy ratio: " << tone_energy_ratio
                   << "\n";
+        if (ok_frames != frame_count || failed_frames != 0 ||
+            tone_energy_ratio < 1.0e-4) {
+            std::cerr << "canonical AMBE tone round-trip quality check failed\n";
+            fobos_dmr_voice_destroy(context);
+            return 2;
+        }
     }
 
     fobos_dmr_voice_destroy(context);

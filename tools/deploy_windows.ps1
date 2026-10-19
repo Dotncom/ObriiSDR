@@ -177,7 +177,7 @@ $ReleaseDocFiles = @(
     "docs\dmr_external_backend.md",
     "docs\gnss_preflight_4.1.md",
     "docs\iq_pipeline_audit.md",
-    "docs\release_notes_6.3.0.md",
+    "docs\release_notes_6.4.0.md",
     "docs\dmr_motorola_privacy.md",
     "docs\performance_and_dmr_audit.md",
     "docs\wireless_lab.md",

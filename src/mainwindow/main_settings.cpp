@@ -509,6 +509,15 @@ void YourClassName::loadPersistentSettings() {
         settings.value("fpvHunter/thresholdDb", fpvHunterSettings.thresholdDb).toDouble();
     fpvHunterSettings = FpvHunterDetector::normalizedSettings(fpvHunterSettings);
     fpvHunterFollowEnabled = settings.value("fpvHunter/followEnabled", fpvHunterFollowEnabled).toBool();
+    fpvAutoScanDwellMs = (std::clamp)(
+        settings.value("fpvHunter/autoScanDwellMs", fpvAutoScanDwellMs).toInt(), 50, 5000);
+    fpvAutoScanLossTimeoutMs = (std::clamp)(
+        settings.value("fpvHunter/autoScanLossMs", fpvAutoScanLossTimeoutMs).toInt(), 500, 30000);
+    fpvAutoScanMinimumLockPercent = (std::clamp)(
+        settings.value("fpvHunter/autoScanMinimumLock", fpvAutoScanMinimumLockPercent).toInt(), 1, 100);
+    // Auto scan is deliberately armed per session so opening the application
+    // never starts changing receiver frequency without an explicit action.
+    fpvAutoScanArmed = false;
     digitalVideoHunterSettings.enabled =
         settings.value("digitalVideoHunter/enabled", digitalVideoHunterSettings.enabled).toBool();
     digitalVideoHunterSettings.minWidthMhz =
@@ -935,6 +944,19 @@ void YourClassName::loadPersistentSettings() {
         settings.value("ui/waterfall3DFixedPlane", waterfall3DFixedPlane).toBool();
     waterfall3DMonochrome =
         settings.value("ui/waterfall3DMonochrome", waterfall3DMonochrome).toBool();
+    waterfall3DHeightGradient =
+        settings.value("ui/waterfall3DHeightGradient", waterfall3DHeightGradient).toBool();
+    const QColor storedMonochromeColor(
+        settings.value("ui/waterfall3DMonochromeColor",
+                       waterfall3DMonochromeColor.name(QColor::HexRgb)).toString());
+    if (storedMonochromeColor.isValid()) {
+        waterfall3DMonochromeColor = storedMonochromeColor;
+    }
+    waterfall3DMonochromeGradientDepth = (std::clamp)(
+        settings.value("ui/waterfall3DMonochromeGradientDepth",
+                       waterfall3DMonochromeGradientDepth).toInt(),
+        0,
+        100);
     waterfall3DAlternativeView =
         settings.value("ui/waterfall3DAlternativeView", waterfall3DAlternativeView).toBool();
     waterfall3DVncSliceInput =
@@ -973,6 +995,29 @@ void YourClassName::loadPersistentSettings() {
         QSignalBlocker blocker(waterfall3DMonochromeCheckbox);
         waterfall3DMonochromeCheckbox->setChecked(waterfall3DMonochrome);
     }
+    if (waterfall3DHeightGradientCheckbox) {
+        QSignalBlocker blocker(waterfall3DHeightGradientCheckbox);
+        waterfall3DHeightGradientCheckbox->setChecked(waterfall3DHeightGradient);
+    }
+    if (waterfall3DMonochromeColorButton) {
+        const QColor textColor = waterfall3DMonochromeColor.lightnessF() > 0.58
+                                     ? Qt::black : Qt::white;
+        waterfall3DMonochromeColorButton->setText(
+            waterfall3DMonochromeColor.name(QColor::HexRgb).toUpper());
+        waterfall3DMonochromeColorButton->setStyleSheet(QStringLiteral(
+            "QPushButton { background-color: %1; color: %2; border: 1px solid #707780; padding: 3px 8px; }")
+            .arg(waterfall3DMonochromeColor.name(QColor::HexRgb),
+                 textColor.name(QColor::HexRgb)));
+    }
+    if (waterfall3DMonochromeGradientDepthSlider) {
+        QSignalBlocker blocker(waterfall3DMonochromeGradientDepthSlider);
+        waterfall3DMonochromeGradientDepthSlider->setValue(
+            waterfall3DMonochromeGradientDepth);
+    }
+    if (waterfall3DMonochromeGradientDepthValueLabel) {
+        waterfall3DMonochromeGradientDepthValueLabel->setText(
+            QStringLiteral("%1%").arg(waterfall3DMonochromeGradientDepth));
+    }
     if (waterfall3DAlternativeViewCheckbox) {
         QSignalBlocker blocker(waterfall3DAlternativeViewCheckbox);
         waterfall3DAlternativeViewCheckbox->setChecked(waterfall3DAlternativeView);
@@ -990,6 +1035,10 @@ void YourClassName::loadPersistentSettings() {
         waterfallWidget->set3DSpectrumSliceCaptureFixed(waterfall3DSpectrumSliceCaptureFixed);
         waterfallWidget->set3DFixedPlane(waterfall3DFixedPlane);
         waterfallWidget->set3DMonochrome(waterfall3DMonochrome);
+        waterfallWidget->set3DHeightGradient(waterfall3DHeightGradient);
+        waterfallWidget->set3DMonochromeColor(waterfall3DMonochromeColor);
+        waterfallWidget->set3DMonochromeGradientDepth(
+            waterfall3DMonochromeGradientDepth);
         waterfallWidget->set3DModifierFreeSliceInput(waterfall3DVncSliceInput);
     }
     const bool hasWorkspaceModeSetting = settings.contains("ui/waterfall3DAlternativeView");
@@ -1509,15 +1558,23 @@ void YourClassName::savePersistentSettings() {
                  << "center" << settingsToSave.centerFrequency
                  << "listening" << settingsToSave.listeningFrequency;
     }
-    settings.setValue("agileScan/enabled", agileScanEnabled);
-    settings.setValue("agileScan/autoStepSampleRate", agileScanAutoStepSampleRate);
-    settings.setValue("agileScan/rangesMhz", agileScanRangesMhz);
-    settings.setValue("agileScan/stepMhz", agileScanStepMhz);
+    const bool savePreAutoScan = fpvAutoScanController.active() && fpvAutoScanSnapshot.valid;
+    settings.setValue("agileScan/enabled",
+                      savePreAutoScan ? fpvAutoScanSnapshot.agileEnabled : agileScanEnabled);
+    settings.setValue("agileScan/autoStepSampleRate",
+                      savePreAutoScan ? fpvAutoScanSnapshot.agileAutoStep : agileScanAutoStepSampleRate);
+    settings.setValue("agileScan/rangesMhz",
+                      savePreAutoScan ? fpvAutoScanSnapshot.agileRangesMhz : agileScanRangesMhz);
+    settings.setValue("agileScan/stepMhz",
+                      savePreAutoScan ? fpvAutoScanSnapshot.agileStepMhz : agileScanStepMhz);
     settings.setValue("scan/visualMode", normalizedScanVisualMode(scanVisualMode));
-    settings.setValue("standardScan/enabled", standardScanEnabled);
+    settings.setValue("standardScan/enabled",
+                      savePreAutoScan ? fpvAutoScanSnapshot.standardEnabled : standardScanEnabled);
     settings.setValue("standardScan/listenLock", scanListeningLockEnabled);
-    settings.setValue("standardScan/centersMhz", standardScanCentersMhz);
-    settings.setValue("standardScan/dwellMs", standardScanDwellMs);
+    settings.setValue("standardScan/centersMhz",
+                      savePreAutoScan ? fpvAutoScanSnapshot.standardCentersMhz : standardScanCentersMhz);
+    settings.setValue("standardScan/dwellMs",
+                      savePreAutoScan ? fpvAutoScanSnapshot.standardDwellMs : standardScanDwellMs);
     settings.setValue("standardScan/settleMs", standardScanSettleMs);
     settings.setValue("standardScan/rangeStartMhz", standardScanRangeStartMhz);
     settings.setValue("standardScan/rangeEndMhz", standardScanRangeEndMhz);
@@ -1607,6 +1664,9 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("fpvHunter/maxWidthMhz", fpvHunterSettings.maxWidthMhz);
     settings.setValue("fpvHunter/thresholdDb", fpvHunterSettings.thresholdDb);
     settings.setValue("fpvHunter/followEnabled", fpvHunterFollowEnabled);
+    settings.setValue("fpvHunter/autoScanDwellMs", fpvAutoScanDwellMs);
+    settings.setValue("fpvHunter/autoScanLossMs", fpvAutoScanLossTimeoutMs);
+    settings.setValue("fpvHunter/autoScanMinimumLock", fpvAutoScanMinimumLockPercent);
     settings.setValue("digitalVideoHunter/enabled", digitalVideoHunterSettings.enabled);
     settings.setValue("digitalVideoHunter/minWidthMhz", digitalVideoHunterSettings.minWidthMhz);
     settings.setValue("digitalVideoHunter/maxWidthMhz", digitalVideoHunterSettings.maxWidthMhz);
@@ -1804,6 +1864,11 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("ui/waterfall3DSpectrumSliceCaptureFixed", waterfall3DSpectrumSliceCaptureFixed);
     settings.setValue("ui/waterfall3DFixedPlane", waterfall3DFixedPlane);
     settings.setValue("ui/waterfall3DMonochrome", waterfall3DMonochrome);
+    settings.setValue("ui/waterfall3DHeightGradient", waterfall3DHeightGradient);
+    settings.setValue("ui/waterfall3DMonochromeColor",
+                      waterfall3DMonochromeColor.name(QColor::HexRgb));
+    settings.setValue("ui/waterfall3DMonochromeGradientDepth",
+                      waterfall3DMonochromeGradientDepth);
     settings.setValue("ui/waterfall3DAlternativeView", waterfall3DAlternativeView);
     settings.setValue("ui/waterfall3DVncSliceInput", waterfall3DVncSliceInput);
     settings.setValue("ui/alternativeInterfaceMode", alternativeInterfaceMode);

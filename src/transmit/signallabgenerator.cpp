@@ -227,6 +227,87 @@ bool generateFsk(const SignalLabConfiguration &configuration,
     return true;
 }
 
+bool generateSweepingBeacon(const SignalLabConfiguration &configuration,
+                            int sampleCount,
+                            SignalLabGenerationResult *result) {
+    const double sampleRate = configuration.sampleRate;
+    const double startHz = configuration.toneFrequencyHz;
+    const double stopHz = configuration.secondFrequencyHz;
+    const double requestedWidth = configuration.sweepBandwidthHz;
+    if (!std::isfinite(startHz) || !std::isfinite(stopHz) ||
+        !std::isfinite(requestedWidth) || requestedWidth < 0.0) {
+        result->error = QStringLiteral("Sweeping beacon frequencies and bandwidth must be finite");
+        return false;
+    }
+    if (!std::isfinite(configuration.sweepPeriodSeconds) ||
+        configuration.sweepPeriodSeconds <= 0.0) {
+        result->error = QStringLiteral("Sweeping beacon period must be positive");
+        return false;
+    }
+    if (requestedWidth > sampleRate * 0.9) {
+        result->error = QStringLiteral("Sweeping beacon bandwidth must not exceed 90% of the sample rate");
+        return false;
+    }
+    const double halfWidth = requestedWidth * 0.5;
+    const double maximumEdge = (std::max)(std::abs(startHz), std::abs(stopHz)) +
+                               std::abs(configuration.centerOffsetHz) + halfWidth;
+    if (maximumEdge > sampleRate * 0.49) {
+        result->error = QStringLiteral(
+            "Sweeping beacon path, bandwidth and center offset exceed the Nyquist range");
+        return false;
+    }
+
+    if (requestedWidth < 1.0e-9) {
+        result->iq.fill(std::complex<float>(1.0f, 0.0f), sampleCount);
+        result->occupiedBandwidthHz = std::abs(stopHz - startHz);
+    } else {
+        // A full-rolloff QPSK baseband gives a deterministic, genuinely
+        // band-limited beacon whose nominal two-sided width is requestedWidth.
+        SignalLabConfiguration base = configuration;
+        base.waveform = SignalLabWaveform::Qpsk;
+        base.centerOffsetHz = 0.0;
+        base.rolloff = 1.0;
+        base.symbolRate = requestedWidth * 0.5;
+        if (!generatePulseShaped(base, sampleCount, result)) {
+            result->error = QStringLiteral("Sweeping beacon bandwidth is too narrow for this generator rate: ") +
+                            result->error;
+            return false;
+        }
+        result->occupiedBandwidthHz += std::abs(stopHz - startHz);
+        // This is a moving test signal, not a stationary constellation. Avoid
+        // presenting misleading matched-symbol points in the I/Q preview.
+        result->samplesPerSymbol = 0;
+        result->pulseRolloff = 0.0;
+    }
+
+    double phase = 0.0;
+    const double rangeHz = stopHz - startHz;
+    for (int sample = 0; sample < sampleCount; ++sample) {
+        const double time = static_cast<double>(sample) / sampleRate;
+        const double leg = std::fmod(time / configuration.sweepPeriodSeconds, 1.0);
+        double ratio = leg;
+        switch (configuration.sweepMode) {
+        case SignalLabSweepMode::PingPong: {
+            const double pingPong = std::fmod(time / configuration.sweepPeriodSeconds, 2.0);
+            ratio = pingPong <= 1.0 ? pingPong : 2.0 - pingPong;
+            break;
+        }
+        case SignalLabSweepMode::RestartForward:
+            ratio = leg;
+            break;
+        case SignalLabSweepMode::RestartReverse:
+            ratio = 1.0 - leg;
+            break;
+        }
+        const double frequencyHz = startHz + rangeHz * ratio;
+        phase = std::remainder(phase + 2.0 * kPi * frequencyHz / sampleRate,
+                               2.0 * kPi);
+        result->iq[sample] *= std::complex<float>(static_cast<float>(std::cos(phase)),
+                                                  static_cast<float>(std::sin(phase)));
+    }
+    return true;
+}
+
 bool generateOfdm(const SignalLabConfiguration &configuration,
                   SignalLabGenerationResult *result) {
     const int fftSize = configuration.ofdmFftSize;
@@ -388,8 +469,18 @@ QString SignalLabGenerator::waveformName(SignalLabWaveform waveform) {
     case SignalLabWaveform::Fsk2: return QStringLiteral("2-FSK");
     case SignalLabWaveform::Gfsk2: return QStringLiteral("2-GFSK");
     case SignalLabWaveform::Ofdm: return QStringLiteral("OFDM");
+    case SignalLabWaveform::SweepingBeacon: return QStringLiteral("Sweeping beacon");
     }
     return QStringLiteral("Unknown");
+}
+
+QString SignalLabGenerator::sweepModeName(SignalLabSweepMode mode) {
+    switch (mode) {
+    case SignalLabSweepMode::PingPong: return QStringLiteral("Ping-pong");
+    case SignalLabSweepMode::RestartForward: return QStringLiteral("Forward restart");
+    case SignalLabSweepMode::RestartReverse: return QStringLiteral("Reverse restart");
+    }
+    return QStringLiteral("Ping-pong");
 }
 
 QString SignalLabGenerator::constellationName(SignalLabConstellation constellation) {
@@ -452,6 +543,8 @@ SignalLabGenerationResult SignalLabGenerator::generate(
                                  configuration.waveform == SignalLabWaveform::Qam256;
         if (pulseShaped) {
             if (!generatePulseShaped(configuration, sampleCount, &result)) return result;
+        } else if (configuration.waveform == SignalLabWaveform::SweepingBeacon) {
+            if (!generateSweepingBeacon(configuration, sampleCount, &result)) return result;
         } else if (configuration.waveform == SignalLabWaveform::Fsk2 ||
                    configuration.waveform == SignalLabWaveform::Gfsk2) {
             if (!generateFsk(configuration, sampleCount, &result)) return result;
@@ -543,6 +636,10 @@ SignalLabGenerationResult SignalLabGenerator::generate(
     if (configuration.waveform == SignalLabWaveform::LinearChirp) {
         spectralHalfSpanHz = (std::max)(std::abs(configuration.toneFrequencyHz),
                                         std::abs(configuration.secondFrequencyHz));
+    } else if (configuration.waveform == SignalLabWaveform::SweepingBeacon) {
+        spectralHalfSpanHz = (std::max)(std::abs(configuration.toneFrequencyHz),
+                                        std::abs(configuration.secondFrequencyHz)) +
+                             configuration.sweepBandwidthHz * 0.5;
     }
     const double nyquistGuardHz = configuration.sampleRate * 0.49;
     if (std::abs(configuration.centerOffsetHz) + spectralHalfSpanHz >
@@ -573,6 +670,14 @@ SignalLabGenerationResult SignalLabGenerator::generate(
     if (result.samplesPerSymbol > 0) {
         result.summary += QStringLiteral(" | %1 sym/s").arg(
             double(result.sampleRate) / result.samplesPerSymbol, 0, 'f', 3);
+    }
+    if (configuration.waveform == SignalLabWaveform::SweepingBeacon) {
+        result.summary += QStringLiteral(" | %1 Hz -> %2 Hz | width %3 Hz | pass %4 s | %5")
+                              .arg(configuration.toneFrequencyHz, 0, 'f', 1)
+                              .arg(configuration.secondFrequencyHz, 0, 'f', 1)
+                              .arg(configuration.sweepBandwidthHz, 0, 'f', 1)
+                              .arg(configuration.sweepPeriodSeconds, 0, 'f', 3)
+                              .arg(sweepModeName(configuration.sweepMode));
     }
     return result;
 }

@@ -73,6 +73,7 @@ toolchain.cmake
 _stable_backups/
 /git/
 /sandbox/
+/new/
 
 # Build/output
 build/

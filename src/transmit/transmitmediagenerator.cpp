@@ -14,6 +14,35 @@
 namespace {
 constexpr double Pi = 3.14159265358979323846;
 
+double normalizeAudioForTransmit(QVector<float> *samples) {
+    if (!samples || samples->isEmpty()) return 0.0;
+
+    double mean = 0.0;
+    for (float sample : *samples) mean += sample;
+    mean /= samples->size();
+
+    double sumSquares = 0.0;
+    double peak = 0.0;
+    for (float sample : *samples) {
+        const double centered = sample - mean;
+        sumSquares += centered * centered;
+        peak = (std::max)(peak, std::abs(centered));
+    }
+    const double rms = std::sqrt(sumSquares / samples->size());
+    if (peak < 1.0e-7 || rms < 1.0e-8) return 0.0;
+
+    constexpr double TargetPeak = 0.92;
+    constexpr double TargetRms = 0.20;
+    constexpr double MaximumGain = 7.943282347; // +18 dB
+    const double gain = (std::clamp)((std::min)(TargetPeak / peak, TargetRms / rms),
+                                     0.10, MaximumGain);
+    for (float &sample : *samples) {
+        sample = static_cast<float>((std::clamp)((sample - mean) * gain,
+                                                 -TargetPeak, TargetPeak));
+    }
+    return 20.0 * std::log10(gain);
+}
+
 struct SstvMode {
     const char *id;
     int vis;
@@ -85,23 +114,6 @@ void appendVis(QVector<float> &audio, int sampleRate, int vis, double &phase) {
     appendTone(audio, sampleRate, 1200.0, 0.030, phase);
 }
 
-QVector<float> resample(const QVector<float> &input, int sourceRate, int targetRate) {
-    if (input.isEmpty() || sourceRate <= 0 || targetRate <= 0) return {};
-    if (sourceRate == targetRate) return input;
-    const qsizetype outputCount = static_cast<qsizetype>(
-        std::llround(static_cast<double>(input.size()) * targetRate / sourceRate));
-    QVector<float> output(outputCount);
-    const double step = static_cast<double>(sourceRate) / targetRate;
-    for (qsizetype index = 0; index < outputCount; ++index) {
-        const double position = index * step;
-        const int first = (std::min)(input.size() - 1, static_cast<int>(position));
-        const int second = (std::min)(input.size() - 1, first + 1);
-        const float fraction = static_cast<float>(position - first);
-        output[index] = input[first] + (input[second] - input[first]) * fraction;
-    }
-    return output;
-}
-
 quint32 readU32(const QByteArray &data, int offset) {
     return offset + 4 <= data.size()
                ? qFromLittleEndian<quint32>(reinterpret_cast<const uchar *>(data.constData() + offset))
@@ -113,6 +125,47 @@ quint16 readU16(const QByteArray &data, int offset) {
                ? qFromLittleEndian<quint16>(reinterpret_cast<const uchar *>(data.constData() + offset))
                : 0;
 }
+}
+
+QVector<float> TransmitMediaGenerator::resampleAudio(const QVector<float> &input,
+                                                       int sourceRate,
+                                                       int targetRate) {
+    if (input.isEmpty() || sourceRate <= 0 || targetRate <= 0) return {};
+    if (sourceRate == targetRate) return input;
+
+    const qsizetype outputCount = static_cast<qsizetype>(
+        std::llround(static_cast<double>(input.size()) * targetRate / sourceRate));
+    QVector<float> output(outputCount);
+    const double sourceStep = static_cast<double>(sourceRate) / targetRate;
+    const double cutoff = 0.94 * (std::min)(1.0, static_cast<double>(targetRate) / sourceRate);
+    constexpr int Radius = 24;
+    const auto sinc = [](double value) {
+        if (std::abs(value) < 1.0e-12) return 1.0;
+        const double angle = Pi * value;
+        return std::sin(angle) / angle;
+    };
+
+    for (qsizetype outputIndex = 0; outputIndex < outputCount; ++outputIndex) {
+        const double position = outputIndex * sourceStep;
+        const int center = static_cast<int>(std::floor(position));
+        double weighted = 0.0;
+        double weightSum = 0.0;
+        for (int tap = -Radius + 1; tap <= Radius; ++tap) {
+            const int sourceIndex = center + tap;
+            if (sourceIndex < 0 || sourceIndex >= input.size()) continue;
+            const double distance = sourceIndex - position;
+            const double windowPosition = std::abs(distance) / Radius;
+            if (windowPosition >= 1.0) continue;
+            const double window = 0.5 + 0.5 * std::cos(Pi * windowPosition);
+            const double weight = cutoff * sinc(cutoff * distance) * window;
+            weighted += input[sourceIndex] * weight;
+            weightSum += weight;
+        }
+        output[outputIndex] = std::abs(weightSum) > 1.0e-12
+                                  ? static_cast<float>(weighted / weightSum)
+                                  : 0.0f;
+    }
+    return output;
 }
 
 TxAudioMedia TransmitMediaGenerator::loadWav(const QString &path, int targetSampleRate) {
@@ -179,11 +232,13 @@ TxAudioMedia TransmitMediaGenerator::loadWav(const QString &path, int targetSamp
         }
         mono.append(static_cast<float>((std::clamp)(sum / channels, -1.0, 1.0)));
     }
-    result.samples = resample(mono, sourceRate, targetSampleRate);
+    result.samples = resampleAudio(mono, sourceRate, targetSampleRate);
+    const double normalizationDb = normalizeAudioForTransmit(&result.samples);
     result.sampleRate = targetSampleRate;
-    result.summary = QStringLiteral("WAV: %1 Hz -> %2 Hz, %3 s")
+    result.summary = QStringLiteral("WAV: %1 Hz -> %2 Hz, %3 s | source gain %4 dB")
                          .arg(sourceRate).arg(targetSampleRate)
-                         .arg(static_cast<double>(result.samples.size()) / targetSampleRate, 0, 'f', 2);
+                         .arg(static_cast<double>(result.samples.size()) / targetSampleRate, 0, 'f', 2)
+                         .arg(normalizationDb, 0, 'f', 1);
     return result;
 }
 
@@ -200,6 +255,9 @@ TxAudioMedia TransmitMediaGenerator::generateSstv(const QImage &input,
                              .scaled(320, mode->height, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
     QVector<float> audio;
     double phase = 0.0;
+    // Let the USB transmitter, PA and receiving discriminator settle before
+    // the first 1900 Hz leader instead of clipping the VIS header at startup.
+    audio.fill(0.0f, qRound(0.350 * sampleRate));
     appendVis(audio, sampleRate, mode->vis, phase);
     QVector<uchar> r(320), g(320), b(320), yv(320), chroma(160);
     for (int y = 0; y < mode->height; ++y) {

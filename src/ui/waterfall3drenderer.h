@@ -6,6 +6,7 @@
 #include <deque>
 #include <vector>
 #include <QMatrix4x4>
+#include <QColor>
 #include <QOpenGLBuffer>
 #include <QOpenGLShaderProgram>
 #include <QPointF>
@@ -56,6 +57,9 @@ public:
     void setSurfaceSmoothing(int smoothing);
     void setSurfaceLighting(int lighting);
     void setMonochrome(bool enabled);
+    void setHeightGradient(bool enabled);
+    void setMonochromeColor(const QColor &color);
+    void setMonochromeGradientDepth(int percent);
     bool beginFrequencySlice(int screenX, int screenY, int viewportWidth, int viewportHeight);
     bool beginSpectrumSlice(int screenX, int screenY, int viewportWidth, int viewportHeight);
     void stepFrequencySlice(int direction);
@@ -140,6 +144,9 @@ private:
     int surfaceSmoothing = 0;
     int surfaceLighting = 0;
     bool monochrome = false;
+    bool heightGradient = false;
+    QColor monochromeColor = QColor(45, 104, 196);
+    int monochromeGradientDepth = 100;
     std::vector<HistoryRow> capturedSpectrumRows;
     int capturedSpectrumFirstRow = -1;
     int capturedSpectrumRowsRemaining = 0;
@@ -173,6 +180,7 @@ private:
     bool uploadGpuSurfaceRows();
     bool renderGpuSurface(const QMatrix4x4 &transform);
     void applySampleColor(const VertexSample &sample) const;
+    void applyHeightColor(float height) const;
 };
 
 #endif // WATERFALL3DRENDERER_H

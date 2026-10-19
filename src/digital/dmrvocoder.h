@@ -17,6 +17,9 @@ public:
 
     bool isAvailable() const;
     bool canEncode() const;
+    bool canEncodePrivacy() const;
+    QByteArray encodePayload49(const qint16 *pcm8k160, QString *error = nullptr);
+    QByteArray canonicalFromPayload49(const QByteArray &payload49, QString *error = nullptr);
     QByteArray encodeCanonicalFrame(const qint16 *pcm8k160, QString *error = nullptr);
     void setPreferredBackendId(const QString &backendId);
     void reset();

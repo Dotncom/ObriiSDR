@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 6.3.0)
+project(ObriiSDR VERSION 6.4.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -290,6 +290,8 @@ set(SOURCES
     src/backends/fobosbackend.h
     src/digital/fpvhunterdetector.cpp
     src/digital/fpvhunterdetector.h
+    src/digital/fpvautoscancontroller.cpp
+    src/digital/fpvautoscancontroller.h
     src/gnss/gnssacquisition.cpp
     src/gnss/gnssacquisition.h
     src/gnss/gnssqthhelpers.cpp
@@ -369,6 +371,8 @@ set(SOURCES
     src/transmit/sstvimageeditordialog.h
     src/transmit/transmitdialog.cpp
     src/transmit/transmitdialog.h
+    src/transmit/windowsmicrophonecapture.cpp
+    src/transmit/windowsmicrophonecapture.h
     third_party/ft8_lib/ft8/constants.c
     third_party/ft8_lib/ft8/crc.c
     third_party/ft8_lib/ft8/encode.c
@@ -569,6 +573,13 @@ if(OBRII_HDF5_INCLUDE_DIR)
 endif()
 
 if(FOBOS_BUILD_CW_SELFTEST)
+    add_executable(ObriiFpvAutoScanSelfTest tools/fpv_autoscan_selftest.cpp
+        src/digital/fpvautoscancontroller.cpp)
+    target_include_directories(ObriiFpvAutoScanSelfTest PRIVATE src/digital)
+    if(MSVC)
+        target_compile_options(ObriiFpvAutoScanSelfTest PRIVATE /utf-8)
+    endif()
+
     add_executable(ObriiExperimentBundleSelfTest tools/experiment_bundle_selftest.cpp
         src/research/experimentbundle.cpp src/research/spectrumframerecorder.cpp)
     target_include_directories(ObriiExperimentBundleSelfTest PRIVATE src/research src/core src/ui src/utils)
@@ -918,7 +929,7 @@ if(FOBOS_BUILD_CW_SELFTEST)
         ${CMAKE_SOURCE_DIR}/FobosDMRVoiceBackend-gpl/include
         ${FFTW_INCLUDE_DIR}
     )
-    target_link_libraries(FobosTransmitSelfTest PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets ${FFTW_FLOAT_LIBRARY})
+    target_link_libraries(FobosTransmitSelfTest PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets ObriiDmrCrypto ${FFTW_FLOAT_LIBRARY})
     if(NOT WIN32)
         target_link_libraries(FobosTransmitSelfTest PRIVATE Threads::Threads)
     endif()
@@ -944,14 +955,40 @@ if(FOBOS_BUILD_CW_SELFTEST)
         tools/sstv_decoder_selftest.cpp
         src/digital/videoprocessor.cpp
         src/digital/videoprocessor.h
+        src/audio/audioprocessor.cpp
+        src/audio/audioprocessor.h
+        src/audio/audiofilterchain.cpp
+        src/core/iqbuffer.cpp
+        src/core/iqchannelizer.cpp
+        src/core/channelizerutils.cpp
+        src/transmit/transmitmediagenerator.cpp
+        src/transmit/transmitmediagenerator.h
+        src/transmit/transmitwaveformgenerator.cpp
+        src/transmit/transmitwaveformgenerator.h
+        src/transmit/transmitterbackend.h
+        third_party/ft8_lib/ft8/constants.c
+        third_party/ft8_lib/ft8/crc.c
+        third_party/ft8_lib/ft8/encode.c
+        third_party/ft8_lib/ft8/message.c
+        third_party/ft8_lib/ft8/text.c
     )
     target_include_directories(FobosSstvDecoderSelfTest PRIVATE
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/src/core
         ${CMAKE_SOURCE_DIR}/src/digital
+        ${CMAKE_SOURCE_DIR}/src/audio
+        ${CMAKE_SOURCE_DIR}/src/transmit
         ${CMAKE_SOURCE_DIR}/src/utils
+        ${CMAKE_SOURCE_DIR}/third_party/ft8_lib
+        ${FFTW_INCLUDE_DIR}
     )
-    target_link_libraries(FobosSstvDecoderSelfTest PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets)
+    target_link_libraries(FobosSstvDecoderSelfTest PRIVATE
+        Qt5::Core Qt5::Gui Qt5::Widgets ${FFTW_FLOAT_LIBRARY})
+    if(WIN32)
+        target_link_libraries(FobosSstvDecoderSelfTest PRIVATE winmm)
+    else()
+        target_link_libraries(FobosSstvDecoderSelfTest PRIVATE Threads::Threads)
+    endif()
     if(MSVC)
         target_compile_options(FobosSstvDecoderSelfTest PRIVATE /utf-8)
     endif()
@@ -972,7 +1009,7 @@ if(FOBOS_HAS_MBELIB_NEO)
 endif()
 
 if(WIN32)
-    target_link_libraries(ObriiSDR PRIVATE winmm opengl32 winhttp)
+    target_link_libraries(ObriiSDR PRIVATE winmm opengl32 winhttp ole32)
 else()
     target_link_libraries(ObriiSDR PRIVATE OpenGL::GL Threads::Threads)
 endif()

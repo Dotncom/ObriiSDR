@@ -132,6 +132,10 @@ if(EXISTS "${FOBOS_OPENDMR_ROOT}/opendmr.h")
         PRIVATE
             "${CMAKE_CURRENT_LIST_DIR}/include"
     )
+    target_compile_definitions(fobos_dmr_voice_opendmr_probe
+        PRIVATE
+            FOBOS_DMR_VOICE_PROBE_HAS_PAYLOAD_CHANNEL_CODE=1
+    )
     target_link_libraries(fobos_dmr_voice_opendmr_probe
         PRIVATE
             fobos_dmr_voice_opendmr

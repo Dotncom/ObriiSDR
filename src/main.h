@@ -21,6 +21,7 @@
 #include <memory>
 #include <QScrollArea>
 #include <QCheckBox>
+#include <QColor>
 #include <QMainWindow>
 #include <QDockWidget>
 #include <QPlainTextEdit>
@@ -80,6 +81,7 @@
 #include "dmrhunterdetector.h"
 #include "dmrprivacyutils.h"
 #include "fpvhunterdetector.h"
+#include "fpvautoscancontroller.h"
 #include "digitalvideohunterdetector.h"
 #include "spectrumhuntercontrols.h"
 #include "scanvisualassembler.h"
@@ -354,6 +356,13 @@ private:
     void selectFpvHunterCandidate(int direction);
     void tuneFpvHunterCandidateIndex(int index);
     void tuneFpvHunterCandidateValue(const FpvHunterCandidate &candidate, bool saveSettings);
+    void startFpvAutoScan();
+    void stopFpvAutoScan(bool restorePreviousScan = true);
+    bool configureFpvAutoScanBackend(bool startScanning);
+    void lockFpvAutoScanCandidate(const FpvHunterCandidate &candidate);
+    void resumeFpvAutoScan();
+    void handleFpvAnalogLockMetrics(int hsyncPercent, bool verticalSync, double levelSpan);
+    void updateFpvAutoScanStatus();
     void rememberFpvHunterCandidate(const FpvHunterCandidate &candidate, bool startNewEvent, qint64 nowMs);
     void updateFpvHunterHistoryControls();
     void tuneFpvHunterHistorySelection();
@@ -619,6 +628,7 @@ private:
     void tuneSignalCenterAt(double frequency);
     void tuneSidebandEdgeAt(double frequency, int modulationType);
     void centerReceiverAt(double frequency);
+    void updateQuickHamPanel();
     bool applyFftLengthChange(int newFftLength, bool notifyRemote);
     int fftLengthForBinWidth(double sampleRate, double hzPerPoint) const;
     int nearestStandardFftLength(int requestedLength) const;
@@ -686,6 +696,12 @@ private:
     QCheckBox *waterfall3DSpectrumSliceCaptureFixedCheckbox = nullptr;
     QCheckBox *waterfall3DFixedPlaneCheckbox = nullptr;
     QCheckBox *waterfall3DMonochromeCheckbox = nullptr;
+    QCheckBox *waterfall3DHeightGradientCheckbox = nullptr;
+    QLabel *waterfall3DMonochromeColorLabel = nullptr;
+    QPushButton *waterfall3DMonochromeColorButton = nullptr;
+    QLabel *waterfall3DMonochromeGradientDepthLabel = nullptr;
+    QSlider *waterfall3DMonochromeGradientDepthSlider = nullptr;
+    QLabel *waterfall3DMonochromeGradientDepthValueLabel = nullptr;
     QCheckBox *waterfall3DAlternativeViewCheckbox = nullptr;
     QCheckBox *waterfall3DVncSliceInputCheckbox = nullptr;
     QCheckBox *dmrAdaptiveSlicerCheckbox = nullptr;
@@ -701,6 +717,8 @@ private:
     QSpinBox *dsdNeoInputPortSpin = nullptr;
     QSpinBox *dsdNeoUdpOutputPortSpin = nullptr;
     QButtonGroup *modulationButtonGroup = nullptr;
+    QButtonGroup *quickHamBandButtonGroup = nullptr;
+    QButtonGroup *quickHamModeButtonGroup = nullptr;
     
     QPushButton *refreshButton = nullptr;
     QPushButton *fobosButton = nullptr;
@@ -1131,6 +1149,9 @@ private:
     bool waterfall3DSpectrumSliceCaptureFixed = false;
     bool waterfall3DFixedPlane = false;
     bool waterfall3DMonochrome = false;
+    bool waterfall3DHeightGradient = false;
+    QColor waterfall3DMonochromeColor = QColor(45, 104, 196);
+    int waterfall3DMonochromeGradientDepth = 100;
     bool waterfall3DVncSliceInput = false;
     bool experimentalGpuWaterfall = false;
     bool showSpectrumFps = false;
@@ -1232,6 +1253,28 @@ private:
     FpvHunterTrack fpvHunterTrack;
     uint64_t fpvHunterFrameSequence = 0;
     QElapsedTimer fpvHunterClock;
+    FpvAutoScanController fpvAutoScanController;
+    bool fpvAutoScanArmed = false;
+    int fpvAutoScanDwellMs = 650;
+    int fpvAutoScanLossTimeoutMs = 2500;
+    int fpvAutoScanMinimumLockPercent = 45;
+    enum class FpvAutoScanBackend {
+        None,
+        StandardRetune,
+        AgileNative
+    };
+    FpvAutoScanBackend fpvAutoScanBackend = FpvAutoScanBackend::None;
+    struct FpvAutoScanSnapshot {
+        bool valid = false;
+        bool agileEnabled = false;
+        bool standardEnabled = false;
+        bool agileAutoStep = true;
+        QString agileRangesMhz;
+        double agileStepMhz = 5.0;
+        QString standardCentersMhz;
+        int standardDwellMs = 650;
+    };
+    FpvAutoScanSnapshot fpvAutoScanSnapshot;
     struct FpvHunterEvent {
         bool valid = false;
         quint64 id = 0;

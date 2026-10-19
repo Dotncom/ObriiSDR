@@ -21,13 +21,22 @@ float normalizedHeight(float level, float levelMin, float levelMax) {
     return std::clamp((level - levelMin) / (levelMax - levelMin), 0.0f, 1.0f);
 }
 
-std::array<unsigned char, 3> blueAmplitudeColor(float value) {
+std::array<unsigned char, 3> monochromeAmplitudeColor(float value,
+                                                       const QColor &baseColor,
+                                                       int depthPercent) {
     const float t = std::clamp(std::isfinite(value) ? value : 0.0f, 0.0f, 1.0f);
-    const float root = std::sqrt(t);
+    const float depth = std::clamp(static_cast<float>(depthPercent) / 100.0f,
+                                   0.0f,
+                                   1.0f);
+    const float lowFactor = 1.0f - 0.86f * depth;
+    const float highFactor = 1.0f + 0.38f * depth;
+    const float factor = lowFactor + (highFactor - lowFactor) * std::sqrt(t);
+    const auto channel = [factor](int component) {
+        return static_cast<unsigned char>(std::lround(std::clamp(
+            static_cast<float>(component) * factor, 0.0f, 255.0f)));
+    };
     return {
-        static_cast<unsigned char>(std::lround(5.0f + 95.0f * t * t)),
-        static_cast<unsigned char>(std::lround(18.0f + 190.0f * t)),
-        static_cast<unsigned char>(std::lround(55.0f + 200.0f * root))
+        channel(baseColor.red()), channel(baseColor.green()), channel(baseColor.blue())
     };
 }
 QVector3D densityProfileColor(float value) {
@@ -52,6 +61,50 @@ QVector3D densityProfileColor(float value) {
     }
     const float u = (t - 0.84f) / 0.16f;
     return QVector3D(0.96f + 0.04f * u, 0.20f + 0.80f * u, u);
+}
+
+struct FrontFacePoint {
+    float frequency = 0.0f;
+    float height = 0.0f;
+};
+
+using FrontFacePolygon = std::array<FrontFacePoint, 8>;
+
+int clipFrontFacePolygon(const FrontFacePolygon &input,
+                         int inputCount,
+                         FrontFacePolygon &output,
+                         float boundary,
+                         bool keepAbove) {
+    if (inputCount <= 0) {
+        return 0;
+    }
+
+    int outputCount = 0;
+    FrontFacePoint previous = input[static_cast<std::size_t>(inputCount - 1)];
+    bool previousInside = keepAbove ? previous.height >= boundary
+                                    : previous.height <= boundary;
+    for (int index = 0; index < inputCount; ++index) {
+        const FrontFacePoint current = input[static_cast<std::size_t>(index)];
+        const bool currentInside = keepAbove ? current.height >= boundary
+                                             : current.height <= boundary;
+        if (currentInside != previousInside && outputCount < int(output.size())) {
+            const float denominator = current.height - previous.height;
+            const float ratio = std::abs(denominator) > 1.0e-7f
+                                    ? std::clamp((boundary - previous.height) / denominator,
+                                                 0.0f,
+                                                 1.0f)
+                                    : 0.0f;
+            output[static_cast<std::size_t>(outputCount++)] = {
+                previous.frequency + (current.frequency - previous.frequency) * ratio,
+                boundary};
+        }
+        if (currentInside && outputCount < int(output.size())) {
+            output[static_cast<std::size_t>(outputCount++)] = current;
+        }
+        previous = current;
+        previousInside = currentInside;
+    }
+    return outputCount;
 }
 
 }
@@ -817,9 +870,44 @@ void Waterfall3DRenderer::setMonochrome(bool enabled) {
     pendingGpuRows.clear();
 }
 
-void Waterfall3DRenderer::applySampleColor(const VertexSample &sample) const {
+void Waterfall3DRenderer::setHeightGradient(bool enabled) {
+    heightGradient = enabled;
+}
+
+void Waterfall3DRenderer::setMonochromeColor(const QColor &color) {
+    if (!color.isValid() || monochromeColor == color) return;
+    monochromeColor = color;
+    gpuTexturesResetRequired = true;
+    pendingGpuRows.clear();
+}
+
+void Waterfall3DRenderer::setMonochromeGradientDepth(int percent) {
+    percent = std::clamp(percent, 0, 100);
+    if (monochromeGradientDepth == percent) return;
+    monochromeGradientDepth = percent;
+    gpuTexturesResetRequired = true;
+    pendingGpuRows.clear();
+}
+
+void Waterfall3DRenderer::applyHeightColor(float height) const {
     if (monochrome) {
-        const auto color = blueAmplitudeColor(sample.height);
+        const auto color = monochromeAmplitudeColor(
+            height, monochromeColor, monochromeGradientDepth);
+        glColor3ub(color[0], color[1], color[2]);
+        return;
+    }
+    const QVector3D color = densityProfileColor(height);
+    glColor3f(color.x(), color.y(), color.z());
+}
+
+void Waterfall3DRenderer::applySampleColor(const VertexSample &sample) const {
+    if (heightGradient) {
+        applyHeightColor(sample.height);
+        return;
+    }
+    if (monochrome) {
+        const auto color = monochromeAmplitudeColor(
+            sample.height, monochromeColor, monochromeGradientDepth);
         glColor3ub(color[0], color[1], color[2]);
     } else {
         glColor3ub(sample.color[0], sample.color[1], sample.color[2]);
@@ -898,6 +986,7 @@ bool Waterfall3DRenderer::ensureSurfaceProgram() {
         "uniform float smoothingMode;\n"
         "varying vec3 vertexColor;\n"
         "varying float pointDensity;\n"
+        "varying float gradientHeight;\n"
         "varying vec3 surfaceNormal;\n"
         "float axisValue(float dimension, vec3 values) {\n"
         "    if (dimension < 0.5) return values.x;\n"
@@ -978,16 +1067,38 @@ bool Waterfall3DRenderer::ensureSurfaceProgram() {
         "    gl_Position = transform * vec4(position, 1.0);\n"
         "    vertexColor = texture2D(colorMap, texCoord).rgb;\n"
         "    pointDensity = value;\n"
+        "    gradientHeight = logicalValues.y;\n"
         "}\n";
     static const char *fragmentSource =
         "uniform float densityAxes;\n"
         "uniform float lightingMode;\n"
+        "uniform float heightGradientMode;\n"
+        "uniform float monochromeMode;\n"
+        "uniform vec3 monochromeColor;\n"
+        "uniform float monochromeGradientDepth;\n"
         "varying vec3 vertexColor;\n"
         "varying float pointDensity;\n"
+        "varying float gradientHeight;\n"
         "varying vec3 surfaceNormal;\n"
+        "vec3 amplitudeColor(float value) {\n"
+        "    float t = clamp(value, 0.0, 1.0);\n"
+        "    if (monochromeMode > 0.5) {\n"
+        "        float lowFactor = 1.0 - 0.86 * monochromeGradientDepth;\n"
+        "        float highFactor = 1.0 + 0.38 * monochromeGradientDepth;\n"
+        "        float factor = mix(lowFactor, highFactor, sqrt(t));\n"
+        "        return clamp(monochromeColor * factor, 0.0, 1.0);\n"
+        "    }\n"
+        "    if (t < 0.16) return mix(vec3(0.03, 0.07, 0.19), vec3(0.0, 0.13, 0.47), t / 0.16);\n"
+        "    if (t < 0.38) return mix(vec3(0.0, 0.13, 0.47), vec3(0.0, 0.87, 0.94), (t - 0.16) / 0.22);\n"
+        "    if (t < 0.64) return mix(vec3(0.0, 0.87, 0.94), vec3(0.96, 0.97, 0.0), (t - 0.38) / 0.26);\n"
+        "    if (t < 0.84) return mix(vec3(0.96, 0.97, 0.0), vec3(0.96, 0.20, 0.0), (t - 0.64) / 0.20);\n"
+        "    return mix(vec3(0.96, 0.20, 0.0), vec3(1.0, 1.0, 1.0), (t - 0.84) / 0.16);\n"
+        "}\n"
         "void main() {\n"
         "    if (densityAxes > 0.5 && pointDensity <= 0.001) discard;\n"
-        "    vec3 color = vertexColor;\n"
+        "    vec3 color = heightGradientMode > 0.5\n"
+        "        ? amplitudeColor(gradientHeight) : vertexColor;\n"
+        "    vec3 baseColor = color;\n"
         "    if (lightingMode > 0.5) {\n"
         "        vec3 normal = normalize(surfaceNormal);\n"
         "        vec3 lightDirection = normalize(vec3(-0.42, -0.32, 0.86));\n"
@@ -996,7 +1107,7 @@ bool Waterfall3DRenderer::ensureSurfaceProgram() {
         "        float slopeShadow = 1.0 - strength * 0.22 *\n"
         "                            clamp(1.0 - abs(normal.z), 0.0, 1.0);\n"
         "        color *= ((1.0 - strength) + strength * (0.30 + 0.70 * diffuse)) * slopeShadow;\n"
-        "        color += vertexColor * strength * 0.10 * pow(diffuse, 8.0);\n"
+        "        color += baseColor * strength * 0.10 * pow(diffuse, 8.0);\n"
         "    }\n"
         "    gl_FragColor = vec4(color, 1.0);\n"
         "}\n";
@@ -1172,7 +1283,8 @@ bool Waterfall3DRenderer::uploadGpuSurfaceRows() {
                 static_cast<std::uint8_t>(std::lround(std::clamp(sample.height, 0.0f, 1.0f) * 255.0f));
             const std::size_t colorOffset = static_cast<std::size_t>(column) * 3U;
             if (monochrome) {
-                const auto color = blueAmplitudeColor(sample.height);
+                const auto color = monochromeAmplitudeColor(
+                    sample.height, monochromeColor, monochromeGradientDepth);
                 gpuColorScratch[colorOffset] = color[0];
                 gpuColorScratch[colorOffset + 1U] = color[1];
                 gpuColorScratch[colorOffset + 2U] = color[2];
@@ -1254,6 +1366,14 @@ bool Waterfall3DRenderer::renderGpuSurface(const QMatrix4x4 &transform) {
     surfaceProgram.setUniformValue("densityAxisZ", static_cast<float>(densityAxisZDimension));
     surfaceProgram.setUniformValue("smoothingMode", static_cast<float>(surfaceSmoothing));
     surfaceProgram.setUniformValue("lightingMode", static_cast<float>(surfaceLighting));
+    surfaceProgram.setUniformValue("heightGradientMode", heightGradient ? 1.0f : 0.0f);
+    surfaceProgram.setUniformValue("monochromeMode", monochrome ? 1.0f : 0.0f);
+    surfaceProgram.setUniformValue(
+        "monochromeColor",
+        QVector3D(monochromeColor.redF(), monochromeColor.greenF(), monochromeColor.blueF()));
+    surfaceProgram.setUniformValue(
+        "monochromeGradientDepth",
+        static_cast<float>(monochromeGradientDepth) / 100.0f);
     const int gridLocation = surfaceProgram.attributeLocation("gridPosition");
     if (gridLocation < 0) {
         surfaceProgram.release();
@@ -1463,8 +1583,10 @@ void Waterfall3DRenderer::render(int viewportWidth, int viewportHeight) {
                                                      : 0.5f;
                     const QVector3D base = densityPosition(0.0f, frequencyRatio, levelRatio);
                     const QVector3D tip = densityPosition(sample.height, frequencyRatio, levelRatio);
-                    applySampleColor(sample);
+                    if (heightGradient) applyHeightColor(0.0f);
+                    else applySampleColor(sample);
                     glVertex3f(base.x(), base.y(), base.z());
+                    if (heightGradient) applyHeightColor(sample.height);
                     glVertex3f(tip.x(), tip.y(), tip.z());
                 }
             }
@@ -1599,31 +1721,74 @@ void Waterfall3DRenderer::render(int viewportWidth, int viewportHeight) {
             const unsigned char faceAlpha = static_cast<unsigned char>(
                 std::lround(255.0 * static_cast<double>(frontFaceGradientOpacity) / 100.0));
             constexpr float FrontTime = 1.0f;
-            constexpr float BottomBrightness = 0.08f;
+            constexpr int GradientLayers = 32;
+
+            const auto setGradientColor = [&](float normalizedHeight) {
+                const float value = std::clamp(normalizedHeight, 0.0f, 1.0f);
+                if (monochrome) {
+                    const auto color = monochromeAmplitudeColor(
+                        value, monochromeColor, monochromeGradientDepth);
+                    glColor4ub(color[0], color[1], color[2], faceAlpha);
+                    return;
+                }
+                const QVector3D color = densityProfileColor(value);
+                glColor4ub(static_cast<unsigned char>(std::lround(255.0f * color.x())),
+                           static_cast<unsigned char>(std::lround(255.0f * color.y())),
+                           static_cast<unsigned char>(std::lround(255.0f * color.z())),
+                           faceAlpha);
+            };
 
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glDepthMask(GL_FALSE);
             glDisable(GL_DEPTH_TEST);
             glShadeModel(GL_SMOOTH);
-            glBegin(GL_TRIANGLE_STRIP);
-            for (int column = 0; column < columnCount; ++column) {
-                const float frequency = columnCount > 1
-                                            ? -1.0f + 2.0f * static_cast<float>(column) /
-                                                          static_cast<float>(columnCount - 1)
-                                            : 0.0f;
-                const VertexSample &sample = frontRow[static_cast<std::size_t>(column)];
-                const auto monochromeColor = blueAmplitudeColor(sample.height);
-                const unsigned char red = monochrome ? monochromeColor[0] : sample.color[0];
-                const unsigned char green = monochrome ? monochromeColor[1] : sample.color[1];
-                const unsigned char blue = monochrome ? monochromeColor[2] : sample.color[2];
-                glColor4ub(static_cast<unsigned char>(red * BottomBrightness),
-                           static_cast<unsigned char>(green * BottomBrightness),
-                           static_cast<unsigned char>(blue * BottomBrightness),
-                           faceAlpha);
-                glVertex3f(FrontTime, frequency, 0.0f);
-                glColor4ub(red, green, blue, faceAlpha);
-                glVertex3f(FrontTime, frequency, sample.height * 0.72f);
+            glBegin(GL_TRIANGLES);
+            for (int column = 1; column < columnCount; ++column) {
+                const float frequency0 = -1.0f + 2.0f * static_cast<float>(column - 1) /
+                                                     static_cast<float>((std::max)(1, columnCount - 1));
+                const float frequency1 = -1.0f + 2.0f * static_cast<float>(column) /
+                                                     static_cast<float>((std::max)(1, columnCount - 1));
+                const float height0 = std::clamp(
+                    frontRow[static_cast<std::size_t>(column - 1)].height, 0.0f, 1.0f);
+                const float height1 = std::clamp(
+                    frontRow[static_cast<std::size_t>(column)].height, 0.0f, 1.0f);
+                const float segmentMaximum = (std::max)(height0, height1);
+
+                for (int layer = 0; layer < GradientLayers; ++layer) {
+                    const float lower = static_cast<float>(layer) /
+                                        static_cast<float>(GradientLayers);
+                    if (segmentMaximum <= lower) {
+                        break;
+                    }
+                    const float upper = static_cast<float>(layer + 1) /
+                                        static_cast<float>(GradientLayers);
+                    FrontFacePolygon polygon{{
+                        {frequency0, 0.0f},
+                        {frequency0, height0},
+                        {frequency1, height1},
+                        {frequency1, 0.0f}}};
+                    FrontFacePolygon clippedLower{};
+                    FrontFacePolygon clippedLayer{};
+                    int pointCount = clipFrontFacePolygon(
+                        polygon, 4, clippedLower, lower, true);
+                    pointCount = clipFrontFacePolygon(
+                        clippedLower, pointCount, clippedLayer, upper, false);
+                    if (pointCount < 3) {
+                        continue;
+                    }
+
+                    for (int triangle = 1; triangle + 1 < pointCount; ++triangle) {
+                        const FrontFacePoint points[3] = {
+                            clippedLayer[0],
+                            clippedLayer[static_cast<std::size_t>(triangle)],
+                            clippedLayer[static_cast<std::size_t>(triangle + 1)]};
+                        for (const FrontFacePoint &point : points) {
+                            setGradientColor(point.height);
+                            glVertex3f(FrontTime, point.frequency, point.height * 0.72f);
+                        }
+                    }
+                }
             }
             glEnd();
             glEnable(GL_DEPTH_TEST);

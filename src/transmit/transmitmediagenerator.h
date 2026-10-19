@@ -19,6 +19,9 @@ struct TxAudioMedia {
 
 class TransmitMediaGenerator {
 public:
+    static QVector<float> resampleAudio(const QVector<float> &input,
+                                        int sourceRate,
+                                        int targetRate);
     static TxAudioMedia loadWav(const QString &path, int targetSampleRate);
     static TxAudioMedia generateSstv(const QImage &image,
                                      const QString &modeId,

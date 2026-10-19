@@ -9,6 +9,7 @@
 #include <QPushButton>
 #include <QSizePolicy>
 #include <QSignalBlocker>
+#include <QSpinBox>
 #include <QVBoxLayout>
 
 SpectrumHunterControls::SpectrumHunterControls(const QString &title,
@@ -78,6 +79,49 @@ SpectrumHunterControls::SpectrumHunterControls(const QString &title,
     statusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
+    autoScanWidget = new QWidget(this);
+    autoScanCheckbox = new QCheckBox(QStringLiteral("Auto scan + decode"), autoScanWidget);
+    autoScanCheckbox->setToolTip(
+        QStringLiteral("Scan the selected preset, stop on a stable analog video carrier, "
+                       "verify sync, then resume scanning after the signal is lost"));
+    autoScanDwellLabel = new QLabel(QStringLiteral("Dwell:"), autoScanWidget);
+    autoScanDwellSpin = new QSpinBox(autoScanWidget);
+    autoScanDwellSpin->setRange(50, 5000);
+    autoScanDwellSpin->setSuffix(QStringLiteral(" ms"));
+    autoScanDwellSpin->setValue(650);
+    autoScanDwellSpin->setMaximumWidth(92);
+    autoScanLossLabel = new QLabel(QStringLiteral("Loss:"), autoScanWidget);
+    autoScanLossSpin = new QSpinBox(autoScanWidget);
+    autoScanLossSpin->setRange(500, 30000);
+    autoScanLossSpin->setSuffix(QStringLiteral(" ms"));
+    autoScanLossSpin->setValue(2500);
+    autoScanLossSpin->setMaximumWidth(100);
+    autoScanLockLabel = new QLabel(QStringLiteral("HSync:"), autoScanWidget);
+    autoScanLockSpin = new QSpinBox(autoScanWidget);
+    autoScanLockSpin->setRange(1, 100);
+    autoScanLockSpin->setSuffix(QStringLiteral(" %"));
+    autoScanLockSpin->setValue(45);
+    autoScanLockSpin->setMaximumWidth(76);
+    autoScanStatusLabel = new QLabel(QStringLiteral("Auto scan: off"), autoScanWidget);
+    autoScanStatusLabel->setWordWrap(true);
+    autoScanStatusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+
+    auto *autoScanLayout = new QGridLayout(autoScanWidget);
+    autoScanLayout->setContentsMargins(0, 0, 0, 0);
+    autoScanLayout->setHorizontalSpacing(4);
+    autoScanLayout->setVerticalSpacing(3);
+    autoScanLayout->addWidget(autoScanCheckbox, 0, 0, 1, 2);
+    autoScanLayout->addWidget(autoScanDwellLabel, 0, 2);
+    autoScanLayout->addWidget(autoScanDwellSpin, 0, 3);
+    autoScanLayout->addWidget(autoScanLossLabel, 1, 0);
+    autoScanLayout->addWidget(autoScanLossSpin, 1, 1);
+    autoScanLayout->addWidget(autoScanLockLabel, 1, 2);
+    autoScanLayout->addWidget(autoScanLockSpin, 1, 3);
+    autoScanLayout->addWidget(autoScanStatusLabel, 2, 0, 1, 4);
+    autoScanLayout->setColumnStretch(1, 1);
+    autoScanLayout->setColumnStretch(3, 1);
+    autoScanWidget->setVisible(false);
+
     auto *mainLayout = new QVBoxLayout(this);
     auto *presetLayout = new QHBoxLayout();
     auto *tuningLayout = new QGridLayout();
@@ -115,6 +159,7 @@ SpectrumHunterControls::SpectrumHunterControls(const QString &title,
 
     mainLayout->addLayout(presetLayout);
     mainLayout->addLayout(tuningLayout);
+    mainLayout->addWidget(autoScanWidget);
     mainLayout->addWidget(statusLabel);
 
     connect(detectCheckbox, &QCheckBox::toggled, this, &SpectrumHunterControls::detectToggled);
@@ -135,6 +180,19 @@ SpectrumHunterControls::SpectrumHunterControls(const QString &title,
     connect(followCheckbox, &QCheckBox::toggled, this, &SpectrumHunterControls::followToggled);
     connect(previousCandidateButton, &QPushButton::clicked, this, &SpectrumHunterControls::previousCandidateRequested);
     connect(nextCandidateButton, &QPushButton::clicked, this, &SpectrumHunterControls::nextCandidateRequested);
+    connect(autoScanCheckbox, &QCheckBox::toggled, this, &SpectrumHunterControls::autoScanToggled);
+    connect(autoScanDwellSpin,
+            QOverload<int>::of(&QSpinBox::valueChanged),
+            this,
+            &SpectrumHunterControls::autoScanDwellChanged);
+    connect(autoScanLossSpin,
+            QOverload<int>::of(&QSpinBox::valueChanged),
+            this,
+            &SpectrumHunterControls::autoScanLossTimeoutChanged);
+    connect(autoScanLockSpin,
+            QOverload<int>::of(&QSpinBox::valueChanged),
+            this,
+            &SpectrumHunterControls::autoScanMinimumLockChanged);
 
     setCandidateNavigationVisible(false);
     setCandidateNavigationEnabled(false);
@@ -246,6 +304,63 @@ void SpectrumHunterControls::setCandidateIndex(int index, int count) {
 void SpectrumHunterControls::setStatusText(const QString &text) {
     if (statusLabel) {
         statusLabel->setText(text);
+    }
+}
+
+void SpectrumHunterControls::setAutoScanVisible(bool visible) {
+    if (autoScanWidget) {
+        autoScanWidget->setVisible(visible);
+    }
+}
+
+void SpectrumHunterControls::setAutoScanChecked(bool checked) {
+    if (!autoScanCheckbox || autoScanCheckbox->isChecked() == checked) {
+        return;
+    }
+    const QSignalBlocker blocker(autoScanCheckbox);
+    autoScanCheckbox->setChecked(checked);
+}
+
+void SpectrumHunterControls::setAutoScanValues(int dwellMs,
+                                               int lossTimeoutMs,
+                                               int minimumLockPercent) {
+    if (autoScanDwellSpin) {
+        const QSignalBlocker blocker(autoScanDwellSpin);
+        autoScanDwellSpin->setValue(dwellMs);
+    }
+    if (autoScanLossSpin) {
+        const QSignalBlocker blocker(autoScanLossSpin);
+        autoScanLossSpin->setValue(lossTimeoutMs);
+    }
+    if (autoScanLockSpin) {
+        const QSignalBlocker blocker(autoScanLockSpin);
+        autoScanLockSpin->setValue(minimumLockPercent);
+    }
+}
+
+void SpectrumHunterControls::setAutoScanStatusText(const QString &text) {
+    if (autoScanStatusLabel) {
+        autoScanStatusLabel->setText(text);
+    }
+}
+
+void SpectrumHunterControls::setAutoScanUiText(const QString &enabledText,
+                                               const QString &enabledTooltip,
+                                               const QString &dwellText,
+                                               const QString &lossText,
+                                               const QString &lockText) {
+    if (autoScanCheckbox) {
+        autoScanCheckbox->setText(enabledText);
+        autoScanCheckbox->setToolTip(enabledTooltip);
+    }
+    if (autoScanDwellLabel) {
+        autoScanDwellLabel->setText(dwellText);
+    }
+    if (autoScanLossLabel) {
+        autoScanLossLabel->setText(lossText);
+    }
+    if (autoScanLockLabel) {
+        autoScanLockLabel->setText(lockText);
     }
 }
 

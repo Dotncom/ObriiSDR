@@ -3,6 +3,8 @@
 #include "transmitterbackend.h"
 #include "transmitmediagenerator.h"
 #include "dmrtransmitencoder.h"
+#include "dmrprivacycodec.h"
+#include "dmrprivacyutils.h"
 #include "ft8stationutils.h"
 #include "videoprocessor.h"
 
@@ -14,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -53,6 +56,28 @@ int oneBits(const QByteArray &bytes) {
     return count;
 }
 
+QString dmrBurstDibits(const QByteArray &burst) {
+    QString result;
+    result.reserve(burst.size() * 4);
+    for (char raw : burst) {
+        const quint8 value = static_cast<quint8>(raw);
+        for (int pair = 0; pair < 4; ++pair) {
+            result.append(QChar(QLatin1Char('0').unicode() +
+                                ((value >> (6 - pair * 2)) & 0x03U)));
+        }
+    }
+    return result;
+}
+
+double toneMagnitude(const QVector<float> &samples, int sampleRate, double frequency) {
+    std::complex<double> sum(0.0, 0.0);
+    for (int index = 0; index < samples.size(); ++index) {
+        const double phase = -2.0 * 3.14159265358979323846 * frequency * index / sampleRate;
+        sum += static_cast<double>(samples[index]) * std::polar(1.0, phase);
+    }
+    return samples.isEmpty() ? 0.0 : 2.0 * std::abs(sum) / samples.size();
+}
+
 } // namespace
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
@@ -66,6 +91,12 @@ int main(int argc, char **argv) {
         TransmitWaveformGenerator::generateText(configuration,
                                                 QString::fromUtf8(u8"SOS УКРАЇНА"));
     if (!cw.ok() || cw.durationSeconds < 1.0) {
+        std::fprintf(stderr,
+                     "CW generation failed: ok=%d duration=%.6f samples=%lld error=%s\n",
+                     cw.ok() ? 1 : 0,
+                     cw.durationSeconds,
+                     static_cast<long long>(cw.iq.size()),
+                     cw.error.toUtf8().constData());
         qCritical().noquote() << "CW generation failed:" << cw.error;
         return 1;
     }
@@ -315,6 +346,52 @@ int main(int argc, char **argv) {
         }
     }
 
+    TxConfiguration amConfiguration;
+    amConfiguration.modulation = TxModulation::Am;
+    amConfiguration.sampleRate = 48000;
+    amConfiguration.level = 0.80f;
+    amConfiguration.amDepth = 0.65f;
+    amConfiguration.signalBandwidthHz = 0.0;
+    const QVector<std::complex<float>> amEnvelope =
+        TransmitWaveformGenerator::modulateAudio(amConfiguration, {-1.0f, 1.0f});
+    if (amEnvelope.size() != 2) return 43;
+    const double amMinimum = amEnvelope[0].real();
+    const double amMaximum = amEnvelope[1].real();
+    const double modulationIndex = (amMaximum - amMinimum) / (amMaximum + amMinimum);
+    if (std::abs(modulationIndex - amConfiguration.amDepth) > 0.01 ||
+        amMaximum > amConfiguration.level + 1.0e-5) {
+        qCritical() << "AM voice modulation depth is incorrect" << modulationIndex
+                    << amMinimum << amMaximum;
+        return 43;
+    }
+
+    TxConfiguration ssbConfiguration;
+    ssbConfiguration.modulation = TxModulation::Usb;
+    ssbConfiguration.sampleRate = 48000;
+    ssbConfiguration.signalBandwidthHz = 2700.0;
+    QVector<std::complex<float>> ssbTone(24000);
+    for (int index = 0; index < ssbTone.size(); ++index) {
+        ssbTone[index] = std::polar(
+            0.8f, static_cast<float>(2.0 * 3.14159265358979323846 * 2200.0 * index /
+                                     ssbConfiguration.sampleRate));
+    }
+    QVector<std::complex<float>> limitedSsb;
+    TxBandwidthLimiterState ssbLimiterState;
+    if (!TransmitWaveformGenerator::limitSignalBandwidth(
+            ssbConfiguration, ssbTone.constData(), ssbTone.size(),
+            &limitedSsb, &ssbLimiterState)) {
+        return 44;
+    }
+    double ssbMagnitude = 0.0;
+    for (int index = limitedSsb.size() / 2; index < limitedSsb.size(); ++index) {
+        ssbMagnitude += std::abs(limitedSsb[index]);
+    }
+    ssbMagnitude /= limitedSsb.size() - limitedSsb.size() / 2;
+    if (ssbMagnitude < 0.60) {
+        qCritical() << "SSB bandwidth limiter removed valid voice audio" << ssbMagnitude;
+        return 44;
+    }
+
     QImage image(32, 24, QImage::Format_RGB32);
     for (int y = 0; y < image.height(); ++y) {
         for (int x = 0; x < image.width(); ++x) {
@@ -328,8 +405,26 @@ int main(int argc, char **argv) {
         image, QStringLiteral("robot36"), 12000);
     if (!sstv.ok() || sstv.samples.size() < 12000) return 11;
 
-    configuration.sampleRate = 2400000;
+    QVector<float> resampleInput(48000);
+    for (int index = 0; index < resampleInput.size(); ++index) {
+        const double time = static_cast<double>(index) / 48000.0;
+        resampleInput[index] = static_cast<float>(
+            0.5 * std::sin(2.0 * 3.14159265358979323846 * 1000.0 * time) +
+            0.5 * std::sin(2.0 * 3.14159265358979323846 * 15000.0 * time));
+    }
+    const QVector<float> resampled =
+        TransmitMediaGenerator::resampleAudio(resampleInput, 48000, 12000);
+    const double retainedTone = toneMagnitude(resampled, 12000, 1000.0);
+    const double foldedTone = toneMagnitude(resampled, 12000, 3000.0);
+    if (resampled.size() != 12000 || retainedTone < 0.42 || foldedTone > 0.02) {
+        qCritical() << "Band-limited audio resampling failed"
+                    << retainedTone << foldedTone << resampled.size();
+        return 42;
+    }
+
+    configuration.sampleRate = 2000000;
     configuration.modulation = TxModulation::Am;
+    configuration.signalBandwidthHz = 1500000.0;
     const QVector<std::complex<float>> atv =
         TransmitMediaGenerator::generateAtvFrame(image, configuration, false, 384, 288);
     if (atv.isEmpty()) return 12;
@@ -337,14 +432,23 @@ int main(int argc, char **argv) {
         if (!std::isfinite(sample.real()) || !std::isfinite(sample.imag())) return 13;
     }
 
+    QVector<std::complex<float>> filteredAtv;
+    TxBandwidthLimiterState atvLimiterState;
+    if (!TransmitWaveformGenerator::limitSignalBandwidth(
+            configuration, atv.constData(), atv.size(), &filteredAtv, &atvLimiterState) ||
+        filteredAtv.size() != atv.size()) {
+        qCritical() << "ATV bandwidth limiter failed" << filteredAtv.size() << atv.size();
+        return 45;
+    }
+
     QByteArray atvIq;
-    atvIq.resize(atv.size() * 4);
+    atvIq.resize(filteredAtv.size() * 4);
     char *atvBytes = atvIq.data();
-    for (int i = 0; i < atv.size(); ++i) {
+    for (int i = 0; i < filteredAtv.size(); ++i) {
         const qint16 iSample = static_cast<qint16>(std::lround(
-            (std::clamp)(atv[i].real(), -1.0f, 1.0f) * 32767.0f));
+            (std::clamp)(filteredAtv[i].real(), -1.0f, 1.0f) * 32767.0f));
         const qint16 qSample = static_cast<qint16>(std::lround(
-            (std::clamp)(atv[i].imag(), -1.0f, 1.0f) * 32767.0f));
+            (std::clamp)(filteredAtv[i].imag(), -1.0f, 1.0f) * 32767.0f));
         std::memcpy(atvBytes + i * 4, &iSample, sizeof(iSample));
         std::memcpy(atvBytes + i * 4 + 2, &qSample, sizeof(qSample));
     }
@@ -354,7 +458,7 @@ int main(int argc, char **argv) {
                      [&decodedAtv](const QImage &frame) { decodedAtv = frame; });
     decoder.configure(true, VideoProcessor::AmVideo, 15625.0, 384, 288,
                       false, true, true);
-    decoder.processIqFrame(atvIq, configuration.sampleRate, atv.size());
+    decoder.processIqFrame(atvIq, configuration.sampleRate, filteredAtv.size());
     if (decodedAtv.isNull()) return 14;
     int darkest = 255;
     int brightest = 0;
@@ -406,6 +510,35 @@ int main(int argc, char **argv) {
     oneDmoFrame.append(QByteArray(39, '\0'));
     if (DmrTransmitEncoder::burstDibits(oneDmoFrame).size() != 288) return 21;
 
+    DmrTxParameters protectedDmr = dmr;
+    protectedDmr.privacyMode = DMR_PRIVACY_ARC4;
+    protectedDmr.privacyKeyId = 7;
+    protectedDmr.privacyKey = QByteArray::fromHex("0102030405");
+    protectedDmr.privacyMi = 0x12345678U;
+    protectedDmr.privacyMiProvided = true;
+    DmrPrivacyCodec::PiHeader decodedPi;
+    const QByteArray piBurst =
+        DmrTransmitEncoder::buildPrivacyIndicatorBurst(protectedDmr, protectedDmr.privacyMi);
+    if (piBurst.size() != 33 ||
+        !DmrPrivacyCodec::decodePi(dmrBurstDibits(piBurst), decodedPi) ||
+        decodedPi.algorithm != 1 || decodedPi.manufacturer != 0x10 ||
+        decodedPi.keyId != protectedDmr.privacyKeyId ||
+        decodedPi.mi != protectedDmr.privacyMi) {
+        qCritical() << "DMR ARC4 privacy indicator round-trip failed"
+                    << decodedPi.algorithm << decodedPi.manufacturer
+                    << decodedPi.keyId << decodedPi.mi;
+        return 46;
+    }
+    const quint32 expectedNextMi = DmrPrivacyCodec::nextMi(protectedDmr.privacyMi, false);
+    quint32 decodedLateEntryMi = 0;
+    if (!DmrPrivacyCodec::decodeLateEntry(
+            DmrTransmitEncoder::buildLateEntryFragments(expectedNextMi), decodedLateEntryMi) ||
+        decodedLateEntryMi != expectedNextMi) {
+        qCritical() << "DMR privacy late-entry round-trip failed"
+                    << Qt::hex << expectedNextMi << decodedLateEntryMi;
+        return 47;
+    }
+
     DmrTransmitEncoder dmrEncoder;
     if (dmrEncoder.canEncodeVoice()) {
         QString dmrError;
@@ -414,12 +547,71 @@ int main(int argc, char **argv) {
             return 22;
         }
         const QVector<std::complex<float>> beginIq = dmrEncoder.begin(&dmrError);
-        if (!dmrError.isEmpty() || beginIq.size() != 18240) return 23;
+        if (!dmrError.isEmpty() || beginIq.size() != 32640) return 23;
         QVector<float> voiceAudio(2880, 0.0f);
         const QVector<std::complex<float>> voiceIq = dmrEncoder.pushAudio(voiceAudio, &dmrError);
         if (!dmrError.isEmpty() || voiceIq.size() != 2880) return 24;
         const QVector<std::complex<float>> endIq = dmrEncoder.finish(&dmrError);
         if (!dmrError.isEmpty() || endIq.size() != 5760) return 25;
+
+        for (int privacyMode : {DMR_PRIVACY_ARC4, DMR_PRIVACY_AES256}) {
+            DmrTxParameters encrypted = protectedDmr;
+            encrypted.privacyMode = privacyMode;
+            encrypted.privacyKey = privacyMode == DMR_PRIVACY_ARC4
+                                       ? QByteArray::fromHex("0102030405")
+                                       : QByteArray::fromHex(
+                                             "000102030405060708090A0B0C0D0E0F"
+                                             "101112131415161718191A1B1C1D1E1F");
+            DmrTransmitEncoder encryptedEncoder;
+            dmrError.clear();
+            if (!encryptedEncoder.configure(encrypted, &dmrError)) {
+                qCritical().noquote() << "DMR protected encoder configuration failed:"
+                                      << dmrError;
+                return 48;
+            }
+            const QVector<std::complex<float>> encryptedBegin = encryptedEncoder.begin(&dmrError);
+            const QVector<std::complex<float>> encryptedVoice =
+                encryptedEncoder.pushAudio(voiceAudio, &dmrError);
+            const QVector<std::complex<float>> encryptedEnd = encryptedEncoder.finish(&dmrError);
+            if (!dmrError.isEmpty() || encryptedBegin.size() != 41280 ||
+                encryptedVoice.size() != 2880 || encryptedEnd.size() != 5760) {
+                qCritical().noquote() << "DMR protected waveform generation failed:"
+                                      << privacyMode << dmrError
+                                      << encryptedBegin.size() << encryptedVoice.size()
+                                      << encryptedEnd.size();
+                return 49;
+            }
+        }
+
+        DmrTransmitEncoder reusableEncoder;
+        dmrError.clear();
+        if (!reusableEncoder.configure(protectedDmr, &dmrError) ||
+            reusableEncoder.begin(&dmrError).size() != 41280 ||
+            reusableEncoder.finish(&dmrError).size() != 5760) {
+            qCritical().noquote() << "DMR reusable ARC4 setup failed:" << dmrError;
+            return 50;
+        }
+        DmrTxParameters clearDmr = protectedDmr;
+        clearDmr.privacyMode = DMR_PRIVACY_NONE;
+        dmrError.clear();
+        if (!reusableEncoder.configure(clearDmr, &dmrError) ||
+            reusableEncoder.begin(&dmrError).size() != 32640 ||
+            reusableEncoder.finish(&dmrError).size() != 5760) {
+            qCritical().noquote() << "DMR ARC4-to-clear reconfiguration failed:" << dmrError;
+            return 51;
+        }
+        DmrTxParameters aesDmr = protectedDmr;
+        aesDmr.privacyMode = DMR_PRIVACY_AES256;
+        aesDmr.privacyKey = QByteArray::fromHex(
+            "000102030405060708090A0B0C0D0E0F"
+            "101112131415161718191A1B1C1D1E1F");
+        dmrError.clear();
+        if (!reusableEncoder.configure(aesDmr, &dmrError) ||
+            reusableEncoder.begin(&dmrError).size() != 41280 ||
+            reusableEncoder.finish(&dmrError).size() != 5760) {
+            qCritical().noquote() << "DMR clear-to-AES reconfiguration failed:" << dmrError;
+            return 52;
+        }
     } else {
         qInfo() << "DMR AMBE+2 encode backend unavailable; RF framing tests passed";
     }

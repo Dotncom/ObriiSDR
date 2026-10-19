@@ -1,6 +1,7 @@
 #ifndef TRANSMITTERBACKEND_H
 #define TRANSMITTERBACKEND_H
 
+#include <QByteArray>
 #include <QString>
 #include <QVector>
 
@@ -38,6 +39,7 @@ struct TxConfiguration {
     int cwWpm = 18;
     double symbolRate = 1200.0;
     double gaussianBt = 0.5;
+    float amDepth = 0.90f;
     float askDepth = 0.70f;
     bool invertData = false;
     bool alignFt8ToUtcSlot = true;
@@ -47,13 +49,21 @@ struct TxConfiguration {
     std::uint32_t dmrSourceId = 1;
     std::uint32_t dmrDestinationId = 9;
     bool dmrPrivateCall = false;
+    int dmrPrivacyMode = 0;
+    int dmrPrivacyKeyId = 0;
+    QByteArray dmrPrivacyKey;
     int deviceIndex = 0;
     int deviceSampleRate = 2000000;
     std::uint32_t bandwidthHz = 0;
     int txVgaGainDb = 0;
     bool rfAmpEnabled = false;
-    std::uint32_t txUnderrunLimit = 100000;
+    // Zero disables the firmware shortfall stop. The host-side backend still
+    // reports missing source samples and the transmit dialog has its own
+    // watchdog, while a finite firmware limit can stop TX after one USB
+    // transfer on a busy controller shared with a receiver.
+    std::uint32_t txUnderrunLimit = 0;
     bool liveSource = false;
+    int prebufferMilliseconds = 200;
 };
 
 class TransmitterBackend {

@@ -25,7 +25,14 @@ enum class SignalLabWaveform {
     Qam256,
     Fsk2,
     Gfsk2,
-    Ofdm
+    Ofdm,
+    SweepingBeacon
+};
+
+enum class SignalLabSweepMode {
+    PingPong,
+    RestartForward,
+    RestartReverse
 };
 
 enum class SignalLabConstellation {
@@ -45,6 +52,9 @@ struct SignalLabConfiguration {
     double centerOffsetHz = 0.0;
     double toneFrequencyHz = 1000.0;
     double secondFrequencyHz = 3000.0;
+    double sweepBandwidthHz = 1000.0;
+    double sweepPeriodSeconds = 1.0;
+    SignalLabSweepMode sweepMode = SignalLabSweepMode::PingPong;
     double dutyCycle = 0.5;
     QString multiToneFrequencies = QStringLiteral("-3000, -1000, 1000, 3000");
     double symbolRate = 1200.0;
@@ -87,6 +97,7 @@ public:
                                                        QVector<int> *sampleIndices = nullptr);
     static QString waveformName(SignalLabWaveform waveform);
     static QString constellationName(SignalLabConstellation constellation);
+    static QString sweepModeName(SignalLabSweepMode mode);
 };
 
 #endif // SIGNALLABGENERATOR_H

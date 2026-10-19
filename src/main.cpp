@@ -74,6 +74,7 @@
 #include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QColor>
+#include <QColorDialog>
 #include <QCoreApplication>
 #include <QRegularExpression>
 #include <QScrollArea>
@@ -375,7 +376,6 @@ YourClassName::YourClassName(QWidget *parent)
     markTranslatable(digitalModeLabel, QStringLiteral("mode"), QStringLiteral("Mode:"));
     digitalModeLayout->addWidget(digitalModeLabel);
     addModulationRadioButton(digitalWidget, digitalModeLayout, "FT8", MOD_FT8, "FT8 weak-signal decoder");
-    addModulationRadioButton(digitalWidget, digitalModeLayout, "CW", MOD_CW, "Morse audio decoder");
     addModulationRadioButton(digitalWidget, digitalModeLayout, "RTTY", MOD_RTTY, "AFSK RTTY decoder");
     addModulationRadioButton(digitalWidget, digitalModeLayout, "FSK", MOD_FSK, "Frequency-shift keying decoder");
     addModulationRadioButton(digitalWidget, digitalModeLayout, "BPSK31", MOD_PSK, "BPSK31 audio decoder");
@@ -515,7 +515,6 @@ YourClassName::YourClassName(QWidget *parent)
     digitalLayout->addLayout(digitalHeaderLayout);
     digitalLayout->addWidget(dmrPrivacyCapabilityLabel);
     digitalLayout->addLayout(digitalModeLayout);
-    digitalLayout->addWidget(cwDecoderControlsWidget);
     digitalLayout->addWidget(pskDecoderControlsWidget);
     digitalLayout->addLayout(dmrLabLayout);
     digitalLayout->addWidget(digitalStatusLabel);
@@ -963,6 +962,9 @@ YourClassName::YourClassName(QWidget *parent)
     waterfallWidget->set3DSpectrumSliceCaptureFixed(waterfall3DSpectrumSliceCaptureFixed);
     waterfallWidget->set3DFixedPlane(waterfall3DFixedPlane);
     waterfallWidget->set3DMonochrome(waterfall3DMonochrome);
+    waterfallWidget->set3DHeightGradient(waterfall3DHeightGradient);
+    waterfallWidget->set3DMonochromeColor(waterfall3DMonochromeColor);
+    waterfallWidget->set3DMonochromeGradientDepth(waterfall3DMonochromeGradientDepth);
     waterfallWidget->set3DModifierFreeSliceInput(waterfall3DVncSliceInput);
     waterfallWidget->setAlternativeSpectrumGradientFill(alternativeSpectrumGradientFill);
     waterfallWidget->setAlternativeSpectrumGradientOpacity(alternativeSpectrumGradientOpacity);
@@ -1188,6 +1190,60 @@ YourClassName::YourClassName(QWidget *parent)
     waterfall3DMonochromeCheckbox->setToolTip(uiText(
         QStringLiteral("waterfall_3d_monochrome_tooltip"),
         QStringLiteral("Render the 3D surface in a calm solid blue instead of amplitude colors.")));
+    waterfall3DHeightGradientCheckbox = new QCheckBox(
+        uiText(QStringLiteral("waterfall_3d_height_gradient"),
+               QStringLiteral("Height gradient")),
+        this);
+    markTranslatable(waterfall3DHeightGradientCheckbox,
+                     QStringLiteral("waterfall_3d_height_gradient"),
+                     QStringLiteral("Height gradient"));
+    waterfall3DHeightGradientCheckbox->setChecked(waterfall3DHeightGradient);
+    waterfall3DHeightGradientCheckbox->setToolTip(uiText(
+        QStringLiteral("waterfall_3d_height_gradient_tooltip"),
+        QStringLiteral("Color the entire 3D geometry by absolute height, from a dark base to the peak color.")));
+    waterfall3DMonochromeColorLabel = new QLabel(
+        uiText(QStringLiteral("waterfall_3d_monochrome_color"),
+               QStringLiteral("3D color:")),
+        this);
+    markTranslatable(waterfall3DMonochromeColorLabel,
+                     QStringLiteral("waterfall_3d_monochrome_color"),
+                     QStringLiteral("3D color:"));
+    waterfall3DMonochromeColorButton = new QPushButton(this);
+    waterfall3DMonochromeColorButton->setMinimumWidth(96);
+    const auto updateMonochromeColorButton = [this]() {
+        if (!waterfall3DMonochromeColorButton) return;
+        const QColor color = waterfall3DMonochromeColor.isValid()
+                                 ? waterfall3DMonochromeColor
+                                 : QColor(45, 104, 196);
+        const QColor textColor = color.lightnessF() > 0.58 ? Qt::black : Qt::white;
+        waterfall3DMonochromeColorButton->setText(color.name(QColor::HexRgb).toUpper());
+        waterfall3DMonochromeColorButton->setStyleSheet(QStringLiteral(
+            "QPushButton { background-color: %1; color: %2; border: 1px solid #707780; padding: 3px 8px; }")
+            .arg(color.name(QColor::HexRgb), textColor.name(QColor::HexRgb)));
+    };
+    updateMonochromeColorButton();
+    waterfall3DMonochromeColorButton->setToolTip(uiText(
+        QStringLiteral("waterfall_3d_monochrome_color_tooltip"),
+        QStringLiteral("Choose the base color used by monochrome 3D rendering.")));
+    waterfall3DMonochromeGradientDepthLabel = new QLabel(
+        uiText(QStringLiteral("waterfall_3d_monochrome_gradient_depth"),
+               QStringLiteral("Gradient depth:")),
+        this);
+    markTranslatable(waterfall3DMonochromeGradientDepthLabel,
+                     QStringLiteral("waterfall_3d_monochrome_gradient_depth"),
+                     QStringLiteral("Gradient depth:"));
+    waterfall3DMonochromeGradientDepthSlider = new QSlider(Qt::Horizontal, this);
+    waterfall3DMonochromeGradientDepthSlider->setRange(0, 100);
+    waterfall3DMonochromeGradientDepthSlider->setValue(waterfall3DMonochromeGradientDepth);
+    waterfall3DMonochromeGradientDepthSlider->setMinimumWidth(0);
+    waterfall3DMonochromeGradientDepthSlider->setSizePolicy(QSizePolicy::Ignored,
+                                                             QSizePolicy::Fixed);
+    waterfall3DMonochromeGradientDepthSlider->setToolTip(uiText(
+        QStringLiteral("waterfall_3d_monochrome_gradient_depth_tooltip"),
+        QStringLiteral("Set the brightness range between the base and the tops of monochrome 3D geometry.")));
+    waterfall3DMonochromeGradientDepthValueLabel = new QLabel(
+        QStringLiteral("%1%").arg(waterfall3DMonochromeGradientDepth), this);
+    waterfall3DMonochromeGradientDepthValueLabel->setMinimumWidth(38);
     waterfall3DAlternativeViewCheckbox = new QCheckBox(
         uiText(QStringLiteral("waterfall_3d_alternative_view"),
                QStringLiteral("Alternative view")),
@@ -1259,7 +1315,19 @@ YourClassName::YourClassName(QWidget *parent)
     QHBoxLayout *waterfall3DGradientLayout = new QHBoxLayout();
     waterfall3DGradientLayout->setContentsMargins(0, 0, 0, 0);
     waterfall3DGradientLayout->addWidget(alternativeSpectrumGradientCheckbox);
+    waterfall3DGradientLayout->addWidget(waterfall3DHeightGradientCheckbox);
     waterfall3DGradientLayout->addStretch(1);
+    QGridLayout *waterfall3DMonochromeStyleLayout = new QGridLayout();
+    waterfall3DMonochromeStyleLayout->setContentsMargins(0, 0, 0, 0);
+    waterfall3DMonochromeStyleLayout->addWidget(waterfall3DMonochromeColorLabel, 0, 0);
+    waterfall3DMonochromeStyleLayout->addWidget(waterfall3DMonochromeColorButton, 0, 1, 1, 2);
+    waterfall3DMonochromeStyleLayout->addWidget(waterfall3DMonochromeGradientDepthLabel, 1, 0);
+    waterfall3DMonochromeStyleLayout->addWidget(
+        waterfall3DMonochromeGradientDepthValueLabel, 1, 1, 1, 2, Qt::AlignRight);
+    waterfall3DMonochromeStyleLayout->addWidget(
+        waterfall3DMonochromeGradientDepthSlider, 2, 0, 1, 3);
+    waterfall3DMonochromeStyleLayout->setColumnStretch(0, 1);
+    waterfall3DMonochromeStyleLayout->setColumnStretch(1, 1);
     QGridLayout *alternativeSpectrumGradientOpacityLayout = new QGridLayout();
     alternativeSpectrumGradientOpacityLayout->setContentsMargins(0, 0, 0, 0);
     alternativeSpectrumGradientOpacityLayout->addWidget(alternativeSpectrumGradientOpacityLabel,
@@ -2753,6 +2821,10 @@ YourClassName::YourClassName(QWidget *parent)
     fpvHunterControls->addPreset(QStringLiteral("All FPV sparse"), QStringLiteral("1080-1360\\2300-2500\\3200-3500\\5650-5925\t5.000000"));
     fpvHunterControls->setCandidateNavigationVisible(true);
     fpvHunterControls->setFollowVisible(true);
+    fpvHunterControls->setAutoScanVisible(true);
+    fpvHunterControls->setAutoScanValues(fpvAutoScanDwellMs,
+                                         fpvAutoScanLossTimeoutMs,
+                                         fpvAutoScanMinimumLockPercent);
 
     fpvHunterHistoryLabel = new QLabel(QStringLiteral("Recent FPV:"), this);
     markTranslatable(fpvHunterHistoryLabel, QStringLiteral("recent_fpv"), QStringLiteral("Recent FPV:"));
@@ -3037,6 +3109,158 @@ YourClassName::YourClassName(QWidget *parent)
     receiverControlLayout->addLayout(receiverRowsLayout);
     receiverControlLayout->addLayout(fineTuneLayout);
 
+    QWidget *quickHamContainer = new QWidget(this);
+    quickHamContainer->setMinimumWidth(0);
+    quickHamContainer->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    QVBoxLayout *quickHamContainerLayout = new QVBoxLayout(quickHamContainer);
+    quickHamContainerLayout->setContentsMargins(0, 0, 0, 0);
+    quickHamContainerLayout->setSpacing(2);
+    QToolButton *quickHamHeader = new QToolButton(quickHamContainer);
+    quickHamHeader->setCheckable(true);
+    QSettings quickHamSettings(persistentSettingsFilePath(), QSettings::IniFormat);
+    const bool quickHamExpanded =
+        quickHamSettings.value(QStringLiteral("uiSections/quickHamExpanded"), true).toBool();
+    quickHamHeader->setChecked(quickHamExpanded);
+    quickHamHeader->setArrowType(quickHamExpanded ? Qt::DownArrow : Qt::RightArrow);
+    quickHamHeader->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    quickHamHeader->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    markTranslatable(quickHamHeader,
+                     QStringLiteral("quick_ham_panel"),
+                     QStringLiteral("Quick HAM tuning"));
+    quickHamContainerLayout->addWidget(quickHamHeader);
+    QWidget *quickHamPanel = new QWidget(quickHamContainer);
+    quickHamPanel->setObjectName(QStringLiteral("quickHamPanel"));
+    quickHamPanel->setMinimumWidth(0);
+    quickHamPanel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    QVBoxLayout *quickHamLayout = new QVBoxLayout(quickHamPanel);
+    quickHamLayout->setContentsMargins(0, 2, 0, 2);
+    quickHamLayout->setSpacing(2);
+    QLabel *quickHamBandsLabel = new QLabel(QStringLiteral("Amateur bands:"), quickHamPanel);
+    markTranslatable(quickHamBandsLabel,
+                     QStringLiteral("quick_ham_bands"),
+                     QStringLiteral("Amateur bands:"));
+    quickHamLayout->addWidget(quickHamBandsLabel);
+    QGridLayout *quickHamBandsLayout = new QGridLayout();
+    quickHamBandsLayout->setContentsMargins(0, 0, 0, 0);
+    quickHamBandsLayout->setHorizontalSpacing(2);
+    quickHamBandsLayout->setVerticalSpacing(2);
+    quickHamBandButtonGroup = new QButtonGroup(this);
+    quickHamBandButtonGroup->setExclusive(false);
+    struct QuickHamBand {
+        const char *name;
+        double lowMhz;
+        double highMhz;
+        int defaultMode;
+    };
+    const std::array<QuickHamBand, 17> quickHamBands = {{
+        {"2200m", 0.1357, 0.1378, MOD_LSB}, {"630m", 0.472, 0.479, MOD_LSB},
+        {"160m", 1.81, 2.0, MOD_LSB},     {"80m", 3.5, 3.8, MOD_LSB},
+        {"60m", 5.3515, 5.3665, MOD_USB}, {"40m", 7.0, 7.2, MOD_LSB},
+        {"30m", 10.1, 10.15, MOD_USB},    {"20m", 14.0, 14.35, MOD_USB},
+        {"17m", 18.068, 18.168, MOD_USB}, {"15m", 21.0, 21.45, MOD_USB},
+        {"12m", 24.89, 24.99, MOD_USB},   {"10m", 28.0, 29.7, MOD_USB},
+        {"6m", 50.0, 52.0, MOD_USB},      {"4m", 70.0, 70.5, MOD_NFM},
+        {"2m", 144.0, 146.0, MOD_NFM},    {"70cm", 430.0, 440.0, MOD_NFM},
+        {"23cm", 1240.0, 1300.0, MOD_NFM},
+    }};
+    const QString quickHamButtonStyle = QStringLiteral(
+        "QToolButton { padding:2px 3px; border:1px solid #5c626b; }"
+        "QToolButton:checked { background:#247a48; color:white; border-color:#5fce88; font-weight:600; }");
+    for (int index = 0; index < static_cast<int>(quickHamBands.size()); ++index) {
+        const QuickHamBand &band = quickHamBands[static_cast<size_t>(index)];
+        QToolButton *button = new QToolButton(quickHamPanel);
+        button->setText(QString::fromLatin1(band.name));
+        button->setCheckable(true);
+        button->setMinimumWidth(0);
+        button->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+        button->setStyleSheet(quickHamButtonStyle);
+        button->setProperty("bandLowHz", band.lowMhz * 1.0e6);
+        button->setProperty("bandHighHz", band.highMhz * 1.0e6);
+        button->setProperty("defaultModulation", band.defaultMode);
+        button->setToolTip(QStringLiteral("%1-%2 MHz")
+                               .arg(band.lowMhz, 0, 'f', band.lowMhz < 1.0 ? 4 : 3)
+                               .arg(band.highMhz, 0, 'f', band.highMhz < 1.0 ? 4 : 3));
+        quickHamBandButtonGroup->addButton(button, index);
+        quickHamBandsLayout->addWidget(button, index / 4, index % 4);
+    }
+    for (int column = 0; column < 4; ++column) quickHamBandsLayout->setColumnStretch(column, 1);
+    quickHamLayout->addLayout(quickHamBandsLayout);
+
+    QLabel *quickHamModesLabel = new QLabel(QStringLiteral("Demodulation:"), quickHamPanel);
+    markTranslatable(quickHamModesLabel,
+                     QStringLiteral("quick_ham_demodulation"),
+                     QStringLiteral("Demodulation:"));
+    quickHamLayout->addWidget(quickHamModesLabel);
+    QGridLayout *quickHamModesLayout = new QGridLayout();
+    quickHamModesLayout->setContentsMargins(0, 0, 0, 0);
+    quickHamModesLayout->setHorizontalSpacing(2);
+    quickHamModesLayout->setVerticalSpacing(2);
+    quickHamModeButtonGroup = new QButtonGroup(this);
+    quickHamModeButtonGroup->setExclusive(false);
+    const std::array<std::pair<const char *, int>, 8> quickHamModes = {{
+        {"AM", MOD_AM}, {"NFM", MOD_NFM}, {"SAM", MOD_SAM}, {"USB", MOD_USB},
+        {"LSB", MOD_LSB}, {"DSB", MOD_DSB}, {"CW", MOD_CW}, {"WFM", MOD_WFM},
+    }};
+    for (int index = 0; index < static_cast<int>(quickHamModes.size()); ++index) {
+        QToolButton *button = new QToolButton(quickHamPanel);
+        button->setText(QString::fromLatin1(quickHamModes[static_cast<size_t>(index)].first));
+        button->setCheckable(true);
+        button->setMinimumWidth(0);
+        button->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+        button->setStyleSheet(quickHamButtonStyle);
+        const int modulation = quickHamModes[static_cast<size_t>(index)].second;
+        quickHamModeButtonGroup->addButton(button, modulation);
+        quickHamModesLayout->addWidget(button, index / 4, index % 4);
+    }
+    for (int column = 0; column < 4; ++column) quickHamModesLayout->setColumnStretch(column, 1);
+    quickHamLayout->addLayout(quickHamModesLayout);
+    quickHamPanel->setVisible(quickHamExpanded);
+    quickHamContainerLayout->addWidget(quickHamPanel);
+    connect(quickHamHeader, &QToolButton::toggled, quickHamContainer,
+            [quickHamHeader, quickHamPanel](bool checked) {
+                quickHamHeader->setArrowType(checked ? Qt::DownArrow : Qt::RightArrow);
+                quickHamPanel->setVisible(checked);
+                QSettings settings(persistentSettingsFilePath(), QSettings::IniFormat);
+                settings.setValue(QStringLiteral("uiSections/quickHamExpanded"), checked);
+            });
+
+    connect(quickHamBandButtonGroup,
+            QOverload<int>::of(&QButtonGroup::idClicked),
+            this,
+            [this](int id) {
+                QAbstractButton *button = quickHamBandButtonGroup
+                                              ? quickHamBandButtonGroup->button(id)
+                                              : nullptr;
+                if (!button) return;
+                const double centerHz =
+                    0.5 * (button->property("bandLowHz").toDouble() +
+                           button->property("bandHighHz").toDouble());
+                const int modulation = button->property("defaultModulation").toInt();
+                if (modulationButtonGroup) {
+                    if (QAbstractButton *modeButton = modulationButtonGroup->button(modulation)) {
+                        const QSignalBlocker blocker(modulationButtonGroup);
+                        modeButton->setChecked(true);
+                    }
+                }
+                if (pendingSettings.modulationType != modulation) onModulationChanged(modulation);
+                updateTuningFromScale(centerHz, centerHz);
+                savePersistentSettings();
+                updateQuickHamPanel();
+            });
+    connect(quickHamModeButtonGroup,
+            QOverload<int>::of(&QButtonGroup::idClicked),
+            this,
+            [this](int modulation) {
+                if (modulationButtonGroup) {
+                    if (QAbstractButton *button = modulationButtonGroup->button(modulation)) {
+                        const QSignalBlocker blocker(modulationButtonGroup);
+                        button->setChecked(true);
+                    }
+                }
+                if (pendingSettings.modulationType != modulation) onModulationChanged(modulation);
+                updateQuickHamPanel();
+            });
+
     QHBoxLayout *startStopLayout = new QHBoxLayout();
     startStopLayout->addWidget(startButton, 2);
     startStopLayout->addWidget(stopButton, 1);
@@ -3099,6 +3323,7 @@ YourClassName::YourClassName(QWidget *parent)
     receiverSection.contentLayout->addWidget(frequencyControl);
     receiverSection.contentLayout->addLayout(listeningFrequencyHeaderLayout);
     receiverSection.contentLayout->addWidget(listeningFrequencyControl);
+    receiverSection.contentLayout->addWidget(quickHamContainer);
     receiverSection.contentLayout->addLayout(gainLabelLayout);
     receiverSection.contentLayout->addLayout(gainSliderLayout);
     receiverSection.contentLayout->addLayout(rtlGainLayout);
@@ -3192,6 +3417,7 @@ YourClassName::YourClassName(QWidget *parent)
     audioSection.contentLayout->addWidget(bandwidthControl);
     audioSection.contentLayout->addLayout(row1);
     audioSection.contentLayout->addLayout(row2);
+    audioSection.contentLayout->addWidget(cwDecoderControlsWidget);
     audioSection.contentLayout->addWidget(audioDeviceComboBox);
 
     audioFilterChainWidget = new AudioFilterChainWidget(this);
@@ -3239,6 +3465,7 @@ YourClassName::YourClassName(QWidget *parent)
     waterfall3DSection.contentLayout->addLayout(waterfall3DSpectrumSliceCaptureLayout);
     waterfall3DSection.contentLayout->addLayout(waterfall3DVncSliceInputLayout);
     waterfall3DSection.contentLayout->addLayout(waterfall3DGradientLayout);
+    waterfall3DSection.contentLayout->addLayout(waterfall3DMonochromeStyleLayout);
     waterfall3DSection.contentLayout->addLayout(alternativeSpectrumGradientOpacityLayout);
 
     layout->addWidget(deviceSection.widget);
@@ -3266,7 +3493,14 @@ YourClassName::YourClassName(QWidget *parent)
     graphLayout->setStretch(2, 5);
     graphLayout->setStretch(3, 0);
     
-    scaleWidget->setTuning(listeningFrequency, globalFrequency, globalBandwidth, globalModulationType);
+    scaleWidget->setTuning(
+        listeningFrequency,
+        globalFrequency,
+        effectiveDemodulationBandwidth(globalBandwidth,
+                                       globalModulationType,
+                                       pendingSettings.sstvDemodulationMode),
+        effectiveDemodulationModulationType(globalModulationType,
+                                            pendingSettings.sstvDemodulationMode));
     scaleWidget->setMarkerPosition(0.5);
     scaleWidget->setRange(minFrequency, maxFrequency);
 
@@ -4249,6 +4483,18 @@ YourClassName::YourClassName(QWidget *parent)
             [this]() {
                 pendingSettings.sstvDemodulationMode = normalizedSstvDemodulationMode(
                     sstvDemodulationCombo->currentData().toInt());
+                if (scaleWidget) {
+                    scaleWidget->setTuning(
+                        pendingSettings.listeningFrequency,
+                        pendingSettings.centerFrequency,
+                        effectiveDemodulationBandwidth(
+                            pendingSettings.bandwidth,
+                            pendingSettings.modulationType,
+                            pendingSettings.sstvDemodulationMode),
+                        effectiveDemodulationModulationType(
+                            pendingSettings.modulationType,
+                            pendingSettings.sstvDemodulationMode));
+                }
                 if (audioProcessor) {
                     audioProcessor->configure(audioProcessorSettings());
                 }
@@ -4306,6 +4552,11 @@ YourClassName::YourClassName(QWidget *parent)
                 videoSaveImageButton->setEnabled(!frame.isNull());
             });
     connect(videoProcessor, &VideoProcessor::statusChanged, this, &YourClassName::onVideoStatusChanged);
+    connect(videoProcessor,
+            &VideoProcessor::analogLockMetrics,
+            this,
+            &YourClassName::handleFpvAnalogLockMetrics,
+            Qt::QueuedConnection);
     connect(recordingManager, &RecordingManager::statusChanged, this, &YourClassName::updateRecordingStatus);
     connect(recordButton, &QPushButton::toggled, this, [this](bool checked) {
         if (checked) {
@@ -5005,6 +5256,10 @@ YourClassName::YourClassName(QWidget *parent)
     connect(fpvHunterControls, &SpectrumHunterControls::detectToggled, this, [this](bool checked) {
         fpvHunterSettings.enabled = checked;
         if (!checked) {
+            if (fpvAutoScanArmed) {
+                fpvAutoScanArmed = false;
+                stopFpvAutoScan(true);
+            }
             fpvHunterTrack = {};
             fpvHunterCandidates.clear();
             fpvHunterCandidateIndex = -1;
@@ -5096,6 +5351,55 @@ YourClassName::YourClassName(QWidget *parent)
             this,
             [this]() {
                 selectFpvHunterCandidate(1);
+            });
+    connect(fpvHunterControls,
+            &SpectrumHunterControls::autoScanToggled,
+            this,
+            [this](bool checked) {
+                fpvAutoScanArmed = checked;
+                if (checked) {
+                    fpvHunterSettings.enabled = true;
+                    fpvHunterFollowEnabled = false;
+                    updateFpvHunterControls();
+                    if (runState == RadioRunState::Running) {
+                        startFpvAutoScan();
+                    } else {
+                        updateFpvAutoScanStatus();
+                    }
+                } else {
+                    stopFpvAutoScan(true);
+                }
+            });
+    connect(fpvHunterControls,
+            &SpectrumHunterControls::autoScanDwellChanged,
+            this,
+            [this](int value) {
+                fpvAutoScanDwellMs = (std::clamp)(value, 50, 5000);
+                if (fpvAutoScanController.active() &&
+                    fpvAutoScanBackend == FpvAutoScanBackend::StandardRetune) {
+                    standardScanDwellMs = fpvAutoScanDwellMs;
+                }
+                savePersistentSettings();
+            });
+    connect(fpvHunterControls,
+            &SpectrumHunterControls::autoScanLossTimeoutChanged,
+            this,
+            [this](int value) {
+                fpvAutoScanLossTimeoutMs = (std::clamp)(value, 500, 30000);
+                FpvAutoScanController::Settings settings = fpvAutoScanController.settings();
+                settings.signalLossTimeoutMs = fpvAutoScanLossTimeoutMs;
+                fpvAutoScanController.setSettings(settings);
+                savePersistentSettings();
+            });
+    connect(fpvHunterControls,
+            &SpectrumHunterControls::autoScanMinimumLockChanged,
+            this,
+            [this](int value) {
+                fpvAutoScanMinimumLockPercent = (std::clamp)(value, 1, 100);
+                FpvAutoScanController::Settings settings = fpvAutoScanController.settings();
+                settings.minimumHsyncPercent = fpvAutoScanMinimumLockPercent;
+                fpvAutoScanController.setSettings(settings);
+                savePersistentSettings();
             });
     connect(fpvHunterHistoryTuneButton,
             &QPushButton::clicked,
@@ -5377,6 +5681,43 @@ YourClassName::YourClassName(QWidget *parent)
             [this](bool checked) {
                 waterfall3DMonochrome = checked;
                 if (waterfallWidget) waterfallWidget->set3DMonochrome(checked);
+                savePersistentSettings();
+            });
+    connect(waterfall3DHeightGradientCheckbox,
+            &QCheckBox::toggled,
+            this,
+            [this](bool checked) {
+                waterfall3DHeightGradient = checked;
+                if (waterfallWidget) waterfallWidget->set3DHeightGradient(checked);
+                savePersistentSettings();
+            });
+    connect(waterfall3DMonochromeColorButton,
+            &QPushButton::clicked,
+            this,
+            [this, updateMonochromeColorButton]() {
+                const QColor selected = QColorDialog::getColor(
+                    waterfall3DMonochromeColor,
+                    this,
+                    uiText(QStringLiteral("waterfall_3d_monochrome_color_dialog"),
+                           QStringLiteral("Choose 3D color")));
+                if (!selected.isValid()) return;
+                waterfall3DMonochromeColor = selected;
+                updateMonochromeColorButton();
+                if (waterfallWidget) waterfallWidget->set3DMonochromeColor(selected);
+                savePersistentSettings();
+            });
+    connect(waterfall3DMonochromeGradientDepthSlider,
+            &QSlider::valueChanged,
+            this,
+            [this](int value) {
+                waterfall3DMonochromeGradientDepth = value;
+                if (waterfall3DMonochromeGradientDepthValueLabel) {
+                    waterfall3DMonochromeGradientDepthValueLabel->setText(
+                        QStringLiteral("%1%").arg(value));
+                }
+                if (waterfallWidget) {
+                    waterfallWidget->set3DMonochromeGradientDepth(value);
+                }
                 savePersistentSettings();
             });
     connect(waterfall3DAlternativeViewCheckbox,
@@ -5938,6 +6279,9 @@ bool YourClassName::restartStreamForHardwareChange() {
 
     runState = RadioRunState::Stopping;
     updateUiForRunState();
+    if (fpvAutoScanController.active()) {
+        stopFpvAutoScan(true);
+    }
     if (streamWatchdogTimer) streamWatchdogTimer->stop();
     if (stopPollTimer) stopPollTimer->stop();
     if (updateTimer) updateTimer->stop();
@@ -8595,6 +8939,9 @@ void YourClassName::stopFobosProcessing() {
         qDebug() << "[FobosLifecycle] state changed" << runStateName(runState);
     }
     updateUiForRunState();
+    if (fpvAutoScanController.active()) {
+        stopFpvAutoScan(true);
+    }
     if (streamWatchdogTimer) {
         streamWatchdogTimer->stop();
     }

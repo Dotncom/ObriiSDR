@@ -67,6 +67,12 @@ private:
     QDoubleSpinBox *secondToneSpin = nullptr;
     QDoubleSpinBox *dutySpin = nullptr;
     QLineEdit *multiToneEdit = nullptr;
+    QGroupBox *sweepBox = nullptr;
+    QDoubleSpinBox *sweepStartSpin = nullptr;
+    QDoubleSpinBox *sweepStopSpin = nullptr;
+    QDoubleSpinBox *sweepBandwidthSpin = nullptr;
+    QDoubleSpinBox *sweepPeriodSpin = nullptr;
+    QComboBox *sweepModeCombo = nullptr;
     QGroupBox *digitalBox = nullptr;
     QDoubleSpinBox *symbolRateSpin = nullptr;
     QDoubleSpinBox *rolloffSpin = nullptr;

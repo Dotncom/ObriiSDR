@@ -239,7 +239,13 @@ bool TransmitWaveformGenerator::limitSignalBandwidth(
         state->centerHz = centerHz;
     }
 
-    const double cutoff = bandwidth * 0.5;
+    // SSB occupies one side of the complex baseband. Its requested bandwidth
+    // is therefore also its one-sided cutoff, unlike AM/FM/DSB where the
+    // requested RF bandwidth is split equally around the carrier.
+    const bool singleSideband = configuration.modulation == TxModulation::Usb ||
+                                configuration.modulation == TxModulation::Lsb;
+    const double cutoff = (std::min)(singleSideband ? bandwidth : bandwidth * 0.5,
+                                     sampleRate * 0.45);
     const double omega = 2.0 * Pi * cutoff / sampleRate;
     const double cosine = std::cos(omega);
     const double sine = std::sin(omega);
@@ -484,9 +490,17 @@ QVector<std::complex<float>> TransmitWaveformGenerator::modulateAudio(
         }
         const float x = clampAudio(static_cast<float>(filteredAudio));
         switch (configuration.modulation) {
-        case TxModulation::Am:
-            result[i] = std::complex<float>(level * (0.70f + 0.30f * x), 0.0f);
+        case TxModulation::Am: {
+            // Keep the RF peak bounded by `level`, while using a useful voice
+            // modulation index instead of the old, quiet fixed value.
+            const float modulationIndex =
+                (std::clamp)(configuration.amDepth, 0.0f, 1.0f);
+            result[i] = std::complex<float>(
+                level * (1.0f + modulationIndex * x) /
+                    (1.0f + modulationIndex),
+                0.0f);
             break;
+        }
         case TxModulation::Dsb:
             result[i] = std::complex<float>(level * x, 0.0f);
             break;
