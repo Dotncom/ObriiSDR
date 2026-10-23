@@ -13,11 +13,14 @@
 
 namespace {
 void require(bool ok, const char *message) { if (!ok) throw std::runtime_error(message); }
-void fixture(const QString &path, int count = 4) {
+void fixture(const QString &path, int count = 4, const QJsonObject &experimentContext = {}) {
     QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture open failed");
     file.write("FBSPEC1\n", 8);
-    const auto metadata = QJsonDocument(QJsonObject{{"format", "fobos_spectrum_frames"}, {"version", 1},
-        {"sourceSampleRate", 192000.0}, {"listeningFrequency", 100000000.0}, {"privateToken", "SECRET"}}).toJson(QJsonDocument::Compact);
+    QJsonObject metadataObject{{"format", "fobos_spectrum_frames"}, {"version", 1},
+        {"sourceSampleRate", 192000.0}, {"listeningFrequency", 100000000.0}, {"privateToken", "SECRET"}};
+    if (!experimentContext.isEmpty())
+        metadataObject["scientificMetadata"] = QJsonObject{{"experimentContext", experimentContext}};
+    const auto metadata = QJsonDocument(metadataObject).toJson(QJsonDocument::Compact);
     QDataStream stream(&file); stream.setByteOrder(QDataStream::LittleEndian); stream.setVersion(QDataStream::Qt_5_15);
     stream << quint32(metadata.size()); file.write(metadata);
     stream << quint32(0x314d5246U) << qint64(0) << qint64(1700000000000LL)
@@ -121,6 +124,35 @@ void testActiveWriters(const QDir &dir) {
     std::cout << "Active-writer exclusion test is Windows-only\n";
 #endif
 }
+void testRecordedCalibrationIdentity(const QDir &dir) {
+    const QJsonObject configuration{{"backendId", "fobos-agile"}, {"inputMode", 0},
+        {"sampleRateHz", 50.0e6}, {"centerFrequencyHz", 100.0e6}, {"fftLength", 65536}};
+    const QJsonObject recordedSection{{"configuration", configuration}, {"minimumFrequencyHz", 75.0e6},
+        {"maximumFrequencyHz", 125.0e6}, {"capturedFrames", 64}, {"spreadDb", 0.5},
+        {"capturedUtcMs", 1700000000123.0}};
+    const QJsonObject recordedContext{{"receiverCalibration", QJsonObject{{"noiseBaseline", recordedSection}}}};
+    QJsonObject matchingSection = recordedSection;
+    matchingSection["table"] = QJsonArray{QJsonArray{75.0e6, -112.0}, QJsonArray{125.0e6, -111.0}};
+    const QJsonObject matchingContext{{"receiverCalibration", QJsonObject{{"noiseBaseline", matchingSection}}}};
+
+    const QString matchingSource = dir.filePath("recorded-calibration_spectrum.fbspec");
+    fixture(matchingSource, 4, recordedContext);
+    const QString matchingBundle = dir.filePath("recorded-calibration-bundle");
+    QString error;
+    require(ExperimentBundle::write(matchingBundle, matchingSource, matchingContext, &error),
+            "matching recording calibration was not exported");
+    require(QFile::exists(QDir(matchingBundle).filePath("receiver_noise_baseline.csv")),
+            "matching recording calibration table is missing");
+
+    QJsonObject mismatchedSection = matchingSection;
+    mismatchedSection["capturedUtcMs"] = 1700000000999.0;
+    const QJsonObject mismatchedContext{{"receiverCalibration", QJsonObject{{"noiseBaseline", mismatchedSection}}}};
+    const QString mismatchedBundle = dir.filePath("mismatched-calibration-bundle");
+    require(ExperimentBundle::write(mismatchedBundle, matchingSource, mismatchedContext, &error),
+            "mismatched recording calibration export failed");
+    require(!QFile::exists(QDir(mismatchedBundle).filePath("receiver_noise_baseline.csv")),
+            "export-time calibration was incorrectly presented as recording-start data");
+}
 }
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
@@ -129,7 +161,18 @@ int main(int argc, char **argv) {
         const QDir dir(temporary.path()); const auto source = dir.filePath("synthetic_spectrum.fbspec");
         fixture(source);
         QJsonObject context{{"appVersion", "4.0.0"}, {"settings", QJsonObject{{"sampleRate", 192000.0},
-            {"dmrPrivacyKeyHex", "SECRET"}, {"qthLatitude", 50.0}}}, {"password", "SECRET"}};
+            {"dmrPrivacyKeyHex", "SECRET"}, {"qthLatitude", 50.0}}}, {"password", "SECRET"},
+            {"receiverCalibration", QJsonObject{
+                {"noiseBaseline", QJsonObject{{"minimumFrequencyHz", 99.9e6}, {"maximumFrequencyHz", 100.1e6},
+                    {"capturedFrames", 64}, {"spreadDb", 0.4},
+                    {"table", QJsonArray{QJsonArray{99.9e6, -112.0}, QJsonArray{100.1e6, -111.5}}}}},
+                {"yFactor", QJsonObject{{"sourceMode", "enr"}, {"coldTemperatureKelvin", 290.0},
+                    {"hotTemperatureKelvin", 9460.0}, {"enrDb", 15.0},
+                    {"minimumFrequencyHz", 99.9e6}, {"maximumFrequencyHz", 100.1e6},
+                    {"coldFrames", 64}, {"hotFrames", 64}, {"validBins", 2},
+                    {"table", QJsonArray{
+                        QJsonArray{99.9e6, -112.0, -101.0, 11.0, 270.0, 2.85},
+                        QJsonArray{100.1e6, -111.5, -100.4, 11.1, 260.0, 2.78}}}}}}}};
         const auto clean = ExperimentBundle::sanitizeContext(context);
         require(!QJsonDocument(clean).toJson().contains("SECRET") && !clean.value("settings").toObject().contains("qthLatitude"), "privacy sanitizer failed");
         const auto session = ExperimentBundle::sanitizeContext(QJsonObject{{"session", QJsonObject{
@@ -151,12 +194,31 @@ int main(int argc, char **argv) {
             const QString diagnostic = error.isEmpty() ? QStringLiteral("backend returned false without an error") : error;
             throw std::runtime_error((QStringLiteral("read: ") + diagnostic).toStdString());
         }
-        require(QFile::exists(contents.recordingPath) && contents.manifest.value("files").toArray().size() == 1, "bundle round trip failed");
+        const QDir bundleDirectory(destination);
+        const QJsonObject calibrationContext = contents.context.value("receiverCalibration").toObject();
+        require(QFile::exists(contents.recordingPath) && contents.manifest.value("files").toArray().size() == 3 &&
+                QFile::exists(bundleDirectory.filePath("receiver_noise_baseline.csv")) &&
+                QFile::exists(bundleDirectory.filePath("receiver_y_factor.csv")) &&
+                calibrationContext.value("noiseBaseline").toObject().value("attachment") == "receiver_noise_baseline.csv" &&
+                calibrationContext.value("yFactor").toObject().value("attachment") == "receiver_y_factor.csv" &&
+                !calibrationContext.value("yFactor").toObject().contains("table"),
+                "bundle calibration attachments did not round trip");
+        const QString yFactorAttachment = bundleDirectory.filePath("receiver_y_factor.csv");
+        QFile yFactorFile(yFactorAttachment);
+        require(yFactorFile.open(QIODevice::ReadOnly), "cannot read Y-factor attachment fixture");
+        const QByteArray originalYFactor = yFactorFile.readAll();
+        yFactorFile.close();
+        QByteArray damagedYFactor = originalYFactor;
+        damagedYFactor[damagedYFactor.size() - 1] = damagedYFactor.back() == '\n' ? 'x' : '\n';
+        writeBytes(yFactorAttachment, damagedYFactor);
+        rejectedRead(bundleDirectory.filePath("manifest.json"));
+        writeBytes(yFactorAttachment, originalYFactor);
         require(!ExperimentBundle::write(destination, source, context, &error), "existing destination overwritten");
         testMissingIqPairs(dir);
         testTraversal(destination);
         testCancellation(dir, destination);
         testActiveWriters(dir);
+        testRecordedCalibrationIdentity(dir);
         QFile corrupt(contents.recordingPath); require(corrupt.open(QIODevice::ReadWrite), "corruption fixture open failed");
         require(corrupt.seek(corrupt.size() - 1) && corrupt.write("x", 1) == 1, "corruption fixture failed"); corrupt.close();
         require(!ExperimentBundle::read(QDir(destination).filePath("manifest.json"), contents, &error) && contents.recordingPath.isEmpty(), "corrupt bundle accepted");

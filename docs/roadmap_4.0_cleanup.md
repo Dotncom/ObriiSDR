@@ -6,7 +6,7 @@ docs/release_stability_handoff.md.
 
 ## Current Baseline
 
-The v6.3.0 release baseline provides:
+The v6.4.1 release baseline provides:
 
 1. First-class Fobos Standard and Agile receive paths, native RTL-SDR, and a
    hardware-tested native HackRF receive path. SoapySDR remains optional and
@@ -61,6 +61,46 @@ Experimental, not a stable-release claim:
 4. SoapySDR across untested hardware and all bladeRF support.
 
 ## Remaining Priorities
+
+### Current Work Focus
+
+Until the required hardware is available, physical calibration, receiver-side
+measurement validation, Hytera and other deferred decoder work, and native
+wideband wireless PHY work remain parked. Raspberry testing will resume when the
+device is available. The active development track is DSP architecture and
+efficient LAN transport/offload while preserving local audio and the proven
+receiver hot path.
+
+For wideband IQ transport, evaluate three explicitly labelled service levels:
+
+1. Exact full-IQ transport with packed sample formats and no signal-dependent
+   omission, suitable for recording, replay and arbitrary downstream DSP.
+2. Selected-band transport produced by source-side DDC/PFB filtering and
+   decimation, suitable for one or more requested frequency windows at much
+   lower rates while preserving complex phase inside each selected band.
+3. Lossy analysis transport using quantized spectrum tiles, sparse detections or
+   parametric signal descriptions, suitable only for displays and known
+   measurements and never presented as reconstructable full IQ.
+
+Benchmark bit packing, block floating-point quantization and ordinary lossless
+compression against realistic noise-like IQ. Do not assume run-length or sparse
+compression will help: receiver noise normally makes adjacent raw samples and
+FFT bins different. Every lossy mode must report its quantization, omitted bands,
+sample clock, gaps and reconstruction limits in transport metadata.
+
+The long-term 10 GbE topology should keep each USB receiver attached to a small
+edge host running its native driver. That host publishes timestamped, sequenced
+IQ to a separate compute/storage server; UI clients subscribe to spectra,
+waterfalls, audio and control state instead of duplicating the wide IQ stream.
+For full-duplex radios the edge host also owns a bounded timestamped TX queue and
+local safety interlocks. Transparent USB/IP may be evaluated for diagnostics,
+but is not the preferred release architecture for continuous wideband RX/TX.
+Treat this as a staged, budget-dependent target rather than a deployment
+requirement: existing Raspberry/Wyse nodes should first use 1 GbE selected-band,
+FFT-result and event-buffer transfer. Co-located radios should connect directly
+to the compute PC over USB. Optional point-to-point 2.5/10 GbE and finally a
+separate high-speed switch can be added later without replacing the household
+router or the low-bandwidth control network.
 
 ### Wireless Laboratory (Beta)
 

@@ -1061,6 +1061,45 @@ void YourClassName::updateSpectrum() {
     updateGnssSpurWatch(spectrumFrequencies, spectrumMagnitudes, spectrumSettings.centerFrequency);
     updateScanMeasurement(spectrumFrequencies, spectrumMagnitudes);
 
+    const bool receiverNoiseCalibrationActive =
+        receiverNoiseBaseline.isCapturing() ||
+        receiverNoiseBaselineMode != static_cast<int>(ReceiverNoiseBaselineMode::Off) ||
+        receiverYFactorCalibration.isCapturing() ||
+        receiverYFactorApplyEnabled;
+    const ReceiverNoiseBaselineKey noiseBaselineKey = receiverNoiseCalibrationActive
+                                                          ? receiverNoiseBaselineKey(spectrumSettings)
+                                                          : ReceiverNoiseBaselineKey{};
+    if (receiverNoiseBaseline.isCapturing()) {
+        if (scanVisualSource != QStringLiteral("none")) {
+            receiverNoiseBaseline.cancelCapture();
+        } else if (!receiverNoiseBaselineCaptureTimer.isValid() ||
+                   receiverNoiseBaselineCaptureTimer.elapsed() >= 100) {
+            receiverNoiseBaselineCaptureTimer.restart();
+            const ReceiverNoiseBaseline::CaptureResult captureResult =
+                receiverNoiseBaseline.addFrame(spectrumFrequencies,
+                                               spectrumMagnitudes,
+                                               noiseBaselineKey);
+            if (captureResult == ReceiverNoiseBaseline::CaptureResult::Completed) {
+                saveReceiverNoiseBaselineProfiles();
+            }
+        }
+    }
+    if (receiverYFactorCalibration.isCapturing()) {
+        if (scanVisualSource != QStringLiteral("none")) {
+            receiverYFactorCalibration.cancelCapture();
+        } else if (!receiverYFactorCaptureTimer.isValid() ||
+                   receiverYFactorCaptureTimer.elapsed() >= 100) {
+            receiverYFactorCaptureTimer.restart();
+            const ReceiverYFactorCalibration::CaptureResult captureResult =
+                receiverYFactorCalibration.addFrame(spectrumFrequencies,
+                                                    spectrumMagnitudes,
+                                                    noiseBaselineKey);
+            if (captureResult == ReceiverYFactorCalibration::CaptureResult::Completed) {
+                saveReceiverYFactorProfiles();
+            }
+        }
+    }
+
     const std::vector<float> *displayFrequenciesPtr = &spectrumFrequencies;
     const std::vector<float> *displayMagnitudesPtr = &spectrumMagnitudes;
     const std::vector<float> *displayReferenceMagnitudesPtr = &referenceMagnitudes;
@@ -1449,9 +1488,31 @@ void YourClassName::updateSpectrum() {
                                     displayLevelMin,
                                     static_cast<SpectrumDisplayReduction>(spectrumDisplayReductionMode),
                                     preparedDisplayFrame);
+        static SpectrumDisplayFrame receiverNoiseDisplayFrame;
+        const SpectrumDisplayFrame *visiblePreparedFrame = &preparedDisplayFrame;
+        if (displayScanSegments.isEmpty() && receiverYFactorApplyEnabled) {
+            receiverNoiseDisplayFrame = preparedDisplayFrame;
+            if (receiverYFactorCalibration.applyInputReferred(
+                    receiverNoiseDisplayFrame.frequencies,
+                    receiverNoiseDisplayFrame.levels,
+                    noiseBaselineKey,
+                    receiverYFactorTargetDb)) {
+                visiblePreparedFrame = &receiverNoiseDisplayFrame;
+            }
+        } else if (displayScanSegments.isEmpty() &&
+                   receiverNoiseBaselineMode != static_cast<int>(ReceiverNoiseBaselineMode::Off)) {
+            receiverNoiseDisplayFrame = preparedDisplayFrame;
+            if (receiverNoiseBaseline.apply(receiverNoiseDisplayFrame.frequencies,
+                                            receiverNoiseDisplayFrame.levels,
+                                            noiseBaselineKey,
+                                            static_cast<ReceiverNoiseBaselineMode>(receiverNoiseBaselineMode),
+                                            receiverNoiseBaselineTargetDb)) {
+                visiblePreparedFrame = &receiverNoiseDisplayFrame;
+            }
+        }
         if (dspFlowPanel && dspFlowPanel->shouldUpdateWorkspaceSpectrum()) {
-            dspFlowPanel->updateWorkspaceSpectrum(preparedDisplayFrame.frequencies,
-                                                  preparedDisplayFrame.levels,
+            dspFlowPanel->updateWorkspaceSpectrum(visiblePreparedFrame->frequencies,
+                                                  visiblePreparedFrame->levels,
                                                   displayCenterFrequency,
                                                   pendingSettings.listeningFrequency,
                                                   spectrumSettings.sampleRate,
@@ -1507,11 +1568,11 @@ void YourClassName::updateSpectrum() {
                                              spectrumSettings.fftWindowType);
             graphWidget->setScanSegments(displayScanSegments);
             graphWidget->setScanSegmentMarkersVisible(displayScanSegmentMarkers);
-            graphWidget->setData(preparedDisplayFrame.frequencies,
-                                 preparedDisplayFrame.levels,
+            graphWidget->setData(visiblePreparedFrame->frequencies,
+                                 visiblePreparedFrame->levels,
                                  displayMinFrequency,
                                  displayMaxFrequency,
-                                 static_cast<int>(preparedDisplayFrame.levels.size()),
+                                 static_cast<int>(visiblePreparedFrame->levels.size()),
                                  colorf,
                                  true);
             graphWidget->setOverlayData(preparedDisplayFrame.overlayLevels,
@@ -1593,6 +1654,20 @@ void YourClassName::updateSpectrum() {
                                             displayLevelMin,
                                             static_cast<SpectrumDisplayReduction>(spectrumDisplayReductionMode),
                                             historyDisplayFrame);
+                if (receiverYFactorApplyEnabled) {
+                    receiverYFactorCalibration.applyInputReferred(
+                        historyDisplayFrame.frequencies,
+                        historyDisplayFrame.levels,
+                        noiseBaselineKey,
+                        receiverYFactorTargetDb);
+                } else if (receiverNoiseBaselineMode != static_cast<int>(ReceiverNoiseBaselineMode::Off)) {
+                    receiverNoiseBaseline.apply(
+                        historyDisplayFrame.frequencies,
+                        historyDisplayFrame.levels,
+                        noiseBaselineKey,
+                        static_cast<ReceiverNoiseBaselineMode>(receiverNoiseBaselineMode),
+                        receiverNoiseBaselineTargetDb);
+                }
                 if (historyDisplayFrame.levels.empty()) {
                     continue;
                 }
@@ -1609,11 +1684,11 @@ void YourClassName::updateSpectrum() {
                                          displayLevelMax,
                                          true);
             }
-            waterfallWidget->setData(preparedDisplayFrame.frequencies,
-                                     preparedDisplayFrame.levels,
+            waterfallWidget->setData(visiblePreparedFrame->frequencies,
+                                     visiblePreparedFrame->levels,
                                      displayMinFrequency,
                                      displayMaxFrequency,
-                                     static_cast<int>(preparedDisplayFrame.levels.size()),
+                                     static_cast<int>(visiblePreparedFrame->levels.size()),
                                      secondGraph,
                                      colorf,
                                      contrast,

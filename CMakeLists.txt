@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 6.4.0)
+project(ObriiSDR VERSION 6.4.1)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -149,6 +149,8 @@ set(SOURCES
     src/main.cpp
     src/main.h
     src/mainwindow/main_appsettings.cpp
+    src/mainwindow/main_receiver_noise_baseline.cpp
+    src/mainwindow/main_receiver_yfactor.cpp
     src/mainwindow/main_controls.cpp
     src/mainwindow/main_devices.cpp
     src/mainwindow/main_digital.cpp
@@ -329,6 +331,10 @@ set(SOURCES
     src/research/spaceeventsfeed.cpp src/research/spaceeventsfeed.h
     src/research/receivercalibrationtable.cpp
     src/research/receivercalibrationtable.h
+    src/research/receivernoisebaseline.cpp
+    src/research/receivernoisebaseline.h
+    src/research/receiveryfactorcalibration.cpp
+    src/research/receiveryfactorcalibration.h
     src/research/researchanalysisdialog.cpp
     src/research/researchanalysisdialog.h
     src/research/iqconstellationpreview.cpp
@@ -583,7 +589,7 @@ if(FOBOS_BUILD_CW_SELFTEST)
     add_executable(ObriiExperimentBundleSelfTest tools/experiment_bundle_selftest.cpp
         src/research/experimentbundle.cpp src/research/spectrumframerecorder.cpp)
     target_include_directories(ObriiExperimentBundleSelfTest PRIVATE src/research src/core src/ui src/utils)
-    target_link_libraries(ObriiExperimentBundleSelfTest PRIVATE Qt5::Core)
+    target_link_libraries(ObriiExperimentBundleSelfTest PRIVATE Qt5::Core Qt5::Gui)
     if(MSVC)
         target_compile_options(ObriiExperimentBundleSelfTest PRIVATE /utf-8)
     endif()
@@ -594,10 +600,19 @@ if(FOBOS_BUILD_CW_SELFTEST)
 
     add_executable(ObriiScienceSelfTest tools/science_selftest.cpp
         src/research/tonalspectrum.cpp src/research/receivercalibrationtable.cpp
+        src/research/receivernoisebaseline.cpp
+        src/research/receiveryfactorcalibration.cpp
         src/research/spectrumscienceanalyzer.cpp src/research/spectrumframerecorder.cpp
         src/research/hdf5spectrumexport.cpp)
     target_include_directories(ObriiScienceSelfTest PRIVATE src/research src/core src/ui src/utils)
     target_link_libraries(ObriiScienceSelfTest PRIVATE Qt5::Core)
+
+    add_executable(ObriiReceiverNoiseSelfTest tools/receiver_noise_selftest.cpp
+        src/research/receivercalibrationtable.cpp
+        src/research/receivernoisebaseline.cpp
+        src/research/receiveryfactorcalibration.cpp)
+    target_include_directories(ObriiReceiverNoiseSelfTest PRIVATE src/research src/core)
+    target_link_libraries(ObriiReceiverNoiseSelfTest PRIVATE Qt5::Core)
     if(OBRII_HDF5_INCLUDE_DIR)
         target_include_directories(ObriiScienceSelfTest PRIVATE ${OBRII_HDF5_INCLUDE_DIR})
         target_compile_definitions(ObriiScienceSelfTest PRIVATE OBRII_HAS_HDF5_HEADERS=1)

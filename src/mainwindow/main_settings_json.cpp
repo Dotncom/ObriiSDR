@@ -644,6 +644,14 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
         (std::clamp)(readDouble("amplitudeCalibrationOffsetDb", amplitudeCalibrationOffsetDb),
                      -200.0,
                      200.0);
+    if (frequencyCalibrationSpin) {
+        const QSignalBlocker blocker(frequencyCalibrationSpin);
+        frequencyCalibrationSpin->setValue(frequencyCalibrationOffsetHz);
+    }
+    if (amplitudeCalibrationSpin) {
+        const QSignalBlocker blocker(amplitudeCalibrationSpin);
+        amplitudeCalibrationSpin->setValue(amplitudeCalibrationOffsetDb);
+    }
     calibrationTableEnabled = readBool("calibrationTableEnabled", calibrationTableEnabled);
     if (settingsJson.contains(QStringLiteral("calibrationTable"))) {
         QVector<ReceiverCalibrationPoint> calibrationPoints;

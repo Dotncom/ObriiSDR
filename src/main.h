@@ -75,6 +75,8 @@
 #include "spectrumiqeventrecorder.h"
 #include "spectrumscienceanalyzer.h"
 #include "receivercalibrationtable.h"
+#include "receivernoisebaseline.h"
+#include "receiveryfactorcalibration.h"
 #include "radiosettings.h"
 #include "videoprocessor.h"
 #include "videowidget.h"
@@ -299,9 +301,14 @@ private:
     double calibratedHardwareFrequency(double logicalFrequencyHz) const;
     double effectiveFrequencyCalibrationOffsetHz(double logicalFrequencyHz) const;
     ReceiverCalibrationContext receiverCalibrationContext(const RadioSettings &settings) const;
+    ReceiverNoiseBaselineKey receiverNoiseBaselineKey(const RadioSettings &settings) const;
     double effectiveAmplitudeCalibrationOffsetDb(double frequencyHz) const;
     int setCalibratedActiveFrequencySafely(double logicalFrequencyHz, double *logicalActualFrequencyHz);
     void applyReceiverCalibrationLive();
+    void openReceiverNoiseBaselineDialog();
+    void saveReceiverNoiseBaselineProfiles() const;
+    void openReceiverYFactorDialog();
+    void saveReceiverYFactorProfiles() const;
     bool applyAgileStartupFrequencyKick(const QString &reason);
     bool applyAgileScanSettings(bool forceStop = false);
     bool applyStandardScanSettings(bool forceStop = false);
@@ -622,7 +629,7 @@ private:
     QJsonObject recordingLabMetadata() const;
     QJsonObject recordingScientificSnapshot(const QString &phase) const;
     QJsonObject recordingScientificMetadata(const QString &captureKind) const;
-    QJsonObject experimentBundleContext() const;
+    QJsonObject experimentBundleContext(bool includeCalibrationTables = false) const;
     bool applyExperimentWorkspace(const QJsonObject &context, QString *error);
     void showTuneContextMenu(double frequency, const QPoint &globalPos);
     void tuneSignalCenterAt(double frequency);
@@ -909,6 +916,8 @@ private:
     QSpinBox *spectrumFramePrebufferSpin = nullptr;
     QDoubleSpinBox *scanMeasurementBinSpin = nullptr;
     QDoubleSpinBox *spectrumScienceAverageSpin = nullptr;
+    QDoubleSpinBox *frequencyCalibrationSpin = nullptr;
+    QDoubleSpinBox *amplitudeCalibrationSpin = nullptr;
     QComboBox *spectrumScienceMarkerCombo = nullptr;
     QPushButton *agileScanSavePresetButton = nullptr;
     QPushButton *agileScanDeletePresetButton = nullptr;
@@ -1129,6 +1138,20 @@ private:
     double amplitudeCalibrationOffsetDb = 0.0;
     bool calibrationTableEnabled = false;
     ReceiverCalibrationTable receiverCalibrationTable;
+    ReceiverNoiseBaseline receiverNoiseBaseline;
+    int receiverNoiseBaselineMode = static_cast<int>(ReceiverNoiseBaselineMode::Off);
+    double receiverNoiseBaselineTargetDb = -120.0;
+    int receiverNoiseBaselineCaptureFrames = 64;
+    QElapsedTimer receiverNoiseBaselineCaptureTimer;
+    ReceiverYFactorCalibration receiverYFactorCalibration;
+    bool receiverYFactorApplyEnabled = false;
+    double receiverYFactorTargetDb = -120.0;
+    int receiverYFactorCaptureFrames = 64;
+    int receiverYFactorSourceMode = static_cast<int>(YFactorSourceMode::Enr);
+    double receiverYFactorColdTemperatureKelvin = 290.0;
+    double receiverYFactorHotTemperatureKelvin = 1000.0;
+    double receiverYFactorEnrDb = 15.0;
+    QElapsedTimer receiverYFactorCaptureTimer;
     bool presetManagerOpen = false;
     int waterfallRowsPerFrame = 1;
     int waterfallDisplayMode = static_cast<int>(MyWaterfallWidget::DisplayMode::Waterfall2D);

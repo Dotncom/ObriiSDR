@@ -12,6 +12,16 @@ or **Open experiment** next to the existing report export controls.
 Choose a completed native spectrum recording (`.fbspec`) and a new destination
 folder. The bundle contains the spectrum frames, supported linked IQ and timing
 sidecars when present, a versioned JSON manifest, and SHA-256 file checksums.
+If a receiver-noise baseline or Y-factor profile matches the calibration
+identity recorded at acquisition start, the bundle also contains
+`receiver_noise_baseline.csv` and/or `receiver_y_factor.csv`. The manifest binds
+each table to its receiver, input, center frequency, sample rate, gains, RF
+bandwidth, FFT/window and amplitude-calibration state. The large tables are
+created only for an explicit bundle export; ordinary recordings retain a
+compact calibration summary instead of duplicating them.
+For a legacy recording without a recording-start experiment context, a table
+selected at export remains explicitly marked by `contextOrigin: export-time`;
+it is not presented as proof of the original acquisition state.
 There is no ZIP dependency. Copy the entire folder to the other machine.
 
 New recordings made with extended recording metadata retain an experiment

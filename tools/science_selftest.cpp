@@ -1,5 +1,7 @@
 #include "tonalspectrum.h"
 #include "receivercalibrationtable.h"
+#include "receivernoisebaseline.h"
+#include "receiveryfactorcalibration.h"
 #include "spectrumscienceanalyzer.h"
 #include "spectrumframerecorder.h"
 #include "hdf5spectrumexport.h"
@@ -33,6 +35,60 @@ int main(int argc, char **argv) {
     context = first.conditions; context.sampleRateHz = 2e7;
     check(table.correctionAt(150, context).amplitudeOffsetDb == 1, "different rate cannot use bound calibration");
     check(ReceiverCalibrationContext::fromJson(first.conditions.toJson()).toJson() == first.conditions.toJson(), "condition serialization");
+    ReceiverNoiseBaselineKey noiseKey;
+    noiseKey.receiver = first.conditions;
+    noiseKey.centerFrequencyHz = 100e6;
+    noiseKey.fftLength = 4;
+    noiseKey.fftWindowType = 1;
+    ReceiverNoiseBaseline noiseBaseline;
+    const std::vector<float> noiseFrequencies{98, 99, 100, 101};
+    const std::vector<float> noiseLevels{-100, -90, -80, -70};
+    noiseBaseline.beginCapture(noiseKey, 8);
+    for (int frameIndex = 0; frameIndex < 8; ++frameIndex) {
+        const auto result = noiseBaseline.addFrame(noiseFrequencies, noiseLevels, noiseKey);
+        check(result == (frameIndex == 7 ? ReceiverNoiseBaseline::CaptureResult::Completed
+                                        : ReceiverNoiseBaseline::CaptureResult::Accepted),
+              "noise baseline capture progress");
+    }
+    check(noiseBaseline.hasMatchingProfile(noiseKey), "noise baseline profile match");
+    std::vector<float> signalLevels{-90, -80, -70, -60};
+    check(noiseBaseline.apply(noiseFrequencies, signalLevels, noiseKey,
+                              ReceiverNoiseBaselineMode::RelativeFloor, -120.0),
+          "noise baseline relative apply");
+    check(std::abs(signalLevels.front() - (-110.0f)) < 0.01f &&
+          std::abs(signalLevels.back() - (-110.0f)) < 0.01f,
+          "noise baseline preserves relative level");
+    ReceiverNoiseBaselineKey mismatchedNoiseKey = noiseKey;
+    mismatchedNoiseKey.centerFrequencyHz += 20000000.0;
+    check(!noiseBaseline.hasMatchingProfile(mismatchedNoiseKey), "noise baseline rejects changed tuning");
+    ReceiverNoiseBaseline restoredNoiseBaseline;
+    QString noiseRestoreError;
+    check(restoredNoiseBaseline.deserialize(noiseBaseline.serialize(), &noiseRestoreError) &&
+          noiseRestoreError.isEmpty() && restoredNoiseBaseline.hasMatchingProfile(noiseKey),
+          "noise baseline serialization");
+    ReceiverYFactorCalibration yFactor;
+    const std::vector<float> coldLevels(4, 0.0f);
+    const std::vector<float> hotLevels(4, static_cast<float>(10.0 * std::log10(5.5)));
+    yFactor.beginColdCapture(noiseKey, 8);
+    for (int frameIndex = 0; frameIndex < 8; ++frameIndex)
+        yFactor.addFrame(noiseFrequencies, coldLevels, noiseKey);
+    check(yFactor.coldReady(noiseKey), "Y-factor cold capture");
+    QString yFactorError;
+    check(yFactor.beginHotCapture(noiseKey, 8, YFactorSourceMode::Temperatures,
+                                  290.0, 2900.0, 0.0, &yFactorError),
+          "Y-factor hot capture start");
+    for (int frameIndex = 0; frameIndex < 8; ++frameIndex)
+        yFactor.addFrame(noiseFrequencies, hotLevels, noiseKey);
+    const ReceiverYFactorProfile yProfile = yFactor.matchingProfile(noiseKey);
+    check(yProfile.isValid() && std::abs(yProfile.noiseFigureDb.front() - 3.0103f) < 0.01f,
+          "Y-factor noise figure");
+    std::vector<float> inputReferred = coldLevels;
+    check(yFactor.applyInputReferred(noiseFrequencies, inputReferred, noiseKey, -120.0) &&
+          std::abs(inputReferred.front() + 120.0f) < 0.01f,
+          "Y-factor input-referred application");
+    ReceiverYFactorCalibration restoredYFactor;
+    check(restoredYFactor.deserialize(yFactor.serialize(), &yFactorError) &&
+          restoredYFactor.hasMatchingProfile(noiseKey), "Y-factor serialization");
     std::vector<float> frequencies(8192), levels(8192, -100);
     for (size_t i=0; i<frequencies.size(); ++i) frequencies[i] = float(i);
     levels[100] = -10; levels[200] = -30; levels[300] = -40;

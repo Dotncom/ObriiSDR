@@ -830,6 +830,54 @@ void YourClassName::loadPersistentSettings() {
                      200.0);
     calibrationTableEnabled =
         settings.value("calibration/tableEnabled", calibrationTableEnabled).toBool();
+    receiverNoiseBaselineMode = (std::clamp)(
+        settings.value("calibration/noiseBaselineMode", receiverNoiseBaselineMode).toInt(),
+        static_cast<int>(ReceiverNoiseBaselineMode::Off),
+        static_cast<int>(ReceiverNoiseBaselineMode::ExcessPower));
+    receiverNoiseBaselineTargetDb = (std::clamp)(
+        settings.value("calibration/noiseBaselineTargetDb", receiverNoiseBaselineTargetDb).toDouble(),
+        -220.0,
+        20.0);
+    receiverNoiseBaselineCaptureFrames = (std::clamp)(
+        settings.value("calibration/noiseBaselineCaptureFrames", receiverNoiseBaselineCaptureFrames).toInt(),
+        8,
+        512);
+    QString receiverNoiseBaselineError;
+    if (!receiverNoiseBaseline.deserialize(
+            settings.value("calibration/noiseBaselineProfiles").toByteArray(),
+            &receiverNoiseBaselineError) &&
+        fobosVerboseLoggingEnabled()) {
+        qWarning() << "[Receiver noise baseline]" << receiverNoiseBaselineError;
+    }
+    receiverYFactorApplyEnabled =
+        settings.value("calibration/yFactorApplyEnabled", receiverYFactorApplyEnabled).toBool();
+    receiverYFactorTargetDb = (std::clamp)(
+        settings.value("calibration/yFactorTargetDb", receiverYFactorTargetDb).toDouble(),
+        -220.0, 20.0);
+    receiverYFactorCaptureFrames = (std::clamp)(
+        settings.value("calibration/yFactorCaptureFrames", receiverYFactorCaptureFrames).toInt(),
+        8, 512);
+    receiverYFactorSourceMode = (std::clamp)(
+        settings.value("calibration/yFactorSourceMode", receiverYFactorSourceMode).toInt(),
+        static_cast<int>(YFactorSourceMode::Temperatures),
+        static_cast<int>(YFactorSourceMode::Enr));
+    receiverYFactorColdTemperatureKelvin = (std::clamp)(
+        settings.value("calibration/yFactorColdTemperatureKelvin",
+                       receiverYFactorColdTemperatureKelvin).toDouble(),
+        1.0, 100000.0);
+    receiverYFactorHotTemperatureKelvin = (std::clamp)(
+        settings.value("calibration/yFactorHotTemperatureKelvin",
+                       receiverYFactorHotTemperatureKelvin).toDouble(),
+        1.0, 1000000.0);
+    receiverYFactorEnrDb = (std::clamp)(
+        settings.value("calibration/yFactorEnrDb", receiverYFactorEnrDb).toDouble(),
+        -20.0, 100.0);
+    QString receiverYFactorError;
+    if (!receiverYFactorCalibration.deserialize(
+            settings.value("calibration/yFactorProfiles").toByteArray(),
+            &receiverYFactorError) && fobosVerboseLoggingEnabled()) {
+        qWarning() << "[Receiver Y-factor]" << receiverYFactorError;
+    }
     QVector<ReceiverCalibrationPoint> calibrationPoints;
     const int calibrationPointCount = settings.beginReadArray(QStringLiteral("calibration/table"));
     calibrationPoints.reserve(calibrationPointCount);
@@ -1837,6 +1885,16 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("calibration/frequencyOffsetHz", frequencyCalibrationOffsetHz);
     settings.setValue("calibration/amplitudeOffsetDb", amplitudeCalibrationOffsetDb);
     settings.setValue("calibration/tableEnabled", calibrationTableEnabled);
+    settings.setValue("calibration/noiseBaselineMode", receiverNoiseBaselineMode);
+    settings.setValue("calibration/noiseBaselineTargetDb", receiverNoiseBaselineTargetDb);
+    settings.setValue("calibration/noiseBaselineCaptureFrames", receiverNoiseBaselineCaptureFrames);
+    settings.setValue("calibration/yFactorApplyEnabled", receiverYFactorApplyEnabled);
+    settings.setValue("calibration/yFactorTargetDb", receiverYFactorTargetDb);
+    settings.setValue("calibration/yFactorCaptureFrames", receiverYFactorCaptureFrames);
+    settings.setValue("calibration/yFactorSourceMode", receiverYFactorSourceMode);
+    settings.setValue("calibration/yFactorColdTemperatureKelvin", receiverYFactorColdTemperatureKelvin);
+    settings.setValue("calibration/yFactorHotTemperatureKelvin", receiverYFactorHotTemperatureKelvin);
+    settings.setValue("calibration/yFactorEnrDb", receiverYFactorEnrDb);
     settings.beginWriteArray(QStringLiteral("calibration/table"));
     int calibrationPointIndex = 0;
     for (const ReceiverCalibrationPoint &point : receiverCalibrationTable.points()) {

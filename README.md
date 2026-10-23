@@ -4,10 +4,12 @@ Obrii SDR is a wideband SDR receiver and research workstation, optimized first
 for RigExpert Fobos SDR hardware while also supporting additional receiver
 backends.
 The current packaged release is Windows-first, with active Linux/Raspberry Pi
-support and a separately maintained Android USB/network client. Version 6.4
-adds protected DMR direct-mode transmission, FPV video auto-scan, a repaired
-Windows microphone path, wider SSTV/ATV coverage, quick amateur-band tuning,
-and additional 3D waterfall presentation controls. It retains the independent
+support and a separately maintained Android USB/network client. Version 6.4.1
+adds receiver-noise baseline and Y-factor calibration workflows, calibrated
+noise visualizations and reproducible experiment-bundle attachments. Version
+6.4 also added protected DMR direct-mode transmission, FPV video auto-scan, a
+repaired Windows microphone path, wider SSTV/ATV coverage, quick amateur-band
+tuning, and additional 3D waterfall presentation controls. It retains the independent
 DSP audio branches, configurable DDC/PFB processing, portable experiment folders,
 LAN FFT offload, GNU Radio bridge and connection diagnostics from 6.3.
 It retains live Wi-Fi IQ decoding, experimental HT20 support, research
@@ -26,7 +28,9 @@ dropping, and multistage channel extraction keep the wideband desktop and
 Raspberry paths responsive. Android is released separately only when its
 package changes.
 
-Release 6.4.0 also improves HackRF TX buffering and stop handling, signal-lab
+Release 6.4.1 keeps receiver calibration beside Spectrum measurement and adds
+deterministic self-tests for its calculations and scientific export. Release
+6.4.0 also improved HackRF TX buffering and stop handling, signal-lab
 generation and decoder self-tests. Protected DMR TX requires the optional
 OpenDMR backend and matching authorized keys; repeater wake-up and trunk
 signaling are not implemented.
@@ -42,15 +46,15 @@ Remove API keys, private coordinates and other sensitive data from any attachmen
 
 ## Windows Release Package
 
-Release 6.4.0 provides a Windows x64 core ZIP and a Raspberry/Linux source tar.gz.
+Release 6.4.1 provides a Windows x64 core ZIP and a Raspberry/Linux source tar.gz.
 No Wireless add-on or Android package is uploaded with this release.
-The unchanged optional Wireless add-on from 6.1.1 is also compatible with 6.4.0;
+The unchanged optional Wireless add-on from 6.1.1 is also compatible with 6.4.1;
 it does not need to be downloaded again for an existing installation.
 The add-on contains the portable GNU Radio
 Wi-Fi and Wireshark tools; to enable them, run `Install-Wireless-AddOn.ps1` beside
 `ObriiSDR.exe` or extract the add-on into that same folder. See
 `docs/wireless_addon.md`. Npcap is not bundled.
-Extract the Linux source with `tar -xzf ObriiSDR-v6.4.0-raspberry-source.tar.gz`;
+Extract the Linux source with `tar -xzf ObriiSDR-v6.4.1-raspberry-source.tar.gz`;
 the build/run shell scripts have executable permissions. Android packages are
 maintained and released separately.
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## 6.4.1 - 2026-10-23
+- Added receiver-noise baseline capture for a terminated input, keyed to the
+  receiver, input, tuning, sample rate, FFT/window, RF bandwidth, gain and
+  amplitude-calibration state. Optional visual flattening and excess-power
+  views do not alter raw IQ, audio, recordings or scientific measurements.
+- Added Y-factor Cold/Hot acquisition with calibrated ENR or known source
+  temperatures, per-frequency noise figure and equivalent input noise
+  temperature, a table/graph view and CSV export. Input-referred correction is
+  separately opt-in and performs no per-frame work while disabled.
+- Experiment bundles can include matching receiver-noise and Y-factor tables as
+  checksummed CSV attachments. Recording-start configuration remains distinct
+  from export-time context to preserve provenance.
+- Moved receiver calibration from General settings into Spectrum measurement,
+  kept imported settings synchronized with the visible controls, and clarified
+  spur calibration labels in English, Ukrainian and Spanish.
+- Added deterministic receiver-calibration, science and experiment-bundle test
+  coverage. Windows and Raspberry/Linux source only; no new Wireless add-on or
+  Android package.
+
 ## 6.4.0 - 2026-10-20
 - Added experimental protected DMR Tier II direct/simplex transmission with
   Motorola ARC4 40-bit and AES-256. Voice LC/EMB privacy indication, repeated

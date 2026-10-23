@@ -209,7 +209,7 @@ void YourClassName::openResearchAnalysis(int tabIndex) {
             },
             this);
         researchAnalysisDialog->setExperimentBundleCallbacks(
-            [this]() { return experimentBundleContext(); },
+            [this]() { return experimentBundleContext(true); },
             [this](const QJsonObject &context, QString *error) {
                 return applyExperimentWorkspace(context, error);
             });
@@ -809,7 +809,7 @@ void YourClassName::updateSpurSuppressionStatus() {
     if (spurCalibrationActive) {
         setSpurStatus(
             uiText(QStringLiteral("spur_cal_status"),
-                   QStringLiteral("Spur cal: %1/%2 frames, %3 candidates"))
+                   QStringLiteral("Spur calibration: %1/%2 frames, %3 candidates"))
                 .arg(spurCalibrationFramesDone)
                 .arg(spurCalibrationTargetFrames)
                 .arg(spurCalibrationBins.size()));

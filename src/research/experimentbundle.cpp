@@ -36,9 +36,12 @@ constexpr qint64 ChunkSize = 256 * 1024;
 const QString ManifestName = QStringLiteral("manifest.json");
 const QString PartialName = QStringLiteral(".experiment-bundle.partial");
 const QString SpectrumName = QStringLiteral("recording_spectrum.fbspec");
+const QString NoiseBaselineName = QStringLiteral("receiver_noise_baseline.csv");
+const QString YFactorName = QStringLiteral("receiver_y_factor.csv");
 const QStringList Names{SpectrumName, QStringLiteral("recording_channel_iq.wav"),
     QStringLiteral("recording_channel_iq.json"), QStringLiteral("recording_full_iq_s8.iq8"),
-    QStringLiteral("recording_full_iq_s8.json"), QStringLiteral("recording_full_iq_s8.sigmf-meta")};
+    QStringLiteral("recording_full_iq_s8.json"), QStringLiteral("recording_full_iq_s8.sigmf-meta"),
+    NoiseBaselineName, YFactorName};
 
 void check(bool condition, const char *message) {
     if (!condition) throw std::runtime_error(message);
@@ -93,6 +96,76 @@ QJsonArray calibration(const QJsonArray &input) {
             conditions["backend"] = backend;
         clean["conditions"] = conditions;
         out.append(clean);
+    }
+    return out;
+}
+
+QJsonObject receiverCalibrationConfiguration(const QJsonObject &input) {
+    auto out = numbers(input,
+        "inputMode sampleRateHz lnaGain vgaGain rtlGainTenthsDb gainState centerFrequencyHz "
+        "fftLength fftWindowType rfBandwidthHz amplitudeOffsetDb calibrationPointCount");
+    booleans(out, input, "calibrationTableEnabled");
+    const QString backend = input.value("backendId").toString();
+    static const QRegularExpression safeBackend(QStringLiteral("^[A-Za-z0-9_.+-]{1,64}$"));
+    if (safeBackend.match(backend).hasMatch()) out["backendId"] = backend;
+    return out;
+}
+
+QJsonArray receiverCalibrationTable(const QJsonArray &input, int columns) {
+    QJsonArray out;
+    double previousFrequency = -std::numeric_limits<double>::infinity();
+    for (int index = 0; index < input.size() && out.size() < 32768; ++index) {
+        const QJsonArray source = input[index].toArray();
+        if (source.size() != columns || !source[0].isDouble() ||
+            !std::isfinite(source[0].toDouble()) || source[0].toDouble() <= previousFrequency) {
+            continue;
+        }
+        QJsonArray row;
+        bool valid = true;
+        for (int column = 0; column < columns; ++column) {
+            const QJsonValue value = source[column];
+            const bool optionalResult = columns == 6 && column >= 4;
+            if (value.isDouble() && std::isfinite(value.toDouble())) row.append(value);
+            else if (optionalResult && value.isNull()) row.append(QJsonValue(QJsonValue::Null));
+            else { valid = false; break; }
+        }
+        if (!valid) continue;
+        previousFrequency = source[0].toDouble();
+        out.append(row);
+    }
+    return out;
+}
+
+QJsonObject receiverCalibrationSection(const QJsonObject &input, bool yFactor) {
+    auto out = numbers(input, yFactor
+        ? "coldTemperatureKelvin hotTemperatureKelvin enrDb minimumFrequencyHz maximumFrequencyHz "
+          "coldFrames hotFrames validBins capturedUtcMs rowCount"
+        : "minimumFrequencyHz maximumFrequencyHz capturedFrames spreadDb capturedUtcMs rowCount");
+    if (input.value("configuration").isObject())
+        out["configuration"] = receiverCalibrationConfiguration(input.value("configuration").toObject());
+    if (yFactor) {
+        const QString mode = input.value("sourceMode").toString();
+        if (mode == QStringLiteral("enr") || mode == QStringLiteral("temperatures")) out["sourceMode"] = mode;
+    }
+    const QString expectedAttachment = yFactor ? YFactorName : NoiseBaselineName;
+    if (input.value("attachment").toString() == expectedAttachment)
+        out["attachment"] = expectedAttachment;
+    if (input.value("table").isArray()) {
+        const QJsonArray table = receiverCalibrationTable(input.value("table").toArray(), yFactor ? 6 : 2);
+        if (!table.isEmpty()) out["table"] = table;
+    }
+    return out;
+}
+
+QJsonObject receiverCalibration(const QJsonObject &input) {
+    QJsonObject out;
+    if (input.value("noiseBaseline").isObject()) {
+        const QJsonObject section = receiverCalibrationSection(input.value("noiseBaseline").toObject(), false);
+        if (!section.isEmpty()) out["noiseBaseline"] = section;
+    }
+    if (input.value("yFactor").isObject()) {
+        const QJsonObject section = receiverCalibrationSection(input.value("yFactor").toObject(), true);
+        if (!section.isEmpty()) out["yFactor"] = section;
     }
     return out;
 }
@@ -489,8 +562,67 @@ QJsonObject selectedContext(const QJsonObject &header, const QJsonObject &export
     origin = recorded.isEmpty() ? QStringLiteral("export-time") : QStringLiteral("recording-start");
     auto chosen = recorded.isEmpty() ? sanitizeContext(exportContext) : sanitizeContext(recorded);
     const auto extra = sanitizeContext(exportContext);
-    for (const auto &key : {"session", "note"}) if (extra.contains(key)) chosen[key] = extra.value(key);
+    for (const auto &key : {"session", "note"})
+        if (extra.contains(key)) chosen[key] = extra.value(key);
+    if (recorded.isEmpty()) return chosen;
+
+    QJsonObject chosenCalibration = chosen.value("receiverCalibration").toObject();
+    const QJsonObject extraCalibration = extra.value("receiverCalibration").toObject();
+    for (const auto &sectionName : {"noiseBaseline", "yFactor"}) {
+        const QJsonObject recordedSection = chosenCalibration.value(sectionName).toObject();
+        const QJsonObject exportSection = extraCalibration.value(sectionName).toObject();
+        const bool sameIdentity = !recordedSection.isEmpty() &&
+            recordedSection.value("configuration").toObject() == exportSection.value("configuration").toObject() &&
+            recordedSection.value("capturedUtcMs") == exportSection.value("capturedUtcMs") &&
+            recordedSection.value("minimumFrequencyHz") == exportSection.value("minimumFrequencyHz") &&
+            recordedSection.value("maximumFrequencyHz") == exportSection.value("maximumFrequencyHz");
+        if (sameIdentity && exportSection.value("table").isArray())
+            chosenCalibration[sectionName] = exportSection;
+    }
+    if (!chosenCalibration.isEmpty()) chosen["receiverCalibration"] = chosenCalibration;
     return chosen;
+}
+
+QByteArray extractCalibrationCsv(QJsonObject &context, const QString &sectionName,
+                                 const QString &attachmentName, const QByteArray &header,
+                                 int columns) {
+    QJsonObject calibrationObject = context.value("receiverCalibration").toObject();
+    QJsonObject section = calibrationObject.value(sectionName).toObject();
+    const QJsonArray table = section.value("table").toArray();
+    if (table.isEmpty()) return {};
+    QByteArray csv = header;
+    if (!csv.endsWith('\n')) csv.append('\n');
+    int rows = 0;
+    for (const QJsonValue &value : table) {
+        const QJsonArray row = value.toArray();
+        if (row.size() != columns) continue;
+        for (int column = 0; column < columns; ++column) {
+            if (column) csv.append(',');
+            if (row[column].isDouble()) csv.append(QByteArray::number(row[column].toDouble(), 'g', 17));
+        }
+        csv.append('\n');
+        ++rows;
+    }
+    if (!rows) return {};
+    section.remove("table");
+    section["attachment"] = attachmentName;
+    section["rowCount"] = rows;
+    calibrationObject[sectionName] = section;
+    context["receiverCalibration"] = calibrationObject;
+    return csv;
+}
+
+void writeGeneratedAttachment(const QDir &directory, const QString &name, const QByteArray &bytes,
+                              QJsonArray &entries) {
+    if (bytes.isEmpty()) return;
+    QFile output(directory.filePath(name));
+    check(output.open(QIODevice::WriteOnly | QIODevice::NewOnly), "Cannot create calibration table attachment");
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    emitBytes(&output, hash, bytes);
+    check(output.flush(), "Cannot flush calibration table attachment");
+    entries.append(QJsonObject{{"path", name}, {"size", QString::number(output.size())},
+        {"sha256", QString::fromLatin1(hash.result().toHex())}});
+    output.close();
 }
 }
 
@@ -505,6 +637,10 @@ QJsonObject sanitizeContext(QJsonObject context) {
         booleans(display, input, "coloredSpectrum"); out["display"] = display;
     }
     if (context.value("workspace").isObject()) out["workspace"] = workspace(context.value("workspace").toObject());
+    if (context.value("receiverCalibration").isObject()) {
+        const QJsonObject clean = receiverCalibration(context.value("receiverCalibration").toObject());
+        if (!clean.isEmpty()) out["receiverCalibration"] = clean;
+    }
     if (context.value("note").isString()) out["note"] = context.value("note").toString().left(8192);
     if (context.value("session").isObject()) out["session"] = session(context.value("session").toObject());
     return out;
@@ -550,7 +686,15 @@ bool write(const QString &destinationDirectory, const QString &recordingPath, co
             output.close(); unchanged(file);
         }
         QString origin;
-        const auto selected = selectedContext(header, context, origin);
+        auto selected = selectedContext(header, context, origin);
+        const QByteArray baselineCsv = extractCalibrationCsv(
+            selected, QStringLiteral("noiseBaseline"), NoiseBaselineName,
+            QByteArrayLiteral("frequency_hz,average_receiver_noise_db"), 2);
+        const QByteArray yFactorCsv = extractCalibrationCsv(
+            selected, QStringLiteral("yFactor"), YFactorName,
+            QByteArrayLiteral("frequency_hz,cold_db,hot_db,y_db,equivalent_noise_temperature_k,noise_figure_db"), 6);
+        writeGeneratedAttachment(directory, NoiseBaselineName, baselineCsv, entries);
+        writeGeneratedAttachment(directory, YFactorName, yFactorCsv, entries);
         QJsonObject manifest{{"schemaVersion", 1}, {"format", "obrii-experiment-bundle"}, {"recording", SpectrumName},
             {"appVersion", version(context.value("appVersion"))}, {"createdAtUtc", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
             {"context", selected}, {"contextOrigin", origin}, {"recordingMetadata", header}, {"recordingSummary", summary}, {"files", entries},
@@ -596,6 +740,12 @@ bool read(const QString &manifestPath, Contents &contents, QString *error, const
                 "Invalid bundle size or SHA256");
             add(files, name, directory.filePath(name)); check(files.back().size == size, "Bundle file size mismatch"); expected.insert(name, entry);
         }
+        const QJsonObject manifestContext = sanitizeContext(manifest.value("context").toObject());
+        const QJsonObject receiver = manifestContext.value("receiverCalibration").toObject();
+        const bool baselineDeclared = receiver.value("noiseBaseline").toObject().value("attachment") == NoiseBaselineName;
+        const bool yFactorDeclared = receiver.value("yFactor").toObject().value("attachment") == YFactorName;
+        check(baselineDeclared == (find(files, NoiseBaselineName) != nullptr), "Noise baseline attachment declaration mismatch");
+        check(yFactorDeclared == (find(files, YFactorName) != nullptr), "Y-factor attachment declaration mismatch");
         check(find(files, SpectrumName) != nullptr, "Bundle does not contain its spectrum recording");
         validateCompanions(files, false); work.total = totalSize(files); work.advance(0);
         QJsonObject header, summary;

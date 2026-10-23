@@ -385,44 +385,6 @@ void YourClassName::openApplicationSettings() {
     });
     rootLayout->addLayout(generalLayout);
 
-    QGroupBox *calibrationBox = new QGroupBox(
-        uiText(QStringLiteral("receiver_calibration"), QStringLiteral("Receiver calibration")),
-        &dialog);
-    QFormLayout *calibrationLayout = new QFormLayout(calibrationBox);
-    QDoubleSpinBox *frequencyCalibrationSpin = new QDoubleSpinBox(calibrationBox);
-    frequencyCalibrationSpin->setRange(-10000000.0, 10000000.0);
-    frequencyCalibrationSpin->setDecimals(3);
-    frequencyCalibrationSpin->setSingleStep(1.0);
-    frequencyCalibrationSpin->setSuffix(QStringLiteral(" Hz"));
-    frequencyCalibrationSpin->setKeyboardTracking(false);
-    frequencyCalibrationSpin->setValue(frequencyCalibrationOffsetHz);
-    frequencyCalibrationSpin->setToolTip(uiText(
-        QStringLiteral("frequency_calibration_offset_tooltip"),
-        QStringLiteral("Global correction added to receiver hardware tuning while displayed frequency remains unchanged. Frequency-dependent table corrections from Presets are added to this value.")));
-
-    QDoubleSpinBox *amplitudeCalibrationSpin = new QDoubleSpinBox(calibrationBox);
-    amplitudeCalibrationSpin->setRange(-200.0, 200.0);
-    amplitudeCalibrationSpin->setDecimals(2);
-    amplitudeCalibrationSpin->setSingleStep(0.5);
-    amplitudeCalibrationSpin->setSuffix(QStringLiteral(" dB"));
-    amplitudeCalibrationSpin->setKeyboardTracking(false);
-    amplitudeCalibrationSpin->setValue(amplitudeCalibrationOffsetDb);
-    amplitudeCalibrationSpin->setToolTip(uiText(
-        QStringLiteral("amplitude_calibration_offset_tooltip"),
-        QStringLiteral("Global correction added to displayed spectrum levels and measurements. Frequency-dependent table corrections from Presets are added to this value; IQ samples and audio gain are unchanged.")));
-
-    QPushButton *resetCalibrationButton = new QPushButton(
-        uiText(QStringLiteral("reset_calibration"), QStringLiteral("Reset calibration")),
-        calibrationBox);
-    calibrationLayout->addRow(
-        uiText(QStringLiteral("frequency_calibration_offset"), QStringLiteral("Frequency offset")),
-        frequencyCalibrationSpin);
-    calibrationLayout->addRow(
-        uiText(QStringLiteral("amplitude_calibration_offset"), QStringLiteral("Amplitude offset")),
-        amplitudeCalibrationSpin);
-    calibrationLayout->addRow(resetCalibrationButton);
-    rootLayout->addWidget(calibrationBox);
-
     QGroupBox *settingsBackupBox = new QGroupBox(
         uiText(QStringLiteral("settings_backup"), QStringLiteral("Settings backup")),
         &dialog);
@@ -699,16 +661,6 @@ void YourClassName::openApplicationSettings() {
         qDebug() << "[LiveTune] Agile live retune command interval"
                  << agileLiveRetuneCommandIntervalMs;
     };
-    auto applyFrequencyCalibration = [this, frequencyCalibrationSpin]() {
-        frequencyCalibrationOffsetHz = frequencyCalibrationSpin->value();
-        applyReceiverCalibrationLive();
-        savePersistentSettings();
-    };
-    auto applyAmplitudeCalibration = [this, amplitudeCalibrationSpin]() {
-        amplitudeCalibrationOffsetDb = amplitudeCalibrationSpin->value();
-        savePersistentSettings();
-    };
-
     connect(languageCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog, [applyLanguage](int) {
         applyLanguage();
     });
@@ -733,18 +685,6 @@ void YourClassName::openApplicationSettings() {
     connect(agileLiveRetuneIntervalSpin, QOverload<int>::of(&QSpinBox::valueChanged), &dialog, [applyAgileLiveRetuneInterval](int) {
         applyAgileLiveRetuneInterval();
     });
-    connect(frequencyCalibrationSpin, &QDoubleSpinBox::editingFinished, &dialog, applyFrequencyCalibration);
-    connect(amplitudeCalibrationSpin, &QDoubleSpinBox::editingFinished, &dialog, applyAmplitudeCalibration);
-    connect(resetCalibrationButton, &QPushButton::clicked, &dialog,
-            [frequencyCalibrationSpin,
-             amplitudeCalibrationSpin,
-             applyFrequencyCalibration,
-             applyAmplitudeCalibration]() {
-                frequencyCalibrationSpin->setValue(0.0);
-                amplitudeCalibrationSpin->setValue(0.0);
-                applyFrequencyCalibration();
-                applyAmplitudeCalibration();
-            });
     connect(helpButton, &QPushButton::clicked, &dialog, [this]() {
         openApplicationHelp();
     });

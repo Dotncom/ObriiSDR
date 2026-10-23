@@ -1782,8 +1782,8 @@ YourClassName::YourClassName(QWidget *parent)
         QStringLiteral("spur_tooltip"),
         QStringLiteral("Suppress calibrated internal receiver spurs in spectrum, waterfall and spectrum measurements")));
     spurSuppressionCheckbox->setChecked(spurSuppressionEnabled);
-    spurCalibrateButton = new QPushButton("Cal", spectrumMeasurementBox);
-    markTranslatable(spurCalibrateButton, QStringLiteral("cal"), QStringLiteral("Cal"));
+    spurCalibrateButton = new QPushButton("Calibrate", spectrumMeasurementBox);
+    markTranslatable(spurCalibrateButton, QStringLiteral("cal"), QStringLiteral("Calibrate"));
     spurCalibrateButton->setToolTip(uiText(
         QStringLiteral("cal_tooltip"),
         QStringLiteral("Calibrate stable narrow spurs with a 50 ohm load connected")));
@@ -1791,6 +1791,96 @@ YourClassName::YourClassName(QWidget *parent)
     markTranslatable(spurClearButton, QStringLiteral("clear"), QStringLiteral("Clear"));
     spurClearButton->setToolTip(uiText(QStringLiteral("clear_spur_tooltip"),
                                        QStringLiteral("Clear calibrated spur mask")));
+
+    QGroupBox *receiverCalibrationBox = new QGroupBox("Receiver calibration", spectrumMeasurementBox);
+    markTranslatable(receiverCalibrationBox,
+                     QStringLiteral("receiver_calibration"),
+                     QStringLiteral("Receiver calibration"));
+    QFormLayout *receiverCalibrationLayout = new QFormLayout(receiverCalibrationBox);
+    receiverCalibrationLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+
+    QLabel *frequencyCalibrationLabel = new QLabel("Frequency offset", receiverCalibrationBox);
+    markTranslatable(frequencyCalibrationLabel,
+                     QStringLiteral("frequency_calibration_offset"),
+                     QStringLiteral("Frequency offset"));
+    frequencyCalibrationSpin = new QDoubleSpinBox(receiverCalibrationBox);
+    frequencyCalibrationSpin->setRange(-10000000.0, 10000000.0);
+    frequencyCalibrationSpin->setDecimals(3);
+    frequencyCalibrationSpin->setSingleStep(1.0);
+    frequencyCalibrationSpin->setSuffix(QStringLiteral(" Hz"));
+    frequencyCalibrationSpin->setKeyboardTracking(false);
+    frequencyCalibrationSpin->setValue(frequencyCalibrationOffsetHz);
+    frequencyCalibrationSpin->setMinimumWidth(0);
+    frequencyCalibrationSpin->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    frequencyCalibrationSpin->setToolTip(uiText(
+        QStringLiteral("frequency_calibration_offset_tooltip"),
+        QStringLiteral("Global correction added to receiver hardware tuning while displayed frequency remains unchanged. Frequency-dependent table corrections from Presets are added to this value.")));
+
+    QLabel *amplitudeCalibrationLabel = new QLabel("Amplitude offset", receiverCalibrationBox);
+    markTranslatable(amplitudeCalibrationLabel,
+                     QStringLiteral("amplitude_calibration_offset"),
+                     QStringLiteral("Amplitude offset"));
+    amplitudeCalibrationSpin = new QDoubleSpinBox(receiverCalibrationBox);
+    amplitudeCalibrationSpin->setRange(-200.0, 200.0);
+    amplitudeCalibrationSpin->setDecimals(2);
+    amplitudeCalibrationSpin->setSingleStep(0.5);
+    amplitudeCalibrationSpin->setSuffix(QStringLiteral(" dB"));
+    amplitudeCalibrationSpin->setKeyboardTracking(false);
+    amplitudeCalibrationSpin->setValue(amplitudeCalibrationOffsetDb);
+    amplitudeCalibrationSpin->setMinimumWidth(0);
+    amplitudeCalibrationSpin->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    amplitudeCalibrationSpin->setToolTip(uiText(
+        QStringLiteral("amplitude_calibration_offset_tooltip"),
+        QStringLiteral("Global correction added to displayed spectrum levels and measurements. Frequency-dependent table corrections from Presets are added to this value; IQ samples and audio gain are unchanged.")));
+
+    QPushButton *receiverNoiseBaselineButton = new QPushButton(
+        "Receiver noise baseline...", receiverCalibrationBox);
+    markTranslatable(receiverNoiseBaselineButton,
+                     QStringLiteral("receiver_noise_baseline"),
+                     QStringLiteral("Receiver noise baseline..."));
+    receiverNoiseBaselineButton->setToolTip(uiText(
+        QStringLiteral("receiver_noise_baseline_mode_tooltip"),
+        QStringLiteral("Capture and visually subtract the receiver's own terminated-input noise profile without changing IQ or audio.")));
+    QPushButton *receiverYFactorButton = new QPushButton(
+        "Y-factor measurement...", receiverCalibrationBox);
+    markTranslatable(receiverYFactorButton,
+                     QStringLiteral("receiver_y_factor"),
+                     QStringLiteral("Y-factor measurement..."));
+    QPushButton *resetReceiverCalibrationButton = new QPushButton(
+        "Reset calibration", receiverCalibrationBox);
+    markTranslatable(resetReceiverCalibrationButton,
+                     QStringLiteral("reset_calibration"),
+                     QStringLiteral("Reset calibration"));
+
+    receiverCalibrationLayout->addRow(frequencyCalibrationLabel, frequencyCalibrationSpin);
+    receiverCalibrationLayout->addRow(amplitudeCalibrationLabel, amplitudeCalibrationSpin);
+    receiverCalibrationLayout->addRow(receiverNoiseBaselineButton);
+    receiverCalibrationLayout->addRow(receiverYFactorButton);
+    receiverCalibrationLayout->addRow(resetReceiverCalibrationButton);
+
+    connect(frequencyCalibrationSpin, &QDoubleSpinBox::editingFinished, this, [this]() {
+        frequencyCalibrationOffsetHz = frequencyCalibrationSpin->value();
+        applyReceiverCalibrationLive();
+        savePersistentSettings();
+    });
+    connect(amplitudeCalibrationSpin, &QDoubleSpinBox::editingFinished, this, [this]() {
+        amplitudeCalibrationOffsetDb = amplitudeCalibrationSpin->value();
+        savePersistentSettings();
+    });
+    connect(receiverNoiseBaselineButton, &QPushButton::clicked, this, [this]() {
+        openReceiverNoiseBaselineDialog();
+    });
+    connect(receiverYFactorButton, &QPushButton::clicked, this, [this]() {
+        openReceiverYFactorDialog();
+    });
+    connect(resetReceiverCalibrationButton, &QPushButton::clicked, this, [this]() {
+        frequencyCalibrationSpin->setValue(0.0);
+        amplitudeCalibrationSpin->setValue(0.0);
+        frequencyCalibrationOffsetHz = 0.0;
+        amplitudeCalibrationOffsetDb = 0.0;
+        applyReceiverCalibrationLive();
+        savePersistentSettings();
+    });
     agileScanSavePresetButton = new QPushButton("Save", agileScanBox);
     markTranslatable(agileScanSavePresetButton, QStringLiteral("save_short"), QStringLiteral("Save"));
     agileScanSavePresetButton->setToolTip(uiText(QStringLiteral("save"), QStringLiteral("Save")));
@@ -1872,7 +1962,7 @@ YourClassName::YourClassName(QWidget *parent)
     agileScanDeletePresetButton->setMaximumWidth(42);
     agileScanSavePresetButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     agileScanDeletePresetButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    spurCalibrateButton->setMaximumWidth(44);
+    spurCalibrateButton->setMaximumWidth(86);
     spurClearButton->setMaximumWidth(54);
 
     scanMeasurementTopLayout->setContentsMargins(0, 0, 0, 0);
@@ -1961,6 +2051,7 @@ YourClassName::YourClassName(QWidget *parent)
     spurSuppressionPanelLayout->addLayout(spurSuppressionLayout);
     spurSuppressionPanelLayout->addWidget(spurSuppressionStatusLabel);
     spectrumMeasurementLayout->addLayout(spurSuppressionPanelLayout);
+    spectrumMeasurementLayout->addWidget(receiverCalibrationBox);
 
     agileScanLayout->addLayout(agileScanPresetLayout);
     agileScanLayout->addLayout(agileScanPresetButtonLayout);
