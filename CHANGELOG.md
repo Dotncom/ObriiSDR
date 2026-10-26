@@ -1,5 +1,23 @@
 # Changelog
 
+## 6.5.0 - 2026-10-26
+- Added the standalone Obrii Analyzer application with direct SDR ownership,
+  live attachment to Obrii SDR, recordings, wide sweep/scanning, reduction,
+  marker-pair measurements and instrument-style display controls.
+- Added an opt-in Multi-SDR workspace for RX 1 through RX 8 with independent
+  native sessions, edge-aware linear-power mosaics, real frequency gaps,
+  overview/focused scale modes and synchronized group panning.
+- Added automatic audio source routing: moving the listening marker into an
+  auxiliary RF span sends that receiver's bounded raw IQ to the established
+  demodulator without retuning RX 1. Source changes clear only audio queues.
+- Multi-SDR device, input, center, sample-rate, FFT, gain, inclusion, alignment
+  and panning settings now save immediately and restore after restart.
+- Added configurable marker pairs up to ten markers, display-gap preservation,
+  high-resolution spectrum reduction fixes and initial SoapySDR/USRP B210
+  capability groundwork shared by the main application and analyzer.
+- Windows core and Raspberry/Linux source only. The optional 6.1.1 Wireless
+  add-on remains compatible and is not uploaded again; Android is unchanged.
+
 ## 6.4.1 - 2026-10-23
 - Added receiver-noise baseline capture for a terminated input, keyed to the
   receiver, input, tuning, sample rate, FFT/window, RF bandwidth, gain and

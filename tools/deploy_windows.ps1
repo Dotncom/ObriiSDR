@@ -51,6 +51,7 @@ if (Test-Path -LiteralPath $LegacyExecutable) {
 
 $RootFiles = @(
     @{ Source = Join-Path $BuildPath "ObriiSDR.exe"; Name = "ObriiSDR.exe" },
+    @{ Source = Join-Path $BuildPath "ObriiAnalyzer.exe"; Name = "ObriiAnalyzer.exe" },
     @{ Source = Join-Path $Workspace "fobos\fobos.dll"; Name = "fobos.dll" },
     @{ Source = Join-Path $Workspace "fobos_agile\fobos_sdr.dll"; Name = "fobos_sdr.dll" },
     @{ Source = Join-Path $Workspace "fftw-3.3.5-dll64\libfftw3f-3.dll"; Name = "libfftw3f-3.dll" },
@@ -177,7 +178,7 @@ $ReleaseDocFiles = @(
     "docs\dmr_external_backend.md",
     "docs\gnss_preflight_4.1.md",
     "docs\iq_pipeline_audit.md",
-    "docs\release_notes_6.4.0.md",
+    "docs\release_notes_6.5.0.md",
     "docs\dmr_motorola_privacy.md",
     "docs\performance_and_dmr_audit.md",
     "docs\wireless_lab.md",
@@ -192,7 +193,10 @@ $ReleaseDocFiles = @(
     "docs\gnu_radio_bridge_usage.md",
     "docs\pfb_channelizer.md",
     "docs\dsp_board_coverage.md",
-    "docs\experiment_bundle.md"
+    "docs\experiment_bundle.md",
+    "docs\obrii_analyzer.md",
+    "docs\multi_sdr_architecture.md",
+    "docs\usrp_b210_plan.md"
 )
 foreach ($DocFile in $ReleaseDocFiles) {
     $DocPath = Join-Path $Workspace $DocFile
@@ -367,6 +371,7 @@ foreach ($StaleDoc in $StaleLabDocs) {
 if ($Sign) {
     $SignScript = Join-Path $PSScriptRoot "sign_windows.ps1"
     & $SignScript -Path (Join-Path $DeployPath "ObriiSDR.exe") -PfxPath $PfxPath -CertPassword $CertPassword -CertSubject $CertSubject
+    & $SignScript -Path (Join-Path $DeployPath "ObriiAnalyzer.exe") -PfxPath $PfxPath -CertPassword $CertPassword -CertSubject $CertSubject
 }
 
 Write-Host "Deployed Obrii SDR to $DeployPath"

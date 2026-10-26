@@ -71,6 +71,10 @@ foreach ($file in $files) {
         ([System.IO.Path]::GetExtension($normalized) -in @(".bmp", ".png", ".jpg", ".jpeg"))) {
         continue
     }
+    if (-not $normalized.Contains("/") -and
+        ([System.IO.Path]::GetExtension($normalized) -in @(".lnk", ".url"))) {
+        continue
+    }
     if ($excludeExactPaths -contains $normalizedExact) {
         continue
     }

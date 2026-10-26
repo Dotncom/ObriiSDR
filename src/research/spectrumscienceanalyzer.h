@@ -54,6 +54,7 @@ struct SpectrumScienceMetrics {
 class SpectrumScienceAnalyzer {
 public:
     static constexpr int MaximumMarkers = 64;
+    static constexpr int InteractiveMarkerCount = 10;
     int markerCount() const { return static_cast<int>(markers.size()); }
     int addMarker();
     bool removeMarker(int index);
@@ -66,6 +67,7 @@ public:
     void setDetector(int mode, int frames);
     void setVbwHz(double hz);
     void setPercentileTraces(bool p50, bool p90, bool p99);
+    void setMetricsUpdateIntervalMs(int intervalMs);
     void resetTraces();
     void clear();
 
@@ -76,6 +78,9 @@ public:
     void clearMarker(int index);
     void clearMarkers();
     SpectrumScienceMarker marker(int index) const;
+    void setMeasurementMarkerPair(int firstMarker, int secondMarker);
+    int measurementMarkerFirst() const { return measurementFirstMarker; }
+    int measurementMarkerSecond() const { return measurementSecondMarker; }
 
     double strongestPeakFrequency() const;
     double adjacentPeakFrequency(int markerIndex, int direction) const;
@@ -131,8 +136,12 @@ private:
         {false, 0.0, -160.0f, QStringLiteral("A")},
         {false, 0.0, -160.0f, QStringLiteral("B")}
     };
+    int measurementFirstMarker = 0;
+    int measurementSecondMarker = 1;
     SpectrumScienceMetrics currentMetrics;
     QElapsedTimer updateClock;
+    QElapsedTimer metricsClock;
+    int metricsUpdateIntervalMs = 0;
 };
 
 #endif // SPECTRUMSCIENCEANALYZER_H

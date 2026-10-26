@@ -103,5 +103,6 @@ fi
 echo
 echo "Build complete:"
 echo "  ${BUILD_DIR}/ObriiSDR"
+echo "  ${BUILD_DIR}/ObriiAnalyzer"
 mkdir -p "${BUILD_DIR}/wireless"
 cp "${WORKSPACE}/tools/wifi_phy_decoder.py" "${BUILD_DIR}/wireless/"

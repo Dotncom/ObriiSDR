@@ -60,6 +60,7 @@ bool snapshotRecentEndingAt(std::vector<float> &out,
                             std::uint64_t *sequence = nullptr,
                             BlockMetadata *metadata = nullptr);
 bool popBlock(std::vector<float> &out, std::uint64_t *sequence = nullptr);
+void clearAudioQueue();
 void clear(std::uint64_t epoch = 0);
 std::size_t size();
 std::size_t queuedBlocks();

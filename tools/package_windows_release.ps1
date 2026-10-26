@@ -52,7 +52,7 @@ New-Item -ItemType Directory -Path $Stage -Force | Out-Null
 # Explicit runtime manifest: a development folder also contains private overrides,
 # rotated logs, captures and screenshots. Unknown files never enter a release.
 $RootFiles = @(
-    'ObriiSDR.exe', 'Install-Wireless-AddOn.ps1', 'LICENSE', 'README.md', 'CHANGELOG.md', 'THIRD_PARTY_LICENSES.txt',
+    'ObriiSDR.exe', 'ObriiAnalyzer.exe', 'Install-Wireless-AddOn.ps1', 'LICENSE', 'README.md', 'CHANGELOG.md', 'THIRD_PARTY_LICENSES.txt',
     'translations.json', 'fobos.dll', 'fobos_sdr.dll', 'libfftw3f-3.dll', 'libusb-1.0.dll',
     'rtlsdr.dll', 'Qt5Core.dll', 'Qt5Concurrent.dll', 'Qt5Gui.dll', 'Qt5Widgets.dll', 'Qt5Network.dll',
     'Qt5SerialPort.dll', 'Qt5Multimedia.dll', 'MSVCP140.dll', 'MSVCP140_1.dll',
@@ -65,7 +65,8 @@ $PublicDocs = @(
     "release_notes_$Version.md"
     'research_backends.md', 'psk31_decoder.md', 'hf_prediction.md', 'wireless_addon.md'
     'dsp_stream_protocol.md', 'dsp_stream_manager.md', 'gnu_radio_bridge_usage.md'
-    'pfb_channelizer.md', 'dsp_board_coverage.md', 'experiment_bundle.md'
+    'pfb_channelizer.md', 'dsp_board_coverage.md', 'experiment_bundle.md', 'obrii_analyzer.md',
+    'multi_sdr_architecture.md', 'usrp_b210_plan.md'
 )
 $Backends = if ($WirelessAddOn) { @('wireshark', 'wifi-phy', 'wifi-ht') } else { @('pocketsdr', 'satdump', 'hdf5', 'itu_hf') }
 $ResearchFiles = @{}
@@ -123,7 +124,7 @@ $RequiredFiles = if ($WirelessAddOn) {
       'wireshark/extcap/ObriiWifiExtcap.bat', 'wireless/wifi_phy_decoder.py',
       'wireless/wifi_packet_bus.py', 'wireless/wifi_extcap.py', 'docs/wireless_addon.md')
 } else {
-    @('ObriiSDR.exe', 'Install-Wireless-AddOn.ps1', 'LICENSE', 'translations.json', 'platforms/qwindows.dll')
+    @('ObriiSDR.exe', 'ObriiAnalyzer.exe', 'Install-Wireless-AddOn.ps1', 'LICENSE', 'translations.json', 'platforms/qwindows.dll')
 }
 foreach ($Required in $RequiredFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $Stage $Required))) { throw "Missing release file: $Required" }

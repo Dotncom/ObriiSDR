@@ -1,5 +1,6 @@
 #include "main.h"
 #include "multivfowidget.h"
+#include "multisdrdialog.h"
 #include "dspflowpanel.h"
 #include "appconstants.h"
 #include "appruntimeutils.h"
@@ -839,7 +840,11 @@ void YourClassName::updateSpectrum() {
     }
     visibleSpan = (std::clamp)(visibleSpan, 1.0, fullSpan);
 
-    double visibleCenter = spectrumDisplayCenterHz;
+    const bool multiSdrViewportManaged =
+        multiSdrDialog && multiSdrDialog->mainIncludedReceiverCount() >= 2;
+    double visibleCenter = multiSdrViewportManaged
+                               ? spectrumSettings.centerFrequency
+                               : spectrumDisplayCenterHz;
     if (!std::isfinite(visibleCenter) ||
         visibleCenter < fullMinFrequency ||
         visibleCenter > fullMaxFrequency) {
@@ -848,7 +853,7 @@ void YourClassName::updateSpectrum() {
                             : (fullMinFrequency + fullMaxFrequency) * 0.5;
     }
     visibleCenter = (std::clamp)(visibleCenter, fullMinFrequency, fullMaxFrequency);
-    spectrumDisplayCenterHz = visibleCenter;
+    if (!multiSdrViewportManaged) spectrumDisplayCenterHz = visibleCenter;
 
     double frameMinFrequency = visibleCenter - visibleSpan * 0.5;
     frameMinFrequency = (std::clamp)(frameMinFrequency,
@@ -1310,6 +1315,61 @@ void YourClassName::updateSpectrum() {
         }
     }
     const std::vector<float> &visualMagnitudes = *visualMagnitudesPtr;
+    std::vector<float> multiSdrMainFrequencies;
+    std::vector<float> multiSdrMainLevels;
+    AnalyzerSpectrumFrame multiSdrMainFrame;
+    bool multiSdrMainDisplayActive = false;
+    if (multiSdrDialog && displayScanSegments.isEmpty() &&
+        spectrumFrequencies.size() == visualMagnitudes.size() &&
+        spectrumFrequencies.size() >= 2) {
+        static SpectrumDisplayFrame multiSdrPrimaryDisplayFrame;
+        const int primaryMosaicBins = (std::min)(65536, (std::max)({4096,
+            graphWidget ? graphWidget->width() * 4 : 0,
+            waterfallWidget ? waterfallWidget->width() * 4 : 0}));
+        prepareSpectrumDisplayFrame(spectrumFrequencies,
+                                    visualMagnitudes,
+                                    nullptr,
+                                    static_cast<int>(spectrumFrequencies.size()),
+                                    spectrumFrequencies.front(),
+                                    spectrumFrequencies.back(),
+                                    primaryMosaicBins,
+                                    displayLevelMin,
+                                    static_cast<SpectrumDisplayReduction>(spectrumDisplayReductionMode),
+                                    multiSdrPrimaryDisplayFrame);
+        if (multiSdrPrimaryDisplayFrame.frequencies.size() ==
+                multiSdrPrimaryDisplayFrame.levels.size() &&
+            multiSdrPrimaryDisplayFrame.frequencies.size() >= 2) {
+            AnalyzerSpectrumFrame primaryFrame;
+            primaryFrame.sequence = ++multiSdrPrimarySequence;
+            primaryFrame.utcMs = QDateTime::currentMSecsSinceEpoch();
+            primaryFrame.minimumHz = multiSdrPrimaryDisplayFrame.frequencies.front();
+            primaryFrame.maximumHz = multiSdrPrimaryDisplayFrame.frequencies.back();
+            primaryFrame.centerHz = 0.5 * (primaryFrame.minimumHz + primaryFrame.maximumHz);
+            primaryFrame.sourceFftLength = spectrumSettings.fftLength;
+            primaryFrame.levelsDb = multiSdrPrimaryDisplayFrame.levels;
+            multiSdrDialog->consumePrimaryFrame(primaryFrame);
+        }
+        multiSdrDialog->setMainViewMode(multiSdrViewMode);
+        multiSdrMainDisplayActive = multiSdrDialog->mainMosaicFrame(multiSdrMainFrame);
+        if (multiSdrMainDisplayActive) {
+            multiSdrMainLevels = multiSdrMainFrame.levelsDb;
+            multiSdrMainFrequencies.resize(multiSdrMainLevels.size());
+            const double denominator = static_cast<double>(
+                (std::max<std::size_t>)(1, multiSdrMainFrequencies.size() - 1));
+            for (std::size_t index = 0; index < multiSdrMainFrequencies.size(); ++index) {
+                multiSdrMainFrequencies[index] = static_cast<float>(
+                    multiSdrMainFrame.minimumHz +
+                    (multiSdrMainFrame.maximumHz - multiSdrMainFrame.minimumHz) *
+                        static_cast<double>(index) / denominator);
+            }
+        }
+    }
+    const bool multiSdrFocusAvailable =
+        multiSdrDialog && multiSdrDialog->mainIncludedReceiverCount() >= 2;
+    if (multiSdrPreviousFocusButton)
+        multiSdrPreviousFocusButton->setEnabled(multiSdrFocusAvailable);
+    if (multiSdrNextFocusButton)
+        multiSdrNextFocusButton->setEnabled(multiSdrFocusAvailable);
     if ((spectrumFrameBufferEnabled || spectrumFrameRecorder.isRecording()) &&
         updateWaterfallFrame &&
         !displayFrequencies.empty() &&
@@ -1432,19 +1492,68 @@ void YourClassName::updateSpectrum() {
     if (!suppressLocalVisual) {
         const bool presentMainSpectrum = graphWidget && graphWidget->isVisible() && !isMinimized();
         const bool presentMainWaterfall = waterfallWidget && waterfallWidget->isVisible() && !isMinimized();
+        const std::vector<float> &renderFrequencies = multiSdrMainDisplayActive
+                                                          ? multiSdrMainFrequencies
+                                                          : displayFrequencies;
+        const std::vector<float> &renderMagnitudes = multiSdrMainDisplayActive
+                                                         ? multiSdrMainLevels
+                                                         : visualMagnitudes;
+        const double renderFullMinFrequency = multiSdrMainDisplayActive
+                                                  ? multiSdrMainFrame.minimumHz
+                                                  : displayMinFrequency;
+        const double renderFullMaxFrequency = multiSdrMainDisplayActive
+                                                  ? multiSdrMainFrame.maximumHz
+                                                  : displayMaxFrequency;
+        const double renderFullSpan = (std::max)(1.0,
+            renderFullMaxFrequency - renderFullMinFrequency);
+        double renderVisibleSpan = multiSdrMainDisplayActive
+                                       ? renderFullSpan * effectiveScalePercent() / 100.0
+                                       : renderFullSpan;
+        renderVisibleSpan = (std::clamp)(renderVisibleSpan, 1.0, renderFullSpan);
+        double renderVisibleCenter = multiSdrMainDisplayActive
+                                         ? spectrumDisplayCenterHz
+                                         : displayCenterFrequency;
+        if (!std::isfinite(renderVisibleCenter) ||
+            renderVisibleCenter < renderFullMinFrequency ||
+            renderVisibleCenter > renderFullMaxFrequency) {
+            renderVisibleCenter = multiSdrMainDisplayActive
+                                      ? multiSdrMainFrame.centerHz
+                                      : displayCenterFrequency;
+        }
+        double renderMinFrequency = renderVisibleCenter - renderVisibleSpan * 0.5;
+        renderMinFrequency = (std::clamp)(renderMinFrequency,
+                                          renderFullMinFrequency,
+                                          renderFullMaxFrequency - renderVisibleSpan);
+        const double renderMaxFrequency = renderMinFrequency + renderVisibleSpan;
+        renderVisibleCenter = 0.5 * (renderMinFrequency + renderMaxFrequency);
+        if (multiSdrMainDisplayActive) {
+            spectrumDisplayCenterHz = renderVisibleCenter;
+            minFrequency = renderMinFrequency;
+            maxFrequency = renderMaxFrequency;
+        }
+        const double renderSampleRate = multiSdrMainDisplayActive
+                                            ? renderFullSpan
+                                            : spectrumSettings.sampleRate;
+        const int renderFftLength = multiSdrMainDisplayActive
+                                        ? static_cast<int>(renderMagnitudes.size())
+                                        : spectrumSettings.fftLength;
+        const QVector<ScanVisualSegment> renderScanSegments = multiSdrMainDisplayActive
+                                                                   ? QVector<ScanVisualSegment>()
+                                                                   : displayScanSegments;
+        const bool renderScanMarkers = !multiSdrMainDisplayActive && displayScanSegmentMarkers;
         if (scaleWidget && scaleWidget->isVisible() && !isMinimized()) {
             double scaleListening = pendingSettings.listeningFrequency;
-            if (!displayScanSegments.isEmpty()) {
+            if (!renderScanSegments.isEmpty()) {
                 if (!scanListeningLockEnabled &&
-                    !actualFrequencyInsideScanSegments(scaleListening, displayScanSegments)) {
+                    !actualFrequencyInsideScanSegments(scaleListening, renderScanSegments)) {
                     scaleListening =
-                        fallbackActualFrequencyForScanSegments(displayScanSegments, displayCenterFrequency);
+                        fallbackActualFrequencyForScanSegments(renderScanSegments, renderVisibleCenter);
                 }
             }
-            scaleWidget->setScanSegments(displayScanSegments);
-            scaleWidget->setScanSegmentMarkersVisible(displayScanSegmentMarkers);
+            scaleWidget->setScanSegments(renderScanSegments);
+            scaleWidget->setScanSegmentMarkersVisible(renderScanMarkers);
             scaleWidget->setTuning(scaleListening,
-                                   displayCenterFrequency,
+                                   renderVisibleCenter,
                                    effectiveDemodulationBandwidth(
                                        pendingSettings.bandwidth,
                                        pendingSettings.modulationType,
@@ -1452,7 +1561,7 @@ void YourClassName::updateSpectrum() {
                                    effectiveDemodulationModulationType(
                                        pendingSettings.modulationType,
                                        pendingSettings.sstvDemodulationMode));
-            scaleWidget->setRange(displayMinFrequency, displayMaxFrequency);
+            scaleWidget->setRange(renderMinFrequency, renderMaxFrequency);
         }
         const std::vector<float> &measurementFrequencies =
             displayMeasurementFrequencies.size() == displayMagnitudes.size()
@@ -1461,7 +1570,9 @@ void YourClassName::updateSpectrum() {
         const std::vector<float> measurementOverlay =
             scanMeasurementOverlay(measurementFrequencies, static_cast<int>(displayMagnitudes.size()));
         const std::vector<float> *displayOverlaySource = nullptr;
-        if (!baselineRawOverlay.empty()) {
+        if (multiSdrMainDisplayActive) {
+            displayOverlaySource = nullptr;
+        } else if (!baselineRawOverlay.empty()) {
             displayOverlaySource = &baselineRawOverlay;
         } else if (!measurementOverlay.empty()) {
             displayOverlaySource = &measurementOverlay;
@@ -1478,19 +1589,36 @@ void YourClassName::updateSpectrum() {
         const qint64 preReduceNs = profileDisplayFrame
                                        ? displayProfileTimer.nsecsElapsed()
                                        : 0;
-        prepareSpectrumDisplayFrame(displayFrequencies,
-                                    visualMagnitudes,
+        prepareSpectrumDisplayFrame(renderFrequencies,
+                                    renderMagnitudes,
                                     displayOverlaySource,
-                                    displayFftLength,
-                                    displayMinFrequency,
-                                    displayMaxFrequency,
+                                    static_cast<int>(renderMagnitudes.size()),
+                                    renderMinFrequency,
+                                    renderMaxFrequency,
                                     displayTargetBins,
                                     displayLevelMin,
                                     static_cast<SpectrumDisplayReduction>(spectrumDisplayReductionMode),
-                                    preparedDisplayFrame);
+                                    preparedDisplayFrame,
+                                    multiSdrMainDisplayActive,
+                                    multiSdrMainDisplayActive);
+        static SpectrumDisplayFrame localAnalysisDisplayFrame;
+        const SpectrumDisplayFrame *analysisPreparedFrame = &preparedDisplayFrame;
+        if (multiSdrMainDisplayActive) {
+            prepareSpectrumDisplayFrame(displayFrequencies,
+                                        visualMagnitudes,
+                                        nullptr,
+                                        displayFftLength,
+                                        displayMinFrequency,
+                                        displayMaxFrequency,
+                                        displayTargetBins,
+                                        displayLevelMin,
+                                        static_cast<SpectrumDisplayReduction>(spectrumDisplayReductionMode),
+                                        localAnalysisDisplayFrame);
+            analysisPreparedFrame = &localAnalysisDisplayFrame;
+        }
         static SpectrumDisplayFrame receiverNoiseDisplayFrame;
         const SpectrumDisplayFrame *visiblePreparedFrame = &preparedDisplayFrame;
-        if (displayScanSegments.isEmpty() && receiverYFactorApplyEnabled) {
+        if (!multiSdrMainDisplayActive && displayScanSegments.isEmpty() && receiverYFactorApplyEnabled) {
             receiverNoiseDisplayFrame = preparedDisplayFrame;
             if (receiverYFactorCalibration.applyInputReferred(
                     receiverNoiseDisplayFrame.frequencies,
@@ -1499,7 +1627,7 @@ void YourClassName::updateSpectrum() {
                     receiverYFactorTargetDb)) {
                 visiblePreparedFrame = &receiverNoiseDisplayFrame;
             }
-        } else if (displayScanSegments.isEmpty() &&
+        } else if (!multiSdrMainDisplayActive && displayScanSegments.isEmpty() &&
                    receiverNoiseBaselineMode != static_cast<int>(ReceiverNoiseBaselineMode::Off)) {
             receiverNoiseDisplayFrame = preparedDisplayFrame;
             if (receiverNoiseBaseline.apply(receiverNoiseDisplayFrame.frequencies,
@@ -1534,24 +1662,25 @@ void YourClassName::updateSpectrum() {
             }
         }
         if (wirelessLabDialog && wirelessLabDialog->isVisible() && displayScanSegments.isEmpty())
-            wirelessLabDialog->appendSpectrum(preparedDisplayFrame.frequencies,
-                                               preparedDisplayFrame.levels, spectrumSettings.sampleRate);
+            wirelessLabDialog->appendSpectrum(analysisPreparedFrame->frequencies,
+                                               analysisPreparedFrame->levels, spectrumSettings.sampleRate);
         if (refreshAnalysis) {
             const std::vector<float> scienceFrequencies =
                 !displayScanSegments.isEmpty()
-                    ? actualFrequenciesFromScanSegments(preparedDisplayFrame.frequencies, displayScanSegments)
+                    ? actualFrequenciesFromScanSegments(analysisPreparedFrame->frequencies,
+                                                        displayScanSegments)
                     : std::vector<float>();
-            updateSpectrumScience(scienceFrequencies.size() == preparedDisplayFrame.frequencies.size()
+            updateSpectrumScience(scienceFrequencies.size() == analysisPreparedFrame->frequencies.size()
                                       ? scienceFrequencies
-                                      : preparedDisplayFrame.frequencies,
-                                  preparedDisplayFrame.levels);
+                                      : analysisPreparedFrame->frequencies,
+                                  analysisPreparedFrame->levels);
             if (displayScanSegments.isEmpty()) {
                 feedZeroSpanFrame(displayFrequencies, visualMagnitudes, true);
             } else {
-                feedZeroSpanFrame(scienceFrequencies.size() == preparedDisplayFrame.frequencies.size()
+                feedZeroSpanFrame(scienceFrequencies.size() == analysisPreparedFrame->frequencies.size()
                                       ? scienceFrequencies
-                                      : preparedDisplayFrame.frequencies,
-                                  preparedDisplayFrame.levels,
+                                      : analysisPreparedFrame->frequencies,
+                                  analysisPreparedFrame->levels,
                                   false);
             }
         }
@@ -1561,20 +1690,21 @@ void YourClassName::updateSpectrum() {
 
         if (refreshAuxiliaryUi && presentMainSpectrum) {
             graphWidget->setLevelRange(displayLevelMin, displayLevelMax);
-            graphWidget->setSpectrumMetadata(displayCenterFrequency,
+            graphWidget->setSpectrumMetadata(renderVisibleCenter,
                                              pendingSettings.listeningFrequency,
-                                             spectrumSettings.sampleRate,
-                                             spectrumSettings.fftLength,
+                                             renderSampleRate,
+                                             renderFftLength,
                                              spectrumSettings.fftWindowType);
-            graphWidget->setScanSegments(displayScanSegments);
-            graphWidget->setScanSegmentMarkersVisible(displayScanSegmentMarkers);
+            graphWidget->setScanSegments(renderScanSegments);
+            graphWidget->setScanSegmentMarkersVisible(renderScanMarkers);
             graphWidget->setData(visiblePreparedFrame->frequencies,
                                  visiblePreparedFrame->levels,
-                                 displayMinFrequency,
-                                 displayMaxFrequency,
+                                 renderMinFrequency,
+                                 renderMaxFrequency,
                                  static_cast<int>(visiblePreparedFrame->levels.size()),
                                  colorf,
-                                 true);
+                                 true,
+                                 multiSdrMainDisplayActive);
             graphWidget->setOverlayData(preparedDisplayFrame.overlayLevels,
                                         !preparedDisplayFrame.overlayLevels.empty(),
                                         true);
@@ -1583,10 +1713,10 @@ void YourClassName::updateSpectrum() {
             qDebug() << "[Spectrum] before waterfall" << "elapsedMs" << traceTimer.elapsed();
         }
         if (updateWaterfallFrame && presentMainWaterfall) {
-            waterfallWidget->setSpectrumMetadata(displayCenterFrequency,
+            waterfallWidget->setSpectrumMetadata(renderVisibleCenter,
                                                  pendingSettings.listeningFrequency,
-                                                 spectrumSettings.sampleRate,
-                                                 spectrumSettings.fftLength,
+                                                 renderSampleRate,
+                                                 renderFftLength,
                                                  spectrumSettings.fftWindowType);
             const IqBuffer::DiscontinuityStats discontinuity = IqBuffer::discontinuityStats();
             if (discontinuity.epoch != lastIqDiscontinuityEpoch) {
@@ -1614,7 +1744,7 @@ void YourClassName::updateSpectrum() {
             // the normal analysis path above.
             SpectrumDisplayFrame historyDisplayFrame;
             std::vector<float> historyBaselineVisual;
-            for (SpectrumFftHistoryRow &historyRow : waterfallHistoryRows) {
+            if (!multiSdrMainDisplayActive) for (SpectrumFftHistoryRow &historyRow : waterfallHistoryRows) {
                 if (historyRow.magnitudes.size() != spectrumFrequencies.size() ||
                     (historyRow.metadata.epoch != 0 &&
                      fftBlockMetadata.epoch != 0 &&
@@ -1686,8 +1816,8 @@ void YourClassName::updateSpectrum() {
             }
             waterfallWidget->setData(visiblePreparedFrame->frequencies,
                                      visiblePreparedFrame->levels,
-                                     displayMinFrequency,
-                                     displayMaxFrequency,
+                                     renderMinFrequency,
+                                     renderMaxFrequency,
                                      static_cast<int>(visiblePreparedFrame->levels.size()),
                                      secondGraph,
                                      colorf,
@@ -1695,11 +1825,12 @@ void YourClassName::updateSpectrum() {
                                      sensitivity,
                                      displayLevelMin,
                                      displayLevelMax,
-                                     true);
+                                     true,
+                                     multiSdrMainDisplayActive);
         }
         if (presentMainWaterfall) {
-            waterfallWidget->setScanSegments(displayScanSegments);
-            waterfallWidget->setScanSegmentMarkersVisible(displayScanSegmentMarkers);
+            waterfallWidget->setScanSegments(renderScanSegments);
+            waterfallWidget->setScanSegmentMarkersVisible(renderScanMarkers);
         }
         if (profileDisplayFrame) {
             const qint64 afterWidgetsNs = displayProfileTimer.nsecsElapsed();

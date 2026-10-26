@@ -10,8 +10,12 @@
 #include <QStringList>
 
 #include <algorithm>
+#include <cmath>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 
@@ -21,12 +25,19 @@ constexpr int SOAPY_ERR_NOT_LOADED = -14001;
 constexpr int SOAPY_ERR_NOT_OPEN = -14002;
 constexpr int SOAPY_ERR_OPEN_FAILED = -14003;
 constexpr int SOAPY_SDR_RX = 1;
+constexpr int SOAPY_SDR_TX = 0;
 constexpr const char *SOAPY_SDR_CF32 = "CF32";
 
 struct SoapySdrKwargs {
     std::size_t size = 0;
     char **keys = nullptr;
     char **vals = nullptr;
+};
+
+struct SoapySdrRange {
+    double minimum = 0.0;
+    double maximum = 0.0;
+    double step = 0.0;
 };
 
 using SoapySdrDevice = void;
@@ -43,9 +54,19 @@ struct SoapySdrApi {
     const char *(*kwargs_get)(const SoapySdrKwargs *args, const char *key) = nullptr;
     SoapySdrDevice *(*make)(const SoapySdrKwargs *args) = nullptr;
     int (*unmake)(SoapySdrDevice *device) = nullptr;
+    std::size_t (*get_num_channels)(const SoapySdrDevice *device, int direction) = nullptr;
+    bool (*get_full_duplex)(const SoapySdrDevice *device, int direction, std::size_t channel) = nullptr;
+    double *(*list_sample_rates)(const SoapySdrDevice *device, int direction,
+                                std::size_t channel, std::size_t *length) = nullptr;
+    double *(*list_bandwidths)(const SoapySdrDevice *device, int direction,
+                              std::size_t channel, std::size_t *length) = nullptr;
+    SoapySdrRange *(*get_frequency_range)(const SoapySdrDevice *device, int direction,
+                                         std::size_t channel, std::size_t *length) = nullptr;
+    void (*free_memory)(void *ptr) = nullptr;
     int (*set_sample_rate)(SoapySdrDevice *device, int direction, std::size_t channel, double sampleRate) = nullptr;
     int (*set_frequency)(SoapySdrDevice *device, int direction, std::size_t channel, double frequency, const SoapySdrKwargs *args) = nullptr;
     int (*set_bandwidth)(SoapySdrDevice *device, int direction, std::size_t channel, double bandwidth) = nullptr;
+    int (*set_gain)(SoapySdrDevice *device, int direction, std::size_t channel, double gain) = nullptr;
     SoapySdrStream *(*setup_stream)(SoapySdrDevice *device,
                                     int direction,
                                     const char *format,
@@ -87,6 +108,8 @@ QStringList libraryCandidates() {
         QDir(appDir).absoluteFilePath(QStringLiteral("SoapySDR.dll")),
         QDir(appDir).absoluteFilePath(QStringLiteral("soapysdr/SoapySDR.dll")),
         QDir(appDir).absoluteFilePath(QStringLiteral("SoapySDR/SoapySDR.dll")),
+        QDir(appDir).absoluteFilePath(QStringLiteral("dsd-neo/SoapySDR.dll")),
+        QDir(appDir).absoluteFilePath(QStringLiteral("pocketsdr/SoapySDR.dll")),
         QStringLiteral("SoapySDR"),
         QStringLiteral("SoapySDR.dll")
     };
@@ -160,6 +183,13 @@ bool ensureLoadedLocked() {
             resolveSymbol(soapy, soapy.close_stream, "SoapySDRDevice_closeStream");
         resolveSymbol(soapy, soapy.last_error, "SoapySDRDevice_lastError", false);
         resolveSymbol(soapy, soapy.set_bandwidth, "SoapySDRDevice_setBandwidth", false);
+        resolveSymbol(soapy, soapy.set_gain, "SoapySDRDevice_setGain", false);
+        resolveSymbol(soapy, soapy.get_num_channels, "SoapySDRDevice_getNumChannels", false);
+        resolveSymbol(soapy, soapy.get_full_duplex, "SoapySDRDevice_getFullDuplex", false);
+        resolveSymbol(soapy, soapy.list_sample_rates, "SoapySDRDevice_listSampleRates", false);
+        resolveSymbol(soapy, soapy.list_bandwidths, "SoapySDRDevice_listBandwidths", false);
+        resolveSymbol(soapy, soapy.get_frequency_range, "SoapySDRDevice_getFrequencyRange", false);
+        resolveSymbol(soapy, soapy.free_memory, "SoapySDR_free", false);
 
         if (!ok) {
             loadErrors << QStringLiteral("%1: %2").arg(candidate, soapy.lastError);
@@ -260,6 +290,92 @@ QVector<SoapySdrDeviceInfo> enumerateSoapySdrDevices() {
     return devices;
 }
 
+SoapySdrDeviceCapabilities querySoapySdrDeviceCapabilities(int nativeIndex, int rxChannel) {
+    SoapySdrDeviceCapabilities capabilities;
+    QMutexLocker locker(&apiMutex());
+    if (!ensureLoadedLocked()) {
+        capabilities.error = api().lastError;
+        return capabilities;
+    }
+
+    SoapySdrApi &soapy = api();
+    std::size_t count = 0;
+    SoapySdrKwargs *list = soapy.enumerate(nullptr, &count);
+    SoapySdrDevice *opened = nullptr;
+    if (list && count > 0) {
+        const std::size_t index = static_cast<std::size_t>(
+            std::clamp(nativeIndex, 0, static_cast<int>(count - 1)));
+        opened = soapy.make(&list[index]);
+        soapy.kwargs_list_clear(list, count);
+    } else {
+        opened = soapy.make(nullptr);
+    }
+    if (!opened) {
+        capabilities.error = lastErrorLocked(soapy);
+        if (capabilities.error.isEmpty())
+            capabilities.error = QStringLiteral("SoapySDRDevice_make returned null");
+        return capabilities;
+    }
+
+    capabilities.rxChannels = soapy.get_num_channels
+                                  ? static_cast<int>(soapy.get_num_channels(opened, SOAPY_SDR_RX))
+                                  : 1;
+    capabilities.txChannels = soapy.get_num_channels
+                                  ? static_cast<int>(soapy.get_num_channels(opened, SOAPY_SDR_TX))
+                                  : 0;
+    const int channel = std::clamp(rxChannel, 0, std::max(0, capabilities.rxChannels - 1));
+    capabilities.fullDuplex = capabilities.rxChannels > 0 && capabilities.txChannels > 0 &&
+                              soapy.get_full_duplex &&
+                              soapy.get_full_duplex(opened, SOAPY_SDR_RX,
+                                                    static_cast<std::size_t>(channel));
+
+    if (capabilities.rxChannels > 0 && soapy.free_memory) {
+        std::size_t length = 0;
+        if (soapy.list_sample_rates) {
+            double *rates = soapy.list_sample_rates(opened, SOAPY_SDR_RX,
+                                                    static_cast<std::size_t>(channel), &length);
+            for (std::size_t index = 0; rates && index < length; ++index) {
+                if (std::isfinite(rates[index]) && rates[index] > 0.0)
+                    capabilities.rxSampleRatesHz.append(rates[index]);
+            }
+            if (rates) soapy.free_memory(rates);
+        }
+        length = 0;
+        if (soapy.list_bandwidths) {
+            double *bandwidths = soapy.list_bandwidths(opened, SOAPY_SDR_RX,
+                                                       static_cast<std::size_t>(channel), &length);
+            for (std::size_t index = 0; bandwidths && index < length; ++index) {
+                if (std::isfinite(bandwidths[index]) && bandwidths[index] > 0.0)
+                    capabilities.rxBandwidthsHz.append(bandwidths[index]);
+            }
+            if (bandwidths) soapy.free_memory(bandwidths);
+        }
+        length = 0;
+        if (soapy.get_frequency_range) {
+            SoapySdrRange *ranges = soapy.get_frequency_range(
+                opened, SOAPY_SDR_RX, static_cast<std::size_t>(channel), &length);
+            for (std::size_t index = 0; ranges && index < length; ++index) {
+                capabilities.rxFrequencyRangesHz.append(
+                    {ranges[index].minimum, ranges[index].maximum, ranges[index].step});
+            }
+            if (ranges) soapy.free_memory(ranges);
+        }
+    }
+    std::sort(capabilities.rxSampleRatesHz.begin(), capabilities.rxSampleRatesHz.end());
+    capabilities.rxSampleRatesHz.erase(
+        std::unique(capabilities.rxSampleRatesHz.begin(), capabilities.rxSampleRatesHz.end()),
+        capabilities.rxSampleRatesHz.end());
+    std::sort(capabilities.rxBandwidthsHz.begin(), capabilities.rxBandwidthsHz.end());
+    capabilities.rxBandwidthsHz.erase(
+        std::unique(capabilities.rxBandwidthsHz.begin(), capabilities.rxBandwidthsHz.end()),
+        capabilities.rxBandwidthsHz.end());
+    capabilities.valid = capabilities.rxChannels > 0;
+    if (!capabilities.valid && capabilities.error.isEmpty())
+        capabilities.error = QStringLiteral("Device reports no RX channels");
+    soapy.unmake(opened);
+    return capabilities;
+}
+
 int openSoapySdrDeviceSafely(void **dev, int nativeIndex) {
     if (!dev) {
         return SOAPY_ERR_NOT_OPEN;
@@ -297,37 +413,49 @@ int closeSoapySdrDeviceSafely(void *dev) {
     });
 }
 
-int setSoapySdrSampleRateSafely(void *dev, double sampleRateHz) {
+int setSoapySdrSampleRateSafely(void *dev, double sampleRateHz, int channel) {
     if (!dev) {
         return SOAPY_ERR_NOT_OPEN;
     }
-    return withApi([dev, sampleRateHz](SoapySdrApi &soapy) {
-        return soapy.set_sample_rate(static_cast<SoapySdrDevice*>(dev), SOAPY_SDR_RX, 0, sampleRateHz);
+    return withApi([dev, sampleRateHz, channel](SoapySdrApi &soapy) {
+        return soapy.set_sample_rate(static_cast<SoapySdrDevice*>(dev), SOAPY_SDR_RX,
+                                     static_cast<std::size_t>(std::max(0, channel)), sampleRateHz);
     });
 }
 
-int setSoapySdrCenterFrequencySafely(void *dev, double frequencyHz) {
+int setSoapySdrCenterFrequencySafely(void *dev, double frequencyHz, int channel) {
     if (!dev) {
         return SOAPY_ERR_NOT_OPEN;
     }
-    return withApi([dev, frequencyHz](SoapySdrApi &soapy) {
-        return soapy.set_frequency(static_cast<SoapySdrDevice*>(dev), SOAPY_SDR_RX, 0, frequencyHz, nullptr);
+    return withApi([dev, frequencyHz, channel](SoapySdrApi &soapy) {
+        return soapy.set_frequency(static_cast<SoapySdrDevice*>(dev), SOAPY_SDR_RX,
+                                   static_cast<std::size_t>(std::max(0, channel)), frequencyHz, nullptr);
     });
 }
 
-int setSoapySdrBandwidthSafely(void *dev, double bandwidthHz) {
+int setSoapySdrBandwidthSafely(void *dev, double bandwidthHz, int channel) {
     if (!dev) {
         return SOAPY_ERR_NOT_OPEN;
     }
-    return withApi([dev, bandwidthHz](SoapySdrApi &soapy) {
+    return withApi([dev, bandwidthHz, channel](SoapySdrApi &soapy) {
         if (!soapy.set_bandwidth || bandwidthHz <= 0.0) {
             return 0;
         }
-        return soapy.set_bandwidth(static_cast<SoapySdrDevice*>(dev), SOAPY_SDR_RX, 0, bandwidthHz);
+        return soapy.set_bandwidth(static_cast<SoapySdrDevice*>(dev), SOAPY_SDR_RX,
+                                   static_cast<std::size_t>(std::max(0, channel)), bandwidthHz);
     });
 }
 
-void *setupSoapySdrRxStreamSafely(void *dev) {
+int setSoapySdrGainSafely(void *dev, double gainDb, int channel) {
+    if (!dev) return SOAPY_ERR_NOT_OPEN;
+    return withApi([dev, gainDb, channel](SoapySdrApi &soapy) {
+        if (!soapy.set_gain) return 0;
+        return soapy.set_gain(static_cast<SoapySdrDevice*>(dev), SOAPY_SDR_RX,
+                              static_cast<std::size_t>(std::max(0, channel)), gainDb);
+    });
+}
+
+void *setupSoapySdrRxStreamSafely(void *dev, int channelIndex) {
     if (!dev) {
         return nullptr;
     }
@@ -337,7 +465,7 @@ void *setupSoapySdrRxStreamSafely(void *dev) {
         return nullptr;
     }
     SoapySdrApi &soapy = api();
-    const std::size_t channel = 0;
+    const std::size_t channel = static_cast<std::size_t>(std::max(0, channelIndex));
     return soapy.setup_stream(static_cast<SoapySdrDevice*>(dev),
                               SOAPY_SDR_RX,
                               SOAPY_SDR_CF32,

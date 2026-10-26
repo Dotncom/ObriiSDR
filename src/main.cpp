@@ -29,6 +29,9 @@
 #include "ft8stationdialog.h"
 #include "dspflowpanel.h"
 #include "wirelesslabdialog.h"
+#include "analyzerframechannel.h"
+#include "multisdrdialog.h"
+#include "spectrummarkerpairsdialog.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -59,10 +62,12 @@
 #include <QPixmap>
 #include <QPolygonF>
 #include <QPointer>
+#include <QProcess>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStackedWidget>
+#include <QStyle>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QHeaderView>
@@ -134,6 +139,9 @@ YourClassName::YourClassName(QWidget *parent)
     {
 
     loadUiTranslations();
+
+    analyzerFramePublisher = new AnalyzerFramePublisher(this);
+    analyzerFramePublisher->start();
 
     setWindowTitle(QStringLiteral("Obrii SDR"));
 
@@ -939,16 +947,19 @@ YourClassName::YourClassName(QWidget *parent)
     graphWidget = new MyGraphWidget(this);
     graphWidget->setMinimumSize(760, 180);
     graphWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    graphWidget->setFocusPolicy(Qt::StrongFocus);
     graphWidget->setPauseControlVisible(true);
     
     scaleWidget = new ScaleWidget(this);
     scaleWidget->setMinimumWidth(760);
     scaleWidget->setFixedHeight(50);
     scaleWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    scaleWidget->setFocusPolicy(Qt::StrongFocus);
     
     waterfallWidget = new MyWaterfallWidget(this);
     waterfallWidget->setMinimumSize(760, 300);
     waterfallWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    waterfallWidget->setFocusPolicy(Qt::StrongFocus);
     waterfallWidget->setPauseControlVisible(true);
     waterfallWidget->setRowsPerFrame(waterfallRowsPerFrame);
     waterfallWidget->setAreaMeasurementEnabled(waterfallAreaMeasurementEnabled);
@@ -996,6 +1007,26 @@ YourClassName::YourClassName(QWidget *parent)
     waterfallDisplayModeLayout->addWidget(waterfallDisplayModeLabel);
     waterfallDisplayModeLayout->addWidget(waterfallDisplayModeCombo);
     waterfallDisplayModeLayout->addStretch(1);
+
+    QLabel *multiSdrViewModeLabel = new QLabel(QStringLiteral("Multi-SDR scale:"), this);
+    markTranslatable(multiSdrViewModeLabel,
+                     QStringLiteral("multi_sdr_view_mode"),
+                     QStringLiteral("Multi-SDR scale:"));
+    multiSdrViewModeCombo = new QComboBox(this);
+    multiSdrViewModeCombo->addItem(
+        uiText(QStringLiteral("multi_sdr_view_overview"), QStringLiteral("Combined overview")), 0);
+    multiSdrViewModeCombo->addItem(
+        uiText(QStringLiteral("multi_sdr_view_focused"), QStringLiteral("Focused receiver")), 1);
+    multiSdrViewModeCombo->setCurrentIndex(
+        std::max(0, multiSdrViewModeCombo->findData(multiSdrViewMode)));
+    multiSdrViewModeCombo->setToolTip(uiText(
+        QStringLiteral("multi_sdr_view_mode_tooltip"),
+        QStringLiteral("At 100%, show either the complete absolute span of all included receivers or the usable span of the focused receiver.")));
+    QHBoxLayout *multiSdrViewModeLayout = new QHBoxLayout();
+    multiSdrViewModeLayout->setContentsMargins(0, 0, 0, 0);
+    multiSdrViewModeLayout->addWidget(multiSdrViewModeLabel);
+    multiSdrViewModeLayout->addWidget(multiSdrViewModeCombo);
+    multiSdrViewModeLayout->addStretch(1);
 
     waterfall3DResolutionLabel = new QLabel(QStringLiteral("3D resolution:"), this);
     markTranslatable(waterfall3DResolutionLabel,
@@ -1391,6 +1422,24 @@ YourClassName::YourClassName(QWidget *parent)
     transmitButton->setToolTip(uiText(
         QStringLiteral("transmitter_tooltip"),
         QStringLiteral("Open the simulator-first transmitter laboratory; RF output is locked.")));
+    multiSdrPreviousFocusButton = new QPushButton(this);
+    multiSdrPreviousFocusButton->setIcon(style()->standardIcon(QStyle::SP_ArrowLeft));
+    multiSdrPreviousFocusButton->setFixedSize(30, 20);
+    multiSdrPreviousFocusButton->setIconSize(QSize(12, 12));
+    multiSdrPreviousFocusButton->setFocusPolicy(Qt::NoFocus);
+    multiSdrPreviousFocusButton->setEnabled(false);
+    multiSdrPreviousFocusButton->setToolTip(uiText(
+        QStringLiteral("multi_sdr_previous_receiver"),
+        QStringLiteral("Focus the previous receiver span")));
+    multiSdrNextFocusButton = new QPushButton(this);
+    multiSdrNextFocusButton->setIcon(style()->standardIcon(QStyle::SP_ArrowRight));
+    multiSdrNextFocusButton->setFixedSize(30, 20);
+    multiSdrNextFocusButton->setIconSize(QSize(12, 12));
+    multiSdrNextFocusButton->setFocusPolicy(Qt::NoFocus);
+    multiSdrNextFocusButton->setEnabled(false);
+    multiSdrNextFocusButton->setToolTip(uiText(
+        QStringLiteral("multi_sdr_next_receiver"),
+        QStringLiteral("Focus the next receiver span")));
     recordingModeCombo = new QComboBox(this);
     recordingModeCombo->addItem("Audio WAV", static_cast<int>(RecordingManager::Mode::AudioWav));
     recordingModeCombo->addItem("Channel IQ WAV", static_cast<int>(RecordingManager::Mode::ChannelIqWav));
@@ -1560,7 +1609,13 @@ YourClassName::YourClassName(QWidget *parent)
     
     sensLayout->addWidget(sensitivityLabel);
     sensLayout->addWidget(sensitivitySlider);
-    contrastLayout->addWidget(contrastLabel);
+    QHBoxLayout *contrastHeaderLayout = new QHBoxLayout();
+    contrastHeaderLayout->setContentsMargins(0, 0, 0, 0);
+    contrastHeaderLayout->setSpacing(4);
+    contrastHeaderLayout->addWidget(multiSdrPreviousFocusButton, 0, Qt::AlignLeft);
+    contrastHeaderLayout->addWidget(contrastLabel, 0, Qt::AlignLeft);
+    contrastHeaderLayout->addStretch(1);
+    contrastLayout->addLayout(contrastHeaderLayout);
     contrastLayout->addWidget(contrastSlider);
     scaleControlGrid->addWidget(scaleLabel, 0, 0);
     scaleControlGrid->addWidget(scaleSlider, 0, 1);
@@ -1570,7 +1625,13 @@ YourClassName::YourClassName(QWidget *parent)
     scaleControlGrid->setColumnStretch(1, 1);
     levelMinLayout->addWidget(levelMinLabel);
     levelMinLayout->addWidget(levelMinSlider);
-    levelMaxLayout->addWidget(levelMaxLabel);
+    QHBoxLayout *levelMaxHeaderLayout = new QHBoxLayout();
+    levelMaxHeaderLayout->setContentsMargins(0, 0, 0, 0);
+    levelMaxHeaderLayout->setSpacing(4);
+    levelMaxHeaderLayout->addWidget(levelMaxLabel, 0, Qt::AlignLeft);
+    levelMaxHeaderLayout->addStretch(1);
+    levelMaxHeaderLayout->addWidget(multiSdrNextFocusButton, 0, Qt::AlignRight);
+    levelMaxLayout->addLayout(levelMaxHeaderLayout);
     levelMaxLayout->addWidget(levelMaxSlider);
     
     QLabel *centralFrequencyLabel = new QLabel("Central Frequency:", this);
@@ -1687,9 +1748,11 @@ YourClassName::YourClassName(QWidget *parent)
     scanMeasurementExportButton->setToolTip(uiText(QStringLiteral("csv_tooltip"),
                                                    QStringLiteral("Export spectrum measurement bins to CSV")));
     spectrumScienceMarkerCombo = new QComboBox(spectrumMeasurementBox);
-    spectrumScienceMarkerCombo->addItem(QStringLiteral("A"), 0);
-    spectrumScienceMarkerCombo->addItem(QStringLiteral("B"), 1);
-    spectrumScienceMarkerCombo->setMaximumWidth(48);
+    while (spectrumScienceAnalyzer.markerCount() < SpectrumScienceAnalyzer::InteractiveMarkerCount)
+        spectrumScienceAnalyzer.addMarker();
+    for (int index = 0; index < spectrumScienceAnalyzer.markerCount(); ++index)
+        spectrumScienceMarkerCombo->addItem(spectrumScienceAnalyzer.marker(index).label, index);
+    spectrumScienceMarkerCombo->setMaximumWidth(62);
     auto *addScienceMarker = new QPushButton(QStringLiteral("+"), spectrumMeasurementBox);
     auto *removeScienceMarker = new QPushButton(QStringLiteral("-"), spectrumMeasurementBox);
     addScienceMarker->setMaximumWidth(28);
@@ -1697,6 +1760,8 @@ YourClassName::YourClassName(QWidget *parent)
     addScienceMarker->setToolTip(uiText("science_marker_add", "Add marker"));
     removeScienceMarker->setToolTip(uiText("science_marker_remove", "Remove selected marker (A/B are retained)"));
     connect(addScienceMarker, &QPushButton::clicked, this, [this]() {
+        if (spectrumScienceAnalyzer.markerCount() >=
+            SpectrumScienceAnalyzer::InteractiveMarkerCount) return;
         const int index = spectrumScienceAnalyzer.addMarker();
         if (index < 0) return;
         spectrumScienceMarkerCombo->addItem(spectrumScienceAnalyzer.marker(index).label, index);
@@ -1717,7 +1782,7 @@ YourClassName::YourClassName(QWidget *parent)
     markTranslatable(spectrumScienceSetButton, QStringLiteral("science_set"), QStringLiteral("Set"));
     spectrumScienceSetButton->setToolTip(uiText(
         QStringLiteral("science_set_tooltip"),
-        QStringLiteral("Set the active A/B marker to the listening frequency. Shift-click on the spectrum also sets it.")));
+        QStringLiteral("Set the active marker to the listening frequency. Shift-click on the spectrum also sets it.")));
     spectrumSciencePeakButton = new QPushButton("Peak", spectrumMeasurementBox);
     markTranslatable(spectrumSciencePeakButton, QStringLiteral("science_peak"), QStringLiteral("Peak"));
     spectrumSciencePreviousButton = new QPushButton("Prev", spectrumMeasurementBox);
@@ -1730,6 +1795,13 @@ YourClassName::YourClassName(QWidget *parent)
                                                   QStringLiteral("Move the active marker to the next local peak")));
     spectrumScienceClearButton = new QPushButton("Clear", spectrumMeasurementBox);
     markTranslatable(spectrumScienceClearButton, QStringLiteral("clear"), QStringLiteral("Clear"));
+    auto *spectrumSciencePairsButton = new QPushButton("Pairs...", spectrumMeasurementBox);
+    markTranslatable(spectrumSciencePairsButton,
+                     QStringLiteral("science_marker_pairs"),
+                     QStringLiteral("Pairs..."));
+    spectrumSciencePairsButton->setToolTip(uiText(
+        QStringLiteral("science_marker_pairs_tooltip"),
+        QStringLiteral("Choose the primary measurement range and add parallel marker pairs.")));
     spectrumScienceMaxHoldCheckbox = new QCheckBox("Max", spectrumMeasurementBox);
     markTranslatable(spectrumScienceMaxHoldCheckbox, QStringLiteral("science_max_hold"), QStringLiteral("Max"));
     spectrumScienceMaxHoldCheckbox->setToolTip(uiText(QStringLiteral("science_max_hold_tooltip"), QStringLiteral("Show the maximum level retained at every visible frequency")));
@@ -2005,6 +2077,7 @@ YourClassName::YourClassName(QWidget *parent)
     spectrumScienceMarkerNavigationLayout->addWidget(spectrumSciencePreviousButton);
     spectrumScienceMarkerNavigationLayout->addWidget(spectrumScienceNextButton);
     spectrumScienceMarkerNavigationLayout->addWidget(spectrumScienceClearButton);
+    spectrumScienceMarkerNavigationLayout->addWidget(spectrumSciencePairsButton);
     spectrumScienceMarkerNavigationLayout->addStretch(1);
     spectrumScienceTraceLayout->setContentsMargins(0, 0, 0, 0);
     spectrumScienceTraceLayout->setSpacing(4);
@@ -2024,6 +2097,87 @@ YourClassName::YourClassName(QWidget *parent)
     markTranslatable(wirelessLabButton, QStringLiteral("wireless_lab"), QStringLiteral("Wireless lab (beta)..."));
     spectrumScienceActionLayout->addWidget(wirelessLabButton, 3, 0, 1, 2);
     connect(wirelessLabButton, &QPushButton::clicked, this, &YourClassName::openWirelessLab);
+    auto *analyzerButton = new QPushButton(QStringLiteral("Obrii Analyzer..."), spectrumMeasurementBox);
+    analyzerButton->setToolTip(uiText(
+        QStringLiteral("obrii_analyzer_tooltip"),
+        QStringLiteral("Open the standalone laboratory analyzer and attach it to this live spectrum.")));
+    spectrumScienceActionLayout->addWidget(analyzerButton, 5, 0, 1, 2);
+    connect(analyzerButton, &QPushButton::clicked, this, [this]() {
+        const QString executableName = QStringLiteral("ObriiAnalyzer")
+#ifdef _WIN32
+            + QStringLiteral(".exe")
+#endif
+            ;
+        const QString executable = QDir(QCoreApplication::applicationDirPath()).filePath(executableName);
+        if (!QFileInfo::exists(executable) ||
+            !QProcess::startDetached(executable, {QStringLiteral("--connect")},
+                                     QCoreApplication::applicationDirPath())) {
+            QMessageBox::warning(this,
+                                 QStringLiteral("Obrii Analyzer"),
+                                 uiText(QStringLiteral("obrii_analyzer_launch_failed"),
+                                        QStringLiteral("ObriiAnalyzer executable was not found or could not be started.")));
+        }
+    });
+    auto *multiSdrButton = new QPushButton(QStringLiteral("Multi-SDR..."), this);
+    markTranslatable(multiSdrButton, QStringLiteral("multi_sdr"), QStringLiteral("Multi-SDR..."));
+    multiSdrButton->setToolTip(uiText(
+        QStringLiteral("multi_sdr_tooltip"),
+        QStringLiteral("Combine the main receiver with a second SDR on one frequency axis.")));
+    connect(multiSdrButton, &QPushButton::clicked, this, [this]() {
+        if (!multiSdrDialog) {
+            multiSdrDialog = new MultiSdrDialog(
+                uiLanguage.startsWith(QStringLiteral("uk"), Qt::CaseInsensitive), this, true);
+            connect(multiSdrDialog, &MultiSdrDialog::primaryRetuneRequested,
+                    this, [this](double deltaHz) {
+                if (!std::isfinite(deltaHz) || std::abs(deltaHz) < 0.01 ||
+                    pendingSettings.inputMode != INPUT_RF || offlineIqPlaybackActive)
+                    return;
+                const RadioSettings previousSettings = pendingSettings;
+                pendingSettings.centerFrequency += deltaHz;
+                pendingSettings.listeningFrequency += deltaHz;
+                normalizeTuning(pendingSettings, true);
+                applyCenterFrequencyToHardwareIfNeeded(previousSettings, "multi-SDR group pan");
+                publishSettingsToGlobals();
+                if (frequencyControl) {
+                    QSignalBlocker blocker(frequencyControl);
+                    frequencyControl->setValueHz(pendingSettings.centerFrequency);
+                }
+                if (listeningFrequencyControl) {
+                    QSignalBlocker blocker(listeningFrequencyControl);
+                    listeningFrequencyControl->setValueHz(pendingSettings.listeningFrequency);
+                }
+                settingRange();
+                if (isNetworkClientMode()) scheduleRemoteSettingsCommand(0);
+                else if (networkMode == NetworkMode::Server) sendServerStateToClients();
+            });
+            connect(multiSdrDialog, &MultiSdrDialog::primaryStartRequested,
+                    this, &YourClassName::startFobosProcessing);
+            connect(multiSdrDialog, &MultiSdrDialog::primaryStopRequested,
+                    this, &YourClassName::stopFobosProcessing);
+            connect(multiSdrDialog, &MultiSdrDialog::audioSourceChanged,
+                    this, [this](int receiverIndex) {
+                if (audioProcessor)
+                    audioProcessor->setExternalIqSourceEnabled(receiverIndex > 0);
+            });
+            connect(multiSdrDialog, &MultiSdrDialog::auxiliaryIqReady,
+                    this,
+                    [this](const float *samples, quint64 floatCount,
+                           double sampleRateHz, double centerHz) {
+                if (audioProcessor) {
+                    audioProcessor->submitExternalIq(
+                        samples, static_cast<std::size_t>(floatCount), sampleRateHz, centerHz);
+                }
+            }, Qt::DirectConnection);
+            multiSdrDialog->setPrimaryConfiguration(pendingSettings.centerFrequency,
+                                                    pendingSettings.sampleRate,
+                                                    pendingSettings.fftLength);
+            multiSdrDialog->setMainViewMode(multiSdrViewMode);
+            multiSdrDialog->setPrimaryRunning(isRunningOrTransitioning());
+        }
+        multiSdrDialog->show();
+        multiSdrDialog->raise();
+        multiSdrDialog->activateWindow();
+    });
     auto *propagationButton = new QPushButton("Radio propagation...", spectrumMeasurementBox);
     markTranslatable(propagationButton, QStringLiteral("radio_propagation"), QStringLiteral("Radio propagation..."));
     spectrumScienceActionLayout->addWidget(propagationButton, 4, 0, 1, 2);
@@ -3186,19 +3340,21 @@ YourClassName::YourClassName(QWidget *parent)
     fineTuneHeaderLayout->addWidget(fineTuneScaleModeButton, 0, Qt::AlignRight | Qt::AlignVCenter);
     fineTuneLayout->addLayout(fineTuneHeaderLayout);
     fineTuneLayout->addWidget(fineTuneStack);
-    QHBoxLayout *presetZoomLayout = new QHBoxLayout();
-    presetZoomLayout->setContentsMargins(0, 0, 0, 0);
-    presetZoomLayout->setSpacing(4);
-    presetZoomLayout->addWidget(presetManagerButton, 1);
-    presetZoomLayout->addWidget(zoomSpectrumButton, 0);
-    presetZoomLayout->addWidget(zoomDensityButton, 0);
-    fineTuneLayout->addLayout(presetZoomLayout);
+    QGridLayout *frequencyActionLayout = new QGridLayout();
+    frequencyActionLayout->setContentsMargins(0, 0, 0, 0);
+    frequencyActionLayout->setHorizontalSpacing(4);
+    frequencyActionLayout->setVerticalSpacing(4);
+    frequencyActionLayout->addWidget(presetManagerButton, 0, 0);
+    frequencyActionLayout->addWidget(zoomSpectrumButton, 0, 1);
+    frequencyActionLayout->addWidget(zoomDensityButton, 1, 0);
+    frequencyActionLayout->addWidget(multiSdrButton, 1, 1);
+    frequencyActionLayout->setColumnStretch(0, 1);
+    frequencyActionLayout->setColumnStretch(1, 1);
 
     QVBoxLayout *receiverControlLayout = new QVBoxLayout();
     receiverControlLayout->setContentsMargins(0, 0, 0, 0);
     receiverControlLayout->setSpacing(3);
     receiverControlLayout->addLayout(receiverRowsLayout);
-    receiverControlLayout->addLayout(fineTuneLayout);
 
     QWidget *quickHamContainer = new QWidget(this);
     quickHamContainer->setMinimumWidth(0);
@@ -3353,6 +3509,9 @@ YourClassName::YourClassName(QWidget *parent)
             });
 
     QHBoxLayout *startStopLayout = new QHBoxLayout();
+    const int startStopHeight = std::max(36, startButton->sizeHint().height() * 3 / 2);
+    startButton->setMinimumHeight(startStopHeight);
+    stopButton->setMinimumHeight(startStopHeight);
     startStopLayout->addWidget(startButton, 2);
     startStopLayout->addWidget(stopButton, 1);
 
@@ -3404,22 +3563,25 @@ YourClassName::YourClassName(QWidget *parent)
         return {section, contentLayout};
     };
 
-    CollapsibleSection deviceSection = createCollapsibleSection(QStringLiteral("device"), QStringLiteral("Device"), true);
-    deviceSection.contentLayout->addLayout(deviceButtonLayout);
-    deviceSection.contentLayout->addWidget(comboBox);
-
     CollapsibleSection receiverSection = createCollapsibleSection(QStringLiteral("receiver"), QStringLiteral("Receiver"), true);
+    receiverSection.contentLayout->addLayout(frequencyActionLayout);
+    receiverSection.contentLayout->addLayout(deviceButtonLayout);
+    receiverSection.contentLayout->addWidget(comboBox);
     receiverSection.contentLayout->addLayout(receiverControlLayout);
-    receiverSection.contentLayout->addLayout(centralFrequencyHeaderLayout);
-    receiverSection.contentLayout->addWidget(frequencyControl);
-    receiverSection.contentLayout->addLayout(listeningFrequencyHeaderLayout);
-    receiverSection.contentLayout->addWidget(listeningFrequencyControl);
-    receiverSection.contentLayout->addWidget(quickHamContainer);
     receiverSection.contentLayout->addLayout(gainLabelLayout);
     receiverSection.contentLayout->addLayout(gainSliderLayout);
     receiverSection.contentLayout->addLayout(rtlGainLayout);
     receiverSection.contentLayout->addWidget(hackRfSettingsButton);
     receiverSection.contentLayout->addLayout(startStopLayout);
+
+    CollapsibleSection frequencySection = createCollapsibleSection(
+        QStringLiteral("frequencies"), QStringLiteral("Frequencies"), true);
+    frequencySection.contentLayout->addLayout(centralFrequencyHeaderLayout);
+    frequencySection.contentLayout->addWidget(frequencyControl);
+    frequencySection.contentLayout->addLayout(listeningFrequencyHeaderLayout);
+    frequencySection.contentLayout->addWidget(listeningFrequencyControl);
+    frequencySection.contentLayout->addLayout(fineTuneLayout);
+    frequencySection.contentLayout->addWidget(quickHamContainer);
 
     multiVfoWidget = new MultiVfoWidget(this);
     multiVfoWidget->setLanguage(uiLanguage == QStringLiteral("uk"));
@@ -3546,6 +3708,7 @@ YourClassName::YourClassName(QWidget *parent)
         QStringLiteral("Waterfall visualization"),
         false);
     waterfall3DSection.contentLayout->addLayout(waterfallDisplayModeLayout);
+    waterfall3DSection.contentLayout->addLayout(multiSdrViewModeLayout);
     waterfall3DSection.contentLayout->addLayout(waterfall3DResolutionLayout);
     waterfall3DSection.contentLayout->addLayout(waterfall3DSurfaceLayout);
     waterfall3DSection.contentLayout->addLayout(waterfall3DHistoryRowsLayout);
@@ -3559,22 +3722,22 @@ YourClassName::YourClassName(QWidget *parent)
     waterfall3DSection.contentLayout->addLayout(waterfall3DMonochromeStyleLayout);
     waterfall3DSection.contentLayout->addLayout(alternativeSpectrumGradientOpacityLayout);
 
-    layout->addWidget(deviceSection.widget);
     layout->addWidget(receiverSection.widget);
-    layout->addWidget(multiVfoSection.widget);
+    layout->addWidget(frequencySection.widget);
     layout->addWidget(audioSection.widget);
     layout->addWidget(audioFilterChainSection.widget);
+    layout->addWidget(waterfall3DSection.widget);
+    layout->addWidget(multiVfoSection.widget);
+    layout->addWidget(qthSection.widget);
     layout->addWidget(hfCancelSection.widget);
     layout->addWidget(scanSection.widget);
-    layout->addWidget(spectrumMeasurementSection.widget);
     layout->addWidget(listeningScanSection.widget);
-    layout->addWidget(qthSection.widget);
     layout->addWidget(dmrHunterSection.widget);
     layout->addWidget(fpvHunterSection.widget);
     layout->addWidget(digitalVideoHunterSection.widget);
-    layout->addWidget(gpioSection.widget);
     layout->addWidget(recordingSection.widget);
-    layout->addWidget(waterfall3DSection.widget);
+    layout->addWidget(gpioSection.widget);
+    layout->addWidget(spectrumMeasurementSection.widget);
     layout->addStretch(1);
 
     controlsWidget->setLayout(layout);
@@ -5235,6 +5398,33 @@ YourClassName::YourClassName(QWidget *parent)
         spectrumScienceAnalyzer.clearMarker(spectrumScienceActiveMarker);
         updateSpectrumScienceUi();
     });
+    connect(spectrumSciencePairsButton, &QPushButton::clicked, this, [this]() {
+        if (!spectrumMarkerPairsDialog) {
+            QVector<SpectrumScienceMarker> markers;
+            markers.reserve(spectrumScienceAnalyzer.markerCount());
+            for (int index = 0; index < spectrumScienceAnalyzer.markerCount(); ++index)
+                markers.append(spectrumScienceAnalyzer.marker(index));
+            spectrumMarkerPairsDialog = new SpectrumMarkerPairsDialog(
+                uiLanguage.startsWith(QStringLiteral("uk"), Qt::CaseInsensitive), this);
+            spectrumMarkerPairsDialog->setMarkers(markers);
+            spectrumMarkerPairsDialog->setPairConfiguration(spectrumScienceMarkerPairConfiguration);
+            connect(spectrumMarkerPairsDialog, &SpectrumMarkerPairsDialog::primaryPairChanged,
+                    this, [this](int first, int second) {
+                spectrumScienceAnalyzer.setMeasurementMarkerPair(first, second);
+                updateSpectrumScienceUi();
+                savePersistentSettings();
+            });
+            connect(spectrumMarkerPairsDialog, &SpectrumMarkerPairsDialog::configurationChanged,
+                    this, [this]() {
+                spectrumScienceMarkerPairConfiguration =
+                    spectrumMarkerPairsDialog->pairConfiguration();
+                savePersistentSettings();
+            });
+        }
+        spectrumMarkerPairsDialog->show();
+        spectrumMarkerPairsDialog->raise();
+        spectrumMarkerPairsDialog->activateWindow();
+    });
     auto applyScienceTraceSettings = [this]() {
         spectrumScienceMaxHoldEnabled = spectrumScienceMaxHoldCheckbox && spectrumScienceMaxHoldCheckbox->isChecked();
         spectrumScienceMinHoldEnabled = spectrumScienceMinHoldCheckbox && spectrumScienceMinHoldCheckbox->isChecked();
@@ -5578,6 +5768,23 @@ YourClassName::YourClassName(QWidget *parent)
     connect(presetManagerButton, &QPushButton::clicked, this, &YourClassName::openPresetManager);
     connect(zoomSpectrumButton, &QPushButton::clicked, this, &YourClassName::openZoomSpectrum);
     connect(zoomDensityButton, &QPushButton::clicked, this, &YourClassName::openZoomDensity);
+    const auto focusMultiSdrReceiver = [this](int direction) {
+        if (!multiSdrDialog || multiSdrDialog->mainIncludedReceiverCount() < 2) return;
+        const int focusedIndex = multiSdrViewModeCombo
+                                     ? multiSdrViewModeCombo->findData(1)
+                                     : -1;
+        if (multiSdrViewModeCombo && focusedIndex >= 0)
+            multiSdrViewModeCombo->setCurrentIndex(focusedIndex);
+        multiSdrViewMode = 1;
+        multiSdrDialog->setMainViewMode(1);
+        multiSdrDialog->focusAdjacentMainReceiver(direction);
+        AnalyzerSpectrumFrame frame;
+        if (multiSdrDialog->mainMosaicFrame(frame)) spectrumDisplayCenterHz = frame.centerHz;
+    };
+    connect(multiSdrPreviousFocusButton, &QPushButton::clicked, this,
+            [focusMultiSdrReceiver]() { focusMultiSdrReceiver(-1); });
+    connect(multiSdrNextFocusButton, &QPushButton::clicked, this,
+            [focusMultiSdrReceiver]() { focusMultiSdrReceiver(1); });
     connect(appSettingsButton, &QPushButton::clicked, this, &YourClassName::openApplicationSettings);
     connect(dspPathButton, &QPushButton::clicked, this, [this]() {
         ensureDspFlowPanel();
@@ -5635,6 +5842,20 @@ YourClassName::YourClassName(QWidget *parent)
                 waterfallDisplayMode = requestedMode;
                 waterfallWidget->setDisplayMode(
                     static_cast<MyWaterfallWidget::DisplayMode>(waterfallDisplayMode));
+                savePersistentSettings();
+            });
+    connect(multiSdrViewModeCombo,
+            qOverload<int>(&QComboBox::currentIndexChanged),
+            this,
+            [this](int index) {
+                if (!multiSdrViewModeCombo || index < 0) return;
+                multiSdrViewMode = multiSdrViewModeCombo->itemData(index).toInt() == 1 ? 1 : 0;
+                if (multiSdrDialog) {
+                    multiSdrDialog->setMainViewMode(multiSdrViewMode);
+                    AnalyzerSpectrumFrame frame;
+                    if (multiSdrDialog->mainMosaicFrame(frame))
+                        spectrumDisplayCenterHz = frame.centerHz;
+                }
                 savePersistentSettings();
             });
     connect(waterfall3DResolutionCombo,
@@ -5863,6 +6084,9 @@ YourClassName::YourClassName(QWidget *parent)
     populateAudioDevices();
     refreshSettingsFromUi();
     loadPersistentSettings();
+    while (spectrumScienceAnalyzer.markerCount() < SpectrumScienceAnalyzer::InteractiveMarkerCount)
+        spectrumScienceAnalyzer.addMarker();
+    updateSpectrumScienceUi();
     publishSettingsToGlobals();
     updateFineTuneControlMode();
     updateUiFromPendingSettings();
@@ -5889,6 +6113,10 @@ YourClassName::YourClassName(QWidget *parent)
 
 YourClassName::~YourClassName() {
     qApp->removeEventFilter(this);
+    if (multiSdrDialog) {
+        delete multiSdrDialog;
+        multiSdrDialog = nullptr;
+    }
     if (dspFlowPanel) {
         dspFlowPanel->hide();
         delete dspFlowPanel;
@@ -6039,6 +6267,25 @@ bool YourClassName::eventFilter(QObject *watched, QEvent *event) {
                 startSpectrumFrameRecording();
             }
             return true;
+        }
+        if (keyEvent && event->type() == QEvent::KeyPress && !keyEvent->isAutoRepeat() &&
+            keyEvent->modifiers() == Qt::NoModifier &&
+            (keyEvent->key() == Qt::Key_Left || keyEvent->key() == Qt::Key_Right)) {
+            QWidget *focused = QApplication::focusWidget();
+            const auto isWithin = [focused](QWidget *surface) {
+                return focused && surface &&
+                       (focused == surface || surface->isAncestorOf(focused));
+            };
+            const bool spectrumSurfaceFocused = isWithin(graphWidget) ||
+                                                isWithin(scaleWidget) ||
+                                                isWithin(waterfallWidget);
+            QPushButton *target = keyEvent->key() == Qt::Key_Left
+                                      ? multiSdrPreviousFocusButton
+                                      : multiSdrNextFocusButton;
+            if (spectrumSurfaceFocused && target && target->isEnabled()) {
+                target->click();
+                return true;
+            }
         }
     }
     return QMainWindow::eventFilter(watched, event);
@@ -7460,6 +7707,13 @@ void YourClassName::clearLiveSpectrumSnapshot(bool clearVisualHistory, uint64_t 
 void YourClassName::updateUiForRunState() {
     const bool processorRunning = processor && processor->isRunning();
     const bool idle = isIdle() && !processorRunning;
+    if (multiSdrDialog) {
+        multiSdrDialog->setPrimaryConfiguration(pendingSettings.centerFrequency,
+                                                pendingSettings.sampleRate,
+                                                pendingSettings.fftLength);
+        multiSdrDialog->setPrimaryRunning(runState == RadioRunState::Starting ||
+                                          runState == RadioRunState::Running);
+    }
     if (!idle && usbDeviceRefreshTimer) {
         usbDeviceRefreshTimer->stop();
     }

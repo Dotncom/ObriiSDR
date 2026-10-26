@@ -773,7 +773,8 @@ void MyWaterfallWidget::setData(const std::vector<float> &sourceXData,
                                 float sensitivity,
                                 float levelMin,
                                  float levelMax,
-                                 bool displayOrdered) {
+                                 bool displayOrdered,
+                                 bool preserveFrequencyGaps) {
     if (displayPaused) return;
     bool shouldScheduleUpdate = false;
     bool shouldRefreshSliceOverlay = false;
@@ -849,36 +850,39 @@ void MyWaterfallWidget::setData(const std::vector<float> &sourceXData,
                 }
             }
 
-            int previousFilled = -1;
-            float previousValue = this->levelMin;
-            for (int x = 0; x < lineWidth; ++x) {
-                const float value = pixelMaxData[static_cast<std::size_t>(x)];
-                if (!std::isfinite(value)) {
-                    continue;
+            if (preserveFrequencyGaps) {
+                for (float &value : pixelMaxData) {
+                    if (!std::isfinite(value)) value = this->levelMin;
+                }
+            } else {
+                int previousFilled = -1;
+                float previousValue = this->levelMin;
+                for (int x = 0; x < lineWidth; ++x) {
+                    const float value = pixelMaxData[static_cast<std::size_t>(x)];
+                    if (!std::isfinite(value)) continue;
+
+                    if (previousFilled < 0) {
+                        for (int fill = 0; fill < x; ++fill)
+                            pixelMaxData[static_cast<std::size_t>(fill)] = value;
+                    } else if (x - previousFilled > 1) {
+                        const int gap = x - previousFilled;
+                        for (int fill = previousFilled + 1; fill < x; ++fill) {
+                            const float t = static_cast<float>(fill - previousFilled) /
+                                            static_cast<float>(gap);
+                            pixelMaxData[static_cast<std::size_t>(fill)] =
+                                previousValue + (value - previousValue) * t;
+                        }
+                    }
+
+                    previousFilled = x;
+                    previousValue = value;
                 }
 
                 if (previousFilled < 0) {
-                    for (int fill = 0; fill < x; ++fill) {
-                        pixelMaxData[static_cast<std::size_t>(fill)] = value;
-                    }
-                } else if (x - previousFilled > 1) {
-                    const int gap = x - previousFilled;
-                    for (int fill = previousFilled + 1; fill < x; ++fill) {
-                        const float t = static_cast<float>(fill - previousFilled) / static_cast<float>(gap);
-                        pixelMaxData[static_cast<std::size_t>(fill)] =
-                            previousValue + (value - previousValue) * t;
-                    }
-                }
-
-                previousFilled = x;
-                previousValue = value;
-            }
-
-            if (previousFilled < 0) {
-                std::fill(pixelMaxData.begin(), pixelMaxData.end(), this->levelMin);
-            } else {
-                for (int fill = previousFilled + 1; fill < lineWidth; ++fill) {
-                    pixelMaxData[static_cast<std::size_t>(fill)] = previousValue;
+                    std::fill(pixelMaxData.begin(), pixelMaxData.end(), this->levelMin);
+                } else {
+                    for (int fill = previousFilled + 1; fill < lineWidth; ++fill)
+                        pixelMaxData[static_cast<std::size_t>(fill)] = previousValue;
                 }
             }
 

@@ -6,6 +6,8 @@
 #include "researchanalysisdialog.h"
 #include "zerospandialog.h"
 #include "zoomdensitydialog.h"
+#include "analyzerframechannel.h"
+#include "spectrummarkerpairsdialog.h"
 
 #include <QDebug>
 #include <QDateTime>
@@ -51,6 +53,10 @@ QString scienceLevelText(double levelDb, int unit) {
 
 void YourClassName::updateSpectrumScience(const std::vector<float> &frequencies,
                                           const std::vector<float> &levels) {
+    if (analyzerFramePublisher && analyzerFramePublisher->hasSubscribers()) {
+        analyzerFramePublisher->publish(frequencies, levels, pendingSettings.fftLength);
+    }
+    if (!spectrumScienceLocalAnalysisRequired()) return;
     spectrumScienceAnalyzer.setTraceEnabled(spectrumScienceMaxHoldEnabled,
                                             spectrumScienceMinHoldEnabled,
                                             spectrumScienceAverageEnabled);
@@ -98,6 +104,11 @@ void YourClassName::updateSpectrumScience(const std::vector<float> &frequencies,
 }
 
 bool YourClassName::spectrumScienceAnalysisRequired() const {
+    return (analyzerFramePublisher && analyzerFramePublisher->hasSubscribers()) ||
+           spectrumScienceLocalAnalysisRequired();
+}
+
+bool YourClassName::spectrumScienceLocalAnalysisRequired() const {
     return spectrumScienceAnalyzer.hasMarkers() ||
            spectrumScienceMaxHoldEnabled ||
            spectrumScienceMinHoldEnabled ||
@@ -272,6 +283,7 @@ void YourClassName::updateSpectrumScienceUi() {
     markers.reserve(spectrumScienceAnalyzer.markerCount());
     for (int i = 0; i < spectrumScienceAnalyzer.markerCount(); ++i)
         markers.append(spectrumScienceAnalyzer.marker(i));
+    if (spectrumMarkerPairsDialog) spectrumMarkerPairsDialog->setMarkers(markers);
     const int activeMarkerIndex = std::clamp(spectrumScienceActiveMarker, 0, markers.size() - 1);
     const SpectrumScienceMarker activeMarker = markers.at(activeMarkerIndex);
     if (graphWidget) {
@@ -321,10 +333,15 @@ void YourClassName::updateSpectrumScienceUi() {
         QString status = markerText(markers.at(activeMarkerIndex));
         QStringList allMarkers;
         for (const auto &marker : markers) if (marker.enabled) allMarkers << markerText(marker);
-        if (markers.at(0).enabled && markers.at(1).enabled) {
+        const int firstPairMarker = spectrumScienceAnalyzer.measurementMarkerFirst();
+        const int secondPairMarker = spectrumScienceAnalyzer.measurementMarkerSecond();
+        if (markers.at(firstPairMarker).enabled && markers.at(secondPairMarker).enabled) {
             status += QStringLiteral(" | dF %1 kHz | dL %2 dB")
-                          .arg(std::abs(markers.at(1).frequencyHz - markers.at(0).frequencyHz) / 1.0e3, 0, 'f', 3)
-                          .arg(markers.at(1).levelDb - markers.at(0).levelDb, 0, 'f', 1);
+                          .arg(std::abs(markers.at(secondPairMarker).frequencyHz -
+                                        markers.at(firstPairMarker).frequencyHz) / 1.0e3, 0, 'f', 3)
+                          .arg(markers.at(secondPairMarker).levelDb -
+                                   markers.at(firstPairMarker).levelDb,
+                               0, 'f', 1);
         }
         spectrumScienceMarkerStatusLabel->setText(status);
         spectrumScienceMarkerStatusLabel->setToolTip(allMarkers.join(QLatin1Char('\n')));

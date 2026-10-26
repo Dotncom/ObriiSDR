@@ -117,7 +117,9 @@ void prepareSpectrumDisplayFrame(const std::vector<float> &sourceFrequencies,
                                  int targetBins,
                                  float fallbackLevel,
                                  SpectrumDisplayReduction reduction,
-                                 SpectrumDisplayFrame &output) {
+                                 SpectrumDisplayFrame &output,
+                                 bool sourceLevelsFrequencyOrdered,
+                                 bool preserveFrequencyGaps) {
     const int availableCount = std::min({sourceCount,
                                          static_cast<int>(sourceFrequencies.size()),
                                          static_cast<int>(sourceLevels.size())});
@@ -143,7 +145,8 @@ void prepareSpectrumDisplayFrame(const std::vector<float> &sourceFrequencies,
     }
 
     const double span = maxFrequency - minFrequency;
-    if (hasRegularFrequencyGrid(sourceFrequencies, availableCount)) {
+    const bool regularGrid = hasRegularFrequencyGrid(sourceFrequencies, availableCount);
+    if (regularGrid) {
         const double sourceFirstFrequency = sourceFrequencies.front();
         const double sourceLastFrequency = sourceFrequencies[static_cast<std::size_t>(availableCount - 1)];
         const double sourceStep = (sourceLastFrequency - sourceFirstFrequency) /
@@ -165,7 +168,9 @@ void prepareSpectrumDisplayFrame(const std::vector<float> &sourceFrequencies,
             BinAccumulator overlayAccumulator;
             const double centerFrequency = (lowerFrequency + upperFrequency) * 0.5;
             for (int index = firstIndex; index < lastIndex; ++index) {
-                const int shiftedIndex = (index + availableCount / 2) % availableCount;
+                const int shiftedIndex = sourceLevelsFrequencyOrdered
+                                             ? index
+                                             : (index + availableCount / 2) % availableCount;
                 const float level = sourceLevels[static_cast<std::size_t>(shiftedIndex)];
                 const double distance = reduction == SpectrumDisplayReduction::Sample
                     ? std::abs(static_cast<double>(sourceFrequencies[static_cast<std::size_t>(index)]) - centerFrequency)
@@ -201,7 +206,9 @@ void prepareSpectrumDisplayFrame(const std::vector<float> &sourceFrequencies,
                                            (static_cast<double>(bin) + 0.5) * span / binCount;
             const double distance = reduction == SpectrumDisplayReduction::Sample
                 ? std::abs(static_cast<double>(frequency) - centerFrequency) : 0.0;
-            const int shiftedIndex = (index + availableCount / 2) % availableCount;
+            const int shiftedIndex = sourceLevelsFrequencyOrdered
+                                         ? index
+                                         : (index + availableCount / 2) % availableCount;
             const float level = sourceLevels[static_cast<std::size_t>(shiftedIndex)];
             levelAccumulators[static_cast<std::size_t>(bin)].add(level, distance, reduction);
             if (includeOverlay) {
@@ -220,9 +227,41 @@ void prepareSpectrumDisplayFrame(const std::vector<float> &sourceFrequencies,
         }
     }
 
-    fillMissingBins(output.levels, fallbackLevel);
-    if (includeOverlay) {
-        fillMissingBins(output.overlayLevels, fallbackLevel);
+    if (!preserveFrequencyGaps) {
+        fillMissingBins(output.levels, fallbackLevel);
+        if (includeOverlay) fillMissingBins(output.overlayLevels, fallbackLevel);
+    } else if (regularGrid && sourceLevelsFrequencyOrdered) {
+        // A zoomed output can have more screen bins than source samples inside
+        // the viewport. Fill those resampling holes, then restore only gaps
+        // that are explicitly non-finite in the absolute-frequency source.
+        fillMissingBins(output.levels, fallbackLevel);
+        if (includeOverlay) fillMissingBins(output.overlayLevels, fallbackLevel);
+        const double sourceFirstFrequency = sourceFrequencies.front();
+        const double sourceLastFrequency =
+            sourceFrequencies[static_cast<std::size_t>(availableCount - 1)];
+        const double sourceStep = (sourceLastFrequency - sourceFirstFrequency) /
+                                  static_cast<double>(availableCount - 1);
+        const auto restoreExplicitGaps = [&](std::vector<float> &values,
+                                             const std::vector<float> &source) {
+            for (int bin = 0; bin < binCount; ++bin) {
+                const double frequency = minFrequency +
+                    (static_cast<double>(bin) + 0.5) * span / static_cast<double>(binCount);
+                const double position = (frequency - sourceFirstFrequency) / sourceStep;
+                if (position < 0.0 || position > static_cast<double>(availableCount - 1))
+                    continue;
+                const int left = std::clamp(static_cast<int>(std::floor(position)),
+                                            0, availableCount - 1);
+                const int right = std::clamp(static_cast<int>(std::ceil(position)),
+                                             0, availableCount - 1);
+                if (!std::isfinite(source[static_cast<std::size_t>(left)]) &&
+                    !std::isfinite(source[static_cast<std::size_t>(right)])) {
+                    values[static_cast<std::size_t>(bin)] =
+                        -std::numeric_limits<float>::infinity();
+                }
+            }
+        };
+        restoreExplicitGaps(output.levels, sourceLevels);
+        if (includeOverlay) restoreExplicitGaps(output.overlayLevels, *sourceOverlayLevels);
     }
     for (int bin = 0; bin < binCount; ++bin) {
         output.frequencies[static_cast<std::size_t>(bin)] = static_cast<float>(

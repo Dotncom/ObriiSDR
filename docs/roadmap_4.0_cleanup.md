@@ -6,7 +6,7 @@ docs/release_stability_handoff.md.
 
 ## Current Baseline
 
-The v6.4.1 release baseline provides:
+The v6.5.0 release baseline provides:
 
 1. First-class Fobos Standard and Agile receive paths, native RTL-SDR, and a
    hardware-tested native HackRF receive path. SoapySDR remains optional and

@@ -75,7 +75,7 @@ void MyGraphWidget::resizeGL(int w, int h) {
     }
 }
 
-void MyGraphWidget::setData(const std::vector<float> &xData, const std::vector<float> &yData, double xMin, double xMax, int fftLength, bool colorf, bool displayOrdered) {
+void MyGraphWidget::setData(const std::vector<float> &xData, const std::vector<float> &yData, double xMin, double xMax, int fftLength, bool colorf, bool displayOrdered, bool preserveFrequencyGaps) {
     if (displayPaused) return;
     this->xData = xData;
     this->yData = yData;
@@ -84,6 +84,7 @@ void MyGraphWidget::setData(const std::vector<float> &xData, const std::vector<f
     this->fftLength = std::max(0, fftLength);
     this->colorf = colorf;
     this->dataDisplayOrdered = displayOrdered;
+    this->preserveDataFrequencyGaps = preserveFrequencyGaps;
     update();
 }
 
@@ -307,6 +308,9 @@ void MyGraphWidget::paintGL() {
                     continue;
                 }
                 float intensity = displayLevelAt(yData, i, dataCount, dataDisplayOrdered);
+                if (!std::isfinite(intensity) && preserveDataFrequencyGaps) {
+                    continue;
+                }
                 if (!std::isfinite(intensity)) {
                     intensity = yMin;
                 }
@@ -326,6 +330,10 @@ void MyGraphWidget::paintGL() {
                 const float frequency = renderFrequencyScratch[index];
                 const float intensity = renderLevelScratch[index];
                 if (!std::isfinite(frequency) || !std::isfinite(intensity)) {
+                    if (drawing) {
+                        glEnd();
+                        drawing = false;
+                    }
                     continue;
                 }
                 if (!drawing) {
@@ -348,10 +356,14 @@ void MyGraphWidget::paintGL() {
                 glEnd();
             }
         } else {
-            glBegin(GL_LINE_STRIP);
+            bool drawing = false;
             for (int i = 0; i < dataCount; ++i) {
                 const double frequency = displayFrequencyAt(i, dataCount);
                 if (!std::isfinite(frequency)) {
+                    if (drawing) {
+                        glEnd();
+                        drawing = false;
+                    }
                     continue;
                 }
                 const float xNorm = static_cast<float>((frequency - xMin) / (xMax - xMin));
@@ -359,8 +371,17 @@ void MyGraphWidget::paintGL() {
                     continue;
                 }
                 float intensity = displayLevelAt(yData, i, dataCount, dataDisplayOrdered);
-                if (!std::isfinite(intensity)) {
-                    intensity = 0.0f;
+                if (!std::isfinite(intensity) && preserveDataFrequencyGaps) {
+                    if (drawing) {
+                        glEnd();
+                        drawing = false;
+                    }
+                    continue;
+                }
+                if (!std::isfinite(intensity)) intensity = yMin;
+                if (!drawing) {
+                    glBegin(GL_LINE_STRIP);
+                    drawing = true;
                 }
                 const float level = normalizedLevel(intensity);
                 if (colorf == true) {
@@ -373,7 +394,7 @@ void MyGraphWidget::paintGL() {
                 const float yPos = plotBottom + level * plotHeight;
                 glVertex2f(xPos, yPos);
             }
-            glEnd();
+            if (drawing) glEnd();
         }
 
         if (overlayEnabled && !overlayYData.empty()) {

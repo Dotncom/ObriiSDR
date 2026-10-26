@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 6.4.1)
+project(ObriiSDR VERSION 6.5.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -145,6 +145,40 @@ add_library(ObriiItm STATIC
 set_target_properties(ObriiItm PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 target_include_directories(ObriiItm PUBLIC ${CMAKE_SOURCE_DIR}/third_party/ntia_itm/include)
 
+# Shared, statically linked measurement code. Keeping the hot algorithms here
+# lets ObriiSDR and the standalone instrument use identical calculations without
+# a runtime DLL boundary or per-frame indirection.
+add_library(ObriiMeasurementCore STATIC
+    src/analyzer/analyzerframechannel.cpp
+    src/analyzer/analyzerframechannel.h
+    src/analyzer/instrumentsweepengine.cpp
+    src/analyzer/instrumentsweepengine.h
+    src/analyzer/spectrummosaicengine.cpp
+    src/analyzer/spectrummosaicengine.h
+    src/research/spectrumframerecorder.cpp
+    src/research/spectrumframerecorder.h
+    src/research/spectrumscienceanalyzer.cpp
+    src/research/spectrumscienceanalyzer.h
+    src/research/tonalspectrum.cpp
+    src/research/tonalspectrum.h
+    src/research/receivercalibrationtable.cpp
+    src/research/receivercalibrationtable.h
+    src/research/receivernoisebaseline.cpp
+    src/research/receivernoisebaseline.h
+    src/research/receiveryfactorcalibration.cpp
+    src/research/receiveryfactorcalibration.h
+)
+target_include_directories(ObriiMeasurementCore PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/analyzer
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/research
+    ${CMAKE_SOURCE_DIR}/src/ui
+)
+target_link_libraries(ObriiMeasurementCore PUBLIC Qt5::Core Qt5::Network)
+if(MSVC)
+    target_compile_options(ObriiMeasurementCore PRIVATE /utf-8)
+endif()
+
 set(SOURCES
     src/main.cpp
     src/main.h
@@ -245,6 +279,14 @@ set(SOURCES
     src/utils/appsettingsutils.h
     src/ui/apphelp.cpp
     src/ui/apphelp.h
+    src/analyzer/analyzerreceiver.cpp
+    src/analyzer/analyzerreceiver.h
+    src/analyzer/analyzerspectrumwidget.cpp
+    src/analyzer/analyzerspectrumwidget.h
+    src/analyzer/multisdrdialog.cpp
+    src/analyzer/multisdrdialog.h
+    src/ui/spectrummarkerpairsdialog.cpp
+    src/ui/spectrummarkerpairsdialog.h
     src/core/dataprocessor.cpp
     src/core/dataprocessor.h
     src/core/diagnosticlogging.h
@@ -306,15 +348,10 @@ set(SOURCES
     src/core/iqbuffer.h
     src/network/networkcontroller.cpp
     src/network/networkcontroller.h
-    src/research/spectrumframerecorder.cpp
-    src/research/spectrumframerecorder.h
     src/research/spectrumframereplaydialog.cpp
     src/research/spectrumframereplaydialog.h
     src/research/spectrumiqeventrecorder.cpp
     src/research/spectrumiqeventrecorder.h
-    src/research/spectrumscienceanalyzer.cpp
-    src/research/spectrumscienceanalyzer.h
-    src/research/tonalspectrum.cpp
     src/gnss/gnsssdrstream.cpp
     src/gnss/gnsssdrstream.h
     src/gnss/gnsssdrpvtdialog.cpp
@@ -322,19 +359,12 @@ set(SOURCES
     src/digital/lrptdecodedialog.cpp
     src/digital/lrptdecodedialog.h
     src/mainwindow/main_externaltools.cpp
-    src/research/tonalspectrum.h
     src/research/hdf5spectrumexport.cpp
     src/research/hdf5spectrumexport.h
     src/research/hdf5spectrumexportui.cpp
     src/research/hdf5spectrumexportui.h
     src/research/publicdatafetch.cpp src/research/publicdatafetch.h
     src/research/spaceeventsfeed.cpp src/research/spaceeventsfeed.h
-    src/research/receivercalibrationtable.cpp
-    src/research/receivercalibrationtable.h
-    src/research/receivernoisebaseline.cpp
-    src/research/receivernoisebaseline.h
-    src/research/receiveryfactorcalibration.cpp
-    src/research/receiveryfactorcalibration.h
     src/research/researchanalysisdialog.cpp
     src/research/researchanalysisdialog.h
     src/research/iqconstellationpreview.cpp
@@ -463,9 +493,62 @@ if(WIN32)
 endif()
 
 add_executable(ObriiSDR ${SOURCES})
+
+add_executable(ObriiAnalyzer
+    src/analyzer/analyzerfobosglobals.cpp
+    src/analyzer/analyzerreceiver.cpp
+    src/analyzer/analyzerreceiver.h
+    src/analyzer/analyzermain.cpp
+    src/analyzer/analyzermainwindow.cpp
+    src/analyzer/analyzermainwindow.h
+    src/analyzer/multisdrdialog.cpp
+    src/analyzer/multisdrdialog.h
+    src/analyzer/analyzerspectrumwidget.cpp
+    src/analyzer/analyzerspectrumwidget.h
+    src/ui/spectrummarkerpairsdialog.cpp
+    src/ui/spectrummarkerpairsdialog.h
+    src/backends/fobosbackend.cpp
+    src/backends/fobosbackend.h
+    src/backends/hackrfbackend.cpp
+    src/backends/hackrfbackend.h
+    src/backends/rtlsdrbackend.cpp
+    src/backends/rtlsdrbackend.h
+    src/backends/soapysdrbackend.cpp
+    src/backends/soapysdrbackend.h
+    src/core/fftplannermutex.cpp
+    src/core/fftplannermutex.h
+    src/app_resources.qrc
+)
+if(WIN32)
+    target_sources(ObriiAnalyzer PRIVATE packaging/windows/fobosapp.rc)
+endif()
+target_include_directories(ObriiAnalyzer PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/analyzer
+    ${CMAKE_SOURCE_DIR}/src/backends
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/research
+    ${CMAKE_SOURCE_DIR}/src/ui
+    ${FOBOS_STANDARD_INCLUDE_DIR}
+    ${FOBOS_AGILE_INCLUDE_DIR}
+    ${FFTW_INCLUDE_DIR}
+)
+target_compile_definitions(ObriiAnalyzer PRIVATE OBRII_ANALYZER_VERSION="${PROJECT_VERSION}")
+target_link_libraries(ObriiAnalyzer PRIVATE
+    ObriiMeasurementCore
+    ${FOBOS_STANDARD_LIBRARY}
+    ${FOBOS_AGILE_LIBRARY}
+    ${FFTW_FLOAT_LIBRARY}
+    Qt5::Core Qt5::Widgets Qt5::Network Qt5::Concurrent)
+if(MSVC)
+    target_compile_options(ObriiAnalyzer PRIVATE /utf-8)
+    target_compile_definitions(ObriiAnalyzer PRIVATE FOBOSAPP_HAS_FFTW_THREADS=1)
+endif()
 set(OBRII_RUNTIME_OUTPUT_DIR "" CACHE PATH "Persistent local runtime directory for the Windows application")
 if(WIN32 AND OBRII_RUNTIME_OUTPUT_DIR)
     set_target_properties(ObriiSDR PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+    set_target_properties(ObriiAnalyzer PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
 endif()
 option(FOBOS_ENABLE_HF_PREDICTION "Optional isolated ITU HF planning dialog" ON)
@@ -507,6 +590,7 @@ target_include_directories(ObriiSDR PRIVATE
 target_link_libraries(ObriiSDR PRIVATE
     ObriiDmrCrypto
     ObriiItm
+    ObriiMeasurementCore
     ${FOBOS_STANDARD_LIBRARY}
     ${FOBOS_AGILE_LIBRARY}
     ${FFTW_FLOAT_LIBRARY}
@@ -579,6 +663,27 @@ if(OBRII_HDF5_INCLUDE_DIR)
 endif()
 
 if(FOBOS_BUILD_CW_SELFTEST)
+    add_executable(ObriiInstrumentSweepSelfTest tools/instrument_sweep_selftest.cpp)
+    target_include_directories(ObriiInstrumentSweepSelfTest PRIVATE src/analyzer)
+    target_link_libraries(ObriiInstrumentSweepSelfTest PRIVATE ObriiMeasurementCore Qt5::Core)
+    if(MSVC)
+        target_compile_options(ObriiInstrumentSweepSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiAnalyzerFrameChannelSelfTest tools/analyzer_frame_channel_selftest.cpp)
+    target_include_directories(ObriiAnalyzerFrameChannelSelfTest PRIVATE src/analyzer)
+    target_link_libraries(ObriiAnalyzerFrameChannelSelfTest PRIVATE ObriiMeasurementCore Qt5::Core Qt5::Network)
+    if(MSVC)
+        target_compile_options(ObriiAnalyzerFrameChannelSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiSpectrumMosaicSelfTest tools/spectrum_mosaic_selftest.cpp)
+    target_include_directories(ObriiSpectrumMosaicSelfTest PRIVATE src/analyzer)
+    target_link_libraries(ObriiSpectrumMosaicSelfTest PRIVATE ObriiMeasurementCore Qt5::Core)
+    if(MSVC)
+        target_compile_options(ObriiSpectrumMosaicSelfTest PRIVATE /utf-8)
+    endif()
+
     add_executable(ObriiFpvAutoScanSelfTest tools/fpv_autoscan_selftest.cpp
         src/digital/fpvautoscancontroller.cpp)
     target_include_directories(ObriiFpvAutoScanSelfTest PRIVATE src/digital)

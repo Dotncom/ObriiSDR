@@ -23,6 +23,7 @@ constexpr double FM_DEEMPHASIS_SECONDS = 50e-6;
 constexpr double NFM_DEEMPHASIS_SECONDS = 300e-6;
 constexpr size_t MAX_AUDIO_BUFFER_SAMPLES = BUFFER_SIZE * 10;
 constexpr size_t AUDIO_START_BUFFER_SAMPLES = BUFFER_SIZE * 2;
+constexpr size_t MAX_EXTERNAL_IQ_BLOCKS = 4;
 constexpr double SSB_LOW_CUT_HZ = 250.0;
 constexpr double SSB_MAX_AUDIO_HZ = 3600.0;
 constexpr double SAM_LOCK_RANGE_HZ = 1500.0;
@@ -289,6 +290,51 @@ void AudioProcessor::configure(const RadioSettings &settings) {
     }
 }
 
+void AudioProcessor::setExternalIqSourceEnabled(bool enabled) {
+    const bool changed = externalIqSourceEnabled.exchange(enabled) != enabled;
+    {
+        std::lock_guard<std::mutex> lock(externalIqMutex);
+        externalIqQueue.clear();
+    }
+    IqBuffer::clearAudioQueue();
+    if (changed) demodulatorResetRequested = true;
+}
+
+void AudioProcessor::submitExternalIq(const float *samples, std::size_t floatCount,
+                                      double sampleRateHz, double centerHz) {
+    if (!externalIqSourceEnabled.load(std::memory_order_acquire) ||
+        !running.load(std::memory_order_acquire) || !samples || floatCount < 2 ||
+        !std::isfinite(sampleRateHz) || sampleRateHz <= 0.0 ||
+        !std::isfinite(centerHz)) {
+        return;
+    }
+    floatCount -= floatCount % 2U;
+    ExternalIqBlock block;
+    try {
+        block.samples.assign(samples, samples + floatCount);
+    } catch (const std::bad_alloc &) {
+        demodulatorResetRequested = true;
+        return;
+    }
+    block.sampleRateHz = sampleRateHz;
+    block.centerHz = centerHz;
+    block.sequence = externalIqSequence.fetch_add(1, std::memory_order_relaxed) + 1;
+    std::lock_guard<std::mutex> lock(externalIqMutex);
+    if (externalIqQueue.size() >= MAX_EXTERNAL_IQ_BLOCKS) {
+        externalIqQueue.pop_front();
+        demodulatorResetRequested = true;
+    }
+    externalIqQueue.push_back(std::move(block));
+}
+
+bool AudioProcessor::popExternalIq(ExternalIqBlock &block) {
+    std::lock_guard<std::mutex> lock(externalIqMutex);
+    if (externalIqQueue.empty()) return false;
+    block = std::move(externalIqQueue.front());
+    externalIqQueue.pop_front();
+    return true;
+}
+
 void AudioProcessor::resetHfNoiseCancelState() {
     hfNoiseCancelResetRequested = true;
 }
@@ -422,6 +468,10 @@ void AudioProcessor::startDemodulation() {
             bufferReady[i] = true;
         }
     }
+    {
+        std::lock_guard<std::mutex> lock(externalIqMutex);
+        externalIqQueue.clear();
+    }
     resetDemodulatorState();
 
     if (localPlaybackEnabled.load()) {
@@ -476,6 +526,10 @@ void AudioProcessor::stopDemodulationImpl(bool closeOutputDevice) {
                  << "audioJoinable" << audioWorker.joinable();
     }
     const bool wasRunning = running.exchange(false);
+    {
+        std::lock_guard<std::mutex> lock(externalIqMutex);
+        externalIqQueue.clear();
+    }
     cv.notify_all();
 
     if (fobosVerboseLoggingEnabled()) {
@@ -1538,7 +1592,24 @@ void AudioProcessor::SDRThread() {
     std::uint64_t previousDroppedBlocks = healthLoggingActive ? IqBuffer::stats().droppedQueuedBlocks : 0;
 
     while (running) {
-        const RadioSettings settings = currentSettingsSnapshot();
+        RadioSettings settings = currentSettingsSnapshot();
+        std::uint64_t iqBlockSequence = 0;
+        if (externalIqSourceEnabled.load(std::memory_order_acquire)) {
+            ExternalIqBlock externalBlock;
+            if (!popExternalIq(externalBlock)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            iqBlock = std::move(externalBlock.samples);
+            iqBlockSequence = externalBlock.sequence;
+            settings.sampleRate = externalBlock.sampleRateHz;
+            settings.centerFrequency = externalBlock.centerHz;
+            settings.actualFrequency = externalBlock.centerHz;
+        } else if (!IqBuffer::popBlock(iqBlock, &iqBlockSequence) ||
+                   settings.sampleRate <= 0.0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
         const bool healthLogging = fobosVerboseLoggingEnabled();
         if (healthLogging != healthLoggingActive) {
             healthLoggingActive = healthLogging;
@@ -1586,11 +1657,6 @@ void AudioProcessor::SDRThread() {
             audioFilterChain.configure(activeAudioFilterChainJson, AUDIO_OUTPUT_RATE);
         }
 
-        std::uint64_t iqBlockSequence = 0;
-        if (!IqBuffer::popBlock(iqBlock, &iqBlockSequence) || settings.sampleRate <= 0.0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
         if (previousIqSequence != 0 && iqBlockSequence > previousIqSequence + 1) {
             healthSequenceGaps += iqBlockSequence - previousIqSequence - 1;
             if (settings.modulationType == MOD_DMR) resetDemodulatorState();

@@ -126,6 +126,7 @@ QJsonObject YourClassName::settingsToJson() const {
     settings["scanMeasurementUpdateIntervalMs"] = scanMeasurementUpdateIntervalMs;
     settings["spectrumScienceMaxHold"] = spectrumScienceMaxHoldEnabled;
     settings["spectrumScienceMarkers"] = spectrumScienceAnalyzer.markerConfiguration();
+    settings["spectrumScienceMarkerPairs"] = spectrumScienceMarkerPairConfiguration;
     settings["spectrumScienceMinHold"] = spectrumScienceMinHoldEnabled;
     settings["spectrumScienceAverage"] = spectrumScienceAverageEnabled;
     settings["spectrumScienceAverageSeconds"] = spectrumScienceAverageSeconds;
@@ -216,6 +217,7 @@ QJsonObject YourClassName::settingsToJson() const {
     settings["calibrationTable"] = calibrationPointsJson;
     settings["waterfallRowsPerFrame"] = waterfallRowsPerFrame;
     settings["waterfallDisplayMode"] = waterfallDisplayMode;
+    settings["multiSdrViewMode"] = multiSdrViewMode;
     settings["waterfall3DResolutionDivisor"] = waterfall3DResolutionDivisor;
     settings["waterfall3DSurfaceStyle"] = waterfall3DSurfaceStyle;
     settings["waterfall3DSmoothing"] = waterfall3DSmoothing;
@@ -494,6 +496,15 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
     spectrumScienceMaxHoldEnabled = readBool("spectrumScienceMaxHold", spectrumScienceMaxHoldEnabled);
     if (settingsJson.contains("spectrumScienceMarkers"))
         spectrumScienceAnalyzer.restoreMarkerConfiguration(settingsJson.value("spectrumScienceMarkers").toArray());
+    if (settingsJson.contains("spectrumScienceMarkerPairs"))
+        spectrumScienceMarkerPairConfiguration = settingsJson.value("spectrumScienceMarkerPairs").toArray();
+    if (spectrumScienceMarkerPairConfiguration.isEmpty())
+        spectrumScienceMarkerPairConfiguration.append(
+            QJsonObject{{QStringLiteral("first"), 0}, {QStringLiteral("second"), 1}});
+    const QJsonObject primaryMarkerPair = spectrumScienceMarkerPairConfiguration.first().toObject();
+    spectrumScienceAnalyzer.setMeasurementMarkerPair(
+        primaryMarkerPair.value(QStringLiteral("first")).toInt(0),
+        primaryMarkerPair.value(QStringLiteral("second")).toInt(1));
     spectrumScienceMinHoldEnabled = readBool("spectrumScienceMinHold", spectrumScienceMinHoldEnabled);
     spectrumScienceAverageEnabled = readBool("spectrumScienceAverage", spectrumScienceAverageEnabled);
     spectrumScienceAverageSeconds = (std::clamp)(readDouble("spectrumScienceAverageSeconds",
@@ -684,6 +695,12 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
         waterfallWidget->setRowsPerFrame(waterfallRowsPerFrame);
     }
     waterfallDisplayMode = (std::clamp)(readInt("waterfallDisplayMode", waterfallDisplayMode), 0, 2);
+    multiSdrViewMode = (std::clamp)(readInt("multiSdrViewMode", multiSdrViewMode), 0, 1);
+    if (multiSdrViewModeCombo) {
+        const QSignalBlocker blocker(multiSdrViewModeCombo);
+        const int index = multiSdrViewModeCombo->findData(multiSdrViewMode);
+        if (index >= 0) multiSdrViewModeCombo->setCurrentIndex(index);
+    }
     if (waterfallDisplayModeCombo) {
         QSignalBlocker blocker(waterfallDisplayModeCombo);
         const int index = waterfallDisplayModeCombo->findData(waterfallDisplayMode);

@@ -22,7 +22,7 @@ public:
     explicit MyGraphWidget(QWidget *parent = nullptr);
     ~MyGraphWidget();
 
-    void setData(const std::vector<float> &xData, const std::vector<float> &yData, double xMin, double xMax, int fftLength, bool colorf, bool displayOrdered = false);
+    void setData(const std::vector<float> &xData, const std::vector<float> &yData, double xMin, double xMax, int fftLength, bool colorf, bool displayOrdered = false, bool preserveFrequencyGaps = false);
     void setOverlayData(const std::vector<float> &yData, bool enabled, bool displayOrdered = false);
     void setLevelRange(float minLevel, float maxLevel);
     void setBandMarkersEnabled(bool generalEnabled, bool amateurEnabled);
@@ -132,6 +132,7 @@ private:
     std::vector<float> renderOverlayLevelScratch;
     bool overlayEnabled = false;
     bool dataDisplayOrdered = false;
+    bool preserveDataFrequencyGaps = false;
     bool overlayDisplayOrdered = false;
     bool generalBandMarkersEnabled = false;
     bool amateurBandMarkersEnabled = false;

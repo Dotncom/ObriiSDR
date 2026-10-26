@@ -122,6 +122,15 @@ void testReducers() {
     prepareSpectrumDisplayFrame({500}, {-83}, nullptr, 1, 0, 1000, 64, -140,
                                 SpectrumDisplayReduction::Peak, output);
     compare(output.levels, {-83});
+
+    const float missing = -std::numeric_limits<float>::infinity();
+    prepareSpectrumDisplayFrame({0, 1, 2, 3, 4}, {-20, missing, missing, missing, -30},
+                                nullptr, 5, 0, 5, 5, -140,
+                                SpectrumDisplayReduction::Peak, output, true, true);
+    require(std::isfinite(output.levels.front()) && std::isfinite(output.levels.back()),
+            "covered mosaic bins were lost");
+    require(!std::isfinite(output.levels[1]) && !std::isfinite(output.levels[2]),
+            "an uncovered multi-SDR gap was interpolated");
 }
 
 void benchmark() {

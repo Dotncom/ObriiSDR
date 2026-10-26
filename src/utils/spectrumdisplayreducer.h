@@ -26,6 +26,8 @@ void prepareSpectrumDisplayFrame(const std::vector<float> &sourceFrequencies,
                                  int targetBins,
                                  float fallbackLevel,
                                  SpectrumDisplayReduction reduction,
-                                 SpectrumDisplayFrame &output);
+                                 SpectrumDisplayFrame &output,
+                                 bool sourceLevelsFrequencyOrdered = false,
+                                 bool preserveFrequencyGaps = false);
 
 #endif // SPECTRUMDISPLAYREDUCER_H

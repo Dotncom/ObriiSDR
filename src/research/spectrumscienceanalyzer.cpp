@@ -20,6 +20,12 @@ void SpectrumScienceAnalyzer::restoreMarkerConfiguration(const QJsonArray &confi
         if (object.value("enabled").toBool() && std::isfinite(frequency) && frequency >= 0)
             setMarker(i, frequency);
     }
+    if (measurementFirstMarker >= markerCount() || measurementSecondMarker >= markerCount() ||
+        measurementFirstMarker == measurementSecondMarker) {
+        measurementFirstMarker = 0;
+        measurementSecondMarker = 1;
+    }
+    updateMetrics();
 }
 
 namespace {
@@ -54,6 +60,13 @@ void SpectrumScienceAnalyzer::setTraceEnabled(bool maxHold, bool minHold, bool a
     maxHoldEnabled = maxHold;
     minHoldEnabled = minHold;
     averageEnabled = average;
+    if (!maxHoldEnabled) maxHoldDb.clear();
+    if (!minHoldEnabled) minHoldDb.clear();
+    if (!averageEnabled) {
+        averagePower.clear();
+        averageDb.clear();
+        averageHistoryPower.clear();
+    }
 }
 
 void SpectrumScienceAnalyzer::setAverageTimeSeconds(double seconds) {
@@ -94,6 +107,11 @@ void SpectrumScienceAnalyzer::setPercentileTraces(bool p50, bool p90, bool p99) 
     if (!p99) percentile99Db.clear();
 }
 
+void SpectrumScienceAnalyzer::setMetricsUpdateIntervalMs(int intervalMs) {
+    metricsUpdateIntervalMs = std::clamp(intervalMs, 0, 5000);
+    metricsClock.invalidate();
+}
+
 void SpectrumScienceAnalyzer::resetTraces() {
     if (frameLevels.empty()) {
         maxHoldDb.clear();
@@ -107,12 +125,16 @@ void SpectrumScienceAnalyzer::resetTraces() {
         updateClock.invalidate();
         return;
     }
-    maxHoldDb = frameLevels;
-    minHoldDb = frameLevels;
-    averagePower.resize(frameLevels.size());
-    averageDb = frameLevels;
-    for (std::size_t i = 0; i < frameLevels.size(); ++i) {
-        averagePower[i] = static_cast<float>(dbToPower(frameLevels[i]));
+    if (maxHoldEnabled) maxHoldDb = frameLevels; else maxHoldDb.clear();
+    if (minHoldEnabled) minHoldDb = frameLevels; else minHoldDb.clear();
+    if (averageEnabled) {
+        averagePower.resize(frameLevels.size());
+        averageDb = frameLevels;
+        for (std::size_t i = 0; i < frameLevels.size(); ++i)
+            averagePower[i] = static_cast<float>(dbToPower(frameLevels[i]));
+    } else {
+        averagePower.clear();
+        averageDb.clear();
     }
     averageHistoryPower.clear();
     updateClock.restart();
@@ -134,6 +156,7 @@ void SpectrumScienceAnalyzer::clear() {
     averageHistoryPower.clear();
     currentMetrics = {};
     updateClock.invalidate();
+    metricsClock.invalidate();
     updateMarkerLevels();
 }
 
@@ -167,9 +190,15 @@ void SpectrumScienceAnalyzer::updateDetector(const std::vector<float> &rawLevels
         frameLevels.clear();
         return;
     }
-    detectorHistory.push_back(rawLevels);
-    while (static_cast<int>(detectorHistory.size()) > detectorFrames) {
-        detectorHistory.pop_front();
+    const bool historyRequired = detectorMode != SPECTRUM_DETECTOR_SAMPLE ||
+                                 percentile50Enabled || percentile90Enabled ||
+                                 percentile99Enabled;
+    if (historyRequired) {
+        detectorHistory.push_back(rawLevels);
+        while (static_cast<int>(detectorHistory.size()) > detectorFrames)
+            detectorHistory.pop_front();
+    } else {
+        detectorHistory.clear();
     }
     frameLevels = rawLevels;
     if (detectorMode == SPECTRUM_DETECTOR_POSITIVE_PEAK ||
@@ -295,8 +324,9 @@ void SpectrumScienceAnalyzer::update(const std::vector<float> &frequencies,
     }
     const double alpha = 1.0 - std::exp(-elapsedSeconds / averageTimeSeconds);
 
-    if (maxHoldDb.size() != count || minHoldDb.size() != count ||
-        averagePower.size() != count || averageDb.size() != count) {
+    if ((maxHoldEnabled && maxHoldDb.size() != count) ||
+        (minHoldEnabled && minHoldDb.size() != count) ||
+        (averageEnabled && (averagePower.size() != count || averageDb.size() != count))) {
         resetTraces();
     }
     for (std::size_t i = 0; i < count; ++i) {
@@ -336,7 +366,11 @@ void SpectrumScienceAnalyzer::update(const std::vector<float> &frequencies,
         averageHistoryPower.clear();
     }
     updateMarkerLevels();
-    updateMetrics();
+    if (metricsUpdateIntervalMs <= 0 || !metricsClock.isValid() ||
+        metricsClock.elapsed() >= metricsUpdateIntervalMs) {
+        updateMetrics();
+        metricsClock.restart();
+    }
 }
 
 void SpectrumScienceAnalyzer::setMarker(int index, double frequencyHz) {
@@ -362,6 +396,16 @@ void SpectrumScienceAnalyzer::clearMarkers() {
     for (int index = 0; index < markerCount(); ++index) clearMarker(index);
 }
 
+void SpectrumScienceAnalyzer::setMeasurementMarkerPair(int firstMarker, int secondMarker) {
+    if (firstMarker < 0 || secondMarker < 0 || firstMarker >= markerCount() ||
+        secondMarker >= markerCount() || firstMarker == secondMarker)
+        return;
+    if (measurementFirstMarker == firstMarker && measurementSecondMarker == secondMarker) return;
+    measurementFirstMarker = firstMarker;
+    measurementSecondMarker = secondMarker;
+    updateMetrics();
+}
+
 int SpectrumScienceAnalyzer::addMarker() {
     if (markerCount() >= MaximumMarkers) return -1;
     const int index = markerCount();
@@ -374,6 +418,14 @@ bool SpectrumScienceAnalyzer::removeMarker(int index) {
     if (index < 2 || index >= markerCount()) return false;
     markers.erase(markers.begin() + index);
     for (int i = 2; i < markerCount(); ++i) markers[i].label = QStringLiteral("M%1").arg(i + 1);
+    if (measurementFirstMarker == index || measurementSecondMarker == index) {
+        measurementFirstMarker = 0;
+        measurementSecondMarker = 1;
+    } else {
+        if (measurementFirstMarker > index) --measurementFirstMarker;
+        if (measurementSecondMarker > index) --measurementSecondMarker;
+    }
+    updateMetrics();
     return true;
 }
 
@@ -425,9 +477,11 @@ void SpectrumScienceAnalyzer::updateMarkerLevels() {
 
 std::pair<int, int> SpectrumScienceAnalyzer::activeRange() const {
     if (frameLevels.empty()) return {-1, -1};
-    if (markers[0].enabled && markers[1].enabled) {
-        const int a = nearestBin(markers[0].frequencyHz);
-        const int b = nearestBin(markers[1].frequencyHz);
+    if (measurementFirstMarker >= 0 && measurementSecondMarker >= 0 &&
+        measurementFirstMarker < markerCount() && measurementSecondMarker < markerCount() &&
+        markers[measurementFirstMarker].enabled && markers[measurementSecondMarker].enabled) {
+        const int a = nearestBin(markers[measurementFirstMarker].frequencyHz);
+        const int b = nearestBin(markers[measurementSecondMarker].frequencyHz);
         return {(std::min)(a, b), (std::max)(a, b)};
     }
     return {0, static_cast<int>(frameLevels.size()) - 1};

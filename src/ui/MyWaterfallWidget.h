@@ -48,7 +48,7 @@ public:
     explicit MyWaterfallWidget(QWidget *parent = nullptr);
     ~MyWaterfallWidget();
     bool initialized;
-    void setData(const std::vector<float> &xData, const std::vector<float> &yData, double minFrequency, double maxFrequency, int fftLength, bool secondGraph, bool colorSpectrum, float contrast, float sensitivity, float levelMin, float levelMax, bool displayOrdered = false);
+    void setData(const std::vector<float> &xData, const std::vector<float> &yData, double minFrequency, double maxFrequency, int fftLength, bool secondGraph, bool colorSpectrum, float contrast, float sensitivity, float levelMin, float levelMax, bool displayOrdered = false, bool preserveFrequencyGaps = false);
     void queueDiscontinuityRow(DiscontinuityKind kind);
     void setRowsPerFrame(int rows);
     void setRenderBackend(RenderBackend backend);

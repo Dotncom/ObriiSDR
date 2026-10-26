@@ -109,6 +109,19 @@ int main(int argc, char **argv) {
     analyzer.setMarker(40, 100);
     check(analyzer.hasMarkers() && analyzer.marker(40).levelDb == -10, "extra marker analysis");
     check(!analyzer.removeMarker(0) && analyzer.removeMarker(40), "A/B retained / extra marker removed");
+    SpectrumScienceAnalyzer pairAnalyzer;
+    pairAnalyzer.addMarker();
+    pairAnalyzer.addMarker();
+    pairAnalyzer.update(frequencies, levels);
+    pairAnalyzer.setMarker(2, 200);
+    pairAnalyzer.setMarker(3, 300);
+    pairAnalyzer.setMeasurementMarkerPair(2, 3);
+    check(pairAnalyzer.metrics().valid && pairAnalyzer.metrics().rangeStartHz == 200.0 &&
+              pairAnalyzer.metrics().rangeEndHz == 300.0,
+          "selected marker pair defines measurement range");
+    pairAnalyzer.setMeasurementMarkerPair(2, 2);
+    check(pairAnalyzer.measurementMarkerFirst() == 2 && pairAnalyzer.measurementMarkerSecond() == 3,
+          "invalid same-marker pair is rejected");
     analyzer.setMarker(0, 100);
     const auto savedMarkers = analyzer.markerConfiguration();
     SpectrumScienceAnalyzer restored;

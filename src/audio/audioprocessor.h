@@ -21,6 +21,7 @@
 #include <chrono>
 #include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <string>
 #include <mutex>
 #include <thread>
@@ -43,6 +44,9 @@ public:
     void resetHfNoiseCancelState();
     void setAudioDevice(int deviceID);
     void setLocalPlaybackEnabled(bool enabled);
+    void setExternalIqSourceEnabled(bool enabled);
+    void submitExternalIq(const float *samples, std::size_t floatCount,
+                          double sampleRateHz, double centerHz);
     void setDmrChannelIqEnabled(bool enabled) { dmrChannelIqEnabled.store(enabled); }
     void stopDemodulationForStreamRestart();
     void startAudioOutput();
@@ -80,6 +84,13 @@ private:
     void stopDemodulationImpl(bool closeOutputDevice);
     void resetDemodulatorState();
     RadioSettings currentSettingsSnapshot() const;
+    struct ExternalIqBlock {
+        std::vector<float> samples;
+        double sampleRateHz = 0.0;
+        double centerHz = 0.0;
+        std::uint64_t sequence = 0;
+    };
+    bool popExternalIq(ExternalIqBlock &block);
     void processDemodulatorBlock(const std::vector<float>& iqBlock,
                                  std::vector<short>& audioSamples,
                                  std::vector<short>& dmrBasebandSamples,
@@ -110,6 +121,10 @@ private:
     std::mutex waveOutMutex;
 #endif
     mutable std::mutex settingsMutex;
+    std::mutex externalIqMutex;
+    std::deque<ExternalIqBlock> externalIqQueue;
+    std::atomic<bool> externalIqSourceEnabled{false};
+    std::atomic<std::uint64_t> externalIqSequence{0};
     std::thread sdrWorker;
     std::thread audioWorker;
     QThread *workerThread = nullptr;

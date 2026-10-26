@@ -1,4 +1,5 @@
 #include "main.h"
+#include "analyzer/multisdrdialog.h"
 #include "appconstants.h"
 #include "appruntimeutils.h"
 #include "diagnosticlogging.h"
@@ -66,11 +67,16 @@ void YourClassName::updateCentralFrequency() {
 
 void YourClassName::updateTuningFromScale(double tunedListeningFrequency, double tunedCenterFrequency) {
     const RadioSettings previousSettings = pendingSettings;
+    const int audioReceiverIndex = multiSdrDialog
+                                       ? multiSdrDialog->selectAudioSourceForFrequency(
+                                             tunedListeningFrequency)
+                                       : 0;
     pendingSettings.listeningFrequency = tunedListeningFrequency;
-    pendingSettings.centerFrequency = tunedCenterFrequency;
-    normalizeTuning(pendingSettings);
-
-    applyCenterFrequencyToHardwareIfNeeded(previousSettings, "scale");
+    if (audioReceiverIndex == 0) {
+        pendingSettings.centerFrequency = tunedCenterFrequency;
+        normalizeTuning(pendingSettings);
+        applyCenterFrequencyToHardwareIfNeeded(previousSettings, "scale");
+    }
 
     publishSettingsToGlobals();
     if (frequencyControl) {
@@ -177,7 +183,37 @@ void YourClassName::tuneSidebandEdgeAt(double frequency, int modulationType) {
 
 void YourClassName::centerReceiverAt(double frequency) {
     spectrumDisplayCenterHz = frequency;
-    updateTuningFromScale(pendingSettings.listeningFrequency, frequency);
+    const RadioSettings previousSettings = pendingSettings;
+    const double preservedListeningFrequency = pendingSettings.listeningFrequency;
+    const bool auxiliaryAudioSelected =
+        multiSdrDialog && multiSdrDialog->currentAudioSourceIndex() > 0;
+
+    pendingSettings.centerFrequency = frequency;
+    normalizeTuning(pendingSettings, true);
+    if (auxiliaryAudioSelected) {
+        // Centering the primary receiver is independent from a listening marker
+        // currently routed through an auxiliary receiver.
+        pendingSettings.listeningFrequency = preservedListeningFrequency;
+    }
+    applyCenterFrequencyToHardwareIfNeeded(previousSettings, "center receiver");
+    publishSettingsToGlobals();
+
+    if (frequencyControl) {
+        QSignalBlocker blocker(frequencyControl);
+        frequencyControl->setValueHz(pendingSettings.centerFrequency);
+    }
+    if (listeningFrequencyControl) {
+        QSignalBlocker blocker(listeningFrequencyControl);
+        listeningFrequencyControl->setValueHz(pendingSettings.listeningFrequency);
+    }
+    settingRange();
+    updateQuickHamPanel();
+    savePersistentSettings();
+    if (isNetworkClientMode()) {
+        scheduleRemoteSettingsCommand(0);
+    } else if (networkMode == NetworkMode::Server) {
+        sendServerStateToClients();
+    }
 }
 
 void YourClassName::panSpectrumView(int deltaPixels, int widthPixels) {
@@ -185,12 +221,19 @@ void YourClassName::panSpectrumView(int deltaPixels, int widthPixels) {
         return;
     }
 
-    double overallMin = directMinFrequencyForMode(globalMode, globalSampleRate);
-    double overallMax = directMaxFrequency(globalSampleRate);
-    if (offlineIqPlaybackActive && !offlineIqPlaybackHasMetadata) {
+    AnalyzerSpectrumFrame multiSdrFrame;
+    const bool multiSdrDisplayActive =
+        multiSdrDialog && multiSdrDialog->mainMosaicFrame(multiSdrFrame);
+    double overallMin = multiSdrDisplayActive
+                            ? multiSdrFrame.minimumHz
+                            : directMinFrequencyForMode(globalMode, globalSampleRate);
+    double overallMax = multiSdrDisplayActive
+                            ? multiSdrFrame.maximumHz
+                            : directMaxFrequency(globalSampleRate);
+    if (!multiSdrDisplayActive && offlineIqPlaybackActive && !offlineIqPlaybackHasMetadata) {
         overallMin = globalFrequency - globalSampleRate / 2.0;
         overallMax = globalFrequency + globalSampleRate / 2.0;
-    } else if (globalMode == INPUT_RF) {
+    } else if (!multiSdrDisplayActive && globalMode == INPUT_RF) {
         const double receiverMinimum = rfMinimumListeningFrequency(pendingSettings);
         overallMin = (std::max)(receiverMinimum,
                                 globalFrequency - globalSampleRate / 2.0);
@@ -221,6 +264,19 @@ void YourClassName::panSpectrumView(int deltaPixels, int widthPixels) {
                                              ? spectrumDisplayCenterHz
                                              : (minFrequency + maxFrequency) * 0.5;
     spectrumDisplayCenterHz = previousDisplayCenter + shiftHz;
+
+    if (multiSdrDisplayActive) {
+        if (std::abs(retuneDeltaHz) > 0.5)
+            multiSdrDialog->panMainDisplay(retuneDeltaHz);
+        const double predictedMin = overallMin + retuneDeltaHz;
+        const double predictedMax = overallMax + retuneDeltaHz;
+        double newMin = spectrumDisplayCenterHz - visibleSpan * 0.5;
+        newMin = (std::clamp)(newMin, predictedMin, predictedMax - visibleSpan);
+        minFrequency = newMin;
+        maxFrequency = newMin + visibleSpan;
+        if (scaleWidget) scaleWidget->setRange(minFrequency, maxFrequency);
+        return;
+    }
 
     if (std::abs(retuneDeltaHz) > 0.5 && pendingSettings.inputMode == INPUT_RF && !offlineIqPlaybackActive) {
         const RadioSettings previousSettings = pendingSettings;
@@ -1038,8 +1094,14 @@ void YourClassName::applyListeningFrequencyDelta(double deltaHz, int networkDela
 
     const RadioSettings previousSettings = pendingSettings;
     pendingSettings.listeningFrequency += deltaHz;
-    normalizeTuning(pendingSettings);
-    applyCenterFrequencyToHardwareIfNeeded(previousSettings, "fine tune");
+    const int audioReceiverIndex = multiSdrDialog
+                                       ? multiSdrDialog->selectAudioSourceForFrequency(
+                                             pendingSettings.listeningFrequency)
+                                       : 0;
+    if (audioReceiverIndex == 0) {
+        normalizeTuning(pendingSettings);
+        applyCenterFrequencyToHardwareIfNeeded(previousSettings, "fine tune");
+    }
     publishSettingsToGlobals();
 
     if (frequencyControl) {
@@ -1091,8 +1153,14 @@ void YourClassName::onListeningFrequencyEntered() {
 
     const RadioSettings previousSettings = pendingSettings;
     pendingSettings.listeningFrequency = listeningFrequencyControl->valueHz();
-    normalizeTuning(pendingSettings);
-    applyCenterFrequencyToHardwareIfNeeded(previousSettings, "listening control");
+    const int audioReceiverIndex = multiSdrDialog
+                                       ? multiSdrDialog->selectAudioSourceForFrequency(
+                                             pendingSettings.listeningFrequency)
+                                       : 0;
+    if (audioReceiverIndex == 0) {
+        normalizeTuning(pendingSettings);
+        applyCenterFrequencyToHardwareIfNeeded(previousSettings, "listening control");
+    }
     publishSettingsToGlobals();
     if (frequencyControl) {
         QSignalBlocker blocker(frequencyControl);

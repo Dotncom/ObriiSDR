@@ -1,4 +1,5 @@
 #include "main.h"
+#include "analyzer/multisdrdialog.h"
 #include "appconstants.h"
 #include "tuningutils.h"
 
@@ -236,32 +237,49 @@ void YourClassName::settingRange() {
         listeningFrequencyControl->setValueHz((std::clamp)(pendingSettings.listeningFrequency, controlMin, controlMax));
     }
 
-    const double availableRange = (std::max)(1.0, overallMax - overallMin);
+    double displayOverallMin = overallMin;
+    double displayOverallMax = overallMax;
+    AnalyzerSpectrumFrame multiSdrFrame;
+    const bool multiSdrDisplayActive =
+        multiSdrDialog && multiSdrDialog->mainMosaicFrame(multiSdrFrame);
+    if (multiSdrDisplayActive) {
+        displayOverallMin = multiSdrFrame.minimumHz;
+        displayOverallMax = multiSdrFrame.maximumHz;
+    }
+
+    const double availableRange =
+        (std::max)(1.0, displayOverallMax - displayOverallMin);
     double newRange = availableRange * (effectiveScalePercent() / 100.0);
     newRange = (std::clamp)(newRange, 1.0, availableRange);
 
     if (!std::isfinite(spectrumDisplayCenterHz) ||
-        spectrumDisplayCenterHz < overallMin ||
-        spectrumDisplayCenterHz > overallMax) {
-        spectrumDisplayCenterHz = (std::clamp)(pendingSettings.listeningFrequency, overallMin, overallMax);
+        spectrumDisplayCenterHz < displayOverallMin ||
+        spectrumDisplayCenterHz > displayOverallMax) {
+        spectrumDisplayCenterHz = multiSdrDisplayActive
+                                      ? multiSdrFrame.centerHz
+                                      : (std::clamp)(pendingSettings.listeningFrequency,
+                                                     displayOverallMin,
+                                                     displayOverallMax);
     }
 
-    const double minCenter = overallMin + newRange / 2.0;
-    const double maxCenter = overallMax - newRange / 2.0;
+    const double minCenter = displayOverallMin + newRange / 2.0;
+    const double maxCenter = displayOverallMax - newRange / 2.0;
     if (maxCenter >= minCenter) {
         spectrumDisplayCenterHz = (std::clamp)(spectrumDisplayCenterHz, minCenter, maxCenter);
     } else {
-        spectrumDisplayCenterHz = overallMin + availableRange / 2.0;
+        spectrumDisplayCenterHz = displayOverallMin + availableRange / 2.0;
     }
 
 	double newMin = spectrumDisplayCenterHz - newRange / 2.0;
-    newMin = (std::clamp)(newMin, overallMin, overallMax - newRange);
+    newMin = (std::clamp)(newMin,
+                          displayOverallMin,
+                          displayOverallMax - newRange);
     double newMax = newMin + newRange;
     minFrequency = newMin;
     maxFrequency = newMax;
     scaleWidget->setTuning(
         pendingSettings.listeningFrequency,
-        globalFrequency,
+        multiSdrDisplayActive ? spectrumDisplayCenterHz : globalFrequency,
         effectiveDemodulationBandwidth(globalBandwidth,
                                        globalModulationType,
                                        pendingSettings.sstvDemodulationMode),

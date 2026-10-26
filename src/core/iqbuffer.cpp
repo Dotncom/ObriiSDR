@@ -547,6 +547,16 @@ bool popBlock(std::vector<float> &out, std::uint64_t *sequence) {
     return true;
 }
 
+void clearAudioQueue() {
+    std::lock_guard<std::mutex> lock(g_audioQueueMutex);
+    while (!g_iqBlocks.empty()) {
+        recycleBlock(std::move(g_iqBlocks.front()));
+        g_iqBlocks.pop_front();
+    }
+    g_iqBlockSequences.clear();
+    g_iqQueuedFloatCount = 0;
+}
+
 void clear(std::uint64_t epoch) {
     std::scoped_lock lock(g_snapshotPublishMutex, g_iqMutex, g_audioQueueMutex);
     const std::uint64_t previousEpoch = g_iqEpoch;

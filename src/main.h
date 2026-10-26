@@ -111,6 +111,9 @@ class DspFlowPanel;
 class MultiVfoWidget;
 class GnssSdrPvtDialog;
 class LrptDecodeDialog;
+class AnalyzerFramePublisher;
+class MultiSdrDialog;
+class SpectrumMarkerPairsDialog;
 
 extern fobos_dev_t *device;
 extern float* dataq;
@@ -345,6 +348,7 @@ private:
     void updateSpectrumScience(const std::vector<float> &frequencies,
                                const std::vector<float> &levels);
     bool spectrumScienceAnalysisRequired() const;
+    bool spectrumScienceLocalAnalysisRequired() const;
     void feedZeroSpanFrame(const std::vector<float> &frequencies,
                            const std::vector<float> &levels,
                            bool fftShiftedStorage);
@@ -651,6 +655,7 @@ private:
     QCheckBox *fftBinWidthModeCheckbox = nullptr;
     QDoubleSpinBox *fftBinWidthSpin = nullptr;
     QComboBox *waterfallDisplayModeCombo = nullptr;
+    QComboBox *multiSdrViewModeCombo = nullptr;
     QCheckBox *alternativeSpectrumGradientCheckbox = nullptr;
     QComboBox *waterfall3DResolutionCombo = nullptr;
     QComboBox *waterfall3DSurfaceStyleCombo = nullptr;
@@ -734,6 +739,8 @@ private:
     QPushButton *presetManagerButton = nullptr;
     QPushButton *zoomSpectrumButton = nullptr;
     QPushButton *zoomDensityButton = nullptr;
+    QPushButton *multiSdrPreviousFocusButton = nullptr;
+    QPushButton *multiSdrNextFocusButton = nullptr;
     QPushButton *transmitButton = nullptr;
     QPushButton *ft8StationButton = nullptr;
     QPushButton *appSettingsButton = nullptr;
@@ -1155,6 +1162,7 @@ private:
     bool presetManagerOpen = false;
     int waterfallRowsPerFrame = 1;
     int waterfallDisplayMode = static_cast<int>(MyWaterfallWidget::DisplayMode::Waterfall2D);
+    int multiSdrViewMode = 0;
     bool alternativeInterfaceMode = false;
     bool waterfall3DAlternativeView = false;
     bool alternativeSpectrumGradientFill = false;
@@ -1210,6 +1218,11 @@ private:
     double scanMeasurementBinMhz = 0.1;
     int scanMeasurementUpdateIntervalMs = SCAN_MEASUREMENT_DEFAULT_UPDATE_MS;
     SpectrumScienceAnalyzer spectrumScienceAnalyzer;
+    SpectrumMarkerPairsDialog *spectrumMarkerPairsDialog = nullptr;
+    QJsonArray spectrumScienceMarkerPairConfiguration;
+    AnalyzerFramePublisher *analyzerFramePublisher = nullptr;
+    QPointer<MultiSdrDialog> multiSdrDialog;
+    quint64 multiSdrPrimarySequence = 0;
     bool spectrumScienceMaxHoldEnabled = false;
     bool spectrumScienceMinHoldEnabled = false;
     bool spectrumScienceAverageEnabled = false;

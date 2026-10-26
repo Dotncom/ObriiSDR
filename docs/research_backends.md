@@ -85,8 +85,10 @@ wildcard and specific profiles are not mixed. For absolute levels disable AGC:
 an AGC flag does not tell us the actual gain. Different serial devices of the
 same type still need their own manually managed calibration profiles.
 
-Up to 64 markers are retained in settings and experiment metadata. A/B retain
-their legacy delta/range role. The optional single-tone analyzer estimates
+Ten interactive markers are ready in the UI and retained in settings and
+experiment metadata. The marker-pair table starts with A/B only; users can add
+arbitrary parallel pairs, while its first row defines the detailed range. The
+optional single-tone analyzer estimates
 SNR, SINAD=S/(N+D), THD and THD+N from a contiguous spectral span, excluding DC.
 The integration width must cover the selected FFT window's main lobe; broaden
 the span to include the requested harmonics. Missing harmonics explicitly mark

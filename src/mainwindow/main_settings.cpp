@@ -469,6 +469,15 @@ void YourClassName::loadPersistentSettings() {
     spectrumScienceMaxHoldEnabled = settings.value("spectrumScience/maxHold", spectrumScienceMaxHoldEnabled).toBool();
     if (settings.contains("spectrumScience/markers"))
         spectrumScienceAnalyzer.restoreMarkerConfiguration(QJsonDocument::fromJson(settings.value("spectrumScience/markers").toByteArray()).array());
+    spectrumScienceMarkerPairConfiguration = QJsonDocument::fromJson(
+        settings.value("spectrumScience/markerPairs").toByteArray()).array();
+    if (spectrumScienceMarkerPairConfiguration.isEmpty())
+        spectrumScienceMarkerPairConfiguration.append(
+            QJsonObject{{QStringLiteral("first"), 0}, {QStringLiteral("second"), 1}});
+    const QJsonObject primaryMarkerPair = spectrumScienceMarkerPairConfiguration.first().toObject();
+    spectrumScienceAnalyzer.setMeasurementMarkerPair(
+        primaryMarkerPair.value(QStringLiteral("first")).toInt(0),
+        primaryMarkerPair.value(QStringLiteral("second")).toInt(1));
     spectrumScienceMinHoldEnabled = settings.value("spectrumScience/minHold", spectrumScienceMinHoldEnabled).toBool();
     spectrumScienceAverageEnabled = settings.value("spectrumScience/average", spectrumScienceAverageEnabled).toBool();
     spectrumScienceAverageSeconds = (std::clamp)(settings.value("spectrumScience/averageSeconds",
@@ -905,6 +914,13 @@ void YourClassName::loadPersistentSettings() {
     }
     waterfallDisplayMode =
         (std::clamp)(settings.value("ui/waterfallDisplayMode", waterfallDisplayMode).toInt(), 0, 2);
+    multiSdrViewMode =
+        (std::clamp)(settings.value("ui/multiSdrViewMode", multiSdrViewMode).toInt(), 0, 1);
+    if (multiSdrViewModeCombo) {
+        const QSignalBlocker blocker(multiSdrViewModeCombo);
+        const int index = multiSdrViewModeCombo->findData(multiSdrViewMode);
+        if (index >= 0) multiSdrViewModeCombo->setCurrentIndex(index);
+    }
     if (waterfallDisplayModeCombo) {
         QSignalBlocker blocker(waterfallDisplayModeCombo);
         const int index = waterfallDisplayModeCombo->findData(waterfallDisplayMode);
@@ -1691,6 +1707,9 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("spectrumMeasurement/updateIntervalMs", scanMeasurementUpdateIntervalMs);
     settings.setValue("spectrumScience/maxHold", spectrumScienceMaxHoldEnabled);
     settings.setValue("spectrumScience/markers", QJsonDocument(spectrumScienceAnalyzer.markerConfiguration()).toJson(QJsonDocument::Compact));
+    settings.setValue("spectrumScience/markerPairs",
+                      QJsonDocument(spectrumScienceMarkerPairConfiguration)
+                          .toJson(QJsonDocument::Compact));
     settings.setValue("spectrumScience/minHold", spectrumScienceMinHoldEnabled);
     settings.setValue("spectrumScience/average", spectrumScienceAverageEnabled);
     settings.setValue("spectrumScience/averageSeconds", spectrumScienceAverageSeconds);
@@ -1909,6 +1928,7 @@ void YourClassName::savePersistentSettings() {
     settings.endArray();
     settings.setValue("ui/waterfallRowsPerFrame", waterfallRowsPerFrame);
     settings.setValue("ui/waterfallDisplayMode", waterfallDisplayMode);
+    settings.setValue("ui/multiSdrViewMode", multiSdrViewMode);
     settings.setValue("ui/waterfall3DResolutionDivisor", waterfall3DResolutionDivisor);
     settings.setValue("ui/waterfall3DSurfaceStyle", waterfall3DSurfaceStyle);
     settings.setValue("ui/waterfall3DSmoothing", waterfall3DSmoothing);
