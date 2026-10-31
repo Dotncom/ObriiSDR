@@ -3,6 +3,7 @@
 #include "audiofilterchainwidget.h"
 #include "iqbuffer.h"
 #include "dspstreammanager.h"
+#include "dspiqsourceregistry.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -44,7 +45,9 @@ void testActiveBranchResources() {
         blocks = QJsonArray{QJsonObject{{"id", "source"}, {"type", "iq_source"}}};
         edges = QJsonArray();
     };
-    const auto addBranch = [&](const QString &id, bool enabled, int channels = 0, int taps = 16) {
+    const auto addBranch = [&](const QString &id, bool enabled, int channels = 0, int taps = 16,
+                               const QString &receiverId = QStringLiteral("main"),
+                               const QString &channelId = QStringLiteral("rx0")) {
         QString input = "source";
         if (channels) {
             input = id + "-pfb";
@@ -53,7 +56,8 @@ void testActiveBranchResources() {
             edges.append(QJsonObject{{"source", "source"}, {"target", input}});
         }
         blocks.append(QJsonObject{{"id", id}, {"type", "ddc_channelizer"},
-            {"settings", QJsonObject{{"enabled", enabled}}}});
+            {"settings", QJsonObject{{"enabled", enabled}, {"receiverId", receiverId},
+                                      {"channelId", channelId}}}});
         edges.append(QJsonObject{{"source", input}, {"target", id}});
         blocks.append(QJsonObject{{"id", id + "-fft"}, {"type", "branch_fft"}});
         blocks.append(QJsonObject{{"id", id + "-view"}, {"type", "branch_spectrum"}});
@@ -125,7 +129,7 @@ void testActiveBranchResources() {
         addBranch("z-inactive", false, 64, 32);
         const auto plan = compile();
         if (mismatch) {
-            requireRejected(plan, "All active PFB branches must share the same bank settings");
+            requireRejected(plan, "All active PFB branches on one IQ source must share the same bank settings");
         } else {
             require(plan.errors.isEmpty() && plan.branches.size() == 4 && plan.pfbChannels == 16 && plan.pfbTaps == 16,
                 "Matching active PFB banks were rejected");
@@ -133,6 +137,20 @@ void testActiveBranchResources() {
             requireInactiveRoutes(plan, "z-inactive");
         }
     }
+
+    // Different IQ sources own independent banks and may use different bank geometry.
+    reset();
+    addBranch("main-pfb", true, 16, 16);
+    addBranch("aux-pfb", true, 32, 32, "multi-rx-2", "rx1");
+    auto independent = compile();
+    require(independent.errors.isEmpty() && independent.branches.size() == 2 &&
+            independent.branches[0].pfbChannels != independent.branches[1].pfbChannels,
+        "Independent IQ sources were forced to share one PFB bank");
+
+    reset();
+    addBranch("aux-pfb-a", true, 16, 16, "multi-rx-2", "rx1");
+    addBranch("aux-pfb-b", true, 32, 16, "multi-rx-2", "rx1");
+    requireRejected(compile(), "All active PFB branches on one IQ source must share the same bank settings");
 }
 RadioSettings sourceSettings() {
     RadioSettings s;
@@ -151,6 +169,17 @@ void tone(const RadioSettings &s, std::size_t pairs, std::uint64_t start = 0) {
     IqBuffer::BlockMetadata m;
     m.valid = true; m.centerFrequencyHz = s.centerFrequency;
     require(IqBuffer::publish(iq.data(), iq.size(), true, true, 0, &m), "Branch test publish failed");
+}
+
+std::vector<float> toneSamples(const RadioSettings &s, std::size_t pairs,
+                               std::uint64_t start = 0) {
+    std::vector<float> iq(pairs * 2U);
+    for (std::size_t i = 0; i < pairs; ++i) {
+        const double phase = 6.28318530717958647692 * 101500.0 * double(start + i) / s.sampleRate;
+        iq[i * 2U] = float(0.5 * std::cos(phase));
+        iq[i * 2U + 1U] = float(0.5 * std::sin(phase));
+    }
+    return iq;
 }
 DspBranchFrame waitFor(DspBranchEngine &engine, const QString &id, bool error = false) {
     for (int i = 0; i < 300; ++i) {
@@ -173,6 +202,23 @@ bool dspBranchSelfTest() {
     auto layout = graph();
     auto plan = compileDspGraph(layout);
     require(plan.errors.empty() && plan.branches.size() == 1 && plan.spectrumRoutes.size() == 2, "Branch plan failed");
+    const QByteArray mainExecutionKey = plan.executionKey;
+    auto auxiliaryLayout = layout;
+    auto auxiliaryBlocks = auxiliaryLayout["blocks"].toArray();
+    auto auxiliaryDdc = auxiliaryBlocks[1].toObject();
+    auto auxiliarySettings = auxiliaryDdc["settings"].toObject();
+    auxiliarySettings["receiverId"] = "multi-rx-2";
+    auxiliarySettings["channelId"] = "rx1";
+    auxiliaryDdc["settings"] = auxiliarySettings;
+    auxiliaryBlocks[1] = auxiliaryDdc;
+    auxiliaryLayout["blocks"] = auxiliaryBlocks;
+    const auto auxiliaryPlan = compileDspGraph(auxiliaryLayout);
+    require(auxiliaryPlan.errors.empty() && auxiliaryPlan.branches.size() == 1 &&
+            auxiliaryPlan.branches[0].source.receiverId == "multi-rx-2" &&
+            auxiliaryPlan.branches[0].source.channelId == "rx1",
+        "DDC source identity was not compiled into the branch plan");
+    require(auxiliaryPlan.executionKey != mainExecutionKey,
+        "Changing receiverId/channelId did not reconfigure DSP execution");
     auto moved = layout;
     auto blocks = moved["blocks"].toArray();
     auto first = blocks[0].toObject(); first["x"] = 999; blocks[0] = first; moved["blocks"] = blocks;
@@ -208,6 +254,71 @@ bool dspBranchSelfTest() {
         "Branch amplitude/window/RBW wrong");
     require(IqBuffer::queuedBlocks() == queued, "DDC stole samples from the audio queue");
     std::cout << "DDC tone: peak=" << *peak << " dBFS, bin=" << frame.binWidthHz << " Hz, D=" << frame.decimation << '\n';
+
+    {
+        DspIqSourceRegistry::instance().clearAll();
+        DspBranchEngine auxiliaryEngine;
+        auxiliaryEngine.configure(auxiliaryPlan, s, true);
+        const auto auxiliaryIq = toneSamples(s, 262144);
+        require(DspIqSourceRegistry::instance().publish(
+                    auxiliaryPlan.branches[0].source, auxiliaryIq.data(), auxiliaryIq.size(),
+                    s.sampleRate, s.centerFrequency),
+            "Auxiliary IQ was not accepted after DDC subscription");
+        const auto auxiliaryFrame = waitFor(auxiliaryEngine, "fft");
+        const auto auxiliaryPeak = std::max_element(
+            auxiliaryFrame.levels.cbegin(), auxiliaryFrame.levels.cend());
+        const std::size_t auxiliaryIndex = std::size_t(
+            auxiliaryPeak - auxiliaryFrame.levels.cbegin());
+        std::cout << "Auxiliary DDC: source="
+                  << auxiliaryFrame.source.key().toStdString()
+                  << ", peak=" << auxiliaryFrame.frequencies[auxiliaryIndex]
+                  << " Hz, level=" << *auxiliaryPeak << " dBFS\n";
+        require(auxiliaryFrame.source == auxiliaryPlan.branches[0].source &&
+                std::abs(auxiliaryFrame.frequencies[auxiliaryIndex] - 100101500.0) < 70.0,
+            "Auxiliary receiver IQ did not reach its selected DDC/FFT branch");
+    }
+
+    {
+        auto pfbLayout = auxiliaryLayout;
+        auto pfbBlocks = pfbLayout["blocks"].toArray();
+        pfbBlocks.append(QJsonObject{{"id", "aux-pfb"}, {"type", "pfb_channelizer"},
+            {"settings", QJsonObject{{"channels", 16}, {"tapsPerPhase", 16}}}});
+        pfbLayout["blocks"] = pfbBlocks;
+        auto pfbEdges = pfbLayout["connections"].toArray();
+        pfbEdges.removeAt(0);
+        pfbEdges.prepend(QJsonObject{{"source", "aux-pfb"}, {"target", "ddc"}});
+        pfbEdges.prepend(QJsonObject{{"source", "source"}, {"target", "aux-pfb"}});
+        pfbLayout["connections"] = pfbEdges;
+        const auto auxiliaryPfbPlan = compileDspGraph(pfbLayout);
+        require(auxiliaryPfbPlan.errors.isEmpty() && auxiliaryPfbPlan.branches.size() == 1 &&
+                auxiliaryPfbPlan.branches[0].pfb && auxiliaryPfbPlan.branches[0].pfbChannels == 16,
+            "Auxiliary PFB plan did not compile");
+
+        DspIqSourceRegistry::instance().clearAll();
+        DspBranchEngine auxiliaryPfbEngine;
+        auxiliaryPfbEngine.configure(auxiliaryPfbPlan, s, true);
+        const auto auxiliaryIq = toneSamples(s, 262144);
+        require(DspIqSourceRegistry::instance().publish(
+                    auxiliaryPfbPlan.branches[0].source, auxiliaryIq.data(), auxiliaryIq.size(),
+                    s.sampleRate, s.centerFrequency),
+            "Auxiliary IQ was not accepted by the PFB subscription");
+        auto auxiliaryPfbFrame = waitFor(auxiliaryPfbEngine, "fft");
+        const auto pfbPeak = std::max_element(
+            auxiliaryPfbFrame.levels.cbegin(), auxiliaryPfbFrame.levels.cend());
+        const std::size_t pfbIndex = std::size_t(
+            pfbPeak - auxiliaryPfbFrame.levels.cbegin());
+        require(auxiliaryPfbFrame.error.isEmpty() && auxiliaryPfbFrame.pfbChannels == 16 &&
+                std::abs(auxiliaryPfbFrame.frequencies[pfbIndex] - 100101500.0) < 70.0,
+            "Auxiliary PFB changed or lost the selected signal");
+
+        require(DspIqSourceRegistry::instance().publish(
+                    auxiliaryPfbPlan.branches[0].source, auxiliaryIq.data(), auxiliaryIq.size(),
+                    s.sampleRate, s.centerFrequency, true),
+            "Auxiliary PFB discontinuity fixture was not accepted");
+        auxiliaryPfbFrame = waitFor(auxiliaryPfbEngine, "fft");
+        require(auxiliaryPfbFrame.gaps > 0 && auxiliaryPfbFrame.error.isEmpty(),
+            "Auxiliary PFB did not reset and recover after a source gap");
+    }
 
     // An integer D followed by a fractional conversion must use the exact requested D.
     blocks = layout["blocks"].toArray();

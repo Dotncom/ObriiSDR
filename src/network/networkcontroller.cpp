@@ -42,6 +42,7 @@ NetworkController::NetworkController(QObject *parent)
             peerIds.insert(socket, id);
             peerLabels.insert(socket, label);
             peerPriorityKeys.insert(socket, priorityKey);
+            peerStreamProfiles.insert(socket, QStringLiteral("legacy"));
             peerReadBuffers.insert(socket, QByteArray());
             socket->setSocketOption(QAbstractSocket::LowDelayOption, 1);
 
@@ -51,7 +52,22 @@ NetworkController::NetworkController(QObject *parent)
                 if (!peerSockets.contains(socket)) {
                     return;
                 }
-                processSocketData(socket, peerReadBuffers[socket]);
+                if (processingPeerReads.contains(socket)) {
+                    peerReadBuffers[socket].append(socket->readAll());
+                    return;
+                }
+                processingPeerReads.insert(socket);
+                QByteArray buffer = peerReadBuffers.take(socket);
+                while (true) {
+                    processSocketData(socket, buffer);
+                    if (!peerSockets.contains(socket)) break;
+                    const QByteArray reentrantBytes = peerReadBuffers.take(socket);
+                    if (reentrantBytes.isEmpty()) break;
+                    buffer.append(reentrantBytes);
+                }
+                if (peerSockets.contains(socket))
+                    peerReadBuffers.insert(socket, std::move(buffer));
+                processingPeerReads.remove(socket);
             });
 
             connect(socket, &QTcpSocket::disconnected, this, [this, socket]() {
@@ -124,7 +140,8 @@ NetworkController::NetworkController(QObject *parent)
             return;
         }
 
-        for (QTcpSocket *socket : std::as_const(peerSockets)) {
+        const QVector<QTcpSocket*> sockets = peerSockets;
+        for (QTcpSocket *socket : sockets) {
             if (!socket || socket->state() != QAbstractSocket::ConnectedState) {
                 continue;
             }
@@ -169,7 +186,7 @@ qint64 NetworkController::pendingBytes() const {
     qint64 maxPending = 0;
     if (currentMode == NetworkMode::Server) {
         for (QTcpSocket *socket : readyPeerSockets) {
-            if (socket) {
+            if (socket && acceptsLegacyStream(socket)) {
                 maxPending = (std::max)(maxPending, socket->bytesToWrite());
             }
         }
@@ -183,6 +200,27 @@ bool NetworkController::clientHasControl() const {
 
 QString NetworkController::controllerPeerId() const {
     return peerId(peerSocket);
+}
+
+quint16 NetworkController::listeningPort() const {
+    return server && server->isListening() ? server->serverPort() : 0;
+}
+
+QStringList NetworkController::readyPeerIds() const {
+    QStringList result;
+    for (QTcpSocket *socket : peerSockets) {
+        if (isReadyPeer(socket)) result.append(peerId(socket));
+    }
+    return result;
+}
+
+QString NetworkController::peerLabelForId(const QString &peerIdValue) const {
+    return peerLabel(peerForId(peerIdValue));
+}
+
+qint64 NetworkController::pendingBytesForPeer(const QString &peerIdValue) const {
+    QTcpSocket *socket = peerForId(peerIdValue);
+    return isReadyPeer(socket) ? socket->bytesToWrite() : -1;
 }
 
 void NetworkController::stop() {
@@ -247,7 +285,24 @@ void NetworkController::testClientConnection(const QString &serverAddress, quint
     });
 
     connect(clientSocket, &QTcpSocket::readyRead, this, [this]() {
-        processSocketData(clientSocket, clientReadBuffer);
+        QTcpSocket *socket = clientSocket;
+        if (!socket) return;
+        if (processingClientRead) {
+            clientReadBuffer.append(socket->readAll());
+            return;
+        }
+        processingClientRead = true;
+        QByteArray buffer = std::move(clientReadBuffer);
+        while (true) {
+            processSocketData(socket, buffer);
+            if (clientSocket != socket) break;
+            const QByteArray reentrantBytes = std::move(clientReadBuffer);
+            clientReadBuffer.clear();
+            if (reentrantBytes.isEmpty()) break;
+            buffer.append(reentrantBytes);
+        }
+        if (clientSocket == socket) clientReadBuffer = std::move(buffer);
+        processingClientRead = false;
     });
 
     connect(clientSocket, &QTcpSocket::disconnected, this, [this]() {
@@ -297,8 +352,15 @@ bool NetworkController::sendControlCommand(const QJsonObject &command) {
     }
 
     bool sentAny = false;
-    for (QTcpSocket *socket : std::as_const(peerSockets)) {
+    const QVector<QTcpSocket*> sockets = peerSockets;
+    for (QTcpSocket *socket : sockets) {
         if (!isReadyPeer(socket)) {
+            continue;
+        }
+        const QString type = command.value(QStringLiteral("type")).toString();
+        if ((type == QStringLiteral("audio") || type == QStringLiteral("spectrum") ||
+             type == QStringLiteral("spectrumbin") || type == QStringLiteral("iq") ||
+             type == QStringLiteral("iqbin")) && !acceptsLegacyStream(socket)) {
             continue;
         }
         sentAny = sendJsonToSocket(socket, command) || sentAny;
@@ -326,8 +388,15 @@ bool NetworkController::sendBinaryCommand(const QJsonObject &command, const QByt
     }
 
     bool sentAny = false;
-    for (QTcpSocket *socket : std::as_const(peerSockets)) {
+    const QVector<QTcpSocket*> sockets = peerSockets;
+    for (QTcpSocket *socket : sockets) {
         if (!isReadyPeer(socket)) {
+            continue;
+        }
+        const QString type = command.value(QStringLiteral("type")).toString();
+        if ((type == QStringLiteral("audio") || type == QStringLiteral("spectrum") ||
+             type == QStringLiteral("spectrumbin") || type == QStringLiteral("iq") ||
+             type == QStringLiteral("iqbin")) && !acceptsLegacyStream(socket)) {
             continue;
         }
         sentAny = sendBinaryToSocket(socket, command, payload) || sentAny;
@@ -343,11 +412,36 @@ bool NetworkController::sendControlCommandToPeer(const QString &peerIdValue, con
     return sendJsonToSocket(socket, command);
 }
 
+bool NetworkController::sendBinaryCommandToPeer(const QString &peerIdValue,
+                                                const QJsonObject &command,
+                                                const QByteArray &payload) {
+    QTcpSocket *socket = peerForId(peerIdValue);
+    if (!isReadyPeer(socket)) return false;
+    return sendBinaryToSocket(socket, command, payload);
+}
+
 bool NetworkController::sendControlCommandToController(const QJsonObject &command) {
     if (!isReadyPeer(peerSocket)) {
         return false;
     }
     return sendJsonToSocket(peerSocket, command);
+}
+
+bool NetworkController::setPeerStreamProfile(const QString &peerIdValue,
+                                             const QString &profile) {
+    QTcpSocket *socket = peerForId(peerIdValue);
+    if (!isReadyPeer(socket)) return false;
+    const QString normalized = profile.trimmed().toLower();
+    peerStreamProfiles.insert(socket,
+                              normalized == QStringLiteral("remote-vfo")
+                                  ? normalized
+                                  : QStringLiteral("legacy"));
+    return true;
+}
+
+QString NetworkController::peerStreamProfile(const QString &peerIdValue) const {
+    QTcpSocket *socket = peerForId(peerIdValue);
+    return socket ? peerStreamProfiles.value(socket, QStringLiteral("legacy")) : QString();
 }
 
 bool NetworkController::setControllerPeer(const QString &peerIdValue) {
@@ -401,6 +495,9 @@ void NetworkController::closePeerSocket(QTcpSocket *socket) {
         if (!peer) {
             return;
         }
+        const bool wasReady = readyPeerSockets.contains(peer);
+        const QString disconnectedId = peerId(peer);
+        const QString disconnectedLabel = peerLabel(peer);
         readyPeerSockets.remove(peer);
         peerReadBuffers.remove(peer);
         peerPendingBinaryCommands.remove(peer);
@@ -408,7 +505,9 @@ void NetworkController::closePeerSocket(QTcpSocket *socket) {
         peerIds.remove(peer);
         peerLabels.remove(peer);
         peerPriorityKeys.remove(peer);
+        peerStreamProfiles.remove(peer);
         peerLastMessageTimers.remove(peer);
+        processingPeerReads.remove(peer);
         peerSockets.removeAll(peer);
         if (peerSocket == peer) {
             peerSocket = nullptr;
@@ -416,6 +515,9 @@ void NetworkController::closePeerSocket(QTcpSocket *socket) {
         peer->disconnect(this);
         peer->disconnectFromHost();
         peer->deleteLater();
+        if (wasReady && !disconnectedId.isEmpty()) {
+            emit peerDisconnected(disconnectedId, disconnectedLabel);
+        }
     };
 
     if (socket) {
@@ -435,7 +537,9 @@ void NetworkController::closePeerSocket(QTcpSocket *socket) {
     peerIds.clear();
     peerLabels.clear();
     peerPriorityKeys.clear();
+    peerStreamProfiles.clear();
     peerLastMessageTimers.clear();
+    processingPeerReads.clear();
     peerSocket = nullptr;
 }
 
@@ -554,20 +658,21 @@ bool NetworkController::isReadyPeer(QTcpSocket *socket) const {
            readyPeerSockets.contains(socket);
 }
 
+bool NetworkController::acceptsLegacyStream(QTcpSocket *socket) const {
+    return peerStreamProfiles.value(socket, QStringLiteral("legacy")) !=
+           QStringLiteral("remote-vfo");
+}
+
 void NetworkController::promoteControllerIfNeeded() {
     if (isReadyPeer(peerSocket)) {
         return;
     }
 
     peerSocket = nullptr;
-    for (QTcpSocket *socket : std::as_const(peerSockets)) {
-        if (isReadyPeer(socket)) {
-            peerSocket = socket;
-            break;
-        }
-    }
-
-    if (peerSocket) {
+    if (!readyPeerSockets.isEmpty()) {
+        // Losing the controller must not silently grant hardware control to an
+        // arbitrary observer.  Existing peers remain observers until one sends
+        // an explicit requestPriority command.
         broadcastRoleUpdates();
     } else if (currentMode == NetworkMode::Server) {
         controlReady = false;
@@ -593,7 +698,8 @@ void NetworkController::sendRoleUpdate(QTcpSocket *socket) {
 }
 
 void NetworkController::broadcastRoleUpdates() {
-    for (QTcpSocket *socket : std::as_const(peerSockets)) {
+    const QVector<QTcpSocket*> sockets = peerSockets;
+    for (QTcpSocket *socket : sockets) {
         sendRoleUpdate(socket);
     }
 }
@@ -637,10 +743,17 @@ void NetworkController::processSocketData(QTcpSocket *socket, QByteArray &buffer
         return;
     }
 
+    const auto socketStillOwned = [this, socket]() {
+        return (currentMode == NetworkMode::Client && socket == clientSocket) ||
+               (currentMode == NetworkMode::Server && peerSockets.contains(socket));
+    };
+    if (!socketStillOwned()) return;
+
     buffer += socket->readAll();
     int newlineIndex = -1;
     while (true) {
         if (deliverPendingBinaryPayload(socket, buffer)) {
+            if (!socketStillOwned()) return;
             continue;
         }
         const qint64 pendingBinaryBytes =
@@ -664,6 +777,7 @@ void NetworkController::processSocketData(QTcpSocket *socket, QByteArray &buffer
                 peerLastMessageTimers[socket].restart();
             }
             processLine(socket, line);
+            if (!socketStillOwned()) return;
         }
     }
 }
@@ -713,9 +827,10 @@ void NetworkController::processLine(QTcpSocket *socket, const QByteArray &line) 
             if (readyPeerSockets.contains(socket)) {
                 return;
             }
+            const bool hadReadyPeer = !readyPeerSockets.isEmpty();
             readyPeerSockets.insert(socket);
             peerLastMessageTimers[socket].restart();
-            if (!peerSocket) {
+            if (!peerSocket && !hadReadyPeer) {
                 peerSocket = socket;
             }
             sendProtocolLine(socket, OK_MESSAGE);
@@ -730,6 +845,7 @@ void NetworkController::processLine(QTcpSocket *socket, const QByteArray &line) 
             startHeartbeat();
             controlReady = true;
             emit channelReady(message);
+            emit peerReady(peerId(socket), peerLabel(socket));
         }
         return;
     }
@@ -779,6 +895,9 @@ void NetworkController::processLine(QTcpSocket *socket, const QByteArray &line) 
             clientPendingBinaryCommand = command;
             clientPendingBinaryBytes = payloadBytes;
         } else if (currentMode == NetworkMode::Server && peerSockets.contains(socket)) {
+            command["_networkPeerId"] = peerId(socket);
+            command["_networkPeerLabel"] = peerLabel(socket);
+            command["_networkPeerIsController"] = socket == peerSocket;
             peerPendingBinaryCommands.insert(socket, command);
             peerPendingBinaryBytes.insert(socket, payloadBytes);
         }

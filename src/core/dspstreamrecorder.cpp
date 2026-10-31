@@ -32,7 +32,7 @@ QString ioError(const QString &operation, const QFileDevice &file) {
 
 struct DspStreamRecorder::Impl {
     QFile data;
-    QString directory, currentPath, metadataPath, sessionId, stream, startReason;
+    QString directory, currentPath, metadataPath, sessionId, stream, receiverId, channelId, startReason;
     QString message = QStringLiteral("Stopped");
     quint64 limit = 0, totalBytes = 0, samples = 0, firstSample = 0;
     quint64 generation = 0, epoch = 0;
@@ -42,6 +42,8 @@ struct DspStreamRecorder::Impl {
 
     void setMetadata(const DspStreamBlock &block) {
         stream = block.stream;
+        receiverId = block.source.receiverId;
+        channelId = block.source.channelId;
         generation = block.generation;
         epoch = block.epoch;
         firstSample = block.firstSample;
@@ -60,6 +62,8 @@ struct DspStreamRecorder::Impl {
             {"schemaVersion", 1}, {"format", "CF32LE"}, {"sampleLayout", "interleaved_IQ"},
             {"sessionId", sessionId}, {"segmentIndex", segments},
             {"iqFile", QFileInfo(currentPath).fileName()},
+            {"receiverId", metadataKnown ? QJsonValue(receiverId) : QJsonValue(QJsonValue::Null)},
+            {"channelId", metadataKnown ? QJsonValue(channelId) : QJsonValue(QJsonValue::Null)},
             {"samplePositionReference", "relative_channel"},
             {"sampleRate", metadataKnown ? QJsonValue(sampleRate) : QJsonValue(QJsonValue::Null)},
             {"centerHz", metadataKnown ? QJsonValue(centerHz) : QJsonValue(QJsonValue::Null)},
@@ -212,7 +216,8 @@ void DspStreamRecorder::append(const DspStreamBlock &block, const std::vector<fl
 
     QString boundary;
     if (s.metadataKnown) {
-        if (s.stream != block.stream || s.sampleRate != block.sampleRate || s.centerHz != block.centerHz ||
+        if (s.stream != block.stream || s.receiverId != block.source.receiverId ||
+            s.channelId != block.source.channelId || s.sampleRate != block.sampleRate || s.centerHz != block.centerHz ||
             s.generation != block.generation || s.epoch != block.epoch) boundary = QStringLiteral("metadata_change");
         else if (block.gap) boundary = QStringLiteral("gap");
         else if (block.firstSample != s.firstSample + s.samples) boundary = QStringLiteral("noncontiguous_sample");

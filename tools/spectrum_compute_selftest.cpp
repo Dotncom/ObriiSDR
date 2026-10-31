@@ -538,7 +538,40 @@ SpectrumComputeOptions remoteOptions(SpectrumComputeMode mode = SpectrumComputeM
     SpectrumComputeOptions options;
     options.mode = mode;
     options.backend = FFT_BACKEND_CPU_FFTW;
+    // Most integration checks compare every FFT bin against the float reference.
+    // Packed formats have their own bounded-quantization session test below.
+    options.iqFormat = DspIqFormat::Cf32Le;
     return options;
+}
+
+void packedSessionTests() {
+    const auto settings = radioSettings(4096, FFT_WINDOW_HANN);
+    const auto iq = makeIq(settings.fftLength);
+    const auto reference = directLevels(settings, iq);
+    for (const auto format : {DspIqFormat::Cs16Le, DspIqFormat::BlockFloat16Le}) {
+        Session session;
+        auto begin = session.beginRequest(settings);
+        begin["iqFormat"] = DspIqCodec::id(format);
+        require(session.call(begin) && session.replies.size() == 1 &&
+                    session.replies[0].header.value("type") == "main_fft_ready",
+                "packed main FFT begin rejected");
+        const auto encoded = DspIqCodec::encode(iq, format);
+        QJsonObject chunk{{"type", "main_fft_iq"}, {"job", session.job},
+                          {"first", QStringLiteral("0")}, {"gap", false}};
+        DspIqCodec::addMetadata(chunk, encoded);
+        require(session.call(chunk, encoded.payload) && session.replies.size() == 1 &&
+                    session.replies[0].header.value("type") == "main_fft_ack",
+                "packed main FFT IQ rejected");
+        const auto levels = session.run(settings.fftLength, settings.fftLength);
+        require(levels.size() == reference.size(), "packed main FFT result length differs");
+        for (std::size_t i = 0; i < levels.size(); ++i) {
+            require(std::isfinite(levels[i]), "packed main FFT produced non-finite output");
+            if (reference[i] > -80.0f)
+                require(std::abs(levels[i] - reference[i]) < 0.05f,
+                        "packed main FFT changed an in-band level beyond its quantization bound");
+        }
+    }
+    std::cout << "CS16/BFP16 main FFT session quantization and framing passed\n";
 }
 
 void requestRemote(RemoteSpectrumWorker &worker, const RadioSettings &settings,
@@ -555,7 +588,9 @@ SpectrumFftFrame awaitRemoteFrame(RemoteSpectrumWorker &worker, const RadioSetti
 void remoteLoopbackTests() {
     LoopbackServer loopback;
     DspStreamManager ddc;
-    ddc.configure(loopback.endpoint);
+    auto ddcEndpoint = loopback.endpoint;
+    ddcEndpoint.iqFormat = DspIqFormat::Cf32Le;
+    ddc.configure(ddcEndpoint);
     auto block = ddcTone();
     checkDdc(ddc.process(block, true), block);
 
@@ -757,6 +792,7 @@ void wrapperToggleTests() {
     SpectrumComputeOptions remote;
     remote.mode = SpectrumComputeMode::Windows;
     remote.backend = FFT_BACKEND_CPU_FFTW;
+    remote.iqFormat = DspIqFormat::Cf32Le;
     worker.configureRemote(loopback.endpoint, remote);
     require(worker.remoteEnabled(), "wrapper did not enable remote mode");
     settings = radioSettings(1001, FFT_WINDOW_FLAT_TOP);
@@ -878,6 +914,7 @@ int main(int argc, char **argv) {
         fallbackRetryTests();
         fallbackRecoveryTests();
         managerMetadataCoexistenceTest();
+        packedSessionTests();
         remoteLoopbackTests();
         remoteFailureTests();
         remoteCancellationTests();

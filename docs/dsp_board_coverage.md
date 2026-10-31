@@ -84,7 +84,9 @@ worker delivers PCM independently of GUI frame updates. The main filter editor
 also offers a one-shot validated wire-order apply action; ordinary legacy diagram
 links remain documentation and never automatically rewire the main receiver.
 
-DDC and the optional PFB bank run once on the local branch worker. External
+DDC and the optional PFB banks run once per subscribed IQ source on the local
+branch workers. Branches on one source share a bank, while different receivers
+retain independent bank geometry, history and discontinuity state. External
 branches move their already-channelized IQ to a separate, lazily started worker;
 socket waits and external-result demodulation no longer block local branch audio.
 The queue retains at most two pending blocks per external branch (sixteen total,

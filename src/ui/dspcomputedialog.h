@@ -26,6 +26,7 @@ signals:
 private:
     QComboBox *mode_ = nullptr;
     QComboBox *backend_ = nullptr;
+    QComboBox *iqFormat_ = nullptr;
     QSpinBox *uploadLimit_ = nullptr;
     QCheckBox *fallback_ = nullptr;
     QLabel *status_ = nullptr;
@@ -64,5 +65,6 @@ private:
     QLineEdit *endpointAddress_ = nullptr;
     QSpinBox *endpointPort_ = nullptr;
     QLineEdit *endpointToken_ = nullptr;
+    QComboBox *endpointIqFormat_ = nullptr;
     DspComputeServer server_;
 };

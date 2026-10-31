@@ -37,6 +37,15 @@ struct AnalyzerReceiverSettings {
     int lnaGainDb = 0;
     int vgaGainDb = 0;
     int fftWorkerThreads = 0;
+    int computeSourceOrdinal = 0;
+    QString receiverId;
+    QString channelId = QStringLiteral("rx0");
+    // 0: internal, 1: internal master/clock output, 2: external clock input.
+    int clockRole = 0;
+    QString clockId;
+    bool hardwareStartSync = false;
+    int nativeAdcBits = 0;
+    QString nativeSampleFormat;
     QVector<double> agileScanFrequenciesHz;
 };
 

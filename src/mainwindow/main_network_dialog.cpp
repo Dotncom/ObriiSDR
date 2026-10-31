@@ -1,5 +1,8 @@
 #include "main.h"
+#include "appsettingsutils.h"
 #include "diagnosticlogging.h"
+#include "remotevfoservice.h"
+#include "remotewebserver.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -7,17 +10,65 @@
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
+#include <QGroupBox>
+#include <QHeaderView>
 #include <QHBoxLayout>
 #include <QHostAddress>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QStringList>
+#include <QTableWidget>
 #include <QVBoxLayout>
 
 #include <algorithm>
 #include <cmath>
+
+namespace {
+
+struct NetworkClientPreset {
+    QString name;
+    QString address;
+    int port = 21090;
+};
+
+QVector<NetworkClientPreset> loadNetworkClientPresets() {
+    QSettings settings(persistentSettingsFilePath(), QSettings::IniFormat);
+    QVector<NetworkClientPreset> presets;
+    const int count = settings.beginReadArray(QStringLiteral("networkClientPresets"));
+    presets.reserve(count);
+    for (int index = 0; index < count; ++index) {
+        settings.setArrayIndex(index);
+        NetworkClientPreset preset;
+        preset.name = settings.value(QStringLiteral("name")).toString().trimmed();
+        preset.address = settings.value(QStringLiteral("address")).toString().trimmed();
+        preset.port = (std::clamp)(settings.value(QStringLiteral("port"), 21090).toInt(), 1, 65535);
+        if (!preset.name.isEmpty() && !preset.address.isEmpty()) presets.push_back(preset);
+    }
+    settings.endArray();
+    return presets;
+}
+
+void storeNetworkClientPresets(const QVector<NetworkClientPreset> &presets) {
+    QSettings settings(persistentSettingsFilePath(), QSettings::IniFormat);
+    settings.remove(QStringLiteral("networkClientPresets"));
+    settings.beginWriteArray(QStringLiteral("networkClientPresets"), presets.size());
+    for (int index = 0; index < presets.size(); ++index) {
+        settings.setArrayIndex(index);
+        settings.setValue(QStringLiteral("name"), presets[index].name);
+        settings.setValue(QStringLiteral("address"), presets[index].address);
+        settings.setValue(QStringLiteral("port"), presets[index].port);
+    }
+    settings.endArray();
+    settings.sync();
+}
+
+} // namespace
+
 void YourClassName::openNetworkSettingsDialog() {
     QDialog dialog(this);
     dialog.setWindowTitle(uiText(QStringLiteral("network_settings"), QStringLiteral("Network Settings")));
@@ -42,6 +93,9 @@ void YourClassName::openNetworkSettingsDialog() {
     processingCombo->addItem(uiText(QStringLiteral("network_processing_full_iq"),
                                     QStringLiteral("Full IQ client processing (LAN only)")),
                              static_cast<int>(NetworkProcessingMode::FullIqClientSide));
+    processingCombo->addItem(uiText(QStringLiteral("network_processing_remote_vfo"),
+                                    QStringLiteral("Independent server VFO (multi-user)")),
+                             static_cast<int>(NetworkProcessingMode::RemoteVfoServerSide));
     processingCombo->setCurrentIndex(processingCombo->findData(static_cast<int>(networkProcessingMode)));
 
     QLineEdit *serverAddressEdit = new QLineEdit(networkServerAddress, &dialog);
@@ -55,8 +109,22 @@ void YourClassName::openNetworkSettingsDialog() {
     portSpin->setRange(1, 65535);
     portSpin->setValue(networkControlPort);
 
+    QCheckBox *webServerCheck = new QCheckBox(
+        uiText(QStringLiteral("network_web_server"), QStringLiteral("Browser Remote VFO interface")),
+        &dialog);
+    webServerCheck->setChecked(networkWebServerEnabled);
+    QSpinBox *webServerPortSpin = new QSpinBox(&dialog);
+    webServerPortSpin->setRange(1, 65535);
+    webServerPortSpin->setValue(networkWebServerPort);
+
+    QDoubleSpinBox *remoteVfoSquelchSpin = new QDoubleSpinBox(&dialog);
+    remoteVfoSquelchSpin->setRange(-200.0, 0.0);
+    remoteVfoSquelchSpin->setDecimals(1);
+    remoteVfoSquelchSpin->setSuffix(QStringLiteral(" dB"));
+    remoteVfoSquelchSpin->setValue(remoteVfoSquelchDb);
+
     QCheckBox *serverDisableLocalUiCheck = new QCheckBox(uiText(QStringLiteral("network_disable_local_ui"),
-                                                                QStringLiteral("Disable local visual/audio on server when streaming is implemented")),
+                                                                QStringLiteral("Disable local audio/video on server while a client is connected")),
                                                          &dialog);
     serverDisableLocalUiCheck->setChecked(serverDisableLocalVisualAudio);
 
@@ -96,18 +164,37 @@ void YourClassName::openNetworkSettingsDialog() {
     audioHttpStreamPortSpin->setRange(1, 65535);
     audioHttpStreamPortSpin->setValue(audioHttpStreamPort);
 
-    QLabel *statusLabel = new QLabel(networkController
-                                         ? networkController->statusText()
-                                         : uiText(QStringLiteral("network_controller_unavailable"),
-                                                  QStringLiteral("Network controller unavailable")),
-                                     &dialog);
+    QLabel *statusLabel = new QLabel(&dialog);
     statusLabel->setWordWrap(true);
+    const auto refreshStatus = [this, statusLabel]() {
+        QStringList lines;
+        lines.append(networkController
+                         ? networkController->statusText()
+                         : uiText(QStringLiteral("network_controller_unavailable"),
+                                  QStringLiteral("Network controller unavailable")));
+        if (remoteWebServer && (networkWebServerEnabled || remoteWebServer->isListening())) {
+            lines.append(remoteWebServer->statusText());
+        }
+        if (remoteVfoService && networkMode == NetworkMode::Server) {
+            lines.append(uiText(QStringLiteral("remote_vfo_status"),
+                                QStringLiteral("Remote VFO: %1 sessions, %2/%3 active"))
+                             .arg(remoteVfoService->sessionCount())
+                             .arg(remoteVfoService->activeVfoCount())
+                             .arg(RemoteVfoService::MaxVfos));
+        }
+        statusLabel->setText(lines.join(QLatin1Char('\n')));
+    };
+    refreshStatus();
 
     formLayout->addRow(uiText(QStringLiteral("mode"), QStringLiteral("Mode:")), modeCombo);
     formLayout->addRow(uiText(QStringLiteral("processing"), QStringLiteral("Processing:")), processingCombo);
     formLayout->addRow(uiText(QStringLiteral("server_ip"), QStringLiteral("Server IP:")), serverAddressEdit);
     formLayout->addRow(uiText(QStringLiteral("bind_address"), QStringLiteral("Bind address:")), bindAddressEdit);
     formLayout->addRow(uiText(QStringLiteral("control_port"), QStringLiteral("Control port:")), portSpin);
+    formLayout->addRow(uiText(QStringLiteral("browser_access"), QStringLiteral("Browser access:")), webServerCheck);
+    formLayout->addRow(uiText(QStringLiteral("browser_port"), QStringLiteral("Browser port:")), webServerPortSpin);
+    formLayout->addRow(uiText(QStringLiteral("remote_vfo_squelch"), QStringLiteral("Remote VFO squelch:")),
+                       remoteVfoSquelchSpin);
     formLayout->addRow("", serverDisableLocalUiCheck);
     formLayout->addRow(uiText(QStringLiteral("visual_frames"), QStringLiteral("Visual frames:")), fullResolutionSpectrumCheck);
     formLayout->addRow(uiText(QStringLiteral("audio_relay_tx_label"), QStringLiteral("Audio relay TX:")), audioRelayTransmitCheck);
@@ -117,6 +204,67 @@ void YourClassName::openNetworkSettingsDialog() {
     formLayout->addRow(uiText(QStringLiteral("relay_listen_port"), QStringLiteral("Relay listen port:")), audioRelayListenPortSpin);
     formLayout->addRow(uiText(QStringLiteral("vlc_http_audio"), QStringLiteral("VLC HTTP audio:")), audioHttpStreamCheck);
     formLayout->addRow(uiText(QStringLiteral("http_audio_port"), QStringLiteral("HTTP audio port:")), audioHttpStreamPortSpin);
+
+    QGroupBox *presetGroup = new QGroupBox(
+        uiText(QStringLiteral("network_client_presets"), QStringLiteral("Client connection presets")),
+        &dialog);
+    QVBoxLayout *presetLayout = new QVBoxLayout(presetGroup);
+    QTableWidget *presetTable = new QTableWidget(0, 3, presetGroup);
+    presetTable->setHorizontalHeaderLabels({
+        uiText(QStringLiteral("name"), QStringLiteral("Name")),
+        uiText(QStringLiteral("server_ip"), QStringLiteral("Server IP")),
+        uiText(QStringLiteral("control_port"), QStringLiteral("Control port"))});
+    presetTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    presetTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    presetTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    presetTable->verticalHeader()->setVisible(false);
+    presetTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    presetTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    presetTable->setMinimumHeight(110);
+    presetTable->setMaximumHeight(190);
+
+    const auto populatePresetTable = [presetTable](const QVector<NetworkClientPreset> &presets) {
+        QSignalBlocker blocker(presetTable);
+        presetTable->setRowCount(presets.size());
+        for (int row = 0; row < presets.size(); ++row) {
+            presetTable->setItem(row, 0, new QTableWidgetItem(presets[row].name));
+            presetTable->setItem(row, 1, new QTableWidgetItem(presets[row].address));
+            presetTable->setItem(row, 2, new QTableWidgetItem(QString::number(presets[row].port)));
+        }
+    };
+    populatePresetTable(loadNetworkClientPresets());
+
+    const auto presetsFromTable = [presetTable]() {
+        QVector<NetworkClientPreset> presets;
+        presets.reserve(presetTable->rowCount());
+        for (int row = 0; row < presetTable->rowCount(); ++row) {
+            const auto *nameItem = presetTable->item(row, 0);
+            const auto *addressItem = presetTable->item(row, 1);
+            const auto *portItem = presetTable->item(row, 2);
+            NetworkClientPreset preset;
+            preset.name = nameItem ? nameItem->text().trimmed() : QString();
+            preset.address = addressItem ? addressItem->text().trimmed() : QString();
+            bool portOk = false;
+            const int requestedPort = portItem ? portItem->text().toInt(&portOk) : 21090;
+            preset.port = portOk ? (std::clamp)(requestedPort, 1, 65535) : 21090;
+            if (!preset.name.isEmpty() && !preset.address.isEmpty()) presets.push_back(preset);
+        }
+        return presets;
+    };
+
+    QPushButton *savePresetButton = new QPushButton(
+        uiText(QStringLiteral("network_preset_save"), QStringLiteral("Save current")), presetGroup);
+    QPushButton *usePresetButton = new QPushButton(
+        uiText(QStringLiteral("network_preset_use"), QStringLiteral("Use selected")), presetGroup);
+    QPushButton *deletePresetButton = new QPushButton(
+        uiText(QStringLiteral("delete"), QStringLiteral("Delete")), presetGroup);
+    QHBoxLayout *presetButtons = new QHBoxLayout();
+    presetButtons->addWidget(savePresetButton);
+    presetButtons->addWidget(usePresetButton);
+    presetButtons->addWidget(deletePresetButton);
+    presetButtons->addStretch(1);
+    presetLayout->addWidget(presetTable);
+    presetLayout->addLayout(presetButtons);
 
     QPushButton *testButton = new QPushButton(uiText(QStringLiteral("apply_test_channel"), QStringLiteral("Apply / Test Channel")), &dialog);
     QPushButton *requestControlButton = new QPushButton(uiText(QStringLiteral("request_control"), QStringLiteral("Request Control")), &dialog);
@@ -132,6 +280,7 @@ void YourClassName::openNetworkSettingsDialog() {
     actionLayout->addWidget(stopButton);
 
     rootLayout->addLayout(formLayout);
+    rootLayout->addWidget(presetGroup);
     rootLayout->addWidget(statusLabel);
     rootLayout->addLayout(actionLayout);
     rootLayout->addWidget(buttonBox);
@@ -139,12 +288,19 @@ void YourClassName::openNetworkSettingsDialog() {
     auto updateFieldState = [=]() {
         const auto selectedMode = static_cast<NetworkMode>(modeCombo->currentData().toInt());
         serverAddressEdit->setEnabled(selectedMode == NetworkMode::Client);
+        presetGroup->setVisible(selectedMode == NetworkMode::Client);
         bindAddressEdit->setEnabled(selectedMode == NetworkMode::Server);
-        serverDisableLocalUiCheck->setEnabled(selectedMode != NetworkMode::Disabled);
+        serverDisableLocalUiCheck->setEnabled(selectedMode == NetworkMode::Server);
         fullResolutionSpectrumCheck->setEnabled(selectedMode != NetworkMode::Disabled);
         processingCombo->setEnabled(selectedMode != NetworkMode::Disabled);
         portSpin->setEnabled(selectedMode != NetworkMode::Disabled);
-        requestControlButton->setEnabled(selectedMode == NetworkMode::Client);
+        webServerCheck->setEnabled(selectedMode == NetworkMode::Server);
+        webServerPortSpin->setEnabled(selectedMode == NetworkMode::Server && webServerCheck->isChecked());
+        const auto selectedProcessing = static_cast<NetworkProcessingMode>(processingCombo->currentData().toInt());
+        remoteVfoSquelchSpin->setEnabled(selectedMode == NetworkMode::Client &&
+                                         selectedProcessing == NetworkProcessingMode::RemoteVfoServerSide);
+        requestControlButton->setEnabled(selectedMode == NetworkMode::Client &&
+                                         selectedProcessing != NetworkProcessingMode::RemoteVfoServerSide);
         audioRelayHostEdit->setEnabled(audioRelayTransmitCheck->isChecked());
         audioRelayPortSpin->setEnabled(audioRelayTransmitCheck->isChecked());
         audioRelayListenPortSpin->setEnabled(audioRelayReceiveCheck->isChecked());
@@ -154,19 +310,77 @@ void YourClassName::openNetworkSettingsDialog() {
                                 : uiText(QStringLiteral("apply_test_channel"), QStringLiteral("Apply / Test Channel")));
     };
     connect(modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog, updateFieldState);
+    connect(processingCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog, updateFieldState);
     connect(audioRelayTransmitCheck, &QCheckBox::toggled, &dialog, updateFieldState);
     connect(audioRelayReceiveCheck, &QCheckBox::toggled, &dialog, updateFieldState);
     connect(audioHttpStreamCheck, &QCheckBox::toggled, &dialog, updateFieldState);
+    connect(webServerCheck, &QCheckBox::toggled, &dialog, updateFieldState);
     updateFieldState();
+
+    const auto useSelectedPreset = [=]() {
+        const int row = presetTable->currentRow();
+        if (row < 0) return;
+        const auto *addressItem = presetTable->item(row, 1);
+        const auto *portItem = presetTable->item(row, 2);
+        if (!addressItem || addressItem->text().trimmed().isEmpty()) return;
+        serverAddressEdit->setText(addressItem->text().trimmed());
+        bool portOk = false;
+        const int presetPort = portItem ? portItem->text().toInt(&portOk) : portSpin->value();
+        if (portOk) portSpin->setValue((std::clamp)(presetPort, 1, 65535));
+    };
+    connect(usePresetButton, &QPushButton::clicked, &dialog, useSelectedPreset);
+    connect(presetTable, &QTableWidget::cellDoubleClicked, &dialog,
+            [useSelectedPreset](int, int) { useSelectedPreset(); });
+    connect(savePresetButton, &QPushButton::clicked, &dialog, [=, &dialog]() {
+        bool accepted = false;
+        const QString suggestedName = serverAddressEdit->text().trimmed().isEmpty()
+                                          ? QStringLiteral("Server")
+                                          : serverAddressEdit->text().trimmed();
+        const QString name = QInputDialog::getText(
+                                 &dialog,
+                                 uiText(QStringLiteral("network_preset_save"), QStringLiteral("Save current")),
+                                 uiText(QStringLiteral("network_preset_name"), QStringLiteral("Preset name:")),
+                                 QLineEdit::Normal,
+                                 suggestedName,
+                                 &accepted)
+                                 .trimmed();
+        if (!accepted || name.isEmpty()) return;
+        const QString address = serverAddressEdit->text().trimmed();
+        if (address.isEmpty()) return;
+        QVector<NetworkClientPreset> presets = presetsFromTable();
+        auto existing = std::find_if(presets.begin(), presets.end(), [&name](const auto &preset) {
+            return preset.name.compare(name, Qt::CaseInsensitive) == 0;
+        });
+        const NetworkClientPreset value{name, address, portSpin->value()};
+        if (existing == presets.end()) presets.push_back(value);
+        else *existing = value;
+        storeNetworkClientPresets(presets);
+        populatePresetTable(presets);
+    });
+    connect(deletePresetButton, &QPushButton::clicked, &dialog, [=]() {
+        const int row = presetTable->currentRow();
+        if (row < 0) return;
+        presetTable->removeRow(row);
+        storeNetworkClientPresets(presetsFromTable());
+    });
+    connect(presetTable, &QTableWidget::itemChanged, &dialog, [presetsFromTable]() {
+        storeNetworkClientPresets(presetsFromTable());
+    });
 
     QMetaObject::Connection statusConnection;
     if (networkController) {
         statusConnection = connect(networkController,
                                    &NetworkController::statusChanged,
                                    &dialog,
-                                   [statusLabel](const QString &status) {
-                                       statusLabel->setText(status);
-                                   });
+                                   [refreshStatus](const QString &) { refreshStatus(); });
+    }
+    if (remoteWebServer) {
+        connect(remoteWebServer, &RemoteWebServer::statusChanged,
+                &dialog, [refreshStatus](const QString &) { refreshStatus(); });
+    }
+    if (remoteVfoService) {
+        connect(remoteVfoService, &RemoteVfoService::statusChanged,
+                &dialog, refreshStatus);
     }
 
     connect(testButton, &QPushButton::clicked, &dialog, [=]() {
@@ -182,6 +396,9 @@ void YourClassName::openNetworkSettingsDialog() {
                                  ? QString("0.0.0.0")
                                  : bindAddressEdit->text().trimmed();
         networkControlPort = static_cast<quint16>(portSpin->value());
+        networkWebServerEnabled = webServerCheck->isChecked();
+        networkWebServerPort = static_cast<quint16>(webServerPortSpin->value());
+        remoteVfoSquelchDb = remoteVfoSquelchSpin->value();
         serverDisableLocalVisualAudio = serverDisableLocalUiCheck->isChecked();
         networkFullResolutionSpectrumFrames = fullResolutionSpectrumCheck->isChecked();
         networkProcessingMode = static_cast<NetworkProcessingMode>(processingCombo->currentData().toInt());
@@ -196,6 +413,7 @@ void YourClassName::openNetworkSettingsDialog() {
         audioHttpStreamPort = static_cast<quint16>(audioHttpStreamPortSpin->value());
         updateAudioRelaySocket();
         updateAudioHttpStreamServer();
+        updateRemoteWebServer();
         if (isChannelIqRecordingActive() &&
             networkMode != NetworkMode::Disabled &&
             isFullIqProcessingMode()) {
@@ -229,6 +447,7 @@ void YourClassName::openNetworkSettingsDialog() {
                 remoteAudioPlayer->stop();
             }
             networkController->stop();
+            updateRemoteWebServer();
             if (runState == RadioRunState::Running) {
                 updateIqFrameProducerSettings();
             }
@@ -247,6 +466,7 @@ void YourClassName::openNetworkSettingsDialog() {
         if (networkMode == NetworkMode::Server) {
             clearRemoteReceiverDeviceList();
             networkController->startServer(networkBindAddress, networkControlPort);
+            updateRemoteWebServer();
             const bool restartRequired =
                 runState == RadioRunState::Running &&
                 (networkModeChanged || processingModeChanged);
@@ -272,6 +492,7 @@ void YourClassName::openNetworkSettingsDialog() {
             clearRemoteReceiverDeviceList();
         }
         networkController->testClientConnection(networkServerAddress, networkControlPort);
+        updateRemoteWebServer();
         savePersistentSettings();
     });
 
@@ -284,6 +505,7 @@ void YourClassName::openNetworkSettingsDialog() {
         if (networkController) {
             networkController->stop();
         }
+        updateRemoteWebServer();
         if (remoteAudioPlayer) {
             remoteAudioPlayer->stop();
         }

@@ -61,10 +61,10 @@ $RootFiles = @(
 $PublicDocs = @(
     'hackrf_native_beta.md', 'dmr_external_backend.md', 'dmr_motorola_privacy.md',
     'gnss_preflight_4.1.md', 'iq_pipeline_audit.md', 'performance_and_dmr_audit.md',
-    'radio_propagation_lab.md', 'wireless_lab.md', 'roadmap_4.0_cleanup.md',
+    'radio_propagation_lab.md', 'wireless_lab.md',
     "release_notes_$Version.md"
     'research_backends.md', 'psk31_decoder.md', 'hf_prediction.md', 'wireless_addon.md'
-    'dsp_stream_protocol.md', 'dsp_stream_manager.md', 'gnu_radio_bridge_usage.md'
+    'dsp_stream_protocol.md', 'dsp_stream_manager.md', 'network_multi_user.md', 'gnu_radio_bridge_usage.md'
     'pfb_channelizer.md', 'dsp_board_coverage.md', 'experiment_bundle.md', 'obrii_analyzer.md',
     'multi_sdr_architecture.md', 'usrp_b210_plan.md'
 )

@@ -101,6 +101,9 @@ void successTest() {
     require(result.uploadMBps > 0 && result.downloadMBps > 0, "Completed probe has no measured throughput");
     require(result.mainFftMaxLength == SpectrumComputeProtocol::maxLengthForBudget(64),
             "Probe lost the worker memory capability");
+    require(result.selectedBandVersion == DspStreamProtocol::SelectedBandVersion &&
+                result.selectedBandMaxStreams == int(DspStreamProtocol::MaxStreams),
+            "Probe lost the selected-band capability");
     const auto again = probe.result();
     require(again.stage == result.stage && again.uploadBytes == result.uploadBytes &&
             again.downloadBytes == result.downloadBytes && again.rttMedianMs == result.rttMedianMs,
@@ -123,6 +126,9 @@ void estimateTests() {
     auto estimate = estimateDspConnection(measured, 1000000, 100000, 20, 0, 100);
     closeTo(estimate.continuousUploadMBps, 8);
     closeTo(estimate.windowUploadMBps, 40);
+    const auto packed = estimateDspConnection(measured, 1000000, 100000, 20, 0, 100, 4);
+    closeTo(packed.continuousUploadMBps, 4);
+    closeTo(packed.windowUploadMBps, 20);
     closeTo(estimate.spectrumDownloadMBps, 20);
     closeTo(estimate.requestedFramesPerSecond, 50);
     closeTo(estimate.continuousFramesPerSecond, 10);
@@ -277,6 +283,7 @@ void busyAndAuthenticationTests() {
     DspStreamManager ddc;
     auto endpoint = loopback.endpoint;
     endpoint.enabled = true;
+    endpoint.iqFormat = DspIqFormat::Cf32Le;
     ddc.configure(endpoint);
     auto block = halfWindow(0);
     auto before = ddc.process(block, true);

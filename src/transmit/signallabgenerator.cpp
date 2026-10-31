@@ -442,7 +442,8 @@ QVector<std::complex<float>> SignalLabGenerator::matchedSymbols(
             value += std::complex<double>(sample.real(), sample.imag()) * taps[tap + halfTaps];
         }
         value *= std::polar(1.0, -2.0 * kPi * result.centerOffsetHz * center / result.sampleRate);
-        symbols.append({static_cast<float>(value.real()), static_cast<float>(value.imag())});
+        symbols.append(std::complex<float>(static_cast<float>(value.real()),
+                                           static_cast<float>(value.imag())));
         if (sampleIndices) sampleIndices->append(static_cast<int>(center));
     }
     return symbols;

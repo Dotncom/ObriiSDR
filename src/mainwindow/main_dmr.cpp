@@ -212,6 +212,7 @@ void YourClassName::processDigitalAudioFrame(const QByteArray &pcmData, int samp
     settings.dmrAdaptiveSlicer =
         !dmrAdaptiveSlicerCheckbox || dmrAdaptiveSlicerCheckbox->isChecked();
     settings.dmrPrivacyMode = pendingSettings.dmrPrivacyMode;
+    settings.dmrPrivacyAutoKeySelection = pendingSettings.dmrPrivacyAutoKeySelection;
     settings.dmrPrivacyKeyId = pendingSettings.dmrPrivacyKeyId;
     settings.dmrPrivacyKeyHex = pendingSettings.dmrPrivacyKeyHex;
     settings.dmrPrivacyVariant = pendingSettings.dmrPrivacyVariant;
@@ -353,6 +354,7 @@ void YourClassName::updateDigitalDecoderMode() {
     settings.dmrAdaptiveSlicer =
         !dmrAdaptiveSlicerCheckbox || dmrAdaptiveSlicerCheckbox->isChecked();
     settings.dmrPrivacyMode = pendingSettings.dmrPrivacyMode;
+    settings.dmrPrivacyAutoKeySelection = pendingSettings.dmrPrivacyAutoKeySelection;
     settings.dmrPrivacyKeyId = pendingSettings.dmrPrivacyKeyId;
     settings.dmrPrivacyKeyHex = pendingSettings.dmrPrivacyKeyHex;
     settings.dmrPrivacyVariant = pendingSettings.dmrPrivacyVariant;
@@ -361,7 +363,11 @@ void YourClassName::updateDigitalDecoderMode() {
     const int decoderSampleRate =
         settings.modulationType == MOD_DMR ? settings.dmrBasebandSampleRate : 48000;
     QString privacyWarning;
-    if (settings.modulationType == MOD_DMR &&
+    if (settings.modulationType == MOD_DMR && settings.dmrPrivacyAutoKeySelection &&
+        !internalDmrVoiceOutput) {
+        privacyWarning = uiText(QStringLiteral("dmr_auto_key_native_only"),
+            QStringLiteral("Automatic PI ALG/KID selection currently applies to the native mbelib/OpenDMR path. This external backend continues with the selected fixed key."));
+    } else if (settings.modulationType == MOD_DMR &&
         settings.dmrPrivacyMode == DMR_PRIVACY_HYTERA_BASIC &&
         dmrBackend == DMR_BACKEND_GOPHERTRUNK) {
         privacyWarning = uiText(QStringLiteral("dmr_hytera_backend_required"),
@@ -400,16 +406,21 @@ void YourClassName::updateDigitalDecoderMode() {
     }
     if (dmrPrivacyKeyIdCombo) {
         dmrPrivacyKeyIdCombo->setToolTip(!privacyWarning.isEmpty() ? privacyWarning :
+            settings.dmrPrivacyAutoKeySelection
+                ? uiText(QStringLiteral("dmr_privacy_auto_key_tooltip"),
+                         QStringLiteral("Automatic mode reads ALG ID and KID from a CRC-validated PI header and selects the matching saved ARC4/AES-256 key independently for each timeslot.")) :
             settings.dmrPrivacyMode == DMR_PRIVACY_HYTERA_BASIC
                 ? uiText(QStringLiteral("dmr_hytera_beta_hint"),
                          QStringLiteral("Hytera Basic beta: native mbelib/OpenDMR or DSD-neo; 10/32/64 HEX characters. Full is not supported."))
                 : uiText(QStringLiteral("dmr_privacy_key_id_tooltip"),
                          QStringLiteral("Select a saved key from the active privacy table.")));
     }
+    const QVector<DmrPrivacyKeyEntry> privacyKeys = dmrPrivacyKeys;
     QMetaObject::invokeMethod(digitalDecoder,
                               [decoder = digitalDecoder,
                                enabled,
                                settings,
+                               privacyKeys,
                                decoderSampleRate,
                                preferredDmrVoiceBackendId,
                                dmrBackend,
@@ -418,6 +429,7 @@ void YourClassName::updateDigitalDecoderMode() {
                                   decoder->setDmrVoiceBackendId(preferredDmrVoiceBackendId);
                                   decoder->setDmrVoiceOutputEnabled(internalDmrVoiceOutput);
                                   decoder->setDmrVoicePayloadEnabled(dmrBackend != DMR_BACKEND_DSD_NEO);
+                                  decoder->setDmrPrivacyKeys(privacyKeys);
                                   decoder->configure(settings, decoderSampleRate);
                               },
                               Qt::QueuedConnection);

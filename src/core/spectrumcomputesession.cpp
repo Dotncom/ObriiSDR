@@ -1,4 +1,5 @@
 #include "spectrumcomputesession.h"
+#include "dspiqcodec.h"
 #include "fft.h"
 #include <QElapsedTimer>
 #include <QtEndian>
@@ -51,6 +52,7 @@ struct SpectrumComputeSession::Impl {
     RadioSettings settings;
     QString job;
     bool continuous = false, configured = false;
+    DspIqFormat iqFormat = DspIqFormat::Cf32Le;
     quint64 nextSample = 0;
     bool haveNext = false;
     std::size_t write = 0, count = 0;
@@ -69,6 +71,8 @@ bool SpectrumComputeSession::handle(const QJsonObject &q, const QByteArray &payl
             const double rate = q.value("rate").toDouble(), center = q.value("center").toDouble(-1);
             const int window = q.value("window").toInt(-1), backend = q.value("backend").toInt(-1);
             const QString job = q.value("job").toString(), mode = q.value("mode").toString();
+            const QString iqFormatId = q.value("iqFormat").toString();
+            const DspIqFormat iqFormat = DspIqCodec::fromId(iqFormatId, DspIqFormat::Cf32Le);
             const auto pipeline = q.value("pipelineChunks");
             if (!pipeline.isUndefined() && (!pipeline.isDouble() || pipeline.toDouble() < 1 ||
                 pipeline.toDouble() > SpectrumComputeProtocol::MaxPipelineChunks ||
@@ -76,7 +80,9 @@ bool SpectrumComputeSession::handle(const QJsonObject &q, const QByteArray &payl
             if (!payload.isEmpty() || length < 512 || length > impl->maxLength ||
                 !std::isfinite(rate) || rate < 1000 || rate > 1e9 || !std::isfinite(center) || center < 0 || center > 8e9 ||
                 window < 0 || window > 4 || backend < 0 || backend > 2 || job.isEmpty() || job.size() > 80 ||
-                (mode != "windows" && mode != "continuous")) return fail("Invalid main FFT parameters or worker memory budget exceeded");
+                (mode != "windows" && mode != "continuous") || iqFormat == DspIqFormat::Auto ||
+                (!iqFormatId.isEmpty() && DspIqCodec::id(iqFormat) != iqFormatId))
+                return fail("Invalid main FFT parameters or worker memory budget exceeded");
             impl->configured = false;
             impl->settings.inputMode = INPUT_RF; impl->settings.sampleRate = rate;
             impl->settings.centerFrequency = center; impl->settings.fftLength = length;
@@ -85,6 +91,7 @@ bool SpectrumComputeSession::handle(const QJsonObject &q, const QByteArray &payl
             impl->history.resize(std::size_t(length)*2);
             impl->linear.clear(); impl->count = impl->write = 0; impl->haveNext = false;
             impl->job = job; impl->continuous = mode == "continuous"; impl->configured = true;
+            impl->iqFormat = iqFormat;
             QJsonObject ready{{"type", "main_fft_ready"}, {"job", job}};
             if (!pipeline.isUndefined()) ready["pipelineChunks"] = pipeline.toInt();
             return reply(ready, {});
@@ -92,8 +99,15 @@ bool SpectrumComputeSession::handle(const QJsonObject &q, const QByteArray &payl
         if (!impl->configured || q.value("job") != impl->job) return fail("Stale or missing main FFT job");
         if (type == "main_fft_iq") {
             quint64 first = 0;
-            if (!SpectrumComputeProtocol::readCounter(q.value("first"), first) || payload.size()%8 ||
-                !SpectrumComputeProtocol::readFloats(payload, impl->chunk) ||
+            const int sampleCount = q.contains("sampleCount") ? q.value("sampleCount").toInt(-1)
+                : (impl->iqFormat == DspIqFormat::Cf32Le && payload.size() % 8 == 0 ? payload.size() / 8 : -1);
+            const QString iqFormatId = q.value("iqFormat").toString();
+            QString decodeError;
+            if (!SpectrumComputeProtocol::readCounter(q.value("first"), first) ||
+                (!iqFormatId.isEmpty() && iqFormatId != DspIqCodec::id(impl->iqFormat)) ||
+                DspIqCodec::fromId(iqFormatId, DspIqFormat::Cf32Le) != impl->iqFormat ||
+                sampleCount < 1 || sampleCount > SpectrumComputeProtocol::ChunkSamples ||
+                !DspIqCodec::decode(q, payload, sampleCount, impl->chunk, decodeError) ||
                 first > std::numeric_limits<quint64>::max()-impl->chunk.size()/2) return fail("Invalid main FFT IQ chunk");
             const bool discontinuity = q.value("gap").toBool() || (impl->haveNext && first != impl->nextSample);
             if (discontinuity) {

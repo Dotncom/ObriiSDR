@@ -17,6 +17,7 @@ struct DspBranchExecutionStats {
 
 struct DspBranchFrame {
     QString id;
+    DspSourceIdentity source;
     QString error;
     QString recordingStatus;
     QString audioStatus;

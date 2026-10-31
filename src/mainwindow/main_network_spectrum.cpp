@@ -90,6 +90,33 @@ void YourClassName::sendNetworkSpectrumFrame(const std::vector<float> &frequenci
         frameMinFrequency = frequencies.front();
         frameMaxFrequency = frequencies.back();
     }
+    // A server-side UI may be zoomed or panned independently.  For ordinary
+    // contiguous receiver frames always transmit the complete available span,
+    // then let each client choose its own viewport.  Scan mosaics retain their
+    // explicitly assembled range and gap metadata.
+    bool clientViewportApplied = false;
+    if (scanSegments.isEmpty() &&
+        std::isfinite(frequencies.front()) &&
+        std::isfinite(frequencies.back()) &&
+        frequencies.back() > frequencies.front()) {
+        frameMinFrequency = frequencies.front();
+        frameMaxFrequency = frequencies.back();
+        const double availableSpan = frameMaxFrequency - frameMinFrequency;
+        if (std::isfinite(networkRemoteViewportCenterHz) &&
+            std::isfinite(networkRemoteViewportSpanHz) &&
+            networkRemoteViewportSpanHz >= 1.0 &&
+            networkRemoteViewportSpanHz < availableSpan) {
+            const double requestedSpan = (std::clamp)(networkRemoteViewportSpanHz, 1.0, availableSpan);
+            const double minimumCenter = frameMinFrequency + requestedSpan * 0.5;
+            const double maximumCenter = frameMaxFrequency - requestedSpan * 0.5;
+            const double requestedCenter = (std::clamp)(networkRemoteViewportCenterHz,
+                                                        minimumCenter,
+                                                        maximumCenter);
+            frameMinFrequency = requestedCenter - requestedSpan * 0.5;
+            frameMaxFrequency = frameMinFrequency + requestedSpan;
+            clientViewportApplied = true;
+        }
+    }
     double frameListeningFrequency = pendingSettings.listeningFrequency;
     if (!std::isfinite(frameListeningFrequency)) {
         frameListeningFrequency = frameCenterFrequency;
@@ -178,6 +205,7 @@ void YourClassName::sendNetworkSpectrumFrame(const std::vector<float> &frequenci
     frame["showScanSegmentMarkers"] = showScanSegmentMarkers;
     frame["minFrequency"] = frameMinFrequency;
     frame["maxFrequency"] = frameMaxFrequency;
+    frame["clientViewportApplied"] = clientViewportApplied;
     if (!scanSegments.isEmpty()) {
         QJsonArray segmentArray;
         for (const ScanVisualSegment &segment : scanSegments) {
@@ -281,6 +309,31 @@ void YourClassName::displayNetworkSpectrumFrame(const QJsonObject &frame) {
     const QVector<ScanVisualSegment> frameScanSegments = scanSegmentsFromFrame(frame);
     const bool frameShowScanSegmentMarkers =
         frame.value("showScanSegmentMarkers").toBool(!frameScanSegments.isEmpty());
+    const bool clientViewportApplied = frame.value(QStringLiteral("clientViewportApplied")).toBool(false);
+    const double fullSpan = (std::max)(1.0, frameMaxFrequency - frameMinFrequency);
+    double visibleSpan = clientViewportApplied
+                             ? fullSpan
+                             : fullSpan * (effectiveScalePercent() / 100.0);
+    visibleSpan = (std::clamp)(visibleSpan, 1.0, fullSpan);
+    double viewportCenter = spectrumDisplayCenterHz;
+    if (!std::isfinite(viewportCenter) ||
+        viewportCenter < frameMinFrequency ||
+        viewportCenter > frameMaxFrequency) {
+        viewportCenter = frameCenterFrequency;
+    }
+    const double minViewportCenter = frameMinFrequency + visibleSpan * 0.5;
+    const double maxViewportCenter = frameMaxFrequency - visibleSpan * 0.5;
+    if (maxViewportCenter >= minViewportCenter) {
+        viewportCenter = (std::clamp)(viewportCenter, minViewportCenter, maxViewportCenter);
+    } else {
+        viewportCenter = 0.5 * (frameMinFrequency + frameMaxFrequency);
+    }
+    const double viewportMinFrequency = viewportCenter - visibleSpan * 0.5;
+    const double viewportMaxFrequency = viewportMinFrequency + visibleSpan;
+    spectrumDisplayCenterHz = viewportCenter;
+    minFrequency = viewportMinFrequency;
+    maxFrequency = viewportMaxFrequency;
+
     const double displayCenterFrequency = frameCenterFrequency;
     const double displayListeningFrequency = pendingSettings.listeningFrequency;
     const double displayBandwidth = effectiveDemodulationBandwidth(
@@ -298,7 +351,7 @@ void YourClassName::displayNetworkSpectrumFrame(const QJsonObject &frame) {
                                displayCenterFrequency,
                                displayBandwidth,
                                displayModulationType);
-        scaleWidget->setRange(frameMinFrequency, frameMaxFrequency);
+        scaleWidget->setRange(viewportMinFrequency, viewportMaxFrequency);
     }
     const std::vector<float> hunterFrequencies =
         !frameScanSegments.isEmpty()
@@ -423,8 +476,8 @@ void YourClassName::displayNetworkSpectrumFrame(const QJsonObject &frame) {
         graphWidget->setScanSegmentMarkersVisible(frameShowScanSegmentMarkers);
         graphWidget->setData(graphFrequencies,
                              graphMagnitudes,
-                             frameMinFrequency,
-                             frameMaxFrequency,
+                             viewportMinFrequency,
+                             viewportMaxFrequency,
                              graphTargetCount,
                              colorf);
         graphWidget->setOverlayData(!measurementOverlay.empty() ? measurementOverlay : graphReferenceMagnitudes,
@@ -432,7 +485,7 @@ void YourClassName::displayNetworkSpectrumFrame(const QJsonObject &frame) {
                                         static_cast<int>(graphReferenceMagnitudes.size()) == graphTargetCount);
     }
     if (waterfallWidget && frameFresh) {
-        waterfallWidget->setData(frequencies, magnitudes, frameMinFrequency, frameMaxFrequency, frameFftLength,
+        waterfallWidget->setData(frequencies, magnitudes, viewportMinFrequency, viewportMaxFrequency, frameFftLength,
                                  secondGraph, colorf, contrast, sensitivity, displayLevelMin, displayLevelMax);
     }
     if (waterfallWidget) {
@@ -502,6 +555,31 @@ void YourClassName::displayNetworkSpectrumFrameBinary(const QJsonObject &frame, 
     const QVector<ScanVisualSegment> frameScanSegments = scanSegmentsFromFrame(frame);
     const bool frameShowScanSegmentMarkers =
         frame.value("showScanSegmentMarkers").toBool(!frameScanSegments.isEmpty());
+    const bool clientViewportApplied = frame.value(QStringLiteral("clientViewportApplied")).toBool(false);
+    const double fullSpan = (std::max)(1.0, frameMaxFrequency - frameMinFrequency);
+    double visibleSpan = clientViewportApplied
+                             ? fullSpan
+                             : fullSpan * (effectiveScalePercent() / 100.0);
+    visibleSpan = (std::clamp)(visibleSpan, 1.0, fullSpan);
+    double viewportCenter = spectrumDisplayCenterHz;
+    if (!std::isfinite(viewportCenter) ||
+        viewportCenter < frameMinFrequency ||
+        viewportCenter > frameMaxFrequency) {
+        viewportCenter = frameCenterFrequency;
+    }
+    const double minViewportCenter = frameMinFrequency + visibleSpan * 0.5;
+    const double maxViewportCenter = frameMaxFrequency - visibleSpan * 0.5;
+    if (maxViewportCenter >= minViewportCenter) {
+        viewportCenter = (std::clamp)(viewportCenter, minViewportCenter, maxViewportCenter);
+    } else {
+        viewportCenter = 0.5 * (frameMinFrequency + frameMaxFrequency);
+    }
+    const double viewportMinFrequency = viewportCenter - visibleSpan * 0.5;
+    const double viewportMaxFrequency = viewportMinFrequency + visibleSpan;
+    spectrumDisplayCenterHz = viewportCenter;
+    minFrequency = viewportMinFrequency;
+    maxFrequency = viewportMaxFrequency;
+
     const double displayCenterFrequency = frameCenterFrequency;
     const double displayListeningFrequency = pendingSettings.listeningFrequency;
     const double displayBandwidth = effectiveDemodulationBandwidth(
@@ -519,7 +597,7 @@ void YourClassName::displayNetworkSpectrumFrameBinary(const QJsonObject &frame, 
                                displayCenterFrequency,
                                displayBandwidth,
                                displayModulationType);
-        scaleWidget->setRange(frameMinFrequency, frameMaxFrequency);
+        scaleWidget->setRange(viewportMinFrequency, viewportMaxFrequency);
     }
     const std::vector<float> hunterFrequencies =
         !frameScanSegments.isEmpty()
@@ -636,8 +714,8 @@ void YourClassName::displayNetworkSpectrumFrameBinary(const QJsonObject &frame, 
         graphWidget->setScanSegmentMarkersVisible(frameShowScanSegmentMarkers);
         graphWidget->setData(graphFrequencies,
                              graphMagnitudes,
-                             frameMinFrequency,
-                             frameMaxFrequency,
+                             viewportMinFrequency,
+                             viewportMaxFrequency,
                              graphTargetCount,
                              colorf);
         graphWidget->setOverlayData(!measurementOverlay.empty() ? measurementOverlay : graphReferenceMagnitudes,
@@ -645,7 +723,7 @@ void YourClassName::displayNetworkSpectrumFrameBinary(const QJsonObject &frame, 
                                         static_cast<int>(graphReferenceMagnitudes.size()) == graphTargetCount);
     }
     if (waterfallWidget && frameFresh) {
-        waterfallWidget->setData(frequencies, magnitudes, frameMinFrequency, frameMaxFrequency, frameFftLength,
+        waterfallWidget->setData(frequencies, magnitudes, viewportMinFrequency, viewportMaxFrequency, frameFftLength,
                                  secondGraph, colorf, contrast, sensitivity, displayLevelMin, displayLevelMax);
     }
     if (waterfallWidget) {

@@ -6848,6 +6848,7 @@ QString DspFlowPanel::configurationJson() const {
     root.insert(QStringLiteral("spectrumCompute"), QJsonObject{
         {QStringLiteral("mode"), int(spectrumComputeOptions_.mode)},
         {QStringLiteral("backend"), spectrumComputeOptions_.backend},
+        {QStringLiteral("iqFormat"), int(spectrumComputeOptions_.iqFormat)},
         {QStringLiteral("uploadLimitMBps"), spectrumComputeOptions_.uploadLimitMBps},
         {QStringLiteral("fallbackToLocal"), spectrumComputeOptions_.fallbackToLocal}});
     return QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Compact));
@@ -7131,6 +7132,7 @@ bool DspFlowPanel::setConfigurationJson(const QString &json) {
         SpectrumComputeOptions restored;
         restored.mode = SpectrumComputeMode(options.value(QStringLiteral("mode")).toInt(0));
         restored.backend = options.value(QStringLiteral("backend")).toInt(1);
+        restored.iqFormat = DspIqFormat(options.value(QStringLiteral("iqFormat")).toInt(int(DspIqFormat::Auto)));
         restored.uploadLimitMBps = options.value(QStringLiteral("uploadLimitMBps")).toInt(100);
         restored.fallbackToLocal = options.value(QStringLiteral("fallbackToLocal")).toBool(false);
         setSpectrumComputeOptions(restored);
@@ -7183,6 +7185,8 @@ void DspFlowPanel::setSpectrumComputeOptions(const SpectrumComputeOptions &optio
     auto normalized = options;
     if (int(normalized.mode) < 0 || int(normalized.mode) > 2) normalized.mode = SpectrumComputeMode::Local;
     if (normalized.backend < 0 || normalized.backend > 2) normalized.backend = 1;
+    if (int(normalized.iqFormat) < int(DspIqFormat::Auto) ||
+        int(normalized.iqFormat) > int(DspIqFormat::BlockFloat16Le)) normalized.iqFormat = DspIqFormat::Auto;
     normalized.uploadLimitMBps = std::clamp(normalized.uploadLimitMBps, 1, 2000);
     if (spectrumComputeOptions_ == normalized) return;
     spectrumComputeOptions_ = normalized;

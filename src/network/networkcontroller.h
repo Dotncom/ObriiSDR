@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QJsonObject>
 #include <QString>
+#include <QStringList>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
@@ -21,7 +22,8 @@ enum class NetworkMode {
 enum class NetworkProcessingMode {
     ServerSide = 0,
     ChannelIqClientSide = 1,
-    FullIqClientSide = 2
+    FullIqClientSide = 2,
+    RemoteVfoServerSide = 3
 };
 
 class NetworkController : public QObject {
@@ -37,6 +39,10 @@ public:
     qint64 pendingBytes() const;
     bool clientHasControl() const;
     QString controllerPeerId() const;
+    quint16 listeningPort() const;
+    QStringList readyPeerIds() const;
+    QString peerLabelForId(const QString &peerId) const;
+    qint64 pendingBytesForPeer(const QString &peerId) const;
 
     void stop();
     void startServer(const QString &bindAddress, quint16 port);
@@ -44,7 +50,12 @@ public:
     bool sendControlCommand(const QJsonObject &command);
     bool sendBinaryCommand(const QJsonObject &command, const QByteArray &payload);
     bool sendControlCommandToPeer(const QString &peerId, const QJsonObject &command);
+    bool sendBinaryCommandToPeer(const QString &peerId,
+                                 const QJsonObject &command,
+                                 const QByteArray &payload);
     bool sendControlCommandToController(const QJsonObject &command);
+    bool setPeerStreamProfile(const QString &peerId, const QString &profile);
+    QString peerStreamProfile(const QString &peerId) const;
     bool setControllerPeer(const QString &peerId);
     bool blockPriorityRequestsFromPeer(const QString &peerId);
     bool isPriorityRequestBlocked(const QString &peerId) const;
@@ -55,6 +66,8 @@ signals:
     void channelError(const QString &message);
     void controlCommandReceived(const QJsonObject &command);
     void binaryCommandReceived(const QJsonObject &command, const QByteArray &payload);
+    void peerReady(const QString &peerId, const QString &label);
+    void peerDisconnected(const QString &peerId, const QString &label);
 
 private:
     void setStatus(const QString &status);
@@ -72,6 +85,7 @@ private:
     QString peerLabel(QTcpSocket *socket) const;
     QString peerPriorityKey(QTcpSocket *socket) const;
     bool isReadyPeer(QTcpSocket *socket) const;
+    bool acceptsLegacyStream(QTcpSocket *socket) const;
     void promoteControllerIfNeeded();
     void sendRoleUpdate(QTcpSocket *socket);
     void broadcastRoleUpdates();
@@ -91,12 +105,15 @@ private:
     QHash<QTcpSocket*, QString> peerIds;
     QHash<QTcpSocket*, QString> peerLabels;
     QHash<QTcpSocket*, QString> peerPriorityKeys;
+    QHash<QTcpSocket*, QString> peerStreamProfiles;
     QSet<QString> blockedPriorityRequesterKeys;
     QTimer *handshakeTimer = nullptr;
     QTimer *heartbeatTimer = nullptr;
     QElapsedTimer lastMessageTimer;
     QHash<QTcpSocket*, QElapsedTimer> peerLastMessageTimers;
+    QSet<QTcpSocket*> processingPeerReads;
     QByteArray clientReadBuffer;
+    bool processingClientRead = false;
     QJsonObject clientPendingBinaryCommand;
     qint64 clientPendingBinaryBytes = 0;
     NetworkMode currentMode = NetworkMode::Disabled;

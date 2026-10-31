@@ -308,6 +308,7 @@ struct RadioSettings {
     bool dmrAdaptiveSlicer = true;
     int dmrAmbeLayout = DMR_DEFAULT_AMBE_LAYOUT;
     int dmrPrivacyMode = 0;
+    bool dmrPrivacyAutoKeySelection = false;
     int dmrPrivacyKeyId = 0;
     QString dmrPrivacyKeyHex;
     QString dmrPrivacyVariant = QStringLiteral("dmra");

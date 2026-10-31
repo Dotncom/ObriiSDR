@@ -2,6 +2,7 @@
 #define MULTISDRDIALOG_H
 
 #include "analyzerreceiver.h"
+#include "coherentiqaligner.h"
 #include "spectrummosaicengine.h"
 
 #include <QDialog>
@@ -20,6 +21,7 @@ class QCloseEvent;
 class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
+class QLineEdit;
 class QPushButton;
 class QSpinBox;
 
@@ -48,7 +50,7 @@ signals:
     void primaryStartRequested();
     void primaryStopRequested();
     void audioSourceChanged(int receiverIndex);
-    void auxiliaryIqReady(const float *samples, quint64 floatCount,
+    void auxiliaryIqReady(int receiverIndex, const float *samples, quint64 floatCount,
                           double sampleRateHz, double centerHz);
 
 protected:
@@ -80,6 +82,12 @@ private:
     void retuneSource(int sourceIndex, double centerHz);
     void saveSettings() const;
     void restoreSettings();
+    DspSourceIdentity sourceIdentity(int sourceIndex) const;
+    void refreshCoherentReferenceChoices();
+    void updateCoherentSubscriptions();
+    void invalidateCoherentCalibration(const QString &reason = {});
+    void calibrateCoherentGroup();
+    void saveCoherentSnapshot();
     QString text(const char *english, const char *ukrainian) const;
     QString frequencyText(double hz) const;
 
@@ -113,6 +121,13 @@ private:
     QPushButton *stopAllButton = nullptr;
     QPushButton *addReceiverButton = nullptr;
     QPushButton *removeReceiverButton = nullptr;
+    QCheckBox *coherentCaptureCheckbox = nullptr;
+    QComboBox *coherentReferenceCombo = nullptr;
+    QSpinBox *coherentMaxDelaySpin = nullptr;
+    QPushButton *coherentCalibrateButton = nullptr;
+    QPushButton *coherentSaveButton = nullptr;
+    QLabel *coherentStatusLabel = nullptr;
+    QVector<CoherentIqCalibration> coherentCalibrations;
     std::vector<float> mosaicFrequencies;
     std::vector<float> mosaicLevels;
     QElapsedTimer mosaicRefreshClock;

@@ -13,6 +13,7 @@
 #include <memory>
 
 class AnalyzerSpectrumWidget;
+class AnalyzerInstrumentDialog;
 class SpectrumMarkerPairsDialog;
 class QCheckBox;
 class QComboBox;
@@ -116,6 +117,7 @@ private:
     QCheckBox *p99Check = nullptr;
     QComboBox *markerCombo = nullptr;
     SpectrumMarkerPairsDialog *markerPairsDialog = nullptr;
+    AnalyzerInstrumentDialog *instrumentDialog = nullptr;
     QComboBox *receiverCombo = nullptr;
     QComboBox *receiverInputCombo = nullptr;
     QComboBox *receiverFftCombo = nullptr;

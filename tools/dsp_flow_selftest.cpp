@@ -745,13 +745,14 @@ void testSpectrumComputePreferences() {
 
     SpectrumComputeOptions options;
     options.mode = SpectrumComputeMode::Continuous; options.backend = 2;
+    options.iqFormat = DspIqFormat::BlockFloat16Le;
     options.uploadLimitMBps = 321; options.fallbackToLocal = true;
     panel.setSpectrumComputeOptions(options);
     panel.setSpectrumComputeOptions(options);
     require(preferenceSignals == 1 && panel.spectrumComputeOptions() == options, "Preference setter/signal contract failed");
     const auto saved = panel.configurationJson();
     auto object = QJsonDocument::fromJson(saved.toUtf8()).object();
-    require(object["spectrumCompute"].toObject() == QJsonObject{{"mode", 2}, {"backend", 2},
+    require(object["spectrumCompute"].toObject() == QJsonObject{{"mode", 2}, {"backend", 2}, {"iqFormat", 3},
                 {"uploadLimitMBps", 321}, {"fallbackToLocal", true}}, "Unexpected persisted main FFT fields");
     require(!saved.contains(endpoint.token) && !saved.contains(endpoint.address) &&
             !saved.contains("runtime-status-not-a-preference"), "Session-only values serialized");
@@ -775,7 +776,7 @@ void testSpectrumComputePreferences() {
             !restored.configurationJson().contains("injected-") && !restored.configurationJson().contains("externalEndpoint"),
             "Untrusted preference data granted transfer or bypassed normalization");
     const auto cleanPreferences = QJsonDocument::fromJson(restored.configurationJson().toUtf8()).object()["spectrumCompute"].toObject();
-    require(cleanPreferences.size() == 4 && !cleanPreferences.contains("enabled") && restoreSignals == 2,
+    require(cleanPreferences.size() == 5 && !cleanPreferences.contains("enabled") && restoreSignals == 2,
             "Preference restore retained permission fields or missed its change signal");
     normalized.uploadLimitMBps = -1;
     restored.setSpectrumComputeOptions(normalized);
@@ -845,15 +846,16 @@ void testComputeDialog() {
     require(controls, "Manager has no shared main FFT controls");
     auto *mode = controls->findChild<QComboBox *>("mainFftComputeMode");
     auto *backend = controls->findChild<QComboBox *>("mainFftBackend");
+    auto *iqFormat = controls->findChild<QComboBox *>("mainFftIqFormat");
     auto *upload = controls->findChild<QSpinBox *>("mainFftUploadLimitMBps");
     auto *fallback = controls->findChild<QCheckBox *>("mainFftFallbackToLocal");
     auto *apply = controls->findChild<QPushButton *>("mainFftApply");
     auto *status = controls->findChild<QLabel *>("mainFftComputeStatus");
     auto *memory = dialog.findChild<QSpinBox *>("mainFftMemoryMiB");
-    require(mode && backend && upload && fallback && apply && status && memory, "Main FFT controls are incomplete");
+    require(mode && backend && iqFormat && upload && fallback && apply && status && memory, "Main FFT controls are incomplete");
     require(controls->options() == SpectrumComputeOptions{} && !upload->isEnabled() && !fallback->isEnabled(),
             "Local defaults unexpectedly arm remote FFT controls");
-    require(mode->count() == 3 && backend->count() == 3 && upload->minimum() == 1 && upload->maximum() == 2000 &&
+    require(mode->count() == 3 && backend->count() == 3 && iqFormat->count() == 4 && upload->minimum() == 1 && upload->maximum() == 2000 &&
             memory->minimum() == 64 && memory->maximum() == 8192 && memory->value() == 512 && memory->isEnabled(),
             "Main FFT control ranges/defaults changed");
     int applySignals = 0, optionSignals = 0, endpointSignals = 0;
@@ -861,9 +863,12 @@ void testComputeDialog() {
     QObject::connect(&dialog, &DspComputeDialog::spectrumComputeOptionsChanged, &dialog, [&]() { ++optionSignals; });
     QObject::connect(&dialog, &DspComputeDialog::endpointChanged, &dialog, [&]() { ++endpointSignals; });
     mode->setCurrentIndex(mode->findData(int(SpectrumComputeMode::Windows)));
-    backend->setCurrentIndex(backend->findData(0)); upload->setValue(234); fallback->setChecked(true);
+    backend->setCurrentIndex(backend->findData(0));
+    iqFormat->setCurrentIndex(iqFormat->findData(int(DspIqFormat::Cs16Le)));
+    upload->setValue(234); fallback->setChecked(true);
     SpectrumComputeOptions draft;
-    draft.mode = SpectrumComputeMode::Windows; draft.backend = 0; draft.uploadLimitMBps = 234; draft.fallbackToLocal = true;
+    draft.mode = SpectrumComputeMode::Windows; draft.backend = 0; draft.iqFormat = DspIqFormat::Cs16Le;
+    draft.uploadLimitMBps = 234; draft.fallbackToLocal = true;
     require(controls->options() == draft && dialog.spectrumComputeOptions() == SpectrumComputeOptions{} &&
             applySignals == 0 && optionSignals == 0 && upload->isEnabled() && fallback->isEnabled(),
             "Draft FFT edits committed before Apply");
@@ -888,7 +893,7 @@ void testComputeDialog() {
     if (qEnvironmentVariableIsSet("OBRII_DSP_RENDER_TEST")) {
         require(image.save("build/dsp-stream-manager-preview.png"), "Cannot save compute dialog preview");
         auto *tabs = dialog.findChild<QTabWidget *>();
-        require(tabs && tabs->count() == 4, "Compute manager tabs missing");
+        require(tabs && tabs->count() == 5, "Compute manager tabs missing");
         tabs->setCurrentIndex(1);
         dialog.setSpectrumComputeStatus(QStringLiteral("Remote continuous FFT | upload 64 MB/s | download 12 MB/s | DSP 20 ms | latency 30 ms | gaps 0 | overrun 0 samples"));
         QApplication::processEvents();
@@ -927,10 +932,11 @@ void testComputeDialog() {
     require(dialog.findChild<QLabel *>("dspProbeTarget")->text().contains("loopback") &&
             dialog.findChild<QLabel *>("dspProbeEstimate")->text().contains("400.00"), "Probe result lacks loopback warning or traffic estimate");
     auto *tabs = dialog.findChild<QTabWidget *>();
-    tabs->setCurrentIndex(2);
+    auto *probeTab = dialog.findChild<QScrollArea *>("dspConnectionProbeTab");
+    require(probeTab && tabs->indexOf(probeTab) >= 0, "Connection test tab missing");
+    tabs->setCurrentWidget(probeTab);
     dialog.resize(640, 480); QApplication::processEvents();
-    auto *scroll = qobject_cast<QScrollArea *>(tabs->currentWidget());
-    require(scroll && scroll->horizontalScrollBar()->maximum() == 0, "Connection test does not fit a compact window");
+    require(probeTab->horizontalScrollBar()->maximum() == 0, "Connection test does not fit a compact window");
     if (qEnvironmentVariableIsSet("OBRII_DSP_RENDER_TEST")) {
         dialog.resize(820, 840); QApplication::processEvents();
         require(dialog.grab().save("build/dsp-connection-test-preview.png"), "Cannot save connection test preview");
@@ -1056,10 +1062,14 @@ void testResearch3D() {
 }
 }
 
+bool runRemoteVfoServiceTests();
+
 int main(int argc, char **argv) {
 #ifdef _MSC_VER
     SetUnhandledExceptionFilter(reportCrash);
 #endif
+    if (qEnvironmentVariableIsSet("OBRII_REMOTE_VFO_SELFTEST"))
+        std::cerr << "Remote VFO self-test: initializing Qt\n" << std::flush;
     QApplication app(argc, argv);
 #ifdef _WIN32
     if (qEnvironmentVariableIsSet("OBRII_DSP_RENDER_TEST")) {
@@ -1071,6 +1081,12 @@ int main(int argc, char **argv) {
     QStandardPaths::setTestModeEnabled(true);
     QApplication::setApplicationName("ObriiDspFlowSelfTest");
     try {
+        if (qEnvironmentVariableIsSet("OBRII_REMOTE_VFO_SELFTEST")) {
+            std::cerr << "Remote VFO self-test: running protocol checks\n" << std::flush;
+            require(runRemoteVfoServiceTests(), "Remote VFO session tests failed");
+            std::cout << "Remote VFO session isolation and quota tests passed\n";
+            return 0;
+        }
         testBoardHistory();
         testBoardFilterHistory();
         testSelectionDeletion();
@@ -1086,6 +1102,7 @@ int main(int argc, char **argv) {
         testVfoContext();
         testResearch3D();
         require(dspBranchSelfTest(), "DSP branch tests failed");
+        require(runRemoteVfoServiceTests(), "Remote VFO session tests failed");
         require(dspBranchTeardownSelfTest(), "DSP teardown tests failed");
         require(multiVfoPreviewHistorySelfTest(), "VFO level changes cleared or reordered waterfall history");
         std::cout << "DSP frame routing, main FFT bindings/preferences/controls, cache lifetime, throttling and VFO context tests passed\n";

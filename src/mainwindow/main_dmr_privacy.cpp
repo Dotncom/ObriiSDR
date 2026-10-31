@@ -43,6 +43,9 @@ void YourClassName::refreshDmrPrivacyKeyIdCombo() {
         dmrPrivacyModeCombo
             ? normalizedDmrPrivacyMode(dmrPrivacyModeCombo->currentData().toInt())
             : normalizedDmrPrivacyMode(pendingSettings.dmrPrivacyMode);
+    const bool automatic = pendingSettings.dmrPrivacyAutoKeySelection ||
+        (dmrPrivacySelectionCombo && dmrPrivacySelectionCombo->currentData().toBool());
+    if (dmrPrivacyModeCombo) dmrPrivacyModeCombo->setEnabled(!automatic);
     const int preferredKeyId = pendingSettings.dmrPrivacyKeyId;
     const bool arc4 = mode == DMR_PRIVACY_ARC4;
     if (dmrPrivacyFrameOffsetCombo) dmrPrivacyFrameOffsetCombo->setEnabled(arc4);
@@ -69,7 +72,7 @@ void YourClassName::refreshDmrPrivacyKeyIdCombo() {
         return;
     }
 
-    dmrPrivacyKeyIdCombo->setEnabled(true);
+    dmrPrivacyKeyIdCombo->setEnabled(!automatic);
     if (keyIds.isEmpty()) {
         dmrPrivacyKeyIdCombo->addItem(uiText(QStringLiteral("dmr_privacy_no_keys"),
                                              QStringLiteral("No keys")),

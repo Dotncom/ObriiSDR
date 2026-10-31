@@ -3,6 +3,7 @@
 
 #include "dmrvoicepayload.h"
 #include "dmrprivacycodec.h"
+#include "dmrprivacyutils.h"
 #include <array>
 #include <deque>
 #include <vector>
@@ -26,6 +27,7 @@ public:
     };
 
     bool configure(int mode, bool enabled, const QString &keyHex, int keyId);
+    bool setKeyring(const QVector<DmrPrivacyKeyEntry> &entries);
     void reset();
     void resetVoiceAlignment() { slotContexts = {}; }
     bool isActive() const { return active; }
@@ -48,7 +50,15 @@ private:
         quint32 nextMi = 0;
         bool nextMiValid = false;
         QByteArray stream;
+        QByteArray key;
+        int mode = DMR_PRIVACY_NONE;
+        int keyId = -1;
         std::array<int, 18> fragments = {};
+    };
+    struct PreparedKey {
+        int mode = DMR_PRIVACY_NONE;
+        int keyId = 0;
+        QByteArray key;
     };
     struct PendingPi { DmrPrivacyCodec::PiHeader header; quint64 sample = 0; };
     std::array<Slot, 3> slotContexts = {};
@@ -57,6 +67,7 @@ private:
     Statistics counters;
     QString requestedKey;
     QByteArray key;
+    QVector<PreparedKey> keyring;
     int requestedMode = -1;
     int requestedId = -1;
     int configuredKeyBits = 0;
@@ -64,6 +75,7 @@ private:
     bool active = false;
     void beginSuperframe(Slot &slot, const DmrAmbePayload &payload, int ordinal);
     void finishLateEntry(Slot &slot);
+    const PreparedKey *findKey(int mode, int keyId) const;
 };
 
 #endif // DMRPRIVACYPROCESSOR_H

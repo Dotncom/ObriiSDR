@@ -78,6 +78,8 @@ signals:
     void readerFailed(int errorCode, bool stoppedByRequest);
 
 private:
+    void publishCoherentIq(const float *samples, std::size_t floatCount,
+                           std::uint64_t epoch, bool discontinuity = false);
     void emitIqFrame(const float *samples, std::size_t floatCount);
     void emitFullIqFrame(const float *samples, std::size_t floatCount);
     void emitWifiIqFrame(const float *samples, std::size_t floatCount);
@@ -107,6 +109,7 @@ private:
     std::atomic<bool> networkIqResetRequested;
     std::atomic<bool> asyncCancelRequested{false};
     std::atomic<uint64_t> iqRetuneEpoch;
+    std::atomic<uint64_t> coherentSampleCounter{0};
     std::atomic<double> requestedSampleRate;
     std::atomic<double> requestedCenterFrequency;
     std::atomic<double> frequencyCalibrationOffsetHz;

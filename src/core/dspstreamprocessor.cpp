@@ -1,4 +1,5 @@
 #include "dspstreamprocessor.h"
+#include "dspiqcodec.h"
 #include "fftplannermutex.h"
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -123,11 +124,12 @@ DspStreamResult DspStreamProcessor::process(const DspStreamBlock &block) {
     result.gap = block.gap;
     const auto started = Clock::now();
     try {
-        if (!impl->states.count(block.stream) && impl->states.size() >= DspStreamProtocol::MaxStreams) {
+        const QString stateKey = block.source.key() + QLatin1Char('/') + block.stream;
+        if (!impl->states.count(stateKey) && impl->states.size() >= DspStreamProtocol::MaxStreams) {
             result.error = "DSP stream count exceeds limit";
             return result;
         }
-        auto &state = impl->states[block.stream];
+        auto &state = impl->states[stateKey];
         if (!state || block.gap || state->generation != block.generation || state->epoch != block.epoch ||
             state->next != block.firstSample || state->rate != block.sampleRate || state->center != block.centerHz || !sameFfts(state->configs, block.ffts)) {
             result.gap = true;
@@ -148,17 +150,23 @@ DspStreamResult DspStreamProcessor::process(const DspStreamBlock &block) {
         if (block.returnIq) result.iq = std::make_shared<const std::vector<float>>(block.iq);
         for (auto &fft : state->ffts) {
             DspBranchFrame frame;
-            if (fft->compute(block, state->history, state->write, state->count, frame)) result.spectra.push_back(std::move(frame));
+            if (fft->compute(block, state->history, state->write, state->count, frame)) {
+                frame.source = block.source;
+                result.spectra.push_back(std::move(frame));
+            }
         }
-    } catch (const std::exception &) { impl->states.erase(block.stream); result.error = "DSP stream resource limit"; }
+    } catch (const std::exception &) {
+        impl->states.erase(block.source.key() + QLatin1Char('/') + block.stream);
+        result.error = "DSP stream resource limit";
+    }
     result.processingMs = std::chrono::duration<double, std::milli>(Clock::now()-started).count();
     return result;
 }
 
 namespace DspStreamProtocol {
 QString validate(const DspStreamBlock &b) {
-    if (!idValid(b.stream) || b.iq.empty() || b.iq.size()%2 || b.iq.size()/2U > MaxSamples ||
-        !std::isfinite(b.sampleRate) || b.sampleRate < 1000 || b.sampleRate > 2000000 ||
+    if (!idValid(b.stream) || !b.source.isValid() || b.iq.empty() || b.iq.size()%2 || b.iq.size()/2U > MaxSamples ||
+        !std::isfinite(b.sampleRate) || b.sampleRate < 1000 || b.sampleRate > 100000000 ||
         !std::isfinite(b.centerHz) || b.centerHz < 0 || b.centerHz > 8e9 || b.ffts.size() > 2 ||
         b.firstSample > UINT64_MAX-b.iq.size()/2U) return "Invalid stream metadata or block size";
     QStringList ids;
@@ -203,25 +211,75 @@ QByteArray floats(const std::vector<float> &values) {
 QJsonObject request(const DspStreamBlock &b) {
     QJsonArray ffts;
     for (const auto &f : b.ffts) ffts.append(QJsonObject{{"id", f.id}, {"length", f.length}, {"window", f.window}, {"refreshMs", f.refreshMs}});
-    return {{"type", "work"}, {"stream", b.stream}, {"generation", QString::number(qulonglong(b.generation))},
+    return {{"type", "work"}, {"stream", b.stream},
+        {"receiverId", b.source.receiverId}, {"channelId", b.source.channelId},
+        {"generation", QString::number(qulonglong(b.generation))},
         {"epoch", QString::number(qulonglong(b.epoch))}, {"firstSample", QString::number(qulonglong(b.firstSample))},
         {"sampleCount", int(b.iq.size()/2U)}, {"sampleRate", b.sampleRate}, {"centerHz", b.centerHz},
         {"gap", b.gap}, {"returnIq", b.returnIq}, {"ffts", ffts}};
 }
 bool decodeRequest(const QJsonObject &j, const QByteArray &payload, DspStreamBlock &b, QString &error) {
     const int count = j.value("sampleCount").toInt(-1);
-    if (j.value("type") != "work" || count < 1 || count > int(MaxSamples) || payload.size() != count*8 ||
+    const QString iqFormatId = j.value("iqFormat").toString();
+    const DspIqFormat iqFormat = DspIqCodec::fromId(iqFormatId, DspIqFormat::Cf32Le);
+    if (j.value("type") != "work" || count < 1 || count > int(MaxSamples) ||
+        (!iqFormatId.isEmpty() && DspIqCodec::id(iqFormat) != iqFormatId) ||
         !u64(j.value("generation"), b.generation) || !u64(j.value("epoch"), b.epoch) || !u64(j.value("firstSample"), b.firstSample) ||
         !j.value("ffts").isArray() || j.value("ffts").toArray().size() > 2 ||
         !j.value("gap").isBool() || !j.value("returnIq").isBool() || !j.value("centerHz").isDouble()) { error = "Invalid DSP work request"; return false; }
-    b.stream = j.value("stream").toString(); b.sampleRate = j.value("sampleRate").toDouble(); b.centerHz = j.value("centerHz").toDouble();
+    b.stream = j.value("stream").toString();
+    b.source.receiverId = j.value("receiverId").toString(QStringLiteral("main"));
+    b.source.channelId = j.value("channelId").toString(QStringLiteral("rx0"));
+    b.sampleRate = j.value("sampleRate").toDouble(); b.centerHz = j.value("centerHz").toDouble();
+    b.wireFormat = iqFormat;
     b.gap = j.value("gap").toBool(); b.returnIq = j.value("returnIq").toBool(); b.ffts.clear();
     for (const auto &v : j.value("ffts").toArray()) {
         const auto f = v.toObject();
         b.ffts.append({f.value("id").toString(), f.value("length").toInt(-1), f.value("window").toInt(-1), f.value("refreshMs").toInt(-1)});
     }
-    if (!readFloats(payload, 0, count*2, b.iq)) { error = "Invalid DSP IQ payload"; return false; }
+    if (!DspIqCodec::decode(j, payload, count, b.iq, error)) { error = "Invalid DSP IQ payload: " + error; return false; }
     error = validate(b); return error.isEmpty();
+}
+QString selectedBandKey(const DspStreamBlock &b) {
+    return b.source.key() + QLatin1Char('/') + b.stream;
+}
+QJsonObject selectedBandOpen(const DspStreamBlock &b) {
+    QJsonArray ffts;
+    for (const auto &f : b.ffts)
+        ffts.append(QJsonObject{{"id", f.id}, {"length", f.length}, {"window", f.window}, {"refreshMs", f.refreshMs}});
+    return {{"type", "selected_band_open"}, {"version", SelectedBandVersion}, {"stream", b.stream},
+        {"receiverId", b.source.receiverId}, {"channelId", b.source.channelId},
+        {"sampleRate", b.sampleRate}, {"centerHz", b.centerHz}, {"returnIq", b.returnIq}, {"ffts", ffts}};
+}
+bool decodeSelectedBandOpen(const QJsonObject &j, DspStreamBlock &b, QString &error) {
+    if (j.value("type") != "selected_band_open" || j.value("version").toInt(-1) != SelectedBandVersion ||
+        !j.value("returnIq").isBool() || !j.value("ffts").isArray() || j.value("ffts").toArray().size() > 2 ||
+        !j.value("sampleRate").isDouble() || !j.value("centerHz").isDouble()) {
+        error = "Invalid selected-band configuration";
+        return false;
+    }
+    b = {};
+    b.stream = j.value("stream").toString();
+    b.source.receiverId = j.value("receiverId").toString(QStringLiteral("main"));
+    b.source.channelId = j.value("channelId").toString(QStringLiteral("rx0"));
+    b.sampleRate = j.value("sampleRate").toDouble();
+    b.centerHz = j.value("centerHz").toDouble();
+    b.returnIq = j.value("returnIq").toBool();
+    for (const auto &value : j.value("ffts").toArray()) {
+        const auto f = value.toObject();
+        b.ffts.append({f.value("id").toString(), f.value("length").toInt(-1),
+                       f.value("window").toInt(-1), f.value("refreshMs").toInt(-1)});
+    }
+    b.iq = {0.0f, 0.0f};
+    error = validate(b);
+    b.iq.clear();
+    if (!error.isEmpty()) error = "Invalid selected-band configuration: " + error;
+    return error.isEmpty();
+}
+bool selectedBandMatches(const DspStreamBlock &configured, const DspStreamBlock &b) {
+    return configured.stream == b.stream && configured.source == b.source &&
+           configured.sampleRate == b.sampleRate && configured.centerHz == b.centerHz &&
+           configured.returnIq == b.returnIq && sameFfts(configured.ffts, b.ffts);
 }
 QByteArray response(const DspStreamBlock &b, const DspStreamResult &r) {
     if (!r.error.isEmpty()) return encode({{"type", "error"}, {"error", r.error.left(256)}});
@@ -233,7 +291,18 @@ QByteArray response(const DspStreamBlock &b, const DspStreamResult &r) {
             {"rateNumerator", r.rateNumerator}, {"rateDenominator", r.rateDenominator},
             {"inputReserve", r.inputReserve}, {"gap", r.gap}};
     }
-    QByteArray payload = r.iq ? floats(*r.iq) : QByteArray(); json["iqBytes"] = payload.size();
+    QByteArray payload;
+    if (r.iq) {
+        json["iqFormat"] = DspIqCodec::id(b.wireFormat);
+        if (!r.iq->empty()) {
+            const auto encoded = DspIqCodec::encode(*r.iq, b.wireFormat);
+            if (encoded.payload.isEmpty()) return encode({{"type", "error"}, {"error", "IQ response encoding failed"}});
+            payload = encoded.payload;
+            if (encoded.format == DspIqFormat::BlockFloat16Le) json["iqScale"] = encoded.scale;
+            if (encoded.clippedComponents) json["iqClipped"] = encoded.clippedComponents;
+        }
+    }
+    json["iqBytes"] = payload.size();
     QJsonArray spectra;
     for (const auto &f : r.spectra) {
         spectra.append(QJsonObject{{"id", f.id}, {"length", int(f.levels.size())}, {"binWidthHz", f.binWidthHz}, {"rbwHz", f.rbwHz}, {"offsetBytes", payload.size()}});
@@ -248,6 +317,8 @@ bool decodeResponse(const DspStreamBlock &b, const QJsonObject &j, const QByteAr
     const auto invalid = [&r]() { r = {}; r.error = "Invalid or stale DSP worker result"; return false; };
     std::uint64_t generation, epoch, first;
     if (j.value("type") != "result" || j.value("stream").toString() != b.stream ||
+        j.value("receiverId").toString(QStringLiteral("main")) != b.source.receiverId ||
+        j.value("channelId").toString(QStringLiteral("rx0")) != b.source.channelId ||
         !u64(j.value("generation"), generation) || generation != b.generation ||
         !u64(j.value("epoch"), epoch) || epoch != b.epoch || !u64(j.value("firstSample"), first) || first != b.firstSample ||
         j.value("sampleRate").toDouble() != b.sampleRate || j.value("centerHz").toDouble(-1) != b.centerHz ||
@@ -267,7 +338,7 @@ bool decodeResponse(const DspStreamBlock &b, const QJsonObject &j, const QByteAr
             !u64(o.value("originFirstSample"), r.originFirstSample) || r.originFirstSample > b.firstSample ||
             !o.value("gap").isBool()) return invalid();
         r.sampleRate = o.value("sampleRate").toDouble(0);
-        if (!std::isfinite(r.sampleRate) || r.sampleRate < 1000 || r.sampleRate > 2000000 ||
+        if (!std::isfinite(r.sampleRate) || r.sampleRate < 1000 || r.sampleRate > 100000000 ||
             std::abs(r.sampleRate-b.sampleRate*n/d) > 1e-6) return invalid();
         // Bounded input history/lookahead is retained. Arithmetic is
         // integer-only so counters above 2^53 never lose timestamp precision.
@@ -288,10 +359,16 @@ bool decodeResponse(const DspStreamBlock &b, const QJsonObject &j, const QByteAr
         if (r.gap != (start == 0) || (b.gap && r.originFirstSample != b.firstSample)) return invalid();
     }
     int offset = j.value("iqBytes").toInt(-1);
-    if (offset != (b.returnIq ? int(r.sampleCount*8U) : 0)) return invalid();
+    const DspIqFormat responseFormat = DspIqCodec::fromId(j.value("iqFormat").toString(), DspIqFormat::Cf32Le);
+    const std::size_t expectedIqBytes = b.returnIq
+        ? r.sampleCount * std::size_t(DspIqCodec::bytesPerComplexSample(responseFormat)) : 0U;
+    if (offset < 0 || std::size_t(offset) != expectedIqBytes) return invalid();
     if (b.returnIq) {
         std::vector<float> iq;
-        if (!readFloats(payload, 0, int(r.sampleCount*2U), iq)) return invalid();
+        if (r.sampleCount) {
+            QString error;
+            if (!DspIqCodec::decode(j, payload.left(offset), int(r.sampleCount), iq, error)) return invalid();
+        }
         r.iq = std::make_shared<const std::vector<float>>(std::move(iq));
     }
     const auto spectra = j.value("spectra").toArray();
@@ -301,7 +378,7 @@ bool decodeResponse(const DspStreamBlock &b, const QJsonObject &j, const QByteAr
         const auto s = value.toObject(); const QString id = s.value("id").toString();
         auto config = std::find_if(b.ffts.begin(), b.ffts.end(), [&id](const auto &f) { return f.id == id; });
         if (config == b.ffts.end() || ids.contains(id) || s.value("length").toInt(-1) != config->length || s.value("offsetBytes").toInt(-1) != offset) return invalid();
-        ids.append(id); DspBranchFrame frame; frame.id = id; frame.centerHz = b.centerHz;
+        ids.append(id); DspBranchFrame frame; frame.id = id; frame.source = b.source; frame.centerHz = b.centerHz;
         frame.sampleRateHz = r.sampleRate; frame.binWidthHz = s.value("binWidthHz").toDouble(); frame.rbwHz = s.value("rbwHz").toDouble();
         if (!std::isfinite(frame.binWidthHz) || std::abs(frame.binWidthHz-r.sampleRate/config->length) > 1e-6 ||
             !std::isfinite(frame.rbwHz) || frame.rbwHz < frame.binWidthHz*0.99 || frame.rbwHz > frame.binWidthHz*5 ||

@@ -45,6 +45,7 @@ quint64 number(const QJsonObject &json, const char *key) {
 DspStreamBlock block() {
     DspStreamBlock b;
     b.stream = "private-device-identifier-must-not-be-recorded";
+    b.source = DspSourceIdentity::normalized(QStringLiteral("multi-rx-2"), QStringLiteral("rx0"));
     b.generation = (quint64(1) << 60) + 3;
     b.epoch = (quint64(1) << 60) + 5;
     b.firstSample = (quint64(1) << 60) + 17;
@@ -95,6 +96,7 @@ void bytesAndLifetimeTests() {
     checkFinal(path, b.firstSample - 2, 4, "user_stop");
     const auto final = metadata(path);
     require(final.value("format") == "CF32LE" && final.value("samplePositionReference") == "relative_channel" &&
+        final.value("receiverId") == b.source.receiverId && final.value("channelId") == b.source.channelId &&
         final.value("sampleRate").toDouble() == b.sampleRate && final.value("centerHz").toDouble() == b.centerHz,
         "Missing recording format or channel metadata");
     const QByteArray jsonBytes = read(sidecarPath(path));

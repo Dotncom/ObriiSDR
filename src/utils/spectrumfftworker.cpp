@@ -3,6 +3,7 @@
 #include "diagnosticlogging.h"
 #include "fft.h"
 #include "remotespectrumworker.h"
+#include "computebudgetmanager.h"
 
 #include <QElapsedTimer>
 #include <QDebug>
@@ -119,6 +120,7 @@ void SpectrumFftWorker::configureRemote(const DspStreamEndpoint &endpoint, const
 QString SpectrumFftWorker::remoteStatus() const { return remoteWorker ? remoteWorker->status() : QString(); }
 
 void SpectrumFftWorker::run() {
+    ComputeBudgetManager::instance().applyCurrentThreadRole(ComputeThreadRole::MainFft);
 #ifdef __linux__
     // Keep live audio responsive on small ARM systems. Linux applies nice
     // values per thread, so only the background FFT worker is deprioritized.

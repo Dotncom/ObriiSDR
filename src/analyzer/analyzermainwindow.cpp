@@ -1,4 +1,5 @@
 #include "analyzermainwindow.h"
+#include "analyzerinstrumentdialog.h"
 #include "multisdrdialog.h"
 
 #include "analyzerspectrumwidget.h"
@@ -142,6 +143,7 @@ QString AnalyzerMainWindow::uiText(const QString &english) const {
         {QStringLiteral("Disconnect"), QStringLiteral("Відключити")},
         {QStringLiteral("Export CSV"), QStringLiteral("Експорт CSV")},
         {QStringLiteral("Multi-SDR..."), QStringLiteral("Multi-SDR...")},
+        {QStringLiteral("Instrument lab..."), QStringLiteral("Лабораторія приладів...")},
         {QStringLiteral("  No source"), QStringLiteral("  Немає джерела")},
         {QStringLiteral("Scale:"), QStringLiteral("Масштаб:")},
         {QStringLiteral("Extra zoom:"), QStringLiteral("Дод. масштаб:")},
@@ -326,6 +328,7 @@ void AnalyzerMainWindow::buildUi() {
     connectButton = new QPushButton(QStringLiteral("Connect Obrii"), this);
     auto *exportButton = new QPushButton(QStringLiteral("Export CSV"), this);
     auto *multiSdrButton = new QPushButton(QStringLiteral("Multi-SDR..."), this);
+    auto *instrumentLabButton = new QPushButton(QStringLiteral("Instrument lab..."), this);
     toolbar->addWidget(openButton);
     toolbar->addWidget(playButton);
     toolbar->addSeparator();
@@ -333,6 +336,7 @@ void AnalyzerMainWindow::buildUi() {
     toolbar->addSeparator();
     toolbar->addWidget(exportButton);
     toolbar->addWidget(multiSdrButton);
+    toolbar->addWidget(instrumentLabButton);
     sourceLabel = new QLabel(QStringLiteral("  No source"), this);
     sourceLabel->setMinimumWidth(300);
     toolbar->addWidget(sourceLabel);
@@ -765,6 +769,17 @@ void AnalyzerMainWindow::buildUi() {
         }
     });
     connect(exportButton, &QPushButton::clicked, this, &AnalyzerMainWindow::exportCurrentCsv);
+    connect(instrumentLabButton, &QPushButton::clicked, this, [this]() {
+        if (!instrumentDialog) {
+            instrumentDialog = new AnalyzerInstrumentDialog(ukrainianUi, this);
+            connect(instrumentDialog, &QObject::destroyed, this, [this]() {
+                instrumentDialog = nullptr;
+            });
+        }
+        instrumentDialog->show();
+        instrumentDialog->raise();
+        instrumentDialog->activateWindow();
+    });
     connect(multiSdrButton, &QPushButton::clicked, this, [this]() {
         if (sweepActive) toggleWideSweep();
         standaloneReceiver.stop();

@@ -126,10 +126,33 @@ recording and experiment-bundle paths.
   by 1-100. This permits sub-pixel-Hz inspection of a 50 MS/s capture when the
   source FFT has sufficient resolution; left-drag pans inside the source span.
 
-Tracking-generator sweeps, external instrument control, SNA and coherent VNA remain later
-measurement-engine stages. They must use capability-checked RX/TX hardware and
-must not be represented as calibrated measurements before their calibration and
-hardware requirements are satisfied.
+## Instrument laboratory foundation
+
+The **Instrument lab...** button opens a hardware-gated workspace for every
+planned analyzer instrument stage:
+
+- tracking-generator stimulus sweeps;
+- scalar network analysis with through/reference normalization;
+- return loss and SWR with a characterized directional bridge and Open/Short/Load;
+- coherent VNA planning with two RX channels, simultaneous TX, timestamps,
+  shared reference, thru and phase calibration;
+- editable external-generator/receiver SCPI command profiles;
+- reproducible measurement-plan and session JSON files with DUT, operator,
+  calibration identity, capabilities, event log and result-point schema.
+
+The shared measurement core now owns the capability model, validation rules,
+frequency-grid generation, return-loss/SWR formulas and JSON round trips. A
+small backend interface is the future boundary for native UHD, so RF handles do
+not leak into the UI and capability/safety checks cannot be bypassed.
+
+This is deliberately a draft execution layer. The UI can create, validate,
+save and reopen plans and empty session templates, but **Execute RF** remains
+disabled until a hardware adapter has been qualified. Checking a calibration
+box records a completed procedure; it does not fabricate coefficients. SNA,
+return-loss and VNA data must stay labelled diagnostic until the required
+normalization or fixture calibration is present. This lets development pause
+safely until the B210-class receiver arrives without presenting a simulated
+instrument as a finished one.
 
 The current Windows bundle contains UHD command-line/runtime components used by
 the wireless toolchain, but not a SoapyUHD device module. A future USRP can be

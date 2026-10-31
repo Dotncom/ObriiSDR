@@ -1119,9 +1119,21 @@ void DigitalDecoder::configure(const RadioSettings &settings, int sampleRate) {
 }
 
 void DigitalDecoder::configureDmrPrivacy(const RadioSettings &settings) {
-    if (!dmrPrivacy.configure(settings.dmrPrivacyMode,
+    const int effectiveMode = settings.dmrPrivacyAutoKeySelection
+                                  ? DMR_PRIVACY_AUTO
+                                  : settings.dmrPrivacyMode;
+    if (!dmrPrivacy.configure(effectiveMode,
                               settings.modulationType == MOD_DMR && dmrVoiceOutputEnabled,
                               settings.dmrPrivacyKeyHex, settings.dmrPrivacyKeyId)) return;
+    dmrVocoder.reset();
+    dmrPayloadProbeVocoder.reset();
+    dmrRawProbeVocoder.reset();
+    dmrCanonicalProbeVocoder.reset();
+    clearDmrVoicePcmBuffer();
+}
+
+void DigitalDecoder::setDmrPrivacyKeys(const QVector<DmrPrivacyKeyEntry> &keys) {
+    if (!dmrPrivacy.setKeyring(keys)) return;
     dmrVocoder.reset();
     dmrPayloadProbeVocoder.reset();
     dmrRawProbeVocoder.reset();

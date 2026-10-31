@@ -22,12 +22,19 @@ An older DDC-only endpoint replies `{ "type":"hello", "version":1 }`.
 The native main FFT worker replies, with an empty binary payload:
 
 ```json
-{"type":"hello","version":1,"mainFftVersion":1,"mainFftMaxLength":8388608,"connectionProbeVersion":1}
+{"type":"hello","version":1,"iqFormats":["cf32le","cs16le","bfp16le"],"mainFftVersion":1,"mainFftMaxLength":8388608,"connectionProbeVersion":1,"selectedBandVersion":1,"selectedBandMaxStreams":8}
 ```
 
 `mainFftMaxLength` is a number of complex input samples/FFT points, not bytes.
+`iqFormats` is an optional backward-compatible capability. Its absence means
+`cf32le` only. Auto-capable clients prefer `bfp16le`; an explicitly requested
+unsupported format falls back to `cf32le` rather than sending an unknown payload.
 Clients must require `mainFftVersion: 1` before using the extension and respect
 the advertised length; a v1 DDC hello alone does not promise main FFT support.
+`selectedBandVersion: 1` enables explicit preflight for narrow IQ windows after
+local DDC/PFB and decimation. `selectedBandMaxStreams` is the maximum number of
+independent selected windows accepted on one compute connection. Missing fields
+retain the legacy behavior in which every DDC work block is self-describing.
 A native worker may send an error with `code: "authentication_failed"` and
 `error: "Session token rejected"` before disconnecting when the token differs.
 Clients must also support silent disconnects from older workers.
@@ -102,15 +109,46 @@ the outstanding transform. There is no wire-level cancel command or heartbeat.
 
 ## DDC Work
 
-The client sends `{ "type":"work", "stream":"block-id", "generation":"1",
+### Selected-band preflight v1
+
+When the hello advertises `selectedBandVersion: 1`, the client opens each narrow
+window before its first work block or after changing its identity, rate, center,
+return-IQ setting, or FFT list:
+
+```json
+{"type":"selected_band_open","version":1,"stream":"block-id","receiverId":"main","channelId":"rx0","sampleRate":96000,"centerHz":100100000,"returnIq":true,"ffts":[{"id":"fft-id","length":2048,"window":1,"refreshMs":100}]}
+```
+
+The server validates the metadata and replies with an empty payload:
+
+```json
+{"type":"selected_band_ready","version":1,"stream":"block-id","receiverId":"main","channelId":"rx0"}
+```
+
+After the first selected band is opened, every following DDC work block on that
+connection must match a currently opened `receiverId + channelId + stream`
+configuration. Several windows share the same TCP connection and remain
+independent. Legacy peers that omit this capability continue to receive ordinary
+self-describing work blocks without preflight.
+
+### Work blocks
+
+The client sends `{ "type":"work", "stream":"block-id", "receiverId":"main",
+"channelId":"rx0", "generation":"1",
 "epoch":"1", "firstSample":"0", "sampleCount":4096, "sampleRate":96000,
 "centerHz":100100000, "gap":false, "returnIq":true, "ffts":[
 { "id":"fft-id", "length":2048, "window":1, "refreshMs":100 }] }`.
 
-Input is interleaved IEEE-754 little-endian float32 I,Q (CF32LE); binary length
-must equal sampleCount*8. Sample count is 1..65536; sampleRate is 1000..2000000
+Input includes `iqFormat` and is interleaved `cf32le`, signed `cs16le`, or
+block-floating signed `bfp16le`. Binary length is sampleCount*8 for CF32 and
+sampleCount*4 for either 16-bit format. BFP16 additionally carries finite positive
+`iqScale`; decoded components are `int16 * iqScale`. Missing `iqFormat` means
+legacy CF32. Sample count is 1..65536; sampleRate is 1000..100000000
 complex samples/s. All floats must be finite. centerHz is finite, 0..8e9.
-Identifiers are 1..128 characters. Generation, epoch and firstSample are decimal
+Identifiers are 1..128 characters. `receiverId + channelId` identifies the IQ
+source independently from the board block/stream ID. Missing fields from an old
+main-receiver client default to `main/rx0`; a non-main source must be explicit.
+Generation, epoch and firstSample are decimal
 uint64 strings, not JSON floating numbers. firstSample counts CHANNEL samples,
 not receiver samples. They are relative stream positions, NOT UTC/RF timestamps.
 
@@ -121,18 +159,22 @@ firstSample resets all channel history and GNU Radio filter state. Changing only
 returnIq does not reset history. Windows use the symmetric finite-N convention
 (phase denominator N-1), including exact finite-N ENBW.
 
-The reply echoes stream, generation, epoch and firstSample and has type=result,
+The reply echoes stream, receiverId, channelId, generation, epoch and firstSample
+and has type=result,
 sampleRate, centerHz, sampleCount, processingMs and an array spectra. Each spectrum
 has id, length, binWidthHz, rbwHz and offsetBytes. The payload starts with optional
-returned CF32LE IQ when returnIq=true (iqBytes=sampleCount*8, otherwise iqBytes=0),
+returned IQ in the negotiated request format when returnIq=true (`iqBytes` matches
+that format and BFP16 carries `iqScale`; otherwise iqBytes=0),
 followed by each FFT's float32 LE dBFS levels in ascending frequency order.
 FFT normalization is abs(FFT(window*x))/sum(window), floor -200 dBFS; RBW is
 Fs/N * N*sum(window^2)/sum(window)^2. Frequency at index i is centerHz+(i-N/2)*Fs/N.
 No FFT is emitted until its full history is available, and refreshMs limits
 outputs by elapsed monotonic time. The reply is still sent for every work block.
 Maximum retained FFT IQ history is 65536 complex samples per stream, eight streams.
-A ninth stream ID is rejected until the connection/session is reset. This stream
-cap is separate from the native server's two TCP session slots.
+A ninth stream ID is rejected until the connection/session is reset. Processor
+history is keyed by `receiverId/channelId/stream`, so equal board IDs from two
+receivers cannot share filter or FFT history. This stream cap is separate from
+the native server's two TCP session slots.
 
 Errors use `{ "type":"error", "error":"bounded non-sensitive reason" }`.
 Reject unknown requests; never execute commands or deserialize executable code
@@ -193,7 +235,7 @@ there is no RF control, HF-combined mode, returned IQ, DDC, or resampling here.
 Configuration is a JSON-only request:
 
 ```json
-{"type":"main_fft_begin","job":"fft-job-1","mode":"windows","length":1048576,"rate":20000000,"center":100000000,"window":1,"backend":1}
+{"type":"main_fft_begin","job":"fft-job-1","mode":"windows","length":1048576,"rate":20000000,"center":100000000,"window":1,"backend":1,"iqFormat":"bfp16le"}
 ```
 
 - `job`: nonempty string, at most 80 characters. Use a new job identifier when
@@ -227,13 +269,14 @@ and receiver-local fallback are client policies; they are not wire fields.
 After ready, send each chunk and await its acknowledgment before the next request:
 
 ```json
-{"type":"main_fft_iq","job":"fft-job-1","first":"0","gap":false}
+{"type":"main_fft_iq","job":"fft-job-1","first":"0","gap":false,"sampleCount":131072,"iqFormat":"bfp16le","iqScale":0.0000152}
 ```
 
-Binary input is finite CF32LE, 1-131072 complex samples (8-1048576 bytes) per
-message, always a multiple of 8 bytes. This main FFT chunk limit is smaller than
-the enclosing frame's 2 MiB payload cap. There is no `sampleCount` field: the
-payload length determines sample count. `first` is a decimal uint64 string
+Binary input is finite CF32LE, CS16LE or block-floating CS16LE, 1-131072 complex
+samples per message. `main_fft_begin` fixes `iqFormat` for the job; each chunk
+repeats it and carries `sampleCount`, while BFP16 carries a per-chunk `iqScale`.
+The enclosing payload remains capped at 2 MiB. Legacy begin/chunk requests without
+format metadata remain CF32-compatible. `first` is a decimal uint64 string
 (1-20 digits, no sign), counting complex source samples, not floats, bytes or DDC
 channel samples. Overflow of `first + chunkSamples` is rejected. These positions
 are relative stream counters, not hardware-clock/UTC timestamps. `gap` defaults

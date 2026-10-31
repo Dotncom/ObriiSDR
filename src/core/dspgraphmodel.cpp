@@ -154,6 +154,7 @@ DspGraphPlan compileDspGraph(const QJsonObject &graph) {
     // Compile only bounded typed branches; legacy main-path wires never replace the live receiver.
     QJsonArray execution;
     int activeBranches = 0;
+    QHash<QString, QPair<int, int>> activePfbBanks;
     QStringList ids = blocks.keys();
     std::sort(ids.begin(), ids.end());
     for (const QString &id : ids) {
@@ -162,6 +163,9 @@ DspGraphPlan compileDspGraph(const QJsonObject &graph) {
         const auto s = block.value("settings").toObject();
         DspBranchConfig branch;
         branch.id = id;
+        branch.source = DspSourceIdentity::normalized(
+            s.value("receiverId").toString(QStringLiteral("main")),
+            s.value("channelId").toString(QStringLiteral("rx0")));
         branch.enabled = s.value("enabled").toBool(false);
         // Retain inactive routes for the board without reserving worker resources.
         if (branch.enabled && ++activeBranches > DspMaxBranches) { plan.errors << "At most eight DDC branches can run"; continue; }
@@ -183,10 +187,20 @@ DspGraphPlan compileDspGraph(const QJsonObject &graph) {
             int channels = pfb.value("channels").toInt(16);
             if (channels != 8 && channels != 16 && channels != 32 && channels != 64) channels = 16;
             const int taps = std::clamp(pfb.value("tapsPerPhase").toInt(16), 8, 64) & ~1;
+            branch.pfbChannels = channels;
+            branch.pfbTaps = taps;
             if (branch.enabled) {
-                if (plan.pfbChannels && (plan.pfbChannels != channels || plan.pfbTaps != taps))
-                    plan.errors << "All active PFB branches must share the same bank settings";
-                plan.pfbChannels = channels; plan.pfbTaps = taps;
+                const QString sourceKey = branch.source.key();
+                const QPair<int, int> bank(channels, taps);
+                if (activePfbBanks.contains(sourceKey) && activePfbBanks.value(sourceKey) != bank)
+                    plan.errors << "All active PFB branches on one IQ source must share the same bank settings";
+                else
+                    activePfbBanks.insert(sourceKey, bank);
+                // Retain the legacy primary-bank summary for old layouts/status readers.
+                if (branch.source.isPrimary()) {
+                    plan.pfbChannels = channels;
+                    plan.pfbTaps = taps;
+                }
             }
         }
         branch.external = s.value("externalProcessing").toBool(false);
@@ -255,10 +269,13 @@ DspGraphPlan compileDspGraph(const QJsonObject &graph) {
         // Consumer visibility and explicitly armed local sinks are resolved by the board.
         QJsonArray ffts;
         for (const auto &f : branch.ffts) ffts.append(QJsonObject{{"id", f.id}, {"length", f.length}, {"window", f.window}, {"refreshMs", f.refreshMs}});
-        execution.append(QJsonObject{{"id", id}, {"source", inputs[id]}, {"frequency", branch.frequencyHz},
+        execution.append(QJsonObject{{"id", id}, {"source", inputs[id]},
+            {"receiverId", branch.source.receiverId}, {"channelId", branch.source.channelId},
+            {"frequency", branch.frequencyHz},
             {"bandwidth", branch.bandwidthHz}, {"rate", branch.outputRateHz}, {"decimation", branch.decimation},
             {"enabled", branch.enabled}, {"external", branch.external}, {"iqConsumer", branch.iqConsumer}, {"iqSamples", branch.iqSamples}, {"ffts", ffts},
             {"firTaps", branch.firTaps}, {"transitionHz", branch.transitionHz}, {"pfb", branch.pfb},
+            {"pfbChannels", branch.pfbChannels}, {"pfbTaps", branch.pfbTaps},
             {"audioId", branch.audioOutputId}, {"audioEnabled", branch.audioEnabled}, {"modulation", branch.modulation},
             {"audioBandwidth", branch.audioBandwidthHz}, {"audioLowPass", branch.audioLowPassHz},
             {"squelch", branch.squelchDb}, {"filters", branch.audioFilters}, {"device", branch.audioDevice}});

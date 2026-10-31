@@ -97,6 +97,7 @@ QJsonObject YourClassName::settingsToJson() const {
     settings["dmrSlicerRatio"] = pendingSettings.dmrSlicerRatio;
     settings["dmrAdaptiveSlicer"] = pendingSettings.dmrAdaptiveSlicer;
     settings["dmrPrivacyMode"] = pendingSettings.dmrPrivacyMode;
+    settings["dmrPrivacyAutoKeySelection"] = pendingSettings.dmrPrivacyAutoKeySelection;
     settings["dmrPrivacyKeyId"] = pendingSettings.dmrPrivacyKeyId;
     settings["dmrPrivacyKeyHex"] = pendingSettings.dmrPrivacyKeyHex;
     settings["dmrPrivacyVariant"] = pendingSettings.dmrPrivacyVariant;
@@ -414,6 +415,8 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
         readBool("dmrAdaptiveSlicer", pendingSettings.dmrAdaptiveSlicer);
     pendingSettings.dmrPrivacyMode =
         normalizedDmrPrivacyMode(readInt("dmrPrivacyMode", pendingSettings.dmrPrivacyMode));
+    pendingSettings.dmrPrivacyAutoKeySelection =
+        readBool("dmrPrivacyAutoKeySelection", pendingSettings.dmrPrivacyAutoKeySelection);
     pendingSettings.dmrPrivacyKeyId =
         (std::clamp)(readInt("dmrPrivacyKeyId", pendingSettings.dmrPrivacyKeyId), 0, 255);
     pendingSettings.dmrPrivacyKeyHex =

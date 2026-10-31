@@ -15,6 +15,7 @@ struct DspConnectionProbeResult {
     double rttMinMs = 0, rttMedianMs = 0, rttP95Ms = 0, jitterMs = 0;
     double uploadMBps = 0, downloadMBps = 0;
     int pingCount = 0, uploadBytes = 0, downloadBytes = 0, mainFftMaxLength = 0;
+    int selectedBandVersion = 0, selectedBandMaxStreams = 0;
 };
 
 // A user-started synthetic test, on its own thread/socket. Never reads IQ or enables DSP.
@@ -39,7 +40,8 @@ struct DspConnectionEstimate {
 };
 // 25% bandwidth headroom; network-only estimates, not a remote FFT benchmark.
 DspConnectionEstimate estimateDspConnection(const DspConnectionProbeResult &result, double sampleRate,
-                                           int fftLength, int updateMs, int overlapPercent, int uploadBudgetMBps);
+                                           int fftLength, int updateMs, int overlapPercent, int uploadBudgetMBps,
+                                           int iqBytesPerComplexSample = 8);
 
 namespace DspConnectionProbeProtocol {
 constexpr int Version = 1;

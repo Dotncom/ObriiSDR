@@ -1,4 +1,5 @@
 #pragma once
+#include "dspiqcodec.h"
 #include "dspstreamprocessor.h"
 #include <atomic>
 
@@ -7,8 +8,10 @@ struct DspStreamEndpoint {
     QString address = QStringLiteral("127.0.0.1");
     quint16 port = 7358;
     QString token;
+    DspIqFormat iqFormat = DspIqFormat::Auto;
     bool operator==(const DspStreamEndpoint &other) const {
-        return enabled == other.enabled && address == other.address && port == other.port && token == other.token;
+        return enabled == other.enabled && address == other.address && port == other.port &&
+               token == other.token && iqFormat == other.iqFormat;
     }
 };
 

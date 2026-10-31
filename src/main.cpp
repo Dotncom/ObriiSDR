@@ -6,6 +6,7 @@
 #include "gnssqthhelpers.h"
 #include "presethelpers.h"
 #include "iqbuffer.h"
+#include "dspiqsourceregistry.h"
 #include "diagnosticlogging.h"
 #include "dmrbackendpaths.h"
 #include "dsdneobridge.h"
@@ -32,6 +33,8 @@
 #include "analyzerframechannel.h"
 #include "multisdrdialog.h"
 #include "spectrummarkerpairsdialog.h"
+#include "remotevfoservice.h"
+#include "remotewebserver.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -254,6 +257,14 @@ YourClassName::YourClassName(QWidget *parent)
     dmrAmbeLayoutCombo->addItem("Bit stripe", DMR_AMBE_LAYOUT_BIT_STRIPE);
     dmrAmbeLayoutCombo->setToolTip(uiText(QStringLiteral("dmr_ambe_layout_tooltip"),
                                           QStringLiteral("How the 216 DMR voice burst bits are mapped into three 72-bit AMBE frames.")));
+    dmrPrivacySelectionCombo = new QComboBox(digitalWidget);
+    dmrPrivacySelectionCombo->addItem(uiText(QStringLiteral("dmr_privacy_fixed_key"),
+                                              QStringLiteral("Fixed key")), false);
+    dmrPrivacySelectionCombo->addItem(uiText(QStringLiteral("dmr_privacy_auto_key"),
+                                              QStringLiteral("Auto PI ALG/KID")), true);
+    dmrPrivacySelectionCombo->setToolTip(uiText(
+        QStringLiteral("dmr_privacy_selection_tooltip"),
+        QStringLiteral("Fixed key always uses the selected table entry. Auto PI ALG/KID selects an ARC4 or AES-256 key independently for each timeslot from a valid received Privacy Indicator header.")));
     dmrPrivacyModeCombo = new QComboBox(digitalWidget);
     dmrPrivacyModeCombo->addItem(uiText(QStringLiteral("dmr_privacy_none"), QStringLiteral("No privacy")), DMR_PRIVACY_NONE);
     dmrPrivacyModeCombo->addItem(QStringLiteral("ARC4"), DMR_PRIVACY_ARC4);
@@ -355,6 +366,7 @@ YourClassName::YourClassName(QWidget *parent)
     dmrBasebandRateCombo->setMaximumWidth(96);
     dmrChannelRateCombo->setMaximumWidth(96);
     dmrAmbeLayoutCombo->setMaximumWidth(128);
+    dmrPrivacySelectionCombo->setMaximumWidth(148);
     dmrPrivacyModeCombo->setMaximumWidth(112);
     dmrPrivacyKeyIdCombo->setMaximumWidth(120);
     dmrPrivacyFrameOffsetCombo->setMaximumWidth(78);
@@ -495,9 +507,10 @@ YourClassName::YourClassName(QWidget *parent)
     QLabel *dmrPrivacyLabel = new QLabel("Privacy:", digitalWidget);
     markTranslatable(dmrPrivacyLabel, QStringLiteral("dmr_privacy"), QStringLiteral("Privacy:"));
     dmrLabLayout->addWidget(dmrPrivacyLabel, 5, 0);
-    dmrLabLayout->addWidget(dmrPrivacyModeCombo, 5, 1);
-    dmrLabLayout->addWidget(dmrPrivacyKeyIdCombo, 5, 2);
-    dmrLabLayout->addWidget(dmrPrivacyKeysButton, 5, 3, 1, 2);
+    dmrLabLayout->addWidget(dmrPrivacySelectionCombo, 5, 1);
+    dmrLabLayout->addWidget(dmrPrivacyModeCombo, 5, 2);
+    dmrLabLayout->addWidget(dmrPrivacyKeyIdCombo, 5, 3);
+    dmrLabLayout->addWidget(dmrPrivacyKeysButton, 5, 4, 1, 2);
     QLabel *dmrPrivacyArc4Label = new QLabel("ARC4 test:", digitalWidget);
     markTranslatable(dmrPrivacyArc4Label, QStringLiteral("dmr_privacy_arc4_test"), QStringLiteral("ARC4 test:"));
     dmrLabLayout->addWidget(dmrPrivacyArc4Label, 6, 0);
@@ -921,6 +934,8 @@ YourClassName::YourClassName(QWidget *parent)
     playbackManager = new PlaybackManager(this);
     recordingManager = new RecordingManager(this);
     networkController = new NetworkController(this);
+    remoteVfoService = new RemoteVfoService(this);
+    remoteWebServer = new RemoteWebServer(remoteVfoService, this);
     remoteAudioPlayer = new RemoteAudioPlayer(this);
     audioRelaySocket = new QUdpSocket(this);
     gnssNtpSocket = new QUdpSocket(this);
@@ -942,6 +957,30 @@ YourClassName::YourClassName(QWidget *parent)
     networkSettingsAckTimer->setSingleShot(true);
     networkSettingsAckTimer->setInterval(NETWORK_SETTINGS_ACK_TIMEOUT_MS);
     connect(networkSettingsAckTimer, &QTimer::timeout, this, &YourClassName::handleNetworkSettingsAckTimeout);
+    remoteVfoSourceTimer = new QTimer(this);
+    remoteVfoSourceTimer->setInterval(100);
+    connect(remoteVfoSourceTimer, &QTimer::timeout, this, [this]() {
+        if (!remoteVfoService) return;
+        remoteVfoService->setSourceState(
+            pendingSettings,
+            networkMode == NetworkMode::Server && runState == RadioRunState::Running);
+        remoteVfoService->setExternalEndpoint(
+            dspFlowPanel ? dspFlowPanel->externalEndpoint() : DspStreamEndpoint());
+    });
+    connect(remoteVfoService, &RemoteVfoService::statusChanged, this, [this]() {
+        if (!remoteVfoSourceTimer || !remoteVfoService) return;
+        const bool needed = networkMode == NetworkMode::Server &&
+                            remoteVfoService->sessionCount() > 0;
+        if (!needed) {
+            remoteVfoSourceTimer->stop();
+            return;
+        }
+        remoteVfoService->setSourceState(pendingSettings,
+                                         runState == RadioRunState::Running);
+        remoteVfoService->setExternalEndpoint(
+            dspFlowPanel ? dspFlowPanel->externalEndpoint() : DspStreamEndpoint());
+        if (!remoteVfoSourceTimer->isActive()) remoteVfoSourceTimer->start();
+    });
     connectDataProcessorSignals();
     
     graphWidget = new MyGraphWidget(this);
@@ -2161,9 +2200,10 @@ YourClassName::YourClassName(QWidget *parent)
             });
             connect(multiSdrDialog, &MultiSdrDialog::auxiliaryIqReady,
                     this,
-                    [this](const float *samples, quint64 floatCount,
+                    [this](int receiverIndex, const float *samples, quint64 floatCount,
                            double sampleRateHz, double centerHz) {
-                if (audioProcessor) {
+                if (audioProcessor && multiSdrDialog &&
+                    multiSdrDialog->currentAudioSourceIndex() == receiverIndex) {
                     audioProcessor->submitExternalIq(
                         samples, static_cast<std::size_t>(floatCount), sampleRateHz, centerHz);
                 }
@@ -4261,6 +4301,21 @@ YourClassName::YourClassName(QWidget *parent)
     updateReceiverSpecificControls();
     connect(transmitButton, &QPushButton::clicked, this, &YourClassName::openTransmitDialog);
     connect(networkController, &NetworkController::statusChanged, this, &YourClassName::onNetworkStatusChanged);
+    connect(networkController, &NetworkController::peerDisconnected,
+            this, [this](const QString &peerId, const QString &) {
+                if (remoteVfoService) remoteVfoService->closeEndpoint(peerId);
+            });
+    connect(remoteVfoService, &RemoteVfoService::jsonFrameReady,
+            this, [this](const QString &ownerId, const QJsonObject &frame) {
+                if (networkController && ownerId.startsWith(QStringLiteral("client-")))
+                    networkController->sendControlCommandToPeer(ownerId, frame);
+            });
+    connect(remoteVfoService, &RemoteVfoService::binaryFrameReady,
+            this, [this](const QString &ownerId, const QJsonObject &frame, const QByteArray &payload) {
+                if (!networkController || !ownerId.startsWith(QStringLiteral("client-"))) return;
+                if (networkController->pendingBytesForPeer(ownerId) > 256 * 1024) return;
+                networkController->sendBinaryCommandToPeer(ownerId, frame, payload);
+            });
     connect(networkController, &NetworkController::channelReady, this, [this](const QString &status) {
         Q_UNUSED(status);
         if (isNetworkClientMode()) {
@@ -4274,6 +4329,10 @@ YourClassName::YourClassName(QWidget *parent)
             }
             QTimer::singleShot(0, this, [this]() {
                 sendRemoteControlCommand(QStringLiteral("requestServerState"));
+                if (isRemoteVfoProcessingMode() && runState == RadioRunState::Running)
+                    sendRemoteControlCommand(QStringLiteral("start"));
+                else if (networkProcessingMode == NetworkProcessingMode::ServerSide)
+                    settingRange();
             });
         } else if (networkMode == NetworkMode::Server && runState == RadioRunState::Running) {
             applyServerLocalOutputPolicy();
@@ -4323,6 +4382,14 @@ YourClassName::YourClassName(QWidget *parent)
             receiveNetworkIqFrameBinary(command, payload);
         } else if (type == QStringLiteral("spectrumbin")) {
             displayNetworkSpectrumFrameBinary(command, payload);
+        } else if (type == QStringLiteral("remoteVfoAudio") &&
+                   isRemoteVfoProcessingMode() && remoteAudioPlayer) {
+            if (command.value(QStringLiteral("reset")).toBool(false)) remoteAudioPlayer->stop();
+            processDigitalAudioFrame(payload);
+            processSstvAudioFrame(payload);
+            sendAudioRelayFrame(payload);
+            sendAudioHttpFrame(payload);
+            remoteAudioPlayer->playPcmFrame(payload);
         }
     });
     connect(controlsToggleButton, &QPushButton::toggled, this, [this](bool checked) {
@@ -4415,6 +4482,7 @@ YourClassName::YourClassName(QWidget *parent)
             dmrTimingOffsetSpin,
             dmrSlicerRatioSpin,
             dmrAdaptiveSlicerCheckbox,
+            dmrPrivacySelectionCombo,
             dmrPrivacyModeCombo,
             dmrPrivacyKeyIdCombo,
             dmrPrivacyKeysButton,
@@ -4574,11 +4642,14 @@ YourClassName::YourClassName(QWidget *parent)
         updateDigitalDecoderMode();
     });
     const auto updateDmrPrivacyDraft = [this, resetDmrLabDecoderState](const char *reason) {
+        pendingSettings.dmrPrivacyAutoKeySelection =
+            dmrPrivacySelectionCombo && dmrPrivacySelectionCombo->currentData().toBool();
         pendingSettings.dmrPrivacyMode =
             dmrPrivacyModeCombo
                 ? normalizedDmrPrivacyMode(dmrPrivacyModeCombo->currentData().toInt())
                 : DMR_PRIVACY_NONE;
-        if (reason && QString::fromLatin1(reason) == QStringLiteral("privacyMode")) {
+        if (reason && (QString::fromLatin1(reason) == QStringLiteral("privacyMode") ||
+                       QString::fromLatin1(reason) == QStringLiteral("privacySelection"))) {
             refreshDmrPrivacyKeyIdCombo();
         }
         applyDmrPrivacyKeySelection();
@@ -4620,6 +4691,10 @@ YourClassName::YourClassName(QWidget *parent)
             QOverload<int>::of(&QComboBox::currentIndexChanged),
             this,
             [updateDmrPrivacyDraft]() { updateDmrPrivacyDraft("privacyMode"); });
+    connect(dmrPrivacySelectionCombo,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this,
+            [updateDmrPrivacyDraft](int) { updateDmrPrivacyDraft("privacySelection"); });
     connect(dmrPrivacyKeyIdCombo,
             QOverload<int>::of(&QComboBox::currentIndexChanged),
             this,
@@ -6102,6 +6177,7 @@ YourClassName::YourClassName(QWidget *parent)
     updateVideoProcessorMode();
     updateAudioRelaySocket();
     updateAudioHttpStreamServer();
+    updateRemoteWebServer();
     updateUiForRunState();
     refreshPlaybackFiles();
     persistentSettingsReady = true;
@@ -6936,6 +7012,8 @@ void YourClassName::refreshSettingsFromUi() {
         pendingSettings.dmrPrivacyMode =
             normalizedDmrPrivacyMode(pendingSettings.dmrPrivacyMode);
     }
+    pendingSettings.dmrPrivacyAutoKeySelection =
+        dmrPrivacySelectionCombo && dmrPrivacySelectionCombo->currentData().toBool();
     applyDmrPrivacyKeySelection();
     if (dmrPrivacyFrameOffsetCombo) {
         pendingSettings.dmrPrivacyFrameOffset =
@@ -7719,6 +7797,7 @@ void YourClassName::updateUiForRunState() {
     }
     const bool clientCanControl =
         !isNetworkClientMode() ||
+        isRemoteVfoProcessingMode() ||
         !networkController ||
         networkController->clientHasControl();
 
@@ -7733,7 +7812,8 @@ void YourClassName::updateUiForRunState() {
     if (comboBox) {
         const bool receiverListReady =
             !isNetworkClientMode() || remoteReceiverDeviceListValid;
-        comboBox->setEnabled(idle && clientCanControl && receiverListReady);
+        comboBox->setEnabled(idle && clientCanControl && receiverListReady &&
+                             !isRemoteVfoProcessingMode());
     }
     if (refreshButton) refreshButton->setEnabled(idle && clientCanControl);
     if (fobosButton) fobosButton->setEnabled(idle);

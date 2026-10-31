@@ -1,23 +1,35 @@
 # Native Motorola DMR Privacy (Beta)
 
-Select `Obrii SDR + mbelib` or `Obrii SDR + OpenDMR`, select `ARC4` or
-`AES-256`, and choose an existing KID in its key table. Decryption follows
-the selected mode/key/backend automatically; there is no separate checkbox.
+Select `Obrii SDR + mbelib` or `Obrii SDR + OpenDMR`, then choose an explicit
+key-selection mode:
+
+- `Fixed key` preserves the previous behavior: select `ARC4` or `AES-256`
+  and one existing KID from that algorithm's key table.
+- `Auto PI ALG/KID` reads the algorithm ID and KID from a CRC-validated
+  Privacy Indicator header and selects the exact matching saved ARC4 or
+  AES-256 key independently for each timeslot. The algorithm and KID controls
+  become read-only while the key tables remain editable.
+
 ARC4 requires exactly 10 HEX characters (40 bits), AES-256 exactly 64
-(256 bits), including leading zeroes. Only supplied known keys are used.
-There is no key search, guessing or brute force.
+(256 bits), including leading zeroes. If automatic mode cannot find an exact
+`algorithm + KID` match, protected voice is muted. It never tries all keys,
+guesses a key, or performs brute force. Hytera Basic remains fixed-key only.
 
 The separate privacy processor runs after AMBE FEC and before all native
-vocoder candidates. External DSD-neo/Gopher bursts remain unchanged.
+vocoder candidates. Automatic PI-based selection currently applies to this
+native path. External DSD-neo/Gopher bursts remain unchanged and continue
+with the explicitly selected fixed key; the UI shows this limitation.
 DSD-neo ARC4/AES-256 and the working Gopher ARC4 path are not replaced.
 
 ## Synchronization
 
 - CRC-validated PI headers provide the algorithm, KID and 32-bit MI.
   BPTC corrects at most two channel bits; PI polarity is checked independently.
-- A nonzero selected KID must match a received PI KID. KID 0 permits any
-  received ID, as in the existing Gopher path. Late-entry-only recovery
-  cannot verify KID because its fragments contain MI, not a key ID.
+- In fixed mode a nonzero selected KID must match a received PI KID. KID 0
+  permits any received ID, as in the existing Gopher path. In automatic mode
+  both the received algorithm and KID must match a saved key-table entry.
+  Late-entry-only recovery cannot discover a key because its fragments carry
+  MI, not KID; a valid PI must first establish the automatic key context.
 - A-F raw C3 fragments recover the next MI with extended Golay and CRC4.
   That MI is committed after F, never to the current 18 voice frames.
   Without PI, the initial superframe is muted and the next can be decoded.

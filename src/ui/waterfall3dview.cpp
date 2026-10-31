@@ -7,6 +7,7 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <cmath>
 
 namespace {
 bool hasSliceModifier(Qt::KeyboardModifiers modifiers) {

@@ -13,9 +13,26 @@ DDC adapter alone is not that capability. No receiver is opened by a worker.
 The DDC and anti-alias filtering still run on the receiver PC. Only downstream
 channel processing/FFT is offloaded by DDC controls. Main wide FFT offload is a
 separate, explicit selection. Neither route offloads Wi-Fi/GNSS engines or existing
-audio/DMR. A network is not inherently faster:
-96 ksps CF32LE costs 768 kB/s each way when returned IQ is requested; 2 Msps costs
-16 MB/s each way, before framing. Spectrum-only consumers do not return IQ.
+audio/DMR. A network is not inherently faster: before framing, 96 ksps costs
+768 kB/s each way in CF32LE or 384 kB/s in CS16/BFP16 when returned IQ is requested;
+2 Msps costs 16 or 8 MB/s each way. Spectrum-only consumers do not return IQ.
+
+Current native peers negotiate selected-band protocol v1. Before the first work
+block for a branch, the client opens its `receiverId/channelId/stream` window with
+the post-DDC center, sample rate, return-IQ choice and FFT definitions. The worker
+validates and acknowledges that configuration, then requires subsequent work to
+match it. Up to eight windows share one bounded connection. Reconfiguration costs
+one round trip only when metadata changes; IQ blocks keep the existing single
+request/reply path. Legacy peers without the capability continue to receive v1
+work messages without this preflight.
+
+Each DDC selects an IQ source by `receiverId + channelId`. Existing layouts use
+`main/rx0`; the selector also exposes RX 2..RX 8 configured by Multi-SDR. An
+auxiliary source publishes into a bounded history only while at least one branch
+subscribes, and its low-priority branch worker is created only when needed.
+Consequently an ordinary one-receiver layout does not copy auxiliary IQ or add
+another polling thread. Source identity is written into branch recording JSON
+and the network request/reply, and forms part of the executable plan key.
 
 ## Independent Audio And PFB
 
@@ -38,7 +55,8 @@ local to the machine and may need reselection after moving settings to another P
 
 Optional `IQ -> PFB channel bank -> DDC` shares an RF analysis bank across
 branches. All PFB blocks in the active plan must use the same bank configuration;
-there is one active receiver source, not one physical receiver per source block.
+the bank currently accepts only `main/rx0`. RX 2..RX 8 support direct DDC and
+reject PFB explicitly rather than reading IQ from the wrong physical receiver.
 Choose 8/16/32/64 bank channels and 8..64 taps per phase. Bands crossing guarded
 channel edges fail explicitly; direct IQ -> DDC is always available. FIR controls
 on each DDC expose tap count and a transition-width estimate. The status reports
@@ -51,6 +69,25 @@ the matching existing stages. Unrelated stages retain their slots and all stage
 parameters/enabled states remain unchanged. This is a one-shot apply action, not
 automatic rewiring of the main audio path. Independent branch audio links execute
 directly; ordinary legacy main-path diagram links otherwise stay descriptive.
+
+## Local Compute Resources
+
+The stream manager's **Local resources** tab controls one shared budget instead
+of letting every FFT and branch claim all CPU threads independently. Profiles:
+
+- **Conservative** reserves more responsiveness and limits optional parallelism.
+- **Balanced** is the default and caps ordinary main/auxiliary FFT parallelism.
+- **Throughput** grants larger pools for measured high-core-count systems.
+- **Manual** caps the total worker allowance at the selected thread count.
+
+The tab reports logical threads, physical cores, NUMA nodes and Windows processor
+groups, plus the resulting main FFT, auxiliary FFT, DDC and research allowances.
+Topology-aware placement is advisory: Windows assigns stable ideal processors
+across groups, while Linux assigns worker masks to detected NUMA-node CPUs.
+It is a no-op on ordinary single-node/single-group systems. The setting does not
+move USB drivers into another process, guarantee local NUMA memory, or make one
+FFT scale linearly across sockets. Existing FFTW plans take a new thread budget
+the next time their plan is rebuilt.
 
 ## Two Computers
 
@@ -82,7 +119,7 @@ main FFT session to bound memory use.
 
 The **Main FFT** tab and the existing **FFT and resolution** block editor use the
 same controls and one global preference set. Editing a field does not start work;
-**Apply** commits the mode, backend, upload budget and fallback choice. Applying
+**Apply** commits the mode, backend, IQ wire format, upload budget and fallback choice. Applying
 endpoint/transfer permission on the **External processor** tab is separate.
 
 - **Local** keeps FFT computation on the receiver PC.
@@ -91,9 +128,13 @@ endpoint/transfer permission on the **External processor** tab is separate.
   require substantially more upload bandwidth than individual windows.
 - Backend values are CPU (FFTW) = 1, GPU = 2, Auto = 0. The selected remote backend
   is a compute request, not a change to graph signal routing.
+- Network IQ is CF32LE (8 bytes/complex sample), CS16LE (4 bytes), or block-floating
+  CS16LE (4 bytes plus one scale per block). Auto negotiates block-floating CS16 with
+  a current Obrii worker and falls back to CF32 with a legacy peer. Both 16-bit modes
+  are quantized; block-floating avoids a fixed full-scale floor for weak receiver IQ.
 - Upload budget is 1-2000 MB/s, default 100, using decimal MB/s. This is a resource
-  limit, not a throughput guarantee. CF32LE requires 8 bytes per complex sample
-  before protocol overhead; 20 Msps therefore requires at least 160 MB/s.
+  limit, not a throughput guarantee. Before protocol overhead, 20 Msps requires
+  160 MB/s in CF32 or 80 MB/s in either packed 16-bit format.
 - **Allow local FFT if remote processing fails** is off by default. Remote errors,
   backend/capability refusals and memory-limit refusals are reported through the
   main FFT status. Local fallback requires the explicit checkbox.
@@ -179,7 +220,8 @@ FFT executor or a separate compute-target signal-flow block.
   occupied two-session server may close the extra connection before handshake.
   Closing the dialog cancels the test; TCP connect itself has a 1.5 s bound.
 - The results retain the tested endpoint and mark loopback explicitly. Example
-  traffic: full CF32 at 8 MS/s is 64 MB/s; at 50 MS/s it is 400 MB/s. Returned
+  traffic: full CF32 at 8 MS/s is 64 MB/s and at 50 MS/s is 400 MB/s; packed
+  CS16/BFP16 needs 32 and 200 MB/s respectively. Returned
   spectra cost 4 bytes per FFT bin. Editable Fs, FFT length, update interval and
   overlap are estimates only, initially copied from the receiver controls.
   They do not retune or otherwise change the receiver.
@@ -266,11 +308,11 @@ integer in `main_fft_ready` before uploading. Bounds are 1-4. A missing capabili
 means explicit legacy one-chunk lockstep: no extension is sent or assumed.
 Old clients still receive their unchanged ready reply when they omit the field.
 Malformed capabilities or missing/mismatched confirmations fail closed. Framing,
-tokens, chunk payloads, job IDs, ACKs and result messages are unchanged; this does
-not change DDC protocol or processor APIs.
+tokens, job IDs, ACKs and result messages remain compatible; IQ chunks additionally
+carry their negotiated format, sample count and (for BFP16) block scale.
 
 The sender permits at most four outstanding 131072-complex-sample IQ chunks
-(4 MiB CF32LE plus bounded framing). Each ACK must match the oldest pending job,
+(4 MiB CF32LE or 2 MiB packed IQ plus bounded framing). Each ACK must match the oldest pending job,
 64-bit next-sample counter and filled count. One ACK releases one credit. The
 fixed-size client queue contains only four counter records, not extra FFT windows.
 Socket/read buffers and single-packet write bounds remain unchanged. Server

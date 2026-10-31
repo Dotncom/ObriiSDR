@@ -2,6 +2,7 @@
 #include "gpufftbackend.h"
 #include "diagnosticlogging.h"
 #include "iqbuffer.h"
+#include "computebudgetmanager.h"
 
 #include <QDir>
 #include <QDebug>
@@ -29,7 +30,6 @@ constexpr int FFT_THREADED_PLAN_MIN_LENGTH = 524288;
 constexpr int FFT_PARALLEL_POSTPROCESS_MIN_LENGTH = 1048576;
 constexpr int FFT_PROFILE_MIN_LENGTH = 524288;
 constexpr int FFT_AUTO_GPU_BENCHMARK_MAX_LENGTH = 8388608;
-constexpr unsigned int FFT_MAX_WORKER_THREADS = 4;
 
 bool fftwWisdomImported = false;
 #ifdef FOBOSAPP_HAS_FFTW_THREADS
@@ -41,13 +41,7 @@ int fftWorkerCount(int length) {
     if (length < FFT_PARALLEL_POSTPROCESS_MIN_LENGTH) {
         return 1;
     }
-    const unsigned int hardwareThreads = std::thread::hardware_concurrency();
-    if (hardwareThreads < 2U) {
-        return 1;
-    }
-    return static_cast<int>(std::clamp(hardwareThreads / 2U,
-                                       1U,
-                                       FFT_MAX_WORKER_THREADS));
+    return ComputeBudgetManager::instance().recommendedThreads(ComputeWorkClass::MainFft);
 }
 
 template <typename Function>

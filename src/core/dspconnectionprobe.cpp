@@ -110,6 +110,14 @@ struct DspConnectionProbe::Impl {
             if (!payload.isEmpty() || json.value("type") != "hello" || json.value("version") != 1) { fail("protocol"); return; }
             if (json.value("connectionProbeVersion") != Version) { fail("unsupported"); return; }
             if (json.value("mainFftVersion") == 1) r.mainFftMaxLength = json.value("mainFftMaxLength").toInt();
+            if (json.value("selectedBandVersion") == DspStreamProtocol::SelectedBandVersion) {
+                r.selectedBandVersion = DspStreamProtocol::SelectedBandVersion;
+                r.selectedBandMaxStreams = json.value("selectedBandMaxStreams").toInt();
+                if (r.selectedBandMaxStreams < 1 ||
+                    r.selectedBandMaxStreams > int(DspStreamProtocol::MaxStreams)) {
+                    fail("protocol"); return;
+                }
+            }
             stage(DspProbeStage::Latency);
             std::vector<double> rtts;
             for (int i = 0; i < PingCount; ++i) {
@@ -181,7 +189,7 @@ DspConnectionProbeResult DspConnectionProbe::result() const {
 }
 
 DspConnectionEstimate estimateDspConnection(const DspConnectionProbeResult &r, double rate, int length,
-                                           int updateMs, int overlap, int budget) {
+                                           int updateMs, int overlap, int budget, int iqBytes) {
     DspConnectionEstimate e;
     if (!std::isfinite(rate) || rate <= 0 || length < 512 || updateMs < 1 || budget < 1) return e;
     const double hop = (std::max)({1.0, std::floor(double(length) * (100 - std::clamp(overlap, 0, 95)) / 100.0),
@@ -189,8 +197,9 @@ DspConnectionEstimate estimateDspConnection(const DspConnectionProbeResult &r, d
     e.requestedFramesPerSecond = 1000.0 / updateMs;
     e.continuousFramesPerSecond = rate / hop;
     e.continuousSpectrumDownloadMBps = length * 4.0 * e.continuousFramesPerSecond / 1e6;
-    e.continuousUploadMBps = rate * 8.0 / 1e6;
-    e.windowUploadMBps = length * 8.0 * e.requestedFramesPerSecond / 1e6;
+    iqBytes = std::clamp(iqBytes, 4, 8);
+    e.continuousUploadMBps = rate * iqBytes / 1e6;
+    e.windowUploadMBps = length * iqBytes * e.requestedFramesPerSecond / 1e6;
     e.spectrumDownloadMBps = length * 4.0 * e.requestedFramesPerSecond / 1e6;
     e.windowsSnapshotFits = std::size_t(length) <= IqBuffer::MaxSnapshotComplexSamples;
     if (r.stage != DspProbeStage::Complete || r.uploadMBps <= 0 || r.downloadMBps <= 0) return e;
@@ -199,12 +208,12 @@ DspConnectionEstimate estimateDspConnection(const DspConnectionProbeResult &r, d
     e.memoryFits = length <= r.mainFftMaxLength;
     // IQ chunks use stop-and-wait ACKs; returned spectrum chunks are streamed.
     const double iqChunks = std::ceil(double(length) / SpectrumComputeProtocol::ChunkSamples);
-    e.transportMsPerWindow = length * 8.0 / (up * 1000) + length * 4.0 / (down * 1000) +
+    e.transportMsPerWindow = length * iqBytes / (up * 1000) + length * 4.0 / (down * 1000) +
                              (iqChunks + 2) * r.rttMedianMs;
     e.networkFramesPerSecond = 1000.0 / e.transportMsPerWindow;
     e.windowsFit = e.memoryFits && e.windowsSnapshotFits && e.windowUploadMBps <= up && e.spectrumDownloadMBps <= down &&
                    e.requestedFramesPerSecond <= e.networkFramesPerSecond;
-    const double continuousTransportMs = hop * 8.0 / (up * 1000) + length * 4.0 / (down * 1000) +
+    const double continuousTransportMs = hop * iqBytes / (up * 1000) + length * 4.0 / (down * 1000) +
         (std::ceil(hop / SpectrumComputeProtocol::ChunkSamples) + 1) * r.rttMedianMs;
     e.continuousFits = e.memoryFits && e.continuousUploadMBps <= up && e.continuousSpectrumDownloadMBps <= down &&
                       continuousTransportMs * e.continuousFramesPerSecond <= 1000;

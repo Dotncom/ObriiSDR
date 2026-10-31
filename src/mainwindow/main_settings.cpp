@@ -1210,8 +1210,13 @@ void YourClassName::loadPersistentSettings() {
     networkMode = NetworkMode::Disabled;
     const int processingModeValue = (std::clamp)(settings.value("network/processingMode", static_cast<int>(networkProcessingMode)).toInt(),
                                                  static_cast<int>(NetworkProcessingMode::ServerSide),
-                                                 static_cast<int>(NetworkProcessingMode::FullIqClientSide));
+                                                 static_cast<int>(NetworkProcessingMode::RemoteVfoServerSide));
     networkProcessingMode = static_cast<NetworkProcessingMode>(processingModeValue);
+    networkWebServerEnabled = settings.value("network/webServerEnabled", networkWebServerEnabled).toBool();
+    networkWebServerPort = static_cast<quint16>((std::clamp)(
+        settings.value("network/webServerPort", networkWebServerPort).toInt(), 1, 65535));
+    remoteVfoSquelchDb = (std::clamp)(
+        settings.value("network/remoteVfoSquelchDb", remoteVfoSquelchDb).toDouble(), -200.0, 0.0);
     networkServerAddress = settings.value("network/serverAddress", networkServerAddress).toString();
     networkBindAddress = settings.value("network/bindAddress", networkBindAddress).toString();
     networkControlPort = static_cast<quint16>((std::clamp)(settings.value("network/controlPort", static_cast<int>(networkControlPort)).toInt(), 1, 65535));
@@ -1316,6 +1321,9 @@ void YourClassName::loadPersistentSettings() {
     pendingSettings.dmrPrivacyKeyHex =
         normalizedDmrPrivacyKeyHex(settings.value("digital/dmrPrivacyKeyHex",
                                                  pendingSettings.dmrPrivacyKeyHex).toString());
+    pendingSettings.dmrPrivacyAutoKeySelection =
+        settings.value(QStringLiteral("digital/dmrPrivacyAutoKeySelection"),
+                       pendingSettings.dmrPrivacyAutoKeySelection).toBool();
     pendingSettings.dmrPrivacyVariant =
         settings.value("digital/dmrPrivacyVariant", pendingSettings.dmrPrivacyVariant)
             .toString()
@@ -1380,6 +1388,7 @@ void YourClassName::loadPersistentSettings() {
         pendingSettings.dmrPrivacyKeyHex = normalizedDmrPrivacyKeyHex(entry.keyHex);
     }
 
+    setComboToData(dmrPrivacySelectionCombo, pendingSettings.dmrPrivacyAutoKeySelection);
     setComboToData(dmrPrivacyModeCombo, pendingSettings.dmrPrivacyMode);
     refreshDmrPrivacyKeyIdCombo();
     applyDmrPrivacyKeySelection();
@@ -1992,6 +2001,9 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("network/bindAddress", networkBindAddress);
     settings.setValue("network/controlPort", static_cast<int>(networkControlPort));
     settings.setValue("network/processingMode", static_cast<int>(networkProcessingMode));
+    settings.setValue("network/webServerEnabled", networkWebServerEnabled);
+    settings.setValue("network/webServerPort", networkWebServerPort);
+    settings.setValue("network/remoteVfoSquelchDb", remoteVfoSquelchDb);
     settings.setValue("network/serverDisableLocalVisualAudio", serverDisableLocalVisualAudio);
     settings.setValue("network/fullResolutionSpectrumFrames", networkFullResolutionSpectrumFrames);
     settings.setValue("audioRelay/transmitEnabled", audioRelayTransmitEnabled);
@@ -2040,6 +2052,10 @@ void YourClassName::savePersistentSettings() {
                       dmrPrivacyModeCombo
                           ? normalizedDmrPrivacyMode(dmrPrivacyModeCombo->currentData().toInt())
                           : normalizedDmrPrivacyMode(pendingSettings.dmrPrivacyMode));
+    settings.setValue(QStringLiteral("digital/dmrPrivacyAutoKeySelection"),
+                      dmrPrivacySelectionCombo
+                          ? dmrPrivacySelectionCombo->currentData().toBool()
+                          : pendingSettings.dmrPrivacyAutoKeySelection);
     settings.setValue("digital/dmrPrivacyKeyId",
                       pendingSettings.dmrPrivacyKeyId);
     settings.setValue("digital/dmrPrivacyKeyHex",

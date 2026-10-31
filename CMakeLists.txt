@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 6.5.0)
+project(ObriiSDR VERSION 6.6.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -84,7 +84,24 @@ if(FOBOS_ENABLE_MBELIB_NEO AND EXISTS "${CMAKE_SOURCE_DIR}/third_party/mbelib-ne
     set(MBELIB_BUILD_DOCS OFF CACHE BOOL "" FORCE)
     set(MBELIB_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
     set(MBELIB_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+    # GCC 12 on AArch64 can ICE in its loop-vectorizer while compiling the
+    # tone detector, especially when newer mbelib/PFFFT enables -mcpu=native.
+    # Keep this dependency portable; explicit codec SIMD remains available.
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU"
+       AND CMAKE_C_COMPILER_VERSION VERSION_LESS 13
+       AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|arm.*)$")
+        set(MBELIB_ENABLE_NATIVE OFF CACHE BOOL "" FORCE)
+    endif()
     add_subdirectory(third_party/mbelib-neo EXCLUDE_FROM_ALL)
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU"
+       AND CMAKE_C_COMPILER_VERSION VERSION_LESS 13
+       AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|arm.*)$")
+        target_compile_options(mbe-static PRIVATE -fno-tree-vectorize)
+        if(TARGET mbe-shared)
+            target_compile_options(mbe-shared PRIVATE -fno-tree-vectorize)
+        endif()
+        message(STATUS "Applying ARM GCC 12 mbelib vectorizer workaround.")
+    endif()
     set(FOBOS_HAS_MBELIB_NEO ON)
 else()
     message(STATUS "mbelib-neo not found or disabled; DMR voice synthesis will be unavailable.")
@@ -151,6 +168,9 @@ target_include_directories(ObriiItm PUBLIC ${CMAKE_SOURCE_DIR}/third_party/ntia_
 add_library(ObriiMeasurementCore STATIC
     src/analyzer/analyzerframechannel.cpp
     src/analyzer/analyzerframechannel.h
+    src/analyzer/analyzerinstrumentplan.cpp
+    src/analyzer/analyzerinstrumentplan.h
+    src/analyzer/analyzerinstrumentbackend.h
     src/analyzer/instrumentsweepengine.cpp
     src/analyzer/instrumentsweepengine.h
     src/analyzer/spectrummosaicengine.cpp
@@ -246,6 +266,16 @@ set(SOURCES
     src/core/appdiagnostics.h
     src/core/channelizerutils.cpp
     src/core/channelizerutils.h
+    src/core/dspsourceidentity.cpp
+    src/core/dspsourceidentity.h
+    src/core/coherentiqaligner.cpp
+    src/core/coherentiqaligner.h
+    src/core/coherentiqsession.cpp
+    src/core/coherentiqsession.h
+    src/core/dspiqsourceregistry.cpp
+    src/core/dspiqsourceregistry.h
+    src/core/computebudgetmanager.cpp
+    src/core/computebudgetmanager.h
     src/core/iqchannelizer.cpp
     src/core/iqchannelizer.h
     src/core/pfbchannelizer.cpp
@@ -261,6 +291,8 @@ set(SOURCES
     src/core/dspbranchengine.h
     src/core/dspstreamprocessor.cpp
     src/core/dspstreamprocessor.h
+    src/core/dspiqcodec.cpp
+    src/core/dspiqcodec.h
     src/core/dspstreammanager.cpp
     src/core/dspstreammanager.h
     src/core/dspconnectionprobe.cpp
@@ -348,6 +380,10 @@ set(SOURCES
     src/core/iqbuffer.h
     src/network/networkcontroller.cpp
     src/network/networkcontroller.h
+    src/network/remotevfoservice.cpp
+    src/network/remotevfoservice.h
+    src/network/remotewebserver.cpp
+    src/network/remotewebserver.h
     src/research/spectrumframereplaydialog.cpp
     src/research/spectrumframereplaydialog.h
     src/research/spectrumiqeventrecorder.cpp
@@ -501,6 +537,8 @@ add_executable(ObriiAnalyzer
     src/analyzer/analyzermain.cpp
     src/analyzer/analyzermainwindow.cpp
     src/analyzer/analyzermainwindow.h
+    src/analyzer/analyzerinstrumentdialog.cpp
+    src/analyzer/analyzerinstrumentdialog.h
     src/analyzer/multisdrdialog.cpp
     src/analyzer/multisdrdialog.h
     src/analyzer/analyzerspectrumwidget.cpp
@@ -517,6 +555,16 @@ add_executable(ObriiAnalyzer
     src/backends/soapysdrbackend.h
     src/core/fftplannermutex.cpp
     src/core/fftplannermutex.h
+    src/core/computebudgetmanager.cpp
+    src/core/computebudgetmanager.h
+    src/core/dspsourceidentity.cpp
+    src/core/dspsourceidentity.h
+    src/core/coherentiqaligner.cpp
+    src/core/coherentiqaligner.h
+    src/core/coherentiqsession.cpp
+    src/core/coherentiqsession.h
+    src/core/dspiqsourceregistry.cpp
+    src/core/dspiqsourceregistry.h
     src/app_resources.qrc
 )
 if(WIN32)
@@ -670,6 +718,13 @@ if(FOBOS_BUILD_CW_SELFTEST)
         target_compile_options(ObriiInstrumentSweepSelfTest PRIVATE /utf-8)
     endif()
 
+    add_executable(ObriiAnalyzerInstrumentPlanSelfTest tools/analyzer_instrument_plan_selftest.cpp)
+    target_include_directories(ObriiAnalyzerInstrumentPlanSelfTest PRIVATE src/analyzer)
+    target_link_libraries(ObriiAnalyzerInstrumentPlanSelfTest PRIVATE ObriiMeasurementCore Qt5::Core)
+    if(MSVC)
+        target_compile_options(ObriiAnalyzerInstrumentPlanSelfTest PRIVATE /utf-8)
+    endif()
+
     add_executable(ObriiAnalyzerFrameChannelSelfTest tools/analyzer_frame_channel_selftest.cpp)
     target_include_directories(ObriiAnalyzerFrameChannelSelfTest PRIVATE src/analyzer)
     target_link_libraries(ObriiAnalyzerFrameChannelSelfTest PRIVATE ObriiMeasurementCore Qt5::Core Qt5::Network)
@@ -782,7 +837,8 @@ if(FOBOS_BUILD_CW_SELFTEST)
     endif()
 
     add_executable(ObriiFftSnapshotSelfTest tools/fft_snapshot_selftest.cpp tools/fft_test_globals.cpp
-        src/core/fft.cpp src/core/fft.h src/core/gpufftbackend.cpp src/core/iqbuffer.cpp src/core/fftplannermutex.cpp)
+        src/core/fft.cpp src/core/fft.h src/core/gpufftbackend.cpp src/core/iqbuffer.cpp
+        src/core/computebudgetmanager.cpp src/core/fftplannermutex.cpp)
     target_include_directories(ObriiFftSnapshotSelfTest PRIVATE src/core ${FFTW_INCLUDE_DIR})
     target_link_libraries(ObriiFftSnapshotSelfTest PRIVATE Qt5::Core Qt5::Concurrent ${FFTW_FLOAT_LIBRARY})
     if(MSVC)
@@ -792,7 +848,8 @@ if(FOBOS_BUILD_CW_SELFTEST)
     endif()
 
     add_executable(ObriiSpectrumComputeSelfTest tools/spectrum_compute_selftest.cpp tools/fft_test_globals.cpp
-        src/core/spectrumcomputesession.cpp src/core/dspstreammanager.cpp src/core/dspstreamprocessor.cpp src/core/dspconnectionprobe.cpp
+        src/core/spectrumcomputesession.cpp src/core/dspstreammanager.cpp src/core/dspstreamprocessor.cpp src/core/dspiqcodec.cpp src/core/dspconnectionprobe.cpp
+        src/core/dspsourceidentity.cpp src/core/computebudgetmanager.cpp
         src/core/fft.cpp src/core/fft.h src/core/gpufftbackend.cpp src/core/iqbuffer.cpp src/core/fftplannermutex.cpp
         src/utils/remotespectrumworker.cpp src/utils/spectrumfftworker.cpp)
     target_include_directories(ObriiSpectrumComputeSelfTest PRIVATE src/core src/utils ${FFTW_INCLUDE_DIR})
@@ -804,8 +861,9 @@ if(FOBOS_BUILD_CW_SELFTEST)
     endif()
 
     add_executable(ObriiDspStreamSelfTest tools/dsp_stream_selftest.cpp tools/dsp_stream_recorder_test.cpp tools/dsp_connection_probe_selftest.cpp
-        src/core/dspstreamprocessor.cpp src/core/dspstreammanager.cpp src/core/dspconnectionprobe.cpp src/core/dspstreamrecorder.cpp src/core/fftplannermutex.cpp
-        src/core/spectrumcomputesession.cpp src/core/fft.cpp src/core/gpufftbackend.cpp src/core/iqbuffer.cpp tools/fft_test_globals.cpp)
+        src/core/dspstreamprocessor.cpp src/core/dspiqcodec.cpp src/core/dspstreammanager.cpp src/core/dspconnectionprobe.cpp src/core/dspstreamrecorder.cpp src/core/fftplannermutex.cpp
+        src/core/spectrumcomputesession.cpp src/core/fft.cpp src/core/gpufftbackend.cpp src/core/iqbuffer.cpp
+        src/core/dspsourceidentity.cpp src/core/dspiqsourceregistry.cpp src/core/computebudgetmanager.cpp tools/fft_test_globals.cpp)
     target_include_directories(ObriiDspStreamSelfTest PRIVATE src/core ${FFTW_INCLUDE_DIR})
     target_link_libraries(ObriiDspStreamSelfTest PRIVATE Qt5::Core Qt5::Network Qt5::Concurrent ${FFTW_FLOAT_LIBRARY})
     if(MSVC)
@@ -821,12 +879,39 @@ if(FOBOS_BUILD_CW_SELFTEST)
         target_compile_options(ObriiFrequencyControlSelfTest PRIVATE /utf-8)
     endif()
 
+    add_executable(ObriiCoherentIqSelfTest
+        tools/coherent_iq_selftest.cpp
+        src/core/coherentiqaligner.cpp
+        src/core/coherentiqaligner.h
+        src/core/coherentiqsession.cpp
+        src/core/coherentiqsession.h
+        src/core/dspiqsourceregistry.cpp
+        src/core/dspiqsourceregistry.h
+        src/core/dspsourceidentity.cpp
+        src/core/dspsourceidentity.h)
+    target_include_directories(ObriiCoherentIqSelfTest PRIVATE src/core)
+    target_link_libraries(ObriiCoherentIqSelfTest PRIVATE Qt5::Core)
+    if(MSVC)
+        target_compile_options(ObriiCoherentIqSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiNetworkControllerSelfTest
+        tools/network_controller_selftest.cpp
+        src/network/networkcontroller.cpp
+        src/network/networkcontroller.h)
+    target_include_directories(ObriiNetworkControllerSelfTest PRIVATE src/network)
+    target_link_libraries(ObriiNetworkControllerSelfTest PRIVATE Qt5::Core Qt5::Network)
+    if(MSVC)
+        target_compile_options(ObriiNetworkControllerSelfTest PRIVATE /utf-8)
+    endif()
+
     add_executable(ObriiDspFlowSelfTest
         tools/dsp_flow_selftest.cpp
         tools/dsp_branch_selftest.cpp
         tools/dsp_branch_audio_selftest.cpp
         tools/dsp_branch_audio_queue_selftest.cpp
         tools/dsp_branch_remote_selftest.cpp
+        tools/remote_vfo_selftest.cpp
         src/ui/dspflowpanel.cpp src/ui/dspflowpanel.h
         src/ui/dspbranchsettingswidget.cpp src/ui/dspbranchsettingswidget.h
         src/ui/multivfowidget.cpp src/ui/multivfowidget.h
@@ -838,8 +923,9 @@ if(FOBOS_BUILD_CW_SELFTEST)
         src/ui/waterfall3drenderer.cpp
         src/core/iqbuffer.cpp
         src/core/dspgraphmodel.cpp src/core/dspbranchengine.cpp
-        src/core/dspstreamprocessor.cpp src/core/dspstreammanager.cpp src/core/dspconnectionprobe.cpp
+        src/core/dspstreamprocessor.cpp src/core/dspiqcodec.cpp src/core/dspstreammanager.cpp src/core/dspconnectionprobe.cpp
         src/core/dspstreamrecorder.cpp
+        src/core/dspsourceidentity.cpp src/core/dspiqsourceregistry.cpp src/core/computebudgetmanager.cpp
         src/core/spectrumcomputesession.cpp src/core/fft.cpp src/core/gpufftbackend.cpp tools/fft_test_globals.cpp
         src/ui/dspcomputedialog.cpp src/ui/dspcomputedialog.h
         src/core/iqchannelizer.cpp src/core/channelizerutils.cpp
@@ -847,6 +933,8 @@ if(FOBOS_BUILD_CW_SELFTEST)
         src/audio/audioprocessor.cpp src/audio/audioprocessor.h
         src/audio/remoteaudioplayer.cpp src/audio/remoteaudioplayer.h
         src/audio/dspbranchaudiooutput.cpp
+        src/network/remotevfoservice.cpp src/network/remotevfoservice.h
+        src/network/remotewebserver.cpp src/network/remotewebserver.h
         src/core/fftplannermutex.cpp
         src/ui/audiofilterchainwidget.cpp src/audio/audiofilterchain.cpp
         src/scan/scanvisualassembler.cpp)
@@ -919,7 +1007,7 @@ if(FOBOS_BUILD_CW_SELFTEST)
     target_include_directories(ObriiPfbChannelizerSelfTest PRIVATE src/core ${FFTW_INCLUDE_DIR})
     target_link_libraries(ObriiPfbChannelizerSelfTest PRIVATE Qt5::Core ${FFTW_FLOAT_LIBRARY})
     add_executable(ObriiGnuRadioProtocolSelfTest tools/gnu_radio_protocol_selftest.cpp
-        src/core/dspstreamprocessor.cpp src/core/fftplannermutex.cpp)
+        src/core/dspstreamprocessor.cpp src/core/dspiqcodec.cpp src/core/dspsourceidentity.cpp src/core/fftplannermutex.cpp)
     target_include_directories(ObriiGnuRadioProtocolSelfTest PRIVATE src/core ${FFTW_INCLUDE_DIR})
     target_link_libraries(ObriiGnuRadioProtocolSelfTest PRIVATE Qt5::Core ${FFTW_FLOAT_LIBRARY})
     if(MSVC)

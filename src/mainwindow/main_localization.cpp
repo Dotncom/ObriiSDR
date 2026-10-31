@@ -380,6 +380,18 @@ void YourClassName::applyUiLanguage() {
                      DMR_PRIVACY_NONE,
                      QStringLiteral("dmr_privacy_none"),
                      QStringLiteral("No privacy"));
+    setComboItemText(dmrPrivacySelectionCombo,
+                     false,
+                     QStringLiteral("dmr_privacy_fixed_key"),
+                     QStringLiteral("Fixed key"));
+    setComboItemText(dmrPrivacySelectionCombo,
+                     true,
+                     QStringLiteral("dmr_privacy_auto_key"),
+                     QStringLiteral("Auto PI ALG/KID"));
+    if (dmrPrivacySelectionCombo)
+        dmrPrivacySelectionCombo->setToolTip(uiText(
+            QStringLiteral("dmr_privacy_selection_tooltip"),
+            QStringLiteral("Fixed key always uses the selected table entry. Auto PI ALG/KID selects an ARC4 or AES-256 key independently for each timeslot from a valid received Privacy Indicator header.")));
     setComboItemText(dmrPrivacyModeCombo, DMR_PRIVACY_HYTERA_BASIC,
                      QStringLiteral("dmr_privacy_hytera_basic"),
                      QStringLiteral("Hytera Basic (beta)"));

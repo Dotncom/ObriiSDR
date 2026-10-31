@@ -1,5 +1,7 @@
 #include "dspstreammanager.h"
 #include "dspstreamtransport_p.h"
+#include "dspiqsourceregistry.h"
+#include "computebudgetmanager.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QHostAddress>
@@ -31,14 +33,18 @@ DspStreamBlock tone(std::size_t count = 4096) {
     return b;
 }
 void checkTone(const DspStreamResult &r) {
-    require(r.error.isEmpty() && r.spectra.size() == 1, "Tone result missing");
+    if (!r.error.isEmpty() || r.spectra.size() != 1)
+        throw std::runtime_error(QStringLiteral("Tone result missing: error='%1', spectra=%2")
+            .arg(r.error).arg(r.spectra.size()).toStdString());
     const auto &f = r.spectra.front();
     const auto peak = std::max_element(f.levels.begin(), f.levels.end());
     require(std::abs(*peak+6.0206) < 0.01 && std::abs(f.frequencies[peak-f.levels.begin()]-100101500) < 10, "Tone amplitude/frequency wrong");
     require(f.rbwHz > 70 && f.rbwHz < 71, "ENBW/RBW incorrect");
 }
 void codecTests() {
-    auto b = tone(); auto packet = DspStreamProtocol::encode(DspStreamProtocol::request(b), DspStreamProtocol::floats(b.iq));
+    auto b = tone();
+    b.source = DspSourceIdentity::normalized(QStringLiteral("multi-rx-2"), QStringLiteral("rx1"));
+    auto packet = DspStreamProtocol::encode(DspStreamProtocol::request(b), DspStreamProtocol::floats(b.iq));
     QByteArray partial, payload; QJsonObject json; QString error;
     for (int i = 0; i < packet.size()-1; ++i) {
         partial.append(packet[i]);
@@ -47,7 +53,8 @@ void codecTests() {
     partial.append(packet.back());
     require(DspStreamProtocol::extract(partial, json, payload, error) == 1 && partial.isEmpty(), "Complete packet rejected");
     DspStreamBlock decoded;
-    require(DspStreamProtocol::decodeRequest(json, payload, decoded, error) && decoded.iq == b.iq, "IQ wire roundtrip changed samples");
+    require(DspStreamProtocol::decodeRequest(json, payload, decoded, error) && decoded.iq == b.iq && decoded.source == b.source,
+            "IQ wire roundtrip changed samples or source identity");
     b.firstSample = (std::uint64_t(1)<<60)+17;
     require(DspStreamProtocol::decodeRequest(DspStreamProtocol::request(b), payload, decoded, error) && decoded.firstSample == b.firstSample, "64-bit sample clock lost precision");
     json["firstSample"] = -1;
@@ -56,11 +63,85 @@ void codecTests() {
     require(DspStreamProtocol::extract(partial, json, payload, error) == -1, "Oversized packet accepted");
     partial = QByteArray("WRONG001", 8)+QByteArray(8, char(0));
     require(DspStreamProtocol::extract(partial, json, payload, error) == -1, "Bad protocol signature accepted");
+    for (const auto format : {DspIqFormat::Cs16Le, DspIqFormat::BlockFloat16Le}) {
+        const auto encoded = DspIqCodec::encode(b.iq, format);
+        auto metadata = DspStreamProtocol::request(b);
+        DspIqCodec::addMetadata(metadata, encoded);
+        std::vector<float> restored;
+        require(encoded.payload.size() == int(b.iq.size() * 2U) &&
+                    DspIqCodec::decode(metadata, encoded.payload, int(b.iq.size() / 2U), restored, error),
+                "Packed IQ codec rejected its own payload");
+        const double tolerance = format == DspIqFormat::BlockFloat16Le ? 2.0e-5 : 4.0e-5;
+        for (std::size_t i = 0; i < b.iq.size(); ++i)
+            require(std::abs(double(restored[i]) - b.iq[i]) <= tolerance, "Packed IQ quantization exceeded its bound");
+    }
+    auto advertised = DspIqCodec::advertisedFormats();
+    require(DspIqCodec::resolve(DspIqFormat::Auto, advertised) == DspIqFormat::BlockFloat16Le &&
+                DspIqCodec::resolve(DspIqFormat::Auto, {}) == DspIqFormat::Cf32Le,
+            "IQ capability negotiation lost modern or legacy compatibility");
+    DspStreamBlock selected;
+    const auto selectedOpen = DspStreamProtocol::selectedBandOpen(b);
+    require(DspStreamProtocol::decodeSelectedBandOpen(selectedOpen, selected, error) &&
+                DspStreamProtocol::selectedBandKey(selected) == DspStreamProtocol::selectedBandKey(b) &&
+                DspStreamProtocol::selectedBandMatches(selected, b) && selected.iq.empty(),
+            "Selected-band configuration roundtrip failed");
+    auto malformedBand = selectedOpen;
+    malformedBand["sampleRate"] = 100000001.0;
+    require(!DspStreamProtocol::decodeSelectedBandOpen(malformedBand, selected, error),
+            "Out-of-range selected-band rate was accepted");
     b.iq[0] = std::numeric_limits<float>::quiet_NaN();
     require(!DspStreamProtocol::validate(b).isEmpty(), "Nonfinite samples accepted");
     b = tone(); b.ffts[0].length = 1500;
     require(!DspStreamProtocol::validate(b).isEmpty(), "Invalid FFT length accepted");
     std::cout << "Framing, finite bounds, metadata and 64-bit sample clock: passed\n";
+}
+void sourceRegistryAndBudgetTests() {
+    auto &registry = DspIqSourceRegistry::instance();
+    registry.clearAll();
+    const auto source = DspSourceIdentity::normalized(QStringLiteral("multi-rx-2"), QStringLiteral("rx0"));
+    const std::vector<float> iq{1.0f, -1.0f, 0.5f, -0.5f};
+    require(!registry.publish(source, iq.data(), iq.size(), 2.0e6, 100.0e6),
+            "Unsubscribed auxiliary IQ was buffered");
+    int owner = 0;
+    registry.setSubscriptions(&owner, {source.key()});
+    DspIqTimingMetadata timing;
+    timing.epoch = 7;
+    timing.firstComplexSample = 1234;
+    timing.hostTimestampNs = 987654321;
+    timing.clockId = QStringLiteral("lab-ref-1");
+    timing.sampleClockValid = true;
+    timing.clockLocked = true;
+    timing.nativeAdcBits = 8;
+    timing.nativeSampleFormat = QStringLiteral("SC8 -> FC32 normalized");
+    require(registry.publish(source, iq.data(), iq.size(), 2.0e6, 100.0e6, false, &timing),
+            "Subscribed auxiliary IQ was rejected");
+    DspIqSourceSnapshot snapshot;
+    require(registry.snapshotSince(source, 0, 0, 1024, snapshot) && snapshot.iq == iq && snapshot.gap,
+            "Auxiliary source snapshot lost data or initial gap");
+    require(snapshot.epoch == 7 && snapshot.startComplexSample == 1234 &&
+                snapshot.endComplexSample == 1236 && snapshot.hostTimestampNs == timing.hostTimestampNs &&
+                snapshot.clockId == timing.clockId && snapshot.sampleClockValid && snapshot.clockLocked &&
+                snapshot.nativeAdcBits == 8 && snapshot.nativeSampleFormat == timing.nativeSampleFormat,
+            "Coherent timing or native ADC metadata was lost");
+    require(!registry.snapshotSince(source, snapshot.epoch, snapshot.endFloatCount, 1024, snapshot),
+            "Auxiliary source repeated an already consumed block");
+    registry.removeSubscriptions(&owner);
+    require(registry.stats().bufferedSources == 0, "Unsubscribed auxiliary history was retained");
+
+    ComputeTopology topology;
+    topology.logicalThreads = 32;
+    topology.physicalCores = 16;
+    topology.numaNodes = 2;
+    ComputeBudgetSettings settings;
+    settings.profile = ComputeProfile::Balanced;
+    const auto balanced = calculateComputeBudget(topology, settings, false);
+    const auto simplified = calculateComputeBudget(topology, settings, true);
+    require(balanced.mainFftThreads == 4 && balanced.totalWorkerThreads < topology.logicalThreads,
+            "Balanced compute budget lost its realtime reserve or FFT cap");
+    require(simplified.mainFftThreads <= 2 && simplified.auxiliaryFftThreads == 1 &&
+                simplified.dspBranchThreads == 1,
+            "Simplified compute budget did not collapse optional parallelism");
+    std::cout << "Auxiliary IQ subscription and shared compute budget: passed\n";
 }
 void processorTests() {
     DspStreamProcessor processor;
@@ -106,8 +187,23 @@ void processorTests() {
 }
 void networkTests(const DspStreamEndpoint &endpoint, bool native = false) {
     DspStreamManager manager; manager.configure(endpoint);
-    auto b = tone(); const auto remote = manager.process(b, true); checkTone(remote);
-    require(remote.iq && *remote.iq == b.iq, "External IQ differs");
+    const auto checked = [](const char *stage, const DspStreamResult &value) {
+        if (!value.error.isEmpty() || value.spectra.size() != 1)
+            throw std::runtime_error(QStringLiteral("%1: error='%2', spectra=%3")
+                .arg(QString::fromLatin1(stage), value.error).arg(value.spectra.size()).toStdString());
+        checkTone(value);
+    };
+    auto b = tone(); const auto remote = manager.process(b, true); checked("first selected band", remote);
+    require(remote.iq && remote.iq->size() == b.iq.size(), "External IQ differs");
+    for (std::size_t i = 0; i < b.iq.size(); ++i)
+        require(std::abs(double((*remote.iq)[i]) - b.iq[i]) < 2.0e-5, "External packed IQ differs");
+    auto second = b;
+    second.stream = QStringLiteral("second-selected-band");
+    second.ffts[0].id = QStringLiteral("second-selected-fft");
+    checked("second selected band", manager.process(second, true));
+    b.firstSample += b.iq.size() / 2U;
+    QThread::msleep(25);
+    checked("return to first selected band", manager.process(b, true));
     auto bad = endpoint; bad.token = QString(64, 'x');
     manager.configure(bad);
     const auto rejected = manager.process(b, true);
@@ -115,7 +211,7 @@ void networkTests(const DspStreamEndpoint &endpoint, bool native = false) {
     if (native) require(rejected.error.contains("rejected the session token"), "Native token rejection reason was lost");
     require(manager.process(b, true).error == rejected.error, "Retry hid the authentication failure");
     manager.configure(endpoint); b.generation++;
-    checkTone(manager.process(b, true));
+    checked("selected band after reconnect", manager.process(b, true));
     manager.clear();
     std::cout << "Authenticated external FFT/IQ, rejected wrong token and reconnect: passed\n";
 }
@@ -359,7 +455,7 @@ int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     std::cout << std::unitbuf;
     try {
-        codecTests(); processorTests(); require(dspStreamRecorderSelfTest(), "Recorder tests failed");
+        codecTests(); sourceRegistryAndBudgetTests(); processorTests(); require(dspStreamRecorderSelfTest(), "Recorder tests failed");
         require(dspConnectionProbeSelfTest(), "Connection probe tests failed");
         cancellationTests();
         DspStreamEndpoint endpoint; endpoint.enabled = true;

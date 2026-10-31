@@ -50,6 +50,7 @@ $excludeExactPaths = @(
     "tools/dmr_lab_replay.cpp",
     "docs/dmr_lab_replay.md",
     "docs/dmr_external_backend.md",
+    "docs/roadmap_4.0_cleanup.md",
     "config/dmr_backends.example.json",
     "tools/build_windows_local.ps1",
     "tools/deploy_windows.ps1",
@@ -99,6 +100,26 @@ foreach ($file in $files) {
         New-Item -ItemType Directory -Path $destDir -Force | Out-Null
     }
     Copy-Item -LiteralPath $source -Destination $dest -Force
+}
+
+# Git records bundled dependencies as submodule entries, so `git ls-files`
+# does not enumerate their contents. Include mbelib-neo explicitly to keep the
+# Raspberry source folder buildable without another network checkout. Omit its
+# repository metadata; only source, build files and license material are needed.
+$MbelibSource = Join-Path $Workspace 'third_party/mbelib-neo'
+if (Test-Path -LiteralPath (Join-Path $MbelibSource 'CMakeLists.txt')) {
+    $MbelibDestination = Join-Path $Stage 'third_party/mbelib-neo'
+    Get-ChildItem -LiteralPath $MbelibSource -Recurse -File -Force |
+        Where-Object { $_.FullName -notmatch '[\\/]\.git([\\/]|$)' } |
+        ForEach-Object {
+            $Relative = $_.FullName.Substring($MbelibSource.Length).TrimStart([char[]]'\/')
+            $Destination = Join-Path $MbelibDestination $Relative
+            $DestinationDirectory = Split-Path -Parent $Destination
+            if (-not (Test-Path -LiteralPath $DestinationDirectory)) {
+                New-Item -ItemType Directory -Path $DestinationDirectory -Force | Out-Null
+            }
+            Copy-Item -LiteralPath $_.FullName -Destination $Destination -Force
+        }
 }
 
 # Public ITU datasets, not the user's HF prediction job/cache directory.

@@ -1,7 +1,10 @@
 #pragma once
 
+#include "dspsourceidentity.h"
+
 #include <QJsonObject>
 #include <QHash>
+#include <QPair>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -22,6 +25,7 @@ struct DspBranchFftConfig {
 
 struct DspBranchConfig {
     QString id;
+    DspSourceIdentity source;
     double frequencyHz = 0.0;
     double bandwidthHz = 12500.0;
     double outputRateHz = 192000.0;
@@ -29,6 +33,8 @@ struct DspBranchConfig {
     int firTaps = 32;
     double transitionHz = 0.0;
     bool pfb = false;
+    int pfbChannels = 0;
+    int pfbTaps = 16;
     bool enabled = false;
     bool external = false;
     bool iqConsumer = false;

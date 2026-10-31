@@ -8,6 +8,8 @@
 #include "scanvisualutils.h"
 #include "spectrumfftworker.h"
 #include "tuningutils.h"
+#include "remotevfoservice.h"
+#include "remotewebserver.h"
 
 #include <QAbstractSocket>
 #include <QByteArray>
@@ -64,6 +66,20 @@ bool YourClassName::isFullIqProcessingMode() const {
     return networkProcessingMode == NetworkProcessingMode::FullIqClientSide;
 }
 
+bool YourClassName::isRemoteVfoProcessingMode() const {
+    return networkProcessingMode == NetworkProcessingMode::RemoteVfoServerSide;
+}
+
+void YourClassName::updateRemoteWebServer() {
+    if (!remoteWebServer) return;
+    if (!networkWebServerEnabled || networkMode != NetworkMode::Server) {
+        remoteWebServer->stop();
+        return;
+    }
+    if (remoteWebServer->isListening() && remoteWebServer->port() == networkWebServerPort) return;
+    remoteWebServer->start(networkBindAddress, networkWebServerPort);
+}
+
 bool YourClassName::isClientIqProcessingMode(NetworkProcessingMode mode) const {
     return mode == NetworkProcessingMode::ChannelIqClientSide ||
            mode == NetworkProcessingMode::FullIqClientSide;
@@ -71,16 +87,23 @@ bool YourClassName::isClientIqProcessingMode(NetworkProcessingMode mode) const {
 
 void YourClassName::appendNetworkState(QJsonObject &command) const {
     command["processingMode"] = static_cast<int>(networkProcessingMode);
-    command["serverDisableLocalVisualAudio"] = serverDisableLocalVisualAudio;
+    if (networkMode == NetworkMode::Server) {
+        command["serverDisableLocalVisualAudio"] = serverDisableLocalVisualAudio;
+    }
     command["fullResolutionSpectrumFrames"] = networkFullResolutionSpectrumFrames;
 }
 
 void YourClassName::applyNetworkStateFromCommand(const QJsonObject &command) {
-    if (command.contains("processingMode")) {
+    if (command.contains("processingMode") && !isRemoteVfoProcessingMode()) {
         networkProcessingMode = static_cast<NetworkProcessingMode>(command.value("processingMode").toInt(
             static_cast<int>(networkProcessingMode)));
     }
-    if (command.contains("serverDisableLocalVisualAudio")) {
+    // This is a policy of the receiver host, not a client-controlled setting.
+    // Clients still consume it from authoritative server state so their UI can
+    // show the effective policy, but an ordinary client command must never
+    // overwrite the server's local choice.
+    if (networkMode != NetworkMode::Server &&
+        command.contains("serverDisableLocalVisualAudio")) {
         serverDisableLocalVisualAudio = command.value("serverDisableLocalVisualAudio").toBool(serverDisableLocalVisualAudio);
     }
     if (command.contains("fullResolutionSpectrumFrames")) {
@@ -354,8 +377,17 @@ bool YourClassName::sendRemoteControlCommand(const QString &action, const QJsonO
         return false;
     }
 
+    if (isRemoteVfoProcessingMode() &&
+        (action == QStringLiteral("requestServerState") ||
+         action == QStringLiteral("setParameters") || action == QStringLiteral("settings") ||
+         action == QStringLiteral("start") || action == QStringLiteral("stop"))) {
+        Q_UNUSED(extra);
+        return sendRemoteVfoClientCommand(action);
+    }
+
     if (action != QStringLiteral("setParameters") &&
-        action != QStringLiteral("settings")) {
+        action != QStringLiteral("settings") &&
+        action != QStringLiteral("setViewport")) {
         cancelPendingRemoteSettingsCommand();
     }
 
@@ -400,15 +432,69 @@ bool YourClassName::sendRemoteControlCommand(const QString &action, const QJsonO
         if (carriesSettings) {
             startNetworkSettingsAckWait();
         }
-        qDebug() << "[Network] remote command sent" << action;
+        if (action != QStringLiteral("setViewport") || fobosVerboseLoggingEnabled())
+            qDebug() << "[Network] remote command sent" << action;
     }
     return sent;
 }
 
+bool YourClassName::sendRemoteVfoClientCommand(const QString &action) {
+    if (!networkController || networkMode != NetworkMode::Client || !isRemoteVfoProcessingMode()) {
+        return false;
+    }
+    QString remoteAction;
+    if (action == QStringLiteral("requestServerState")) remoteAction = QStringLiteral("open");
+    else if (action == QStringLiteral("start")) remoteAction = QStringLiteral("activate");
+    else if (action == QStringLiteral("stop")) remoteAction = QStringLiteral("deactivate");
+    else remoteAction = QStringLiteral("update");
+
+    QJsonObject command{{QStringLiteral("type"), QStringLiteral("remoteVfo")},
+                        {QStringLiteral("action"), remoteAction},
+                        {QStringLiteral("vfoId"), remoteVfoId},
+                        {QStringLiteral("clientName"), QCoreApplication::applicationName()}};
+    if (remoteAction == QStringLiteral("activate") || remoteAction == QStringLiteral("update")) {
+        refreshSettingsFromUi();
+        QJsonObject settings;
+        settings.insert(QStringLiteral("listeningFrequency"), pendingSettings.listeningFrequency);
+        settings.insert(QStringLiteral("bandwidth"), pendingSettings.bandwidth);
+        settings.insert(QStringLiteral("modulationType"),
+                        effectiveDemodulationModulationType(pendingSettings.modulationType,
+                                                           pendingSettings.sstvDemodulationMode));
+        settings.insert(QStringLiteral("audioLowPassHz"), pendingSettings.audioLowPassHz);
+        settings.insert(QStringLiteral("squelchDb"), remoteVfoSquelchDb);
+        settings.insert(QStringLiteral("audioEnabled"), pendingSettings.audioEnabled);
+        settings.insert(QStringLiteral("volume"), (std::clamp)(volumePercent / 100.0, 0.0, 2.0));
+        settings.insert(QStringLiteral("spectrumEnabled"), true);
+        settings.insert(QStringLiteral("fftLength"), 2048);
+        settings.insert(QStringLiteral("refreshMs"),
+                        (std::clamp)(spectrumUpdateIntervalMs > 0 ? spectrumUpdateIntervalMs : 100,
+                                    40, 1000));
+        command.insert(QStringLiteral("settings"), settings);
+    }
+    return networkController->sendControlCommand(command);
+}
+
+void YourClassName::handleRemoteVfoClientMessage(const QJsonObject &command) {
+    const QString action = command.value(QStringLiteral("action")).toString();
+    if (action == QStringLiteral("error")) {
+        qWarning() << "[RemoteVFO]" << command.value(QStringLiteral("message")).toString();
+        if (runState == RadioRunState::Running) {
+            runState = RadioRunState::Idle;
+            updateUiForRunState();
+        }
+        return;
+    }
+    const QString session = command.value(QStringLiteral("sessionId")).toString();
+    if (!session.isEmpty()) remoteVfoSessionId = session;
+    if (action == QStringLiteral("branchStatus") &&
+        !command.value(QStringLiteral("error")).toString().isEmpty()) {
+        qWarning() << "[RemoteVFO branch]" << command.value(QStringLiteral("error")).toString();
+    }
+}
+
 void YourClassName::scheduleRemoteSettingsCommand(int delayMs) {
-    if (!isNetworkClientMode() ||
-        !networkController ||
-        !networkController->clientHasControl()) {
+    if (!isNetworkClientMode() || !networkController ||
+        (!isRemoteVfoProcessingMode() && !networkController->clientHasControl())) {
         return;
     }
 
@@ -493,6 +579,27 @@ void YourClassName::applyLiveRemoteSettings(const RadioSettings &previousSetting
 }
 
 void YourClassName::onNetworkControlCommandReceived(const QJsonObject &command) {
+    const QString commandType = command.value(QStringLiteral("type")).toString();
+    if (networkMode == NetworkMode::Client && commandType == QStringLiteral("remoteVfo")) {
+        if (command.value(QStringLiteral("action")).toString() == QStringLiteral("audioReset") &&
+            remoteAudioPlayer) {
+            remoteAudioPlayer->stop();
+        }
+        handleRemoteVfoClientMessage(command);
+        return;
+    }
+    if (networkMode == NetworkMode::Server && commandType == QStringLiteral("remoteVfo")) {
+        const QString peerId = command.value(QStringLiteral("_networkPeerId")).toString();
+        if (!peerId.isEmpty() && remoteVfoService && networkController) {
+            networkController->setPeerStreamProfile(peerId, QStringLiteral("remote-vfo"));
+            QJsonObject routed = command;
+            if (routed.value(QStringLiteral("clientName")).toString().isEmpty())
+                routed.insert(QStringLiteral("clientName"),
+                              command.value(QStringLiteral("_networkPeerLabel")).toString());
+            remoteVfoService->handleCommand(peerId, routed);
+        }
+        return;
+    }
     if (networkMode == NetworkMode::Client && command.value("type").toString() == "iq") {
         receiveNetworkIqFrame(command);
         return;
@@ -512,6 +619,7 @@ void YourClassName::onNetworkControlCommandReceived(const QJsonObject &command) 
         const QString action = command.value("action").toString();
         if (action == QStringLiteral("serverState") ||
             action == QStringLiteral("settingsAck")) {
+            if (isRemoteVfoProcessingMode()) return;
             const bool ok = command.value(QStringLiteral("ok")).toBool(true);
             if (!ok) {
                 qDebug() << "[Network] settings command rejected by server"
@@ -579,6 +687,19 @@ void YourClassName::onNetworkControlCommandReceived(const QJsonObject &command) 
     const QString peerId = command.value("_networkPeerId").toString();
     const QString peerLabel = command.value("_networkPeerLabel").toString(QStringLiteral("unknown client"));
     const bool peerIsController = command.value("_networkPeerIsController").toBool(true);
+
+    // Once a peer opts into independent VFO service it remains a listener. This
+    // prevents an old or custom client from retuning the shared hardware through
+    // the legacy control path while other users are listening.
+    if (networkController &&
+        networkController->peerStreamProfile(peerId) == QStringLiteral("remote-vfo")) {
+        QJsonObject rejected{{QStringLiteral("type"), QStringLiteral("remoteVfo")},
+                             {QStringLiteral("action"), QStringLiteral("error")},
+                             {QStringLiteral("requestAction"), command.value("action")},
+                             {QStringLiteral("message"), QStringLiteral("Remote VFO sessions cannot control the physical receiver")}};
+        networkController->sendControlCommandToPeer(peerId, rejected);
+        return;
+    }
 
     if (action == QStringLiteral("requestServerState")) {
         sendServerStateToClients();
@@ -677,7 +798,20 @@ void YourClassName::onNetworkControlCommandReceived(const QJsonObject &command) 
     applyNetworkStateFromCommand(command);
     const bool serverLocalOutputChanged =
         previousServerDisableLocalVisualAudio != serverDisableLocalVisualAudio;
-    qDebug() << "[Network] received remote control command" << action;
+    if (action != QStringLiteral("setViewport") || fobosVerboseLoggingEnabled())
+        qDebug() << "[Network] received remote control command" << action;
+
+    if (action == QStringLiteral("setViewport")) {
+        const double centerHz = command.value(QStringLiteral("centerHz")).toDouble(
+            std::numeric_limits<double>::quiet_NaN());
+        const double spanHz = command.value(QStringLiteral("spanHz")).toDouble(
+            std::numeric_limits<double>::quiet_NaN());
+        if (std::isfinite(centerHz) && std::isfinite(spanHz) && spanHz >= 1.0) {
+            networkRemoteViewportCenterHz = centerHz;
+            networkRemoteViewportSpanHz = spanHz;
+        }
+        return;
+    }
 
     if (action == "setParameters" || action == "settings" || action == "start") {
         const RadioSettings previousSettings = pendingSettings;

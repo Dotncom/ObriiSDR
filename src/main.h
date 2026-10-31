@@ -114,6 +114,8 @@ class LrptDecodeDialog;
 class AnalyzerFramePublisher;
 class MultiSdrDialog;
 class SpectrumMarkerPairsDialog;
+class RemoteVfoService;
+class RemoteWebServer;
 
 extern fobos_dev_t *device;
 extern float* dataq;
@@ -519,6 +521,7 @@ private:
     bool isChannelIqProcessingMode() const;
     bool isFullIqProcessingMode() const;
     bool isClientIqProcessingMode(NetworkProcessingMode mode) const;
+    bool isRemoteVfoProcessingMode() const;
     void appendNetworkState(QJsonObject &command) const;
     void applyNetworkStateFromCommand(const QJsonObject &command);
     QJsonObject networkSettingsPatch(const QJsonObject &settings) const;
@@ -539,6 +542,9 @@ private:
     void clearRemoteReceiverDeviceList();
     void sendServerStateToClients();
     bool sendRemoteControlCommand(const QString &action, const QJsonObject &extra = QJsonObject());
+    bool sendRemoteVfoClientCommand(const QString &action);
+    void handleRemoteVfoClientMessage(const QJsonObject &command);
+    void updateRemoteWebServer();
     void scheduleRemoteSettingsCommand(int delayMs = 120);
     void cancelPendingRemoteSettingsCommand();
     QJsonObject settingsToJson() const;
@@ -679,6 +685,7 @@ private:
     QComboBox *dmrChannelRateCombo = nullptr;
     QComboBox *dmrAmbeLayoutCombo = nullptr;
     QComboBox *dmrBackendCombo = nullptr;
+    QComboBox *dmrPrivacySelectionCombo = nullptr;
     QComboBox *dmrPrivacyModeCombo = nullptr;
     QComboBox *dmrPrivacyFrameOffsetCombo = nullptr;
     QComboBox *dmrPrivacyDropCombo = nullptr;
@@ -1003,6 +1010,7 @@ private:
     QTimer *sampleRateChangeTimer = nullptr;
     QTimer *networkSettingsDebounceTimer = nullptr;
     QTimer *networkSettingsAckTimer = nullptr;
+    QTimer *remoteVfoSourceTimer = nullptr;
     QTimer *standardScanAdvanceTimer = nullptr;
     QTimer *listeningScanAdvanceTimer = nullptr;
     QTimer *videoSnapshotTimer = nullptr;
@@ -1027,6 +1035,8 @@ private:
     PlaybackManager *playbackManager = nullptr;
     RecordingManager *recordingManager = nullptr;
     NetworkController *networkController = nullptr;
+    RemoteVfoService *remoteVfoService = nullptr;
+    RemoteWebServer *remoteWebServer = nullptr;
     RemoteAudioPlayer *remoteAudioPlayer = nullptr;
     MyGraphWidget *graphWidget = nullptr;
     MyWaterfallWidget *waterfallWidget = nullptr;
@@ -1094,6 +1104,13 @@ private:
     QString networkBindAddress = "0.0.0.0";
     quint16 networkControlPort = 21090;
     bool networkFullResolutionSpectrumFrames = false;
+    double networkRemoteViewportCenterHz = std::numeric_limits<double>::quiet_NaN();
+    double networkRemoteViewportSpanHz = std::numeric_limits<double>::quiet_NaN();
+    bool networkWebServerEnabled = false;
+    quint16 networkWebServerPort = 21093;
+    QString remoteVfoSessionId;
+    QString remoteVfoId = QStringLiteral("main");
+    double remoteVfoSquelchDb = -160.0;
     int fineTuneDialLastValue = 0;
     int fineTuneControlMode = 0;
     bool fineTuneScaleHoldMode = false;

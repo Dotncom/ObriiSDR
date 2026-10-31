@@ -1,5 +1,6 @@
 #include "dataprocessor.h"
 #include "iqbuffer.h"
+#include "dspiqsourceregistry.h"
 #include "channelizerutils.h"
 #include "diagnosticlogging.h"
 #include "bladerfbackend.h"
@@ -10,6 +11,7 @@
 #include "zoomspectrumprocessor.h"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <vector>
 #include <utility>
@@ -348,6 +350,7 @@ void DataProcessor::startProcessing(const ReceiverStreamDescriptor &stream) {
     requestedSyncMode = useSyncReader;
     activeSyncMode = useSyncReader;
     totalCallbackCounter = 0;
+    coherentSampleCounter = 0;
     asyncRateReportCount = 0;
     resetStreamDiagnostics();
     if (fobosVerboseLoggingEnabled()) {
@@ -599,6 +602,7 @@ void DataProcessor::run() {
             publishTimer.start();
             const bool queueAudioBlocks = requestedQueueAudioBlocks.load();
             const bool publishIqSnapshot = requestedPublishIqSnapshot.load();
+            publishCoherentIq(syncBuffer.data(), floatCount, readEpoch);
             if (queueAudioBlocks || publishIqSnapshot) {
                 if (!IqBuffer::publish(syncBuffer.data(),
                                        floatCount,
@@ -1517,6 +1521,7 @@ void DataProcessor::handleUnsigned8IqData(const unsigned char *buf, uint32_t byt
     asyncMeasuredSamples += sampleCount;
     const bool queueAudioBlocks = requestedQueueAudioBlocks.load();
     const bool publishIqSnapshot = requestedPublishIqSnapshot.load();
+    publishCoherentIq(floatBuffer.data(), floatBuffer.size(), callbackEpoch);
     if (zoomProcessor && zoomProcessor->enabled()) {
         zoomProcessor->consumeIq(floatBuffer.data(),
                                  sampleCount,
@@ -1590,6 +1595,9 @@ void DataProcessor::handleData(float *buf, uint32_t buf_length, int agileScanInd
         asyncMeasuredSamples += buf_length;
         return;
     }
+    publishCoherentIq(buf,
+                      static_cast<size_t>(buf_length) * FLOATS_PER_IQ_SAMPLE,
+                      callbackEpoch);
     if (zoomProcessor && zoomProcessor->enabled()) {
         const double blockCenterHz = blockMetadata.valid
                                          ? blockMetadata.centerFrequencyHz
@@ -2326,7 +2334,40 @@ void DataProcessor::setFrequencyCalibrationOffset(double offsetHz) {
 
 uint64_t DataProcessor::beginIqRetuneBarrier() {
     const uint64_t epoch = iqRetuneEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+    coherentSampleCounter = 0;
     return epoch;
+}
+
+void DataProcessor::publishCoherentIq(const float *samples,
+                                      std::size_t floatCount,
+                                      std::uint64_t epoch,
+                                      bool discontinuity) {
+    if (!samples || floatCount < 2U) return;
+    floatCount &= ~std::size_t(1);
+    DspIqTimingMetadata timing;
+    timing.epoch = epoch;
+    timing.firstComplexSample = coherentSampleCounter.fetch_add(
+        floatCount / 2U, std::memory_order_relaxed);
+    timing.hostTimestampNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    timing.sampleClockValid = true;
+    timing.hardwareTimestamp = activeStreamDescriptor.hardwareTimestampAvailable;
+    timing.clockLocked = activeStreamDescriptor.clockLocked;
+    timing.clockId = activeStreamDescriptor.clockId;
+    if (activeBackendId.startsWith(QStringLiteral("fobos-"))) {
+        timing.nativeAdcBits = 14;
+        timing.nativeSampleFormat = QStringLiteral("ADC14 -> FC32 normalized");
+    } else if (activeBackendId == QStringLiteral("hackrf") ||
+               activeBackendId == QStringLiteral("rtl-sdr")) {
+        timing.nativeAdcBits = 8;
+        timing.nativeSampleFormat = QStringLiteral("SC8 -> FC32 normalized");
+    } else {
+        timing.nativeSampleFormat = QStringLiteral("backend FC32 normalized");
+    }
+    DspIqSourceRegistry::instance().publish(
+        DspSourceIdentity::normalized(QStringLiteral("main"), QStringLiteral("rx0")),
+        samples, floatCount, requestedSampleRate.load(std::memory_order_relaxed),
+        requestedCenterFrequency.load(std::memory_order_relaxed), discontinuity, &timing);
 }
 
 void DataProcessor::startRetuneRawDump(const QString &reason,

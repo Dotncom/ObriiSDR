@@ -10,6 +10,8 @@ QString dmrPrivacyModeId(int mode) {
         return QStringLiteral("aes256");
     case DMR_PRIVACY_HYTERA_BASIC:
         return QStringLiteral("hytera-bp");
+    case DMR_PRIVACY_AUTO:
+        return QStringLiteral("auto");
     case DMR_PRIVACY_NONE:
     default:
         return QStringLiteral("none");
@@ -22,6 +24,10 @@ int dmrPrivacyModeFromText(const QString &text) {
         normalized == QStringLiteral("hytera-basic") ||
         normalized == QStringLiteral("hytera basic")) {
         return DMR_PRIVACY_HYTERA_BASIC;
+    }
+    if (normalized == QStringLiteral("auto") ||
+        normalized.contains(QStringLiteral("pi kid"))) {
+        return DMR_PRIVACY_AUTO;
     }
     if (normalized.contains(QStringLiteral("aes"))) {
         return DMR_PRIVACY_AES256;
@@ -38,6 +44,7 @@ int normalizedDmrPrivacyMode(int mode) {
     case DMR_PRIVACY_ARC4:
     case DMR_PRIVACY_AES256:
     case DMR_PRIVACY_HYTERA_BASIC:
+    case DMR_PRIVACY_AUTO:
         return mode;
     case DMR_PRIVACY_NONE:
     default:

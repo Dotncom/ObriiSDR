@@ -8,6 +8,8 @@
 #include "dspstreamrecorder.h"
 #include "audioprocessor.h"
 #include "dspbranchaudiooutput.h"
+#include "dspiqsourceregistry.h"
+#include "computebudgetmanager.h"
 #include "pfbchannelizer.h"
 
 #include <algorithm>
@@ -70,6 +72,8 @@ struct DspBranchEngine::Impl {
     std::mutex mutex;
     std::condition_variable wake;
     std::thread worker;
+    std::thread auxiliaryWorker;
+    std::condition_variable auxiliaryWake;
     std::thread remoteWorker;
     std::condition_variable remoteWake;
     std::atomic_bool remoteCancel{false};
@@ -92,9 +96,12 @@ struct DspBranchEngine::Impl {
     ~Impl() {
         { std::lock_guard<std::mutex> lock(mutex); stopping = true; remoteCancel = true; }
         wake.notify_one();
+        auxiliaryWake.notify_one();
         remoteWake.notify_one();
         worker.join();
+        if (auxiliaryWorker.joinable()) auxiliaryWorker.join();
         if (remoteWorker.joinable()) remoteWorker.join();
+        DspIqSourceRegistry::instance().removeSubscriptions(this);
     }
     bool current(std::uint64_t value, std::uint64_t remote = 0) {
         std::lock_guard<std::mutex> lock(mutex);
@@ -164,11 +171,13 @@ struct DspBranchEngine::Impl {
         const bool outputGap = state.gap || block.gap || output.gap;
         state.gap = false;
         frame.sampleRateHz = output.sampleRate > 0 ? output.sampleRate : block.sampleRate;
+        frame.source = block.source;
         frame.gaps += state.transportGaps;
         if (outputGap) state.history.clear();
         if (recorder && recorder->active() && output.iq && !output.iq->empty()) {
             DspStreamBlock recorded;
-            recorded.stream = block.stream; recorded.generation = block.generation; recorded.epoch = block.epoch;
+            recorded.stream = block.stream; recorded.source = block.source;
+            recorded.generation = block.generation; recorded.epoch = block.epoch;
             recorded.sampleRate = frame.sampleRateHz; recorded.centerHz = block.centerHz;
             for (std::size_t start = 0; start < output.iq->size(); start += DspStreamProtocol::MaxSamples*2U) {
                 recorded.firstSample = output.firstSample + start/2;
@@ -216,6 +225,7 @@ struct DspBranchEngine::Impl {
         }
         frame.processingMs = std::chrono::duration<double, std::milli>(Clock::now()-started).count();
         for (auto &spectrum : output.spectra) {
+            spectrum.source = block.source;
             spectrum.decimation = frame.decimation; spectrum.frontDecimation = frame.frontDecimation;
             spectrum.firTaps = frame.firTaps; spectrum.pfbChannels = frame.pfbChannels;
             spectrum.bankProcessingMs = frame.bankProcessingMs;
@@ -234,6 +244,7 @@ struct DspBranchEngine::Impl {
         return true;
     }
     void runRemote() {
+        ComputeBudgetManager::instance().applyCurrentThreadRole(ComputeThreadRole::DspRemote);
 #ifdef _WIN32
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 #elif defined(__linux__)
@@ -297,6 +308,7 @@ struct DspBranchEngine::Impl {
         }
     }
     void run() {
+        ComputeBudgetManager::instance().applyCurrentThreadRole(ComputeThreadRole::DspLocal);
 #ifdef _WIN32
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 #elif defined(__linux__)
@@ -325,8 +337,16 @@ struct DspBranchEngine::Impl {
                     const bool running = active;
                     settings = source;
                     auto requestedRecorders = recordingRequests;
-                    for (const auto &c : configs) if (c.external) requestedRecorders.remove(c.id);
-                    bankChannels = pfbChannels; bankTaps = pfbTaps;
+                    for (const auto &c : configs)
+                        if (c.external || !c.source.isPrimary()) requestedRecorders.remove(c.id);
+                    bankChannels = 0;
+                    bankTaps = 16;
+                    for (const auto &c : configs) {
+                        if (!c.enabled || !c.source.isPrimary() || !c.pfb) continue;
+                        bankChannels = c.pfbChannels;
+                        bankTaps = c.pfbTaps;
+                        break;
+                    }
                     lock.unlock();
                     branches.clear();
                     pfb.reset();
@@ -342,7 +362,8 @@ struct DspBranchEngine::Impl {
                             auto recorder = std::make_unique<DspStreamRecorder>(); recorder->start(it.value());
                             recordingDirectories.insert(it.key(), it.value()); recorders[it.key()] = std::move(recorder);
                         }
-                        if (running) for (const auto &c : configs) if (c.enabled) branches.push_back(std::make_unique<BranchState>(c));
+                        if (running) for (const auto &c : configs)
+                            if (c.enabled && c.source.isPrimary()) branches.push_back(std::make_unique<BranchState>(c));
                     } catch (const std::exception &) {
                         branches.clear(); recorders.clear(); recordingDirectories.clear();
                         for (const auto &c : configs) { DspBranchFrame f; f.id = c.id; f.error = "Cannot allocate DDC branch"; publish(std::move(f), revision); }
@@ -408,7 +429,7 @@ struct DspBranchEngine::Impl {
                     if (!current(revision)) break;
                     const auto started = Clock::now();
                     DspBranchFrame frame;
-                    frame.id = b->config.id; frame.sequence = lastEnd / 2U;
+                    frame.id = b->config.id; frame.source = b->config.source; frame.sequence = lastEnd / 2U;
                     frame.generation = revision; frame.gaps = gaps;
                     const auto recording = recorders.find(b->config.id);
                     DspStreamRecorder *recorder = recording == recorders.end() ? nullptr : recording->second.get();
@@ -460,7 +481,8 @@ struct DspBranchEngine::Impl {
                     for (std::size_t offset = 0; offset < b->channel.size(); offset += DspStreamProtocol::MaxSamples*2U) {
                         if (!current(revision)) break;
                         auto &block = b->stream;
-                        block.stream = b->config.id; block.generation = revision; block.epoch = epoch;
+                        block.stream = b->config.id; block.source = b->config.source;
+                        block.generation = revision; block.epoch = epoch;
                         block.firstSample = b->nextSample; block.gap = b->gap;
                         block.sampleRate = channelRate; block.centerHz = frame.centerHz;
                         block.returnIq = b->config.iqConsumer || b->config.audioEnabled || (recorder && recorder->active()); block.ffts = b->config.ffts;
@@ -487,6 +509,267 @@ struct DspBranchEngine::Impl {
             }
         }
     }
+    void runAuxiliary() {
+        ComputeBudgetManager::instance().applyCurrentThreadRole(ComputeThreadRole::DspAuxiliary);
+#ifdef _WIN32
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#elif defined(__linux__)
+        setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 10);
+#endif
+        struct SourceCursor {
+            DspSourceIdentity source;
+            std::uint64_t epoch = 0;
+            std::uint64_t endFloatCount = 0;
+            std::uint64_t gaps = 0;
+            int pfbChannels = 0;
+            int pfbTaps = 16;
+            PfbChannelizer pfb;
+            std::vector<PfbChannelizer::ChannelOutput> pfbOutputs;
+        };
+        std::vector<std::unique_ptr<BranchState>> branches;
+        std::map<QString, SourceCursor> cursors;
+        DspStreamManager streams;
+        std::map<QString, std::unique_ptr<DspStreamRecorder>> recorders;
+        QHash<QString, QString> recordingDirectories;
+        std::uint64_t revision = 0;
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                const auto changed = [this, revision]() { return stopping || generation != revision; };
+                auxiliaryWake.wait_for(lock, std::chrono::milliseconds(5), changed);
+                if (stopping) return;
+                if (generation != revision) {
+                    revision = generation;
+                    const auto configs = configurations;
+                    const bool running = active;
+                    auto requestedRecorders = recordingRequests;
+                    for (const auto &config : configs)
+                        if (config.external || config.source.isPrimary()) requestedRecorders.remove(config.id);
+                    lock.unlock();
+                    branches.clear();
+                    cursors.clear();
+                    streams.clear();
+                    for (auto it = recorders.begin(); it != recorders.end();) {
+                        if (!running || !requestedRecorders.contains(it->first) ||
+                            recordingDirectories.value(it->first) != requestedRecorders.value(it->first)) {
+                            recordingDirectories.remove(it->first);
+                            it = recorders.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                    try {
+                        if (running) {
+                            for (auto it = requestedRecorders.cbegin(); it != requestedRecorders.cend(); ++it) {
+                                if (recorders.count(it.key())) continue;
+                                auto recorder = std::make_unique<DspStreamRecorder>();
+                                recorder->start(it.value());
+                                recordingDirectories.insert(it.key(), it.value());
+                                recorders[it.key()] = std::move(recorder);
+                            }
+                            for (const auto &config : configs) {
+                                if (!config.enabled || config.source.isPrimary()) continue;
+                                branches.push_back(std::make_unique<BranchState>(config));
+                                auto &cursor = cursors[config.source.key()];
+                                cursor.source = config.source;
+                                if (config.pfb) {
+                                    cursor.pfbChannels = config.pfbChannels;
+                                    cursor.pfbTaps = config.pfbTaps;
+                                }
+                            }
+                        }
+                    } catch (const std::exception &) {
+                        branches.clear();
+                        cursors.clear();
+                        recorders.clear();
+                        recordingDirectories.clear();
+                    }
+                } else {
+                    if (!active) continue;
+                    for (auto &branch : branches)
+                        for (const auto &config : configurations)
+                            if (branch->config.id == config.id) {
+                                branch->config.volume = config.volume;
+                                break;
+                            }
+                }
+            }
+            if (branches.empty()) continue;
+            try {
+                for (auto &entry : cursors) {
+                    if (!current(revision)) break;
+                    SourceCursor &cursor = entry.second;
+                    DspIqSourceSnapshot snapshot;
+                    if (!DspIqSourceRegistry::instance().snapshotSince(
+                            cursor.source, cursor.epoch, cursor.endFloatCount,
+                            MaxInputFloats, snapshot))
+                        continue;
+                    const bool reset = snapshot.gap || snapshot.epoch != cursor.epoch;
+                    if (reset) {
+                        for (auto &branch : branches)
+                            if (branch->config.source == cursor.source) branch->reset();
+                        cursor.pfb.reset();
+                        cursor.pfbOutputs.clear();
+                        if (cursor.epoch != 0) ++cursor.gaps;
+                    }
+                    cursor.epoch = snapshot.epoch;
+                    cursor.endFloatCount = snapshot.endFloatCount;
+                    RadioSettings settings;
+                    settings.inputMode = INPUT_RF;
+                    settings.sampleRate = snapshot.sampleRateHz;
+                    settings.centerFrequency = snapshot.centerHz;
+                    settings.listeningFrequency = snapshot.centerHz;
+                    cursor.pfbOutputs.clear();
+                    bool pfbValid = false;
+                    double pfbMs = 0.0;
+                    if (cursor.pfbChannels > 0) {
+                        const auto startedBank = Clock::now();
+                        PfbChannelizer::Config bankConfig;
+                        bankConfig.sampleRateHz = settings.sampleRate;
+                        bankConfig.channels = cursor.pfbChannels;
+                        bankConfig.tapsPerPhase = cursor.pfbTaps;
+                        if (cursor.pfb.configure(bankConfig)) {
+                            std::vector<int> selected;
+                            for (const auto &candidate : branches) {
+                                if (!candidate->config.pfb || candidate->config.source != cursor.source) continue;
+                                const double center = candidate->config.frequencyHz > 0.0
+                                                          ? candidate->config.frequencyHz
+                                                          : settings.listeningFrequency;
+                                const int bin = cursor.pfb.nearestCenterIndex(center - settings.centerFrequency);
+                                if (cursor.pfb.coversBand(bin, center - settings.centerFrequency,
+                                                         candidate->config.bandwidthHz) &&
+                                    std::find(selected.begin(), selected.end(), bin) == selected.end())
+                                    selected.push_back(bin);
+                            }
+                            pfbValid = cursor.pfb.processFloatIq(
+                                snapshot.iq.data(), snapshot.iq.size(), selected,
+                                cursor.pfbOutputs).status == PfbChannelizer::Status::Ok;
+                        }
+                        pfbMs = std::chrono::duration<double, std::milli>(
+                            Clock::now() - startedBank).count();
+                    }
+                    for (auto &branch : branches) {
+                        if (branch->config.source != cursor.source || !current(revision)) continue;
+                        const auto started = Clock::now();
+                        DspBranchFrame frame;
+                        frame.id = branch->config.id;
+                        frame.source = branch->config.source;
+                        frame.sequence = snapshot.endFloatCount / 2U;
+                        frame.generation = revision;
+                        frame.gaps = cursor.gaps;
+                        frame.centerHz = branch->config.frequencyHz > 0.0
+                                             ? branch->config.frequencyHz
+                                             : settings.listeningFrequency;
+                        frame.sampleRateHz = branch->config.outputRateHz;
+                        const auto recording = recorders.find(branch->config.id);
+                        DspStreamRecorder *recorder = recording == recorders.end()
+                                                          ? nullptr
+                                                          : recording->second.get();
+                        const double halfBand = branch->config.bandwidthHz / 2.0;
+                        if (!std::isfinite(settings.sampleRate) || settings.sampleRate <= 0.0 ||
+                            std::abs(frame.centerHz - settings.centerFrequency) + halfBand > settings.sampleRate * 0.5 ||
+                            halfBand >= frame.sampleRateHz * 0.45) {
+                            frame.error = "Invalid auxiliary DDC band/rate";
+                            branch->reset();
+                            publish(std::move(frame), revision);
+                            continue;
+                        }
+                        RadioSettings branchSettings = settings;
+                        branchSettings.listeningFrequency = frame.centerHz;
+                        const std::vector<float> *input = &snapshot.iq;
+                        if (branch->config.pfb) {
+                            const double offsetHz = frame.centerHz - settings.centerFrequency;
+                            const int bin = cursor.pfb.nearestCenterIndex(offsetHz);
+                            const auto channel = std::find_if(
+                                cursor.pfbOutputs.begin(), cursor.pfbOutputs.end(),
+                                [bin](const auto &output) { return output.binIndex == bin; });
+                            if (!pfbValid || !cursor.pfb.coversBand(
+                                    bin, offsetHz, branch->config.bandwidthHz) ||
+                                channel == cursor.pfbOutputs.end()) {
+                                frame.error = "Band crosses auxiliary PFB guard/channel boundary; change bank size or use direct DDC";
+                                branch->reset();
+                                publish(std::move(frame), revision);
+                                continue;
+                            }
+                            branchSettings.sampleRate = channel->sampleRateHz;
+                            branchSettings.centerFrequency += channel->centerOffsetHz;
+                            input = &channel->iq;
+                            if (input->empty()) continue;
+                        }
+                        IqChannelizer::Options options;
+                        options.outputRateHz = frame.sampleRateHz;
+                        options.cutoffHz = halfBand;
+                        options.decimationFactor = branch->config.decimation;
+                        options.firTapCount = branch->config.firTaps;
+                        options.transitionHz = branch->config.transitionHz;
+                        const auto result = branch->channelizer.processFloatIq(
+                            input->data(), input->size(), branchSettings,
+                            branch->channel, false, &options);
+                        if (!result.valid) {
+                            frame.error = "Invalid auxiliary DDC decimation or output rate";
+                            branch->reset();
+                            publish(std::move(frame), revision);
+                            continue;
+                        }
+                        frame.sampleRateHz = result.outputRate;
+                        frame.decimation = result.decimationFactor;
+                        frame.frontDecimation = result.frontDecimationFactor;
+                        frame.firTaps = result.firTapCount;
+                        frame.pfbChannels = branch->config.pfb ? cursor.pfbChannels : 0;
+                        frame.bankProcessingMs = branch->config.pfb ? pfbMs : 0.0;
+                        for (std::size_t offset = 0; offset < branch->channel.size();
+                             offset += DspStreamProtocol::MaxSamples * 2U) {
+                            if (!current(revision)) break;
+                            auto &block = branch->stream;
+                            block.stream = branch->config.id;
+                            block.source = branch->config.source;
+                            block.generation = revision;
+                            block.epoch = snapshot.epoch;
+                            block.firstSample = branch->nextSample;
+                            block.gap = branch->gap;
+                            block.sampleRate = result.outputRate;
+                            block.centerHz = frame.centerHz;
+                            block.returnIq = branch->config.iqConsumer || branch->config.audioEnabled ||
+                                             (recorder && recorder->active());
+                            block.ffts = branch->config.ffts;
+                            if (branch->config.external) {
+                                std::lock_guard<std::mutex> lock(mutex);
+                                block.returnIq = block.returnIq || recordingRequests.contains(branch->config.id);
+                            }
+                            const auto end = std::min(branch->channel.size(),
+                                offset + DspStreamProtocol::MaxSamples * 2U);
+                            block.iq.assign(branch->channel.begin() + std::ptrdiff_t(offset),
+                                            branch->channel.begin() + std::ptrdiff_t(end));
+                            branch->nextSample += block.iq.size() / 2U;
+                            if (branch->config.external) {
+                                RemoteBranchJob job;
+                                job.config = branch->config;
+                                job.block = std::move(block);
+                                job.frame = frame;
+                                job.started = started;
+                                enqueueRemote(std::move(job));
+                                branch->gap = false;
+                            } else {
+                                auto output = streams.process(block, false);
+                                if (!consumeOutput(std::move(output), block, branch->config,
+                                                   *branch, frame, recorder, started))
+                                    break;
+                            }
+                        }
+                    }
+                }
+            } catch (const std::exception &) {
+                for (auto &branch : branches) {
+                    branch->reset();
+                    DspBranchFrame frame;
+                    frame.id = branch->config.id;
+                    frame.source = branch->config.source;
+                    frame.error = "Auxiliary DDC branch resource limit";
+                    publish(std::move(frame), revision);
+                }
+            }
+        }
+    }
 };
 
 DspBranchEngine::DspBranchEngine() : impl(std::make_unique<Impl>()) {}
@@ -495,6 +778,15 @@ DspBranchEngine::~DspBranchEngine() = default;
 void DspBranchEngine::configure(const DspGraphPlan &plan, const RadioSettings &source, bool active) {
     active = active && !source.simplifiedAudioChannelizer;
     std::lock_guard<std::mutex> lock(impl->mutex);
+    QSet<QString> auxiliarySources;
+    if (active) {
+        for (const auto &branch : plan.branches)
+            if (branch.enabled && !branch.source.isPrimary())
+                auxiliarySources.insert(branch.source.key());
+    }
+    DspIqSourceRegistry::instance().setSubscriptions(impl.get(), auxiliarySources);
+    if (!auxiliarySources.isEmpty() && !impl->auxiliaryWorker.joinable())
+        impl->auxiliaryWorker = std::thread([state = impl.get()]() { state->runAuxiliary(); });
     const auto &old = impl->source;
     if (impl->key == plan.executionKey && impl->active == active && old.sampleRate == source.sampleRate &&
         old.centerFrequency == source.centerFrequency && old.listeningFrequency == source.listeningFrequency && old.inputMode == source.inputMode) {
@@ -507,6 +799,7 @@ void DspBranchEngine::configure(const DspGraphPlan &plan, const RadioSettings &s
     impl->invalidateRemote();
     impl->resetAudio();
     impl->wake.notify_one();
+    impl->auxiliaryWake.notify_one();
 }
 
 void DspBranchEngine::setExternalEndpoint(const DspStreamEndpoint &endpoint) {
@@ -525,6 +818,7 @@ void DspBranchEngine::setRecording(const QString &branchId, const QString &direc
     if (directory.isEmpty()) impl->recordingRequests.remove(branchId);
     else if (impl->recordingRequests.size() < DspMaxBranches || impl->recordingRequests.contains(branchId)) impl->recordingRequests.insert(branchId, directory);
     ++impl->generation; impl->ready.clear(); impl->invalidateRemote(); impl->resetAudio(); impl->wake.notify_one();
+    impl->auxiliaryWake.notify_one();
 }
 
 void DspBranchEngine::setAudioConsumer(AudioConsumer consumer) {

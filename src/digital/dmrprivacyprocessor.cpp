@@ -10,6 +10,23 @@ int nibble(QChar ch) {
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     return -1;
 }
+
+int modeForPiAlgorithm(int algorithm) {
+    if (algorithm == 1) return DMR_PRIVACY_ARC4;
+    if (algorithm == 5) return DMR_PRIVACY_AES256;
+    return DMR_PRIVACY_NONE;
+}
+
+QByteArray validatedKey(int mode, const QString &keyHex) {
+    const QString clean = normalizedDmrPrivacyKeyHex(keyHex);
+    const int expected = mode == DMR_PRIVACY_ARC4 ? 10
+                       : mode == DMR_PRIVACY_AES256 ? 64 : 0;
+    if (expected == 0 || clean.size() != expected ||
+        !std::all_of(clean.begin(), clean.end(), [](QChar c) { return nibble(c) >= 0; })) {
+        return {};
+    }
+    return QByteArray::fromHex(clean.toLatin1());
+}
 }
 
 bool DmrPrivacyProcessor::configure(int mode, bool enabled, const QString &keyHex, int keyId) {
@@ -20,21 +37,17 @@ bool DmrPrivacyProcessor::configure(int mode, bool enabled, const QString &keyHe
     requestedEnabled = enabled;
     requestedKey = keyHex;
     requestedId = keyId;
-    active = enabled && (mode == DMR_PRIVACY_HYTERA_BASIC || mode == DMR_PRIVACY_ARC4 || mode == DMR_PRIVACY_AES256);
+    active = enabled && (mode == DMR_PRIVACY_HYTERA_BASIC || mode == DMR_PRIVACY_ARC4 ||
+                         mode == DMR_PRIVACY_AES256 || mode == DMR_PRIVACY_AUTO);
     configuredKeyBits = 0;
     key.clear();
     masks = {};
     reset();
     if (!active) return previouslyActive;
+    if (mode == DMR_PRIVACY_AUTO) return true;
     if (mode != DMR_PRIVACY_HYTERA_BASIC) {
-        QString clean = keyHex.trimmed();
-        if (clean.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) clean.remove(0, 2);
-        clean.remove(QLatin1Char(' '));
-        const int length = mode == DMR_PRIVACY_ARC4 ? 10 : 64;
-        if (clean.size() == length && std::all_of(clean.begin(), clean.end(), [](QChar c) { return nibble(c) >= 0; })) {
-            key = QByteArray::fromHex(clean.toLatin1());
-            configuredKeyBits = length * 4;
-        }
+        key = validatedKey(mode, keyHex);
+        configuredKeyBits = key.size() * 8;
         return true;
     }
     if (!isValidHyteraBasicKey(keyHex)) return true;
@@ -51,6 +64,40 @@ bool DmrPrivacyProcessor::configure(int mode, bool enabled, const QString &keyHe
         }
     }
     return true;
+}
+
+bool DmrPrivacyProcessor::setKeyring(const QVector<DmrPrivacyKeyEntry> &entries) {
+    QVector<PreparedKey> prepared;
+    for (const DmrPrivacyKeyEntry &entry : entries) {
+        const int mode = normalizedDmrPrivacyMode(entry.mode);
+        if (mode != DMR_PRIVACY_ARC4 && mode != DMR_PRIVACY_AES256) continue;
+        const QByteArray bytes = validatedKey(mode, entry.keyHex);
+        if (bytes.isEmpty()) continue;
+        const int keyId = (std::clamp)(entry.keyId, 0, 255);
+        auto existing = std::find_if(prepared.begin(), prepared.end(), [mode, keyId](const PreparedKey &item) {
+            return item.mode == mode && item.keyId == keyId;
+        });
+        const PreparedKey value{mode, keyId, bytes};
+        if (existing == prepared.end()) prepared.append(value);
+        else *existing = value;
+    }
+    const bool changed = prepared.size() != keyring.size() ||
+        !std::equal(prepared.begin(), prepared.end(), keyring.begin(), keyring.end(),
+                    [](const PreparedKey &a, const PreparedKey &b) {
+                        return a.mode == b.mode && a.keyId == b.keyId && a.key == b.key;
+                    });
+    if (changed) {
+        keyring = std::move(prepared);
+        resetVoiceAlignment();
+    }
+    return changed;
+}
+
+const DmrPrivacyProcessor::PreparedKey *DmrPrivacyProcessor::findKey(int mode, int keyId) const {
+    const auto found = std::find_if(keyring.begin(), keyring.end(), [mode, keyId](const PreparedKey &item) {
+        return item.mode == mode && item.keyId == keyId;
+    });
+    return found == keyring.end() ? nullptr : &*found;
 }
 
 void DmrPrivacyProcessor::reset() {
@@ -97,10 +144,21 @@ void DmrPrivacyProcessor::beginSuperframe(Slot &slot, const DmrAmbePayload &payl
         continuous = count >= 1 && count <= 4 && error <= (std::max)(quint64(2), payload.superframeSamples / 600);
         if (continuous && slot.nextMiValid)
             for (quint64 step = 1; step < count; ++step)
-                mi = DmrPrivacyCodec::nextMi(mi, requestedMode == DMR_PRIVACY_AES256);
+                mi = DmrPrivacyCodec::nextMi(mi, slot.mode == DMR_PRIVACY_AES256);
     }
     bool valid = continuous && slot.nextMiValid;
-    if (!continuous) { slot.encrypted = -1; slot.blocked = false; }
+    if (!continuous) {
+        slot.encrypted = -1;
+        slot.blocked = false;
+        slot.mode = DMR_PRIVACY_NONE;
+        slot.keyId = -1;
+        slot.key.clear();
+    }
+    if (requestedMode != DMR_PRIVACY_AUTO) {
+        slot.mode = requestedMode;
+        slot.keyId = requestedId;
+        slot.key = key;
+    }
     slot.anchor = payload.superframeSample;
     slot.hasAnchor = true;
     slot.lastOrdinal = -1;
@@ -113,15 +171,31 @@ void DmrPrivacyProcessor::beginSuperframe(Slot &slot, const DmrAmbePayload &payl
         headers.pop_front();
         if (payload.superframeSamples && slot.anchor - pi.sample > payload.superframeSamples * 2) continue;
         slot.encrypted = 1;
-        slot.blocked = pi.header.algorithm != (requestedMode == DMR_PRIVACY_ARC4 ? 1 : 5) ||
-                       (requestedId != 0 && pi.header.keyId != requestedId);
+        if (requestedMode == DMR_PRIVACY_AUTO) {
+            const int piMode = modeForPiAlgorithm(pi.header.algorithm);
+            const PreparedKey *selected = findKey(piMode, pi.header.keyId);
+            slot.blocked = selected == nullptr;
+            if (selected) {
+                slot.mode = selected->mode;
+                slot.keyId = selected->keyId;
+                slot.key = selected->key;
+            } else {
+                slot.mode = piMode;
+                slot.keyId = pi.header.keyId;
+                slot.key.clear();
+            }
+        } else {
+            slot.blocked = pi.header.algorithm != (requestedMode == DMR_PRIVACY_ARC4 ? 1 : 5) ||
+                           (requestedId != 0 && pi.header.keyId != requestedId);
+        }
         mi = pi.header.mi;
         valid = !slot.blocked;
     }
     slot.nextMiValid = valid;
     if (valid) {
-        slot.stream = DmrPrivacyCodec::voiceKeystream(requestedMode, key, mi);
-        slot.nextMi = DmrPrivacyCodec::nextMi(mi, requestedMode == DMR_PRIVACY_AES256);
+        slot.stream = DmrPrivacyCodec::voiceKeystream(slot.mode, slot.key, mi);
+        slot.nextMiValid = slot.stream.size() == 126;
+        slot.nextMi = DmrPrivacyCodec::nextMi(mi, slot.mode == DMR_PRIVACY_AES256);
     }
 }
 
@@ -188,8 +262,11 @@ DmrPrivacyProcessor::Outcome DmrPrivacyProcessor::process(DmrAmbePayload &payloa
         if (slot.encrypted == 0) { ++counters.clearFrames; return Outcome::Bypassed; }
         // Even a rejected voice payload contributes its raw late-entry nibble.
         if (ordinal == 17) finishLateEntry(slot);
-        if (!configuredKeyBits) return mute(Outcome::InvalidKey, counters.invalidKey);
         if (slot.blocked) return mute(Outcome::KeyMismatch, counters.keyMismatch);
+        if (requestedMode == DMR_PRIVACY_AUTO && slot.key.isEmpty())
+            return mute(Outcome::KeyMismatch, counters.keyMismatch);
+        if (requestedMode != DMR_PRIVACY_AUTO && !configuredKeyBits)
+            return mute(Outcome::InvalidKey, counters.invalidKey);
         if (slot.stream.size() != 126) return mute(Outcome::MissingMi, counters.missingMi);
     }
 

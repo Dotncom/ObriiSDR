@@ -372,6 +372,66 @@ void testGates() {
     check(!processor.isActive() && !raw.empty() && !soft.empty() && payloads[0].hex == plain,
           "master switch OFF preserves existing path");
 }
+
+void testAutomaticKeySelection(const QString &path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        check(false, "open automatic KID vectors");
+        return;
+    }
+    const QJsonArray vectors = QJsonDocument::fromJson(file.readAll()).array();
+    QVector<DmrPrivacyKeyEntry> keys;
+    for (const QJsonValue &value : vectors) {
+        const QJsonObject vector = value.toObject();
+        DmrPrivacyKeyEntry entry;
+        entry.mode = vector.value(QStringLiteral("Mode")).toInt();
+        entry.keyId = 7;
+        entry.keyHex = vector.value(QStringLiteral("Key")).toString();
+        keys.append(entry);
+    }
+    check(keys.size() == 2, "automatic keyring has ARC4 and AES entries");
+
+    DmrPrivacyProcessor processor;
+    processor.setKeyring(keys);
+    processor.configure(DMR_PRIVACY_AUTO, true, QString(), 0);
+    int slot = 1;
+    for (const QJsonValue &value : vectors) {
+        const QJsonObject vector = value.toObject();
+        const QString pi = vector.value(QStringLiteral("PI")).toString();
+        check(processor.observePi(pi, slot, 900), "automatic mode accepts PI");
+        const QJsonObject first = vector.value(QStringLiteral("Frames")).toArray().at(0).toObject();
+        DmrAmbePayload payload;
+        payload.hex = first.value(QStringLiteral("Cipher")).toArray().at(0).toString();
+        payload.burstIndex = 0;
+        payload.frameIndex = 0;
+        payload.superframeSample = 1000;
+        payload.superframeSamples = 8640;
+        payload.timeslot = slot;
+        payload.privacyIndicator = 1;
+        check(processor.process(payload) == Outcome::Applied &&
+                  payload.hex == QStringLiteral("827E93D4857680"),
+              "PI ALG/KID selects the matching algorithm-namespaced key");
+        ++slot;
+    }
+
+    DmrPrivacyProcessor missing;
+    missing.setKeyring({keys.front()});
+    missing.configure(DMR_PRIVACY_AUTO, true, QString(), 0);
+    const QJsonObject aes = vectors.at(1).toObject();
+    check(missing.observePi(aes.value(QStringLiteral("PI")).toString(), 1, 900),
+          "missing-key PI remains valid metadata");
+    DmrAmbePayload payload;
+    payload.hex = aes.value(QStringLiteral("Frames")).toArray().at(0).toObject()
+                      .value(QStringLiteral("Cipher")).toArray().at(0).toString();
+    payload.burstIndex = 0;
+    payload.frameIndex = 0;
+    payload.superframeSample = 1000;
+    payload.superframeSamples = 8640;
+    payload.timeslot = 1;
+    payload.privacyIndicator = 1;
+    check(missing.process(payload) == Outcome::KeyMismatch && payload.hex.isEmpty(),
+          "unknown automatic KID is muted without key guessing");
+}
 }
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
@@ -380,9 +440,12 @@ int main(int argc, char **argv) {
     testDeferredVoiceAnchor();
     testContinuity();
     testGates();
-    if (app.arguments().size() == 3 && app.arguments().at(1) == QStringLiteral("--reference-json"))
-        testMotorolaVectors(app.arguments().at(2));
-    else testMotorolaVectors(QStringLiteral(OBRII_TEST_SOURCE_DIR "/tools/fixtures/dmr_motorola_vectors.json"));
+    const QString vectorPath =
+        app.arguments().size() == 3 && app.arguments().at(1) == QStringLiteral("--reference-json")
+            ? app.arguments().at(2)
+            : QStringLiteral(OBRII_TEST_SOURCE_DIR "/tools/fixtures/dmr_motorola_vectors.json");
+    testMotorolaVectors(vectorPath);
+    testAutomaticKeySelection(vectorPath);
     if ((app.arguments().size() == 4 || app.arguments().size() == 5) &&
         app.arguments().at(1) == QStringLiteral("--pcm-timing")) {
         const int chunkMs = app.arguments().size() == 5 ? app.arguments().at(4).toInt() : 20;
@@ -390,6 +453,6 @@ int main(int argc, char **argv) {
         else testRecordedTiming(app.arguments().at(2), app.arguments().at(3).toInt(), chunkMs);
     }
     if (failures) return 1;
-    std::cout << "Native DMR privacy tests passed (Motorola ARC4/AES256 and Basic, alignment, slots, gates).\n";
+    std::cout << "Native DMR privacy tests passed (fixed/automatic Motorola ARC4/AES256 and Basic, alignment, slots, gates).\n";
     return 0;
 }

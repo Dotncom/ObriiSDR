@@ -1,4 +1,6 @@
 #include "analyzerreceiver.h"
+#include "computebudgetmanager.h"
+#include "dspiqsourceregistry.h"
 
 #include "fobosbackend.h"
 #include "hackrfbackend.h"
@@ -62,6 +64,9 @@ struct AnalyzerReceiver::Impl {
     std::size_t writePosition = 0;
     std::size_t availableFloats = 0;
     quint64 sequence = 0;
+    std::uint64_t streamEpoch = 0;
+    std::atomic<std::uint64_t> iqSampleCounter{0};
+    bool clockLocked = false;
     QString error;
     fobos_dev_t *fobosDevice = nullptr;
     fobos_sdr_dev_t *fobosAgileDevice = nullptr;
@@ -94,6 +99,24 @@ struct AnalyzerReceiver::Impl {
             availableFloats = std::min(ring.size(), availableFloats + floatCount);
         }
         condition.notify_one();
+        const DspSourceIdentity source = DspSourceIdentity::normalized(
+            settings.receiverId, settings.channelId);
+        if (!settings.receiverId.trimmed().isEmpty() && source.isValid()) {
+            DspIqTimingMetadata timing;
+            timing.epoch = streamEpoch;
+            timing.firstComplexSample = iqSampleCounter.fetch_add(
+                floatCount / 2U, std::memory_order_relaxed);
+            timing.hostTimestampNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            timing.clockId = settings.clockId;
+            timing.sampleClockValid = true;
+            timing.clockLocked = clockLocked;
+            timing.nativeAdcBits = settings.nativeAdcBits;
+            timing.nativeSampleFormat = settings.nativeSampleFormat;
+            DspIqSourceRegistry::instance().publish(
+                source, values, floatCount, settings.sampleRateHz,
+                activeCenterHz.load(std::memory_order_acquire), false, &timing);
+        }
         emit owner->iqBlockReady(values, static_cast<quint64>(floatCount),
                                  settings.sampleRateHz,
                                  activeCenterHz.load(std::memory_order_acquire));
@@ -181,13 +204,22 @@ struct AnalyzerReceiver::Impl {
                                            static_cast<uint32_t>(settings.nativeIndex));
         }
         if (result != 0) { reportError(receiverErrorText(QStringLiteral("Open Fobos"), result)); return false; }
+        if (agile)
+            result = setFobosAgileClockSourceSafely(fobosAgileDevice,
+                                                    settings.clockRole == 2 ? 1 : 0);
+        else
+            result = setFobosClockSourceSafely(fobosDevice,
+                                               settings.clockRole == 2 ? 1U : 0U);
+        // libfobos exposes source selection but no lock detector. Correlation
+        // calibration therefore remains the authority for a Fobos clock group.
+        clockLocked = false;
         double actualRate = settings.sampleRateHz;
-        if (agile) {
+        if (result == 0 && agile) {
             result = setFobosAgileDirectSamplingSafely(fobosAgileDevice,
                                                        settings.directSampling ? 1U : 0U);
             if (result == 0)
                 result = setFobosAgileSampleRateSafely(fobosAgileDevice, settings.sampleRateHz);
-        } else {
+        } else if (result == 0) {
             result = setFobosDirectSamplingSafely(fobosDevice,
                                                   settings.directSampling ? 1U : 0U);
             if (result == 0)
@@ -258,6 +290,18 @@ struct AnalyzerReceiver::Impl {
             result = readFobosAsyncSafely(fobosDevice, &Impl::fobosCallback, this, 16, 131072);
         } else if (settings.backendId == QStringLiteral("hackrf")) {
             result = openHackRfDeviceSafely(&externalDevice, settings.nativeIndex);
+            if (result == 0)
+                result = setHackRfClockOutEnabledSafely(externalDevice, settings.clockRole == 1);
+            if (result == 0)
+                result = setHackRfHardwareSyncEnabledSafely(externalDevice,
+                                                            settings.hardwareStartSync);
+            if (result == 0 && settings.clockRole == 2) {
+                bool detected = false;
+                const int clockResult = getHackRfClockInputStatusSafely(externalDevice, &detected);
+                if (clockResult == 0) clockLocked = detected;
+            } else if (result == 0) {
+                clockLocked = settings.clockRole == 1;
+            }
             if (result == 0) result = setHackRfSampleRateSafely(externalDevice, settings.sampleRateHz);
             if (result == 0) result = setHackRfBandwidthSafely(externalDevice,
                 recommendedHackRfBandwidth(static_cast<uint32_t>(settings.sampleRateHz)));
@@ -334,6 +378,8 @@ struct AnalyzerReceiver::Impl {
     }
 
     void runFft() {
+        ComputeBudgetManager::instance().applyCurrentThreadRole(
+            ComputeThreadRole::AuxiliaryFft, settings.computeSourceOrdinal);
         const int length = settings.fftLength;
         auto *input = reinterpret_cast<fftwf_complex *>(fftwf_malloc(sizeof(fftwf_complex) * length));
         auto *output = reinterpret_cast<fftwf_complex *>(fftwf_malloc(sizeof(fftwf_complex) * length));
@@ -346,9 +392,8 @@ struct AnalyzerReceiver::Impl {
         }
 #ifdef FOBOSAPP_HAS_FFTW_THREADS
         const bool threadedPlanRequested = length >= kThreadedFftMinimumLength;
-        const unsigned int hardwareThreads = std::thread::hardware_concurrency();
-        const int automaticThreads = static_cast<int>(std::clamp(
-            hardwareThreads > 1U ? hardwareThreads / 2U : 1U, 1U, 4U));
+        const int automaticThreads = ComputeBudgetManager::instance().recommendedThreads(
+            ComputeWorkClass::AuxiliaryFft, false, 1);
         const int planThreads = std::clamp(
             settings.fftWorkerThreads > 0 ? settings.fftWorkerThreads : automaticThreads, 1, 16);
 #endif
@@ -533,6 +578,9 @@ struct AnalyzerReceiver::Impl {
     bool start(const AnalyzerReceiverSettings &requested) {
         stop();
         settings = requested;
+        ++streamEpoch;
+        iqSampleCounter.store(0, std::memory_order_release);
+        clockLocked = false;
         activeCenterHz.store(settings.centerHz, std::memory_order_release);
         settings.fftLength = std::clamp(settings.fftLength, 512, 67108864);
         if ((settings.fftLength & 1) != 0) ++settings.fftLength;

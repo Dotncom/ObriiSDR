@@ -201,7 +201,9 @@ cmake --build <build-dir> --config Release --target ObriiPfbChannelizerSelfTest
 The integrated CMake targets were built and passed on Windows with MSVC 19.44,
 FFTW 3.3.5 float and Qt 5.15.2. `ObriiDspFlowSelfTest` additionally checks actual
 bank-to-DDC routing, independent demodulation/filter state, volume changes and
-simplified-mode suspension. This is not Raspberry or audio-device qualification.
+simplified-mode suspension. It also checks independent primary/auxiliary banks,
+source-local FFT routing and reset/recovery after an auxiliary IQ discontinuity.
+This is not Raspberry or audio-device qualification.
 
 ## Verification and measured benchmark
 

@@ -1,4 +1,5 @@
 #include "dspstreammanager.h"
+#include "dspiqcodec.h"
 #include "diagnosticlogging.h"
 #include "spectrumcomputesession.h"
 #include "dspconnectionprobe.h"
@@ -6,7 +7,9 @@
 #include <QDebug>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QHash>
 #include <QHostAddress>
+#include <QJsonDocument>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
@@ -67,9 +70,17 @@ struct DspStreamManager::Impl {
     DspStreamProcessor local;
     std::unique_ptr<QTcpSocket> socket;
     QByteArray buffer;
+    QJsonArray peerIqFormats;
+    int selectedBandVersion = 0;
+    int selectedBandMaxStreams = 0;
+    QHash<QString, QByteArray> selectedBands;
     QString lastError;
     std::chrono::steady_clock::time_point retry{};
-    void disconnect() { if (socket) socket->abort(); socket.reset(); buffer.clear(); }
+    void disconnect() {
+        if (socket) socket->abort();
+        socket.reset(); buffer.clear(); peerIqFormats = {};
+        selectedBandVersion = selectedBandMaxStreams = 0; selectedBands.clear();
+    }
 };
 DspStreamManager::DspStreamManager() : impl(std::make_unique<Impl>()) {}
 DspStreamManager::~DspStreamManager() = default;
@@ -141,6 +152,15 @@ DspStreamResult DspStreamManager::process(const DspStreamBlock &block, bool exte
             return failure("External DSP worker is busy with a connection test; retry after the test");
         if (!payload.isEmpty() || hello.value("type") != "hello" || hello.value("version").toInt() != 1)
             return failure("External DSP authentication/protocol failed");
+        if (hello.value("iqFormats").isArray()) impl->peerIqFormats = hello.value("iqFormats").toArray();
+        if (hello.contains("selectedBandVersion") || hello.contains("selectedBandMaxStreams")) {
+            impl->selectedBandVersion = hello.value("selectedBandVersion").toInt(-1);
+            impl->selectedBandMaxStreams = hello.value("selectedBandMaxStreams").toInt(-1);
+            if (impl->selectedBandVersion != DspStreamProtocol::SelectedBandVersion ||
+                impl->selectedBandMaxStreams < 1 ||
+                impl->selectedBandMaxStreams > int(DspStreamProtocol::MaxStreams))
+                return failure("External DSP advertised an invalid selected-band capability");
+        }
         if (fobosVerboseLoggingEnabled())
             qDebug().noquote() << "[DSP stream] authenticated" << endpoint.address << endpoint.port;
         impl->lastError.clear();
@@ -148,8 +168,33 @@ DspStreamResult DspStreamManager::process(const DspStreamBlock &block, bool exte
     }
     auto request = DspStreamProtocol::request(block);
     request["gap"] = block.gap || connected;
+    const DspIqFormat wireFormat = DspIqCodec::resolve(endpoint.iqFormat, impl->peerIqFormats);
+    const auto encodedIq = DspIqCodec::encode(block.iq, wireFormat);
+    if (encodedIq.payload.isEmpty()) return failure("External DSP could not encode the IQ block");
+    DspIqCodec::addMetadata(request, encodedIq);
     QJsonObject response; QByteArray payload;
-    if (!write(DspStreamProtocol::encode(request, DspStreamProtocol::floats(block.iq))) ||
+    if (impl->selectedBandVersion == DspStreamProtocol::SelectedBandVersion) {
+        const auto open = DspStreamProtocol::selectedBandOpen(block);
+        const QByteArray signature = QJsonDocument(open).toJson(QJsonDocument::Compact);
+        const QString key = DspStreamProtocol::selectedBandKey(block);
+        if (impl->selectedBands.value(key) != signature) {
+            if (!impl->selectedBands.contains(key) &&
+                impl->selectedBands.size() >= impl->selectedBandMaxStreams)
+                return failure("External DSP selected-band limit reached");
+            QJsonObject ready; QByteArray readyPayload;
+            if (!write(DspStreamProtocol::encode(open)) ||
+                !receive(*impl->socket, impl->buffer, ready, readyPayload, 1500, cancel) ||
+                !readyPayload.isEmpty() || ready.value("type") != "selected_band_ready" ||
+                ready.value("version").toInt(-1) != DspStreamProtocol::SelectedBandVersion ||
+                ready.value("stream").toString() != block.stream ||
+                ready.value("receiverId").toString() != block.source.receiverId ||
+                ready.value("channelId").toString() != block.source.channelId)
+                return failure("External DSP rejected the selected-band configuration");
+            impl->selectedBands.insert(key, signature);
+            request["gap"] = true;
+        }
+    }
+    if (!write(DspStreamProtocol::encode(request, encodedIq.payload)) ||
         !receive(*impl->socket, impl->buffer, response, payload, 1500, cancel)) return failure("External DSP timeout/disconnection; stream interrupted");
     if (cancelled()) return cancellation();
     if (!DspStreamProtocol::decodeResponse(block, response, payload, result)) return failure("External DSP returned invalid or stale data");
@@ -222,6 +267,9 @@ struct DspComputeServer::Impl {
             }
             if (!send(*peer, DspStreamProtocol::encode({{"type", "hello"}, {"version", 1},
                 {"connectionProbeVersion", DspConnectionProbeProtocol::Version},
+                {"iqFormats", DspIqCodec::advertisedFormats()},
+                {"selectedBandVersion", DspStreamProtocol::SelectedBandVersion},
+                {"selectedBandMaxStreams", int(DspStreamProtocol::MaxStreams)},
                 {"mainFftPipelineChunks", SpectrumComputeProtocol::MaxPipelineChunks},
                 {"mainFftVersion", 1}, {"mainFftMaxLength", SpectrumComputeProtocol::maxLengthForBudget(memoryMiB)}}), &stopping)) {
                 status("Listening; handshake reply failed"); return;
@@ -235,6 +283,8 @@ struct DspComputeServer::Impl {
             status("Client connected");
             DspStreamProcessor processor;
             std::unique_ptr<SpectrumComputeSession> spectrum;
+            QHash<QString, DspStreamBlock> selectedBands;
+            bool selectedBandsActive = false;
             quint64 blocks = 0, samples = 0;
             QElapsedTimer report; report.start();
             while (!stopping && receive(*peer, buffer, json, payload, 5000, &stopping)) {
@@ -250,21 +300,51 @@ struct DspComputeServer::Impl {
                         return !stopping && send(*peer, DspStreamProtocol::encode(header, bytes), &stopping);
                     };
                     if (!spectrum->handle(json, payload, reply)) break;
-                    if (json.value("type") == "main_fft_iq") { samples += payload.size()/8; ++blocks; }
+                    if (json.value("type") == "main_fft_iq") {
+                        samples += json.value("sampleCount").toInt(payload.size()/8); ++blocks;
+                    }
                     if (report.elapsed() >= 250) {
                         status(QStringLiteral("Blocks %1 | samples %2 | main FFT").arg(blocks).arg(samples)); report.restart();
                     }
+                    continue;
+                }
+                if (json.value("type") == "selected_band_open") {
+                    DspStreamBlock selected; QString error;
+                    if (!payload.isEmpty() ||
+                        !DspStreamProtocol::decodeSelectedBandOpen(json, selected, error)) {
+                        send(*peer, DspStreamProtocol::encode({{"type", "error"}, {"error", error}}), &stopping);
+                        break;
+                    }
+                    const QString key = DspStreamProtocol::selectedBandKey(selected);
+                    if (!selectedBands.contains(key) && selectedBands.size() >= int(DspStreamProtocol::MaxStreams)) {
+                        send(*peer, DspStreamProtocol::encode({{"type", "error"}, {"error", "Selected-band limit reached"}}), &stopping);
+                        break;
+                    }
+                    selectedBands.insert(key, selected); selectedBandsActive = true;
+                    if (!send(*peer, DspStreamProtocol::encode({{"type", "selected_band_ready"},
+                        {"version", DspStreamProtocol::SelectedBandVersion}, {"stream", selected.stream},
+                        {"receiverId", selected.source.receiverId}, {"channelId", selected.source.channelId},
+                        {"activeBands", selectedBands.size()}}), &stopping)) break;
                     continue;
                 }
                 DspStreamBlock block; QString error;
                 if (!DspStreamProtocol::decodeRequest(json, payload, block, error)) {
                     send(*peer, DspStreamProtocol::encode({{"type", "error"}, {"error", error}}), &stopping); break;
                 }
+                if (selectedBandsActive) {
+                    const auto selected = selectedBands.constFind(DspStreamProtocol::selectedBandKey(block));
+                    if (selected == selectedBands.cend() || !DspStreamProtocol::selectedBandMatches(*selected, block)) {
+                        send(*peer, DspStreamProtocol::encode({{"type", "error"},
+                            {"error", "DSP work does not match an opened selected band"}}), &stopping);
+                        break;
+                    }
+                }
                 auto result = processor.process(block);
                 if (!send(*peer, DspStreamProtocol::response(block, result), &stopping)) break;
                 samples += block.iq.size()/2U; ++blocks;
                 if (blocks == 1 || report.elapsed() >= 250) {
-                    status(QStringLiteral("Blocks %1 | samples %2 | DSP %3 ms").arg(blocks).arg(samples).arg(result.processingMs, 0, 'f', 2));
+                    status(QStringLiteral("Blocks %1 | samples %2 | bands %3 | DSP %4 ms")
+                        .arg(blocks).arg(samples).arg(selectedBands.size()).arg(result.processingMs, 0, 'f', 2));
                     report.restart();
                 }
             }

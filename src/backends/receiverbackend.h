@@ -78,6 +78,10 @@ struct ReceiverStreamDescriptor {
     double sampleRateHz = 0.0;
     double centerFrequencyHz = 0.0;
     double frequencyCalibrationOffsetHz = 0.0;
+    QString clockId;
+    bool externalClock = false;
+    bool clockLocked = false;
+    bool hardwareTimestampAvailable = false;
     QString rtlTcpHost = QStringLiteral("127.0.0.1");
     quint16 rtlTcpPort = 1234;
     int rtlSdrNativeDeviceIndex = 0;

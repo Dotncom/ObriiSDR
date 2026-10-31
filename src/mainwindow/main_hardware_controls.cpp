@@ -5,6 +5,7 @@
 
 #include <QCheckBox>
 #include <QDebug>
+#include <QJsonObject>
 #include <QSignalBlocker>
 #include <QStandardItemModel>
 
@@ -286,6 +287,14 @@ void YourClassName::settingRange() {
         effectiveDemodulationModulationType(globalModulationType,
                                             pendingSettings.sstvDemodulationMode));
     scaleWidget->setRange(minFrequency, maxFrequency);
+    if (isNetworkClientMode() &&
+        networkProcessingMode == NetworkProcessingMode::ServerSide &&
+        networkController && networkController->isControlReady()) {
+        QJsonObject viewport;
+        viewport.insert(QStringLiteral("centerHz"), 0.5 * (minFrequency + maxFrequency));
+        viewport.insert(QStringLiteral("spanHz"), maxFrequency - minFrequency);
+        sendRemoteControlCommand(QStringLiteral("setViewport"), viewport);
+    }
     updateFineTuneLabel();
 }
 

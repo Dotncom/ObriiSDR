@@ -12,6 +12,7 @@
 #include "dmrdecoder.h"
 #include "dmrvocoder.h"
 #include "dmrprivacyprocessor.h"
+#include "dmrprivacyutils.h"
 #include "cwaudiodecoder.h"
 #include "psk31audiodecoder.h"
 #include <QTextCodec>
@@ -30,6 +31,7 @@ public:
     void setDmrVoiceBackendId(const QString &backendId);
     void setDmrVoiceOutputEnabled(bool enabled);
     void setDmrVoicePayloadEnabled(bool enabled);
+    void setDmrPrivacyKeys(const QVector<DmrPrivacyKeyEntry> &keys);
     void processPcmFrame(const QByteArray &pcmData, const RadioSettings &settings, int sampleRate = 48000);
 
 signals:

@@ -1,4 +1,5 @@
 #include "dspcomputedialog.h"
+#include "computebudgetmanager.h"
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
@@ -17,6 +18,8 @@
 #include <QUuid>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 SpectrumComputeControls::SpectrumComputeControls(bool uk, QWidget *parent)
     : QWidget(parent) {
     const auto text = [uk](const char *ua, const char *en) { return QString::fromUtf8(uk ? ua : en); };
@@ -33,6 +36,14 @@ SpectrumComputeControls::SpectrumComputeControls(bool uk, QWidget *parent)
     backend_->addItem(QStringLiteral("CPU (FFTW)"), 1);
     backend_->addItem(QStringLiteral("GPU"), 2);
     backend_->addItem(text("Авто", "Auto"), 0);
+    iqFormat_ = new QComboBox(this);
+    iqFormat_->setObjectName(QStringLiteral("mainFftIqFormat"));
+    iqFormat_->addItem(text("Авто — block-float CS16 (4 Б/семпл)", "Auto - block-float CS16 (4 B/sample)"), int(DspIqFormat::Auto));
+    iqFormat_->addItem(QStringLiteral("CF32 (8 B/sample)"), int(DspIqFormat::Cf32Le));
+    iqFormat_->addItem(QStringLiteral("CS16 (4 B/sample)"), int(DspIqFormat::Cs16Le));
+    iqFormat_->addItem(QStringLiteral("Block-float CS16 (4 B/sample)"), int(DspIqFormat::BlockFloat16Le));
+    iqFormat_->setToolTip(text("Auto використовує block-float CS16 з новим обчислювачем і CF32 зі старим.",
+                               "Auto uses block-float CS16 with a current worker and CF32 with a legacy worker."));
     uploadLimit_ = new QSpinBox(this);
     uploadLimit_->setObjectName(QStringLiteral("mainFftUploadLimitMBps"));
     uploadLimit_->setRange(1, 2000);
@@ -47,6 +58,7 @@ SpectrumComputeControls::SpectrumComputeControls(bool uk, QWidget *parent)
     status_->setMinimumHeight(status_->fontMetrics().lineSpacing() * 4);
     form->addRow(text("Обчислення головного FFT:", "Main FFT compute:"), mode_);
     form->addRow(text("Backend на обчислювачі:", "Remote compute backend:"), backend_);
+    form->addRow(text("Формат IQ у мережі:", "Network IQ format:"), iqFormat_);
     form->addRow(text("Ліміт передавання:", "Upload budget:"), uploadLimit_);
     form->addRow(fallback_);
     form->addRow(new QLabel(text("Стан головного FFT:", "Main FFT status:"), this));
@@ -58,6 +70,7 @@ SpectrumComputeControls::SpectrumComputeControls(bool uk, QWidget *parent)
     const auto updateMode = [this]() {
         const bool remote = mode_->currentData().toInt() != int(SpectrumComputeMode::Local);
         backend_->setEnabled(remote);
+        iqFormat_->setEnabled(remote);
         uploadLimit_->setEnabled(remote);
         fallback_->setEnabled(remote);
     };
@@ -71,6 +84,7 @@ SpectrumComputeOptions SpectrumComputeControls::options() const {
     SpectrumComputeOptions options;
     options.mode = SpectrumComputeMode(mode_->currentData().toInt());
     options.backend = backend_->currentData().toInt();
+    options.iqFormat = DspIqFormat(iqFormat_->currentData().toInt());
     options.uploadLimitMBps = uploadLimit_->value();
     options.fallbackToLocal = fallback_->isChecked();
     return options;
@@ -81,6 +95,8 @@ void SpectrumComputeControls::setOptions(const SpectrumComputeOptions &options) 
     mode_->setCurrentIndex(modeIndex < 0 ? 0 : modeIndex);
     const int backendIndex = backend_->findData(options.backend);
     backend_->setCurrentIndex(backendIndex < 0 ? 0 : backendIndex);
+    const int formatIndex = iqFormat_->findData(int(options.iqFormat));
+    iqFormat_->setCurrentIndex(formatIndex < 0 ? 0 : formatIndex);
     uploadLimit_->setValue(options.uploadLimitMBps);
     fallback_->setChecked(options.fallbackToLocal);
 }
@@ -107,14 +123,24 @@ DspComputeDialog::DspComputeDialog(const DspStreamEndpoint &endpoint, bool uk, Q
     auto *address = new QLineEdit(endpoint.address, client); address->setObjectName("dspRemoteAddress");
     auto *port = new QSpinBox(client); port->setRange(1, 65535); port->setValue(endpoint.port);
     auto *token = new QLineEdit(endpoint.token, client); token->setEchoMode(QLineEdit::Password); token->setMaxLength(128);
+    auto *iqFormat = new QComboBox(client);
+    iqFormat->setObjectName(QStringLiteral("dspBranchIqFormat"));
+    iqFormat->addItem(text("Авто — block-float CS16", "Auto - block-float CS16"), int(DspIqFormat::Auto));
+    iqFormat->addItem(QStringLiteral("CF32"), int(DspIqFormat::Cf32Le));
+    iqFormat->addItem(QStringLiteral("CS16"), int(DspIqFormat::Cs16Le));
+    iqFormat->addItem(QStringLiteral("Block-float CS16"), int(DspIqFormat::BlockFloat16Le));
+    iqFormat->setCurrentIndex((std::max)(0, iqFormat->findData(int(endpoint.iqFormat))));
     port->setObjectName("dspRemotePort"); token->setObjectName("dspRemoteToken");
     endpointEnabled_ = enabled; endpointAddress_ = address; endpointPort_ = port; endpointToken_ = token;
+    endpointIqFormat_ = iqFormat;
     clientForm->addRow(text("IP-адреса:", "IP address:"), address); clientForm->addRow(text("Порт:", "Port:"), port);
     clientForm->addRow(text("Ключ сеансу:", "Session token:"), token);
+    clientForm->addRow(text("Формат IQ гілок:", "Branch IQ format:"), iqFormat);
     auto *apply = new QPushButton(text("Застосувати", "Apply"), client); clientForm->addRow(apply);
-    connect(apply, &QPushButton::clicked, this, [this, enabled, address, port, token]() {
+    connect(apply, &QPushButton::clicked, this, [this, enabled, address, port, token, iqFormat]() {
         endpoint_.enabled = enabled->isChecked(); endpoint_.address = address->text().trimmed();
-        endpoint_.port = quint16(port->value()); endpoint_.token = token->text().trimmed(); emit endpointChanged();
+        endpoint_.port = quint16(port->value()); endpoint_.token = token->text().trimmed();
+        endpoint_.iqFormat = DspIqFormat(iqFormat->currentData().toInt()); emit endpointChanged();
     });
     auto *mainFft = new QWidget(tabs);
     auto *mainFftLayout = new QVBoxLayout(mainFft);
@@ -128,6 +154,60 @@ DspComputeDialog::DspComputeDialog(const DspStreamEndpoint &endpoint, bool uk, Q
         spectrumOptions_ = options;
         emit spectrumComputeOptionsChanged();
     });
+    auto *resources = new QWidget(tabs);
+    auto *resourcesForm = new QFormLayout(resources);
+    const ComputeTopology topology = ComputeBudgetManager::instance().topology();
+    const ComputeBudgetSettings resourceSettings = ComputeBudgetManager::instance().settings();
+    auto *topologyLabel = new QLabel(topology.description, resources);
+    topologyLabel->setWordWrap(true);
+    topologyLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    auto *profile = new QComboBox(resources);
+    profile->addItem(text("Економний", "Conservative"), int(ComputeProfile::Conservative));
+    profile->addItem(text("Збалансований", "Balanced"), int(ComputeProfile::Balanced));
+    profile->addItem(text("Продуктивність", "Throughput"), int(ComputeProfile::Throughput));
+    profile->addItem(text("Вручну", "Manual"), int(ComputeProfile::Manual));
+    profile->setCurrentIndex(std::max(0, profile->findData(int(resourceSettings.profile))));
+    auto *manualThreads = new QSpinBox(resources);
+    manualThreads->setRange(1, 256);
+    manualThreads->setValue(resourceSettings.manualThreadLimit);
+    manualThreads->setEnabled(resourceSettings.profile == ComputeProfile::Manual);
+    auto *topologyAware = new QCheckBox(
+        text("Враховувати NUMA та групи процесорів", "Use NUMA and processor groups"), resources);
+    topologyAware->setChecked(resourceSettings.topologyAware);
+    topologyAware->setToolTip(text(
+        "Фонові FFT і DSP отримують рекомендований процесорний вузол. На одновузлових системах нічого не змінює.",
+        "Background FFT and DSP receive an advised processor node. No effect on single-node systems."));
+    auto *budgetLabel = new QLabel(resources);
+    budgetLabel->setWordWrap(true);
+    const auto refreshBudget = [profile, manualThreads, topologyAware, budgetLabel, text](bool save) {
+        ComputeBudgetSettings settings;
+        settings.profile = static_cast<ComputeProfile>(profile->currentData().toInt());
+        settings.manualThreadLimit = manualThreads->value();
+        settings.topologyAware = topologyAware->isChecked();
+        manualThreads->setEnabled(settings.profile == ComputeProfile::Manual);
+        if (save) ComputeBudgetManager::instance().setSettings(settings);
+        const ComputeBudget budget = calculateComputeBudget(
+            ComputeBudgetManager::instance().topology(), settings, false);
+        budgetLabel->setText(text(
+            "Робітників: %1; резерв UI/аудіо: %2; головний FFT: %3; додатковий FFT: %4; DSP: %5; дослідження: %6",
+            "Workers: %1; UI/audio reserve: %2; main FFT: %3; auxiliary FFT: %4; DSP: %5; research: %6")
+            .arg(budget.totalWorkerThreads).arg(budget.reservedRealtimeThreads)
+            .arg(budget.mainFftThreads).arg(budget.auxiliaryFftThreads)
+            .arg(budget.dspBranchThreads).arg(budget.researchThreads));
+    };
+    resourcesForm->addRow(text("Топологія CPU:", "CPU topology:"), topologyLabel);
+    resourcesForm->addRow(text("Профіль:", "Profile:"), profile);
+    resourcesForm->addRow(text("Ліміт потоків:", "Thread limit:"), manualThreads);
+    resourcesForm->addRow(topologyAware);
+    resourcesForm->addRow(budgetLabel);
+    tabs->addTab(resources, text("Локальні ресурси", "Local resources"));
+    connect(profile, QOverload<int>::of(&QComboBox::currentIndexChanged), resources,
+            [refreshBudget](int) { refreshBudget(true); });
+    connect(manualThreads, QOverload<int>::of(&QSpinBox::valueChanged), resources,
+            [refreshBudget](int) { refreshBudget(true); });
+    connect(topologyAware, &QCheckBox::toggled, resources,
+            [refreshBudget](bool) { refreshBudget(true); });
+    refreshBudget(false);
     addProbeTab(tabs, uk);
     auto *worker = new QWidget(tabs); auto *form = new QFormLayout(worker);
     tabs->addTab(worker, text("Обчислювач на цьому ПК", "Compute on this PC"));
@@ -197,6 +277,7 @@ DspComputeDialog::DspComputeDialog(const DspStreamEndpoint &endpoint, bool uk, Q
 void DspComputeDialog::addProbeTab(QTabWidget *tabs, bool uk) {
     const auto text = [uk](const char *ua, const char *en) { return QString::fromUtf8(uk ? ua : en); };
     auto *scroll = new QScrollArea(tabs);
+    scroll->setObjectName(QStringLiteral("dspConnectionProbeTab"));
     scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
     auto *body = new QWidget(scroll);
     auto *form = new QFormLayout(body);
@@ -309,10 +390,13 @@ void DspComputeDialog::refreshProbeResults() {
     probeUpload_->setText(speed(r.uploadMBps, r.uploadBytes));
     probeDownload_->setText(speed(r.downloadMBps, r.downloadBytes));
     const auto options = spectrumControls_->options();
+    const int iqBytes = DspIqCodec::bytesPerComplexSample(options.iqFormat == DspIqFormat::Cf32Le
+        ? DspIqFormat::Cf32Le : DspIqFormat::BlockFloat16Le);
     const auto e = estimateDspConnection(r, probeRate_->value() * 1e6, probeLength_->value(),
-                                        probeInterval_->value(), probeOverlap_->value(), options.uploadLimitMBps);
-    QString estimate = text("Потрібно: повний CF32 %1 MB/s; вікна %2 MB/s; спектри назад %3 MB/s при %4 кадр/с.",
-        "Required: continuous CF32 %1 MB/s; windows %2 MB/s; returned spectra %3 MB/s at %4 frames/s.")
+                                        probeInterval_->value(), probeOverlap_->value(), options.uploadLimitMBps, iqBytes);
+    QString estimate = text("Потрібно: повний IQ (%1 Б/семпл) %2 MB/s; вікна %3 MB/s; спектри назад %4 MB/s при %5 кадр/с.",
+        "Required: continuous IQ (%1 B/sample) %2 MB/s; windows %3 MB/s; returned spectra %4 MB/s at %5 frames/s.")
+        .arg(iqBytes)
         .arg(e.continuousUploadMBps, 0, 'f', 2).arg(e.windowUploadMBps, 0, 'f', 2)
         .arg(e.spectrumDownloadMBps, 0, 'f', 2).arg(e.requestedFramesPerSecond, 0, 'f', 2);
     estimate += text("\nДля безперервного IQ: спектри %1 MB/s при до %2 кадр/с.",
@@ -324,6 +408,10 @@ void DspComputeDialog::refreshProbeResults() {
         estimate += text("\nЛіміт FFT обчислювача: %1; бюджет передавання: %2 MB/s.\nЛише транспорт одного вікна: ≈%3 ms, до ≈%4 кадр/с без FFT.",
             "\nWorker FFT limit: %1; upload budget: %2 MB/s.\nOne-window transport only: ~%3 ms, up to ~%4 frames/s excluding FFT.")
             .arg(r.mainFftMaxLength).arg(options.uploadLimitMBps).arg(e.transportMsPerWindow, 0, 'f', 2).arg(e.networkFramesPerSecond, 0, 'f', 2);
+        if (r.selectedBandVersion == DspStreamProtocol::SelectedBandVersion)
+            estimate += text("\nВибрані DDC/PFB-смуги: protocol v%1, до %2 одночасних вікон.",
+                             "\nSelected DDC/PFB bands: protocol v%1, up to %2 simultaneous windows.")
+                .arg(r.selectedBandVersion).arg(r.selectedBandMaxStreams);
         if (!e.memoryFits) estimate += text("\nДовжина FFT перевищує бюджет пам'яті обчислювача.", "\nFFT length exceeds the worker memory budget.");
         else estimate += text("\nЗа мережею: вікна — %1; повний IQ — %2.", "\nNetwork estimate: windows — %1; continuous IQ — %2.")
             .arg(e.windowsFit ? text("є запас", "headroom available") : text("не вкладається", "insufficient"))
@@ -339,6 +427,7 @@ void DspComputeDialog::setEndpoint(const DspStreamEndpoint &endpoint) {
     endpointAddress_->setText(endpoint.address);
     endpointPort_->setValue(endpoint.port);
     endpointToken_->setText(endpoint.token);
+    endpointIqFormat_->setCurrentIndex((std::max)(0, endpointIqFormat_->findData(int(endpoint.iqFormat))));
 }
 
 void DspComputeDialog::setSpectrumComputeOptions(const SpectrumComputeOptions &options) {

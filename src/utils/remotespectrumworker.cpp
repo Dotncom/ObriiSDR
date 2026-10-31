@@ -3,6 +3,7 @@
 #include "dspstreammanager.h"
 #include "spectrumcomputeoptions.h"
 #include "spectrumcomputesession.h"
+#include "dspiqcodec.h"
 #include "fft.h"
 #include "remotefftretrypolicy.h"
 
@@ -98,6 +99,7 @@ struct RemoteSpectrumWorker::Impl {
     std::vector<float> localIq;
     quint64 localGeneration = 0, localEpoch = 0, localLoss = 0, localEnd = 0;
     int pipelineChunks = 1;
+    QString activeIqFormat = QStringLiteral("CF32");
 
     void releaseLocalCache() {
         localFft.reset();
@@ -136,9 +138,10 @@ struct RemoteSpectrumWorker::Impl {
             uploaded = downloaded = 0;
             meterAt = now;
         }
-        const QString value = QStringLiteral("%1 | upload %2 MB/s | download %3 MB/s | DSP %4 ms | latency %5 ms | gaps %6 | overrun %7 samples | IQ lag %8 ms | IQ window %9 chunks")
+        const QString value = QStringLiteral("%1 | IQ %10 | upload %2 MB/s | download %3 MB/s | DSP %4 ms | latency %5 ms | gaps %6 | overrun %7 samples | IQ lag %8 ms | IQ window %9 chunks")
             .arg(text).arg(upRate, 0, 'f', 2).arg(downRate, 0, 'f', 2)
-            .arg(dspMs, 0, 'f', 1).arg(latencyMs, 0, 'f', 1).arg(gaps).arg(overrunSamples).arg(sampleLagMs, 0, 'f', 1).arg(pipelineChunks);
+            .arg(dspMs, 0, 'f', 1).arg(latencyMs, 0, 'f', 1).arg(gaps).arg(overrunSamples)
+            .arg(sampleLagMs, 0, 'f', 1).arg(pipelineChunks).arg(activeIqFormat);
         std::lock_guard<std::mutex> lock(mutex);
         if (generation.load() == activeGeneration && demanded) message = value;
         statusAt = now;
@@ -186,6 +189,7 @@ struct RemoteSpectrumWorker::Impl {
         QString job;
         bool connected = false;
         int credit = 1, head = 0, pending = 0;
+        DspIqFormat iqFormat = DspIqFormat::Cf32Le;
         bool pipelineAdvertised = false;
         struct Ack { quint64 next; int filled; };
         std::array<Ack, SpectrumComputeProtocol::MaxPipelineChunks> acks{};
@@ -284,6 +288,10 @@ struct RemoteSpectrumWorker::Impl {
                 throw Failure{QStringLiteral("Remote server does not advertise compatible main FFT v1 support")};
             if (config.settings.fftLength > maximum)
                 throw Failure{QStringLiteral("Requested FFT exceeds remote memory budget (maximum %1 samples)").arg(maximum)};
+            const QJsonArray advertised = header.value("iqFormats").isArray()
+                ? header.value("iqFormats").toArray() : QJsonArray{};
+            iqFormat = DspIqCodec::resolve(config.options.iqFormat, advertised);
+            owner.activeIqFormat = DspIqCodec::displayName(iqFormat);
             pipelineAdvertised = header.contains("mainFftPipelineChunks");
             if (pipelineAdvertised && !integer(header.value("mainFftPipelineChunks"), 1,
                 SpectrumComputeProtocol::MaxPipelineChunks, credit))
@@ -298,6 +306,7 @@ struct RemoteSpectrumWorker::Impl {
             QJsonObject request{{"type", "main_fft_begin"}, {"job", job}, {"length", settings.fftLength},
                 {"rate", settings.sampleRate}, {"center", settings.centerFrequency},
                 {"window", settings.fftWindowType}, {"backend", config.options.backend},
+                {"iqFormat", DspIqCodec::id(iqFormat)},
                 {"mode", config.options.mode == SpectrumComputeMode::Continuous ? "continuous" : "windows"}};
             if (pipelineAdvertised) request["pipelineChunks"] = credit;
             send(request);
@@ -316,8 +325,12 @@ struct RemoteSpectrumWorker::Impl {
             for (int i = 0; i < count; ++i)
                 if (!std::isfinite(samples[i])) throw Failure{QStringLiteral("Non-finite IQ samples; remote FFT stopped")};
             if (pending == credit) acknowledge();
-            send({{"type", "main_fft_iq"}, {"job", job}, {"first", QString::number(first)}, {"gap", gap}},
-                 SpectrumComputeProtocol::floats(samples, count));
+            auto encoded = DspIqCodec::encode(samples, count / 2, iqFormat);
+            if (encoded.payload.isEmpty()) throw Failure{QStringLiteral("Remote FFT IQ encoding failed")};
+            QJsonObject header{{"type", "main_fft_iq"}, {"job", job},
+                               {"first", QString::number(first)}, {"gap", gap}};
+            DspIqCodec::addMetadata(header, encoded);
+            send(header, encoded.payload);
             acks[std::size_t((head + pending) % credit)] = {first + quint64(count / 2), expectedFilled};
             ++pending;
             if (credit == 1) acknowledge();

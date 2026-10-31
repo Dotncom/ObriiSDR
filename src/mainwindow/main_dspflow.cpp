@@ -848,6 +848,21 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         if (type == QStringLiteral("ddc_channelizer")) {
             auto *enabled = new QCheckBox(text("Увімкнути гілку", "Enable branch"), dialog);
             enabled->setChecked(stored.value("enabled").toBool(false)); form->addRow(enabled);
+            auto *receiver = new QComboBox(dialog);
+            receiver->addItem(text("Основний приймач", "Main receiver"), QStringLiteral("main"));
+            for (int receiverIndex = 2; receiverIndex <= 8; ++receiverIndex)
+                receiver->addItem(QStringLiteral("RX %1 (Multi-SDR)").arg(receiverIndex),
+                                  QStringLiteral("multi-rx-%1").arg(receiverIndex));
+            int receiverIndex = receiver->findData(stored.value("receiverId").toString(QStringLiteral("main")));
+            receiver->setCurrentIndex(receiverIndex < 0 ? 0 : receiverIndex);
+            form->addRow(text("Джерело IQ:", "IQ source:"), receiver);
+            auto *channel = new QComboBox(dialog);
+            for (int channelIndex = 0; channelIndex < 4; ++channelIndex)
+                channel->addItem(QStringLiteral("RX channel %1").arg(channelIndex),
+                                 QStringLiteral("rx%1").arg(channelIndex));
+            int channelIndex = channel->findData(stored.value("channelId").toString(QStringLiteral("rx0")));
+            channel->setCurrentIndex(channelIndex < 0 ? 0 : channelIndex);
+            form->addRow(text("Канал джерела:", "Source channel:"), channel);
             auto *execution = new QComboBox(dialog);
             execution->addItem(text("На цьому ПК", "On this PC"), false);
             execution->addItem(text("Зовнішній обробник / GNU Radio", "External processor / GNU Radio"), true);
@@ -876,9 +891,11 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
                 stored.value("transitionHz").toDouble(0.0) / 1000.0, 0.0, 500.0, 3, text(" кГц", " kHz"));
             transition->setObjectName(QStringLiteral("transitionHz"));
             transition->setSpecialValueText(text("Авто", "Auto"));
-            const auto apply = [this, id, enabled, follow, frequency, bandwidth, rate, decimation, execution, firTaps, transition]() {
+            const auto apply = [this, id, enabled, receiver, channel, follow, frequency, bandwidth, rate, decimation, execution, firTaps, transition]() {
                 auto value = dspFlowPanel->blockSettings(id);
                 value.insert("enabled", enabled->isChecked());
+                value.insert("receiverId", receiver->currentData().toString());
+                value.insert("channelId", channel->currentData().toString());
                 value.insert("frequencyHz", follow->isChecked() ? 0.0 : frequency->value()*1.0e6);
                 value.insert("bandwidthHz", bandwidth->value()*1000.0);
                 value.insert("outputRateHz", rate->value()*1000.0);
@@ -890,6 +907,8 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
                 dspFlowPanel->setBlockSettings(id, value);
             };
             connect(enabled, &QCheckBox::toggled, dialog, [apply](bool) { apply(); });
+            connect(receiver, QOverload<int>::of(&QComboBox::currentIndexChanged), dialog, [apply](int) { apply(); });
+            connect(channel, QOverload<int>::of(&QComboBox::currentIndexChanged), dialog, [apply](int) { apply(); });
             connect(execution, QOverload<int>::of(&QComboBox::currentIndexChanged), dialog, [apply](int) { apply(); });
             connect(follow, &QCheckBox::toggled, dialog, [apply](bool) { apply(); });
             for (auto *spin : {frequency, bandwidth, rate, transition}) connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), dialog, [apply](double) { apply(); });
@@ -2480,6 +2499,7 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         form->addRow(text("Baseband:", "Baseband:"), linkedCombo(dmrBasebandRateCombo, dialog, syncTimer));
         form->addRow(text("Канал:", "Channel:"), linkedCombo(dmrChannelRateCombo, dialog, syncTimer));
         form->addRow(text("AMBE layout:", "AMBE layout:"), linkedCombo(dmrAmbeLayoutCombo, dialog, syncTimer));
+        form->addRow(text("Вибір ключа:", "Key selection:"), linkedCombo(dmrPrivacySelectionCombo, dialog, syncTimer));
         form->addRow(text("Privacy:", "Privacy:"), linkedCombo(dmrPrivacyModeCombo, dialog, syncTimer));
         form->addRow(text("Key ID:", "Key ID:"), linkedCombo(dmrPrivacyKeyIdCombo, dialog, syncTimer));
         form->addRow(text("Frame offset:", "Frame offset:"), linkedCombo(dmrPrivacyFrameOffsetCombo, dialog, syncTimer));

@@ -1,16 +1,23 @@
 #include "multisdrdialog.h"
 
 #include "analyzerspectrumwidget.h"
+#include "computebudgetmanager.h"
+#include "coherentiqsession.h"
+#include "dspiqsourceregistry.h"
 
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QDir>
 #include <QFrame>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QImage>
 #include <QPainter>
@@ -18,6 +25,9 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QSplitter>
@@ -87,6 +97,9 @@ struct MultiSdrDialog::SourceUi {
     QSpinBox *vga = nullptr;
     QDoubleSpinBox *edgeTrim = nullptr;
     QDoubleSpinBox *levelOffset = nullptr;
+    QComboBox *clockRole = nullptr;
+    QLineEdit *clockId = nullptr;
+    QCheckBox *hardwareSync = nullptr;
     QCheckBox *enabled = nullptr;
     QPushButton *startStop = nullptr;
     QPushButton *remove = nullptr;
@@ -106,6 +119,8 @@ MultiSdrDialog::MultiSdrDialog(bool ukrainianUi, QWidget *parent, bool primaryFr
     buildUi();
     restoreSettings();
     refreshDevices();
+    refreshCoherentReferenceChoices();
+    updateCoherentSubscriptions();
     if (hostPrimary) {
         SourceUi &primary = *sources[0];
         primary.group->setTitle(text("RX 1 - main Obrii receiver", "RX 1 - основний приймач Obrii"));
@@ -116,11 +131,15 @@ MultiSdrDialog::MultiSdrDialog(bool ukrainianUi, QWidget *parent, bool primaryFr
             static_cast<QWidget *>(primary.device), static_cast<QWidget *>(primary.input),
             static_cast<QWidget *>(primary.sampleRate),
             static_cast<QWidget *>(primary.fft), static_cast<QWidget *>(primary.lna),
-            static_cast<QWidget *>(primary.vga)};
+            static_cast<QWidget *>(primary.vga), static_cast<QWidget *>(primary.clockRole),
+            static_cast<QWidget *>(primary.hardwareSync)};
         for (QWidget *control : primaryControls)
             control->setEnabled(false);
         primary.startStop->setEnabled(true);
         primary.centerMhz->setEnabled(true);
+        primary.clockRole->setToolTip(text(
+            "Configure the main receiver clock in the Receiver section.",
+            "Налаштуйте такт основного приймача в розділі «Приймач»."));
         primary.startStop->setToolTip(text(
             "Starts or stops the main Obrii receiver. Its hardware settings remain in the main Receiver and Frequencies sections.",
             "Запускає або зупиняє основний приймач Obrii. Його апаратні параметри залишаються в головних розділах «Приймач» і «Частоти»."));
@@ -129,6 +148,7 @@ MultiSdrDialog::MultiSdrDialog(bool ukrainianUi, QWidget *parent, bool primaryFr
 }
 
 MultiSdrDialog::~MultiSdrDialog() {
+    DspIqSourceRegistry::instance().removeSubscriptions(this);
     if (audioSourceIndex.exchange(0, std::memory_order_acq_rel) != 0)
         emit audioSourceChanged(0);
     saveSettings();
@@ -150,6 +170,219 @@ QString MultiSdrDialog::frequencyText(double hz) const {
     if (std::abs(hz) >= 1.0e6) return QStringLiteral("%1 MHz").arg(hz / 1.0e6, 0, 'f', 6);
     if (std::abs(hz) >= 1.0e3) return QStringLiteral("%1 kHz").arg(hz / 1.0e3, 0, 'f', 3);
     return QStringLiteral("%1 Hz").arg(hz, 0, 'f', 1);
+}
+
+DspSourceIdentity MultiSdrDialog::sourceIdentity(int sourceIndex) const {
+    if (hostPrimary && sourceIndex == 0)
+        return DspSourceIdentity::normalized(QStringLiteral("main"), QStringLiteral("rx0"));
+    return DspSourceIdentity::normalized(
+        QStringLiteral("multi-rx-%1").arg(sourceIndex + 1), QStringLiteral("rx0"));
+}
+
+void MultiSdrDialog::refreshCoherentReferenceChoices() {
+    if (!coherentReferenceCombo) return;
+    const int previous = coherentReferenceCombo->count() > 0
+                             ? coherentReferenceCombo->currentData().toInt()
+                             : coherentReferenceCombo->property("savedReference").toInt();
+    QSignalBlocker blocker(coherentReferenceCombo);
+    coherentReferenceCombo->clear();
+    for (int index = 0; index < static_cast<int>(sources.size()); ++index) {
+        if (!sources[static_cast<std::size_t>(index)]->active) continue;
+        coherentReferenceCombo->addItem(QStringLiteral("RX %1").arg(index + 1), index);
+    }
+    const int restored = coherentReferenceCombo->findData(previous);
+    coherentReferenceCombo->setCurrentIndex(restored >= 0 ? restored : 0);
+    coherentReferenceCombo->setProperty("savedReference", QVariant());
+}
+
+void MultiSdrDialog::updateCoherentSubscriptions() {
+    if (!coherentCaptureCheckbox || !coherentCaptureCheckbox->isChecked()) {
+        DspIqSourceRegistry::instance().removeSubscriptions(this);
+        return;
+    }
+    QSet<QString> keys;
+    for (int index = 0; index < static_cast<int>(sources.size()); ++index) {
+        if (sources[static_cast<std::size_t>(index)]->active)
+            keys.insert(sourceIdentity(index).key());
+    }
+    DspIqSourceRegistry::instance().setSubscriptions(this, keys);
+}
+
+void MultiSdrDialog::invalidateCoherentCalibration(const QString &reason) {
+    if (restoringSettings) return;
+    coherentCalibrations.clear();
+    if (!coherentStatusLabel) return;
+    coherentStatusLabel->setStyleSheet(QStringLiteral("color:#d7b36a;"));
+    coherentStatusLabel->setText(reason.isEmpty()
+        ? text("Configuration changed; coherent joining requires recalibration.",
+               "Конфігурацію змінено; когерентне склеювання потребує повторного калібрування.")
+        : reason);
+}
+
+void MultiSdrDialog::calibrateCoherentGroup() {
+    if (!coherentCaptureCheckbox || !coherentCaptureCheckbox->isChecked() ||
+        coherentReferenceCombo->currentIndex() < 0) return;
+    const int referenceIndex = coherentReferenceCombo->currentData().toInt();
+    const SourceUi &referenceUi = *sources[static_cast<std::size_t>(referenceIndex)];
+    const bool referenceRunning = hostPrimary && referenceIndex == 0
+                                      ? primaryRunning : referenceUi.receiver->isRunning();
+    if (!referenceRunning) {
+        coherentStatusLabel->setText(text("Start the reference receiver first.",
+                                          "Спочатку запустіть опорний приймач."));
+        return;
+    }
+    const QString clockId = referenceUi.clockId->text().trimmed();
+    if (clockId.isEmpty()) {
+        coherentStatusLabel->setText(text("Set a clock-group ID for the reference receiver.",
+                                          "Задайте ID групи такту для опорного приймача."));
+        return;
+    }
+    DspIqSourceSnapshot referenceSnapshot;
+    if (!DspIqSourceRegistry::instance().snapshotSince(
+            sourceIdentity(referenceIndex), 0, 0, 262144, referenceSnapshot)) {
+        coherentStatusLabel->setText(text(
+            "No reference IQ yet. Keep all receivers running for a moment and retry.",
+            "Опорного IQ ще немає. Залиште всі приймачі запущеними й повторіть."));
+        return;
+    }
+
+    QVector<CoherentIqCalibration> calibrations;
+    QStringList summary;
+    bool failed = false;
+    for (int index = 0; index < static_cast<int>(sources.size()); ++index) {
+        if (index == referenceIndex) continue;
+        const SourceUi &targetUi = *sources[static_cast<std::size_t>(index)];
+        if (!targetUi.active) continue;
+        const bool running = hostPrimary && index == 0
+                                 ? primaryRunning : targetUi.receiver->isRunning();
+        if (!running) continue;
+        if (targetUi.clockId->text().trimmed() != clockId) {
+            summary << QStringLiteral("RX%1: %2").arg(index + 1).arg(text(
+                "different clock-group ID", "інший ID групи такту"));
+            failed = true;
+            continue;
+        }
+        DspIqSourceSnapshot targetSnapshot;
+        if (!DspIqSourceRegistry::instance().snapshotSince(
+                sourceIdentity(index), 0, 0, 262144, targetSnapshot)) {
+            summary << QStringLiteral("RX%1: %2").arg(index + 1).arg(text(
+                "no IQ", "немає IQ"));
+            failed = true;
+            continue;
+        }
+        if (std::abs(referenceSnapshot.sampleRateHz - targetSnapshot.sampleRateHz) > 0.5 ||
+            std::abs(referenceSnapshot.centerHz - targetSnapshot.centerHz) > 1.0) {
+            summary << QStringLiteral("RX%1: %2").arg(index + 1).arg(text(
+                "temporarily tune to the same center and sample rate",
+                "тимчасово задайте однакові центр і sample rate"));
+            failed = true;
+            continue;
+        }
+        CoherentIqCalibration calibration = CoherentIqAligner::calibrate(
+            sourceIdentity(referenceIndex), referenceSnapshot.iq,
+            sourceIdentity(index), targetSnapshot.iq,
+            referenceSnapshot.sampleRateHz, referenceSnapshot.centerHz,
+            coherentMaxDelaySpin->value());
+        if (!calibration.valid) {
+            summary << QStringLiteral("RX%1: %2").arg(index + 1).arg(calibration.error);
+            failed = true;
+            continue;
+        }
+        calibrations.append(calibration);
+        const QString adcText = targetSnapshot.nativeAdcBits > 0
+            ? QStringLiteral("%1-bit").arg(targetSnapshot.nativeAdcBits)
+            : text("unknown ADC", "невідома бітність");
+        summary << QStringLiteral("RX%1 [%2, %3]: Δ=%4%5 samp, φ=%6°, gain=%7, coh=%8")
+            .arg(index + 1)
+            .arg(adcText)
+            .arg(targetSnapshot.nativeSampleFormat.isEmpty()
+                     ? QStringLiteral("FC32") : targetSnapshot.nativeSampleFormat)
+            .arg(calibration.integerDelaySamples)
+            .arg(calibration.fractionalDelaySamples, 0, 'f', 3)
+            .arg(calibration.phaseCorrectionRadians * 180.0 / 3.14159265358979323846, 0, 'f', 2)
+            .arg(calibration.gainCorrection, 0, 'f', 4)
+            .arg(calibration.coherence, 0, 'f', 4);
+    }
+    coherentCalibrations = calibrations;
+    if (calibrations.isEmpty()) {
+        coherentStatusLabel->setStyleSheet(QStringLiteral("color:#e07878;"));
+        coherentStatusLabel->setText(summary.isEmpty()
+            ? text("Start at least two receivers in the coherent group.",
+                   "Запустіть щонайменше два приймачі когерентної групи.")
+            : summary.join(QStringLiteral(" | ")));
+        return;
+    }
+    coherentStatusLabel->setStyleSheet(failed
+        ? QStringLiteral("color:#d7b36a;") : QStringLiteral("color:#78d6a3;"));
+    coherentStatusLabel->setText(summary.join(QStringLiteral(" | ")) +
+        (failed ? text(" | Coherent joining remains locked.",
+                       " | Когерентне склеювання лишається заблокованим.")
+                : text(" | Calibration valid.", " | Калібрування валідне.")));
+    if (!failed) saveSettings();
+}
+
+void MultiSdrDialog::saveCoherentSnapshot() {
+    if (!coherentCaptureCheckbox || !coherentCaptureCheckbox->isChecked() ||
+        coherentReferenceCombo->currentIndex() < 0) return;
+    const int referenceIndex = coherentReferenceCombo->currentData().toInt();
+    std::vector<DspIqSourceSnapshot> snapshots;
+    snapshots.reserve(std::size_t(activeSourceCount));
+    for (int index = 0; index < static_cast<int>(sources.size()); ++index) {
+        const SourceUi &source = *sources[static_cast<std::size_t>(index)];
+        if (!source.active) continue;
+        const bool running = hostPrimary && index == 0 ? primaryRunning : source.receiver->isRunning();
+        if (!running) continue;
+        DspIqSourceSnapshot snapshot;
+        if (!DspIqSourceRegistry::instance().snapshotSince(
+                sourceIdentity(index), 0, 0, 2U * 1024U * 1024U, snapshot)) {
+            coherentStatusLabel->setStyleSheet(QStringLiteral("color:#e07878;"));
+            coherentStatusLabel->setText(QStringLiteral("RX%1: %2").arg(index + 1).arg(
+                text("no buffered IQ for synchronized snapshot",
+                     "немає буферизованого IQ для синхронного знімка")));
+            return;
+        }
+        snapshots.push_back(std::move(snapshot));
+    }
+    if (snapshots.size() < 2U) {
+        coherentStatusLabel->setText(text(
+            "Start at least two receivers before saving a synchronized snapshot.",
+            "Перед збереженням синхронного знімка запустіть щонайменше два приймачі."));
+        return;
+    }
+    const DspSourceIdentity reference = sourceIdentity(referenceIndex);
+    for (const auto &snapshot : snapshots) {
+        if (snapshot.source == reference) continue;
+        const auto calibration = std::find_if(coherentCalibrations.cbegin(), coherentCalibrations.cend(),
+            [&](const CoherentIqCalibration &value) {
+                return value.valid && value.reference == reference && value.target == snapshot.source;
+            });
+        if (calibration == coherentCalibrations.cend()) {
+            coherentStatusLabel->setStyleSheet(QStringLiteral("color:#e07878;"));
+            coherentStatusLabel->setText(text(
+                "Calibrate every running receiver before saving a coherent snapshot.",
+                "Перед збереженням когерентного знімка відкалібруйте всі запущені приймачі."));
+            return;
+        }
+    }
+    QSettings settings;
+    const QString initial = settings.value(QStringLiteral("multiSdr/coherentSnapshotDirectory"),
+                                           QDir::homePath()).toString();
+    const QString directory = QFileDialog::getExistingDirectory(
+        this, text("Save synchronized IQ snapshot", "Зберегти синхронний IQ-знімок"), initial);
+    if (directory.isEmpty()) return;
+    settings.setValue(QStringLiteral("multiSdr/coherentSnapshotDirectory"), directory);
+    std::vector<CoherentIqCalibration> calibrations(coherentCalibrations.cbegin(),
+                                                    coherentCalibrations.cend());
+    QString manifestPath;
+    QString error;
+    if (!CoherentIqSession::write(directory, snapshots, calibrations, manifestPath, error)) {
+        coherentStatusLabel->setStyleSheet(QStringLiteral("color:#e07878;"));
+        coherentStatusLabel->setText(error);
+        return;
+    }
+    coherentStatusLabel->setStyleSheet(QStringLiteral("color:#78d6a3;"));
+    coherentStatusLabel->setText(text("Synchronized IQ snapshot saved: ",
+                                      "Синхронний IQ-знімок збережено: ") + manifestPath);
 }
 
 void MultiSdrDialog::buildUi() {
@@ -212,6 +445,40 @@ void MultiSdrDialog::buildUi() {
     toolbar->addStretch(1);
     root->addLayout(toolbar);
 
+    auto *coherentBox = new QGroupBox(
+        text("Coherent receiver group", "Когерентна група приймачів"), this);
+    auto *coherentLayout = new QGridLayout(coherentBox);
+    coherentCaptureCheckbox = new QCheckBox(
+        text("Capture IQ for calibration", "Збирати IQ для калібрування"), coherentBox);
+    coherentCaptureCheckbox->setToolTip(text(
+        "Opt-in only. When disabled, Multi-SDR does not copy IQ for coherent alignment.",
+        "Працює лише за вибором. Коли вимкнено, Multi-SDR не копіює IQ для когерентного вирівнювання."));
+    coherentReferenceCombo = new QComboBox(coherentBox);
+    coherentMaxDelaySpin = new QSpinBox(coherentBox);
+    coherentMaxDelaySpin->setRange(16, 32768);
+    coherentMaxDelaySpin->setValue(4096);
+    coherentMaxDelaySpin->setSuffix(text(" samples", " семплів"));
+    coherentCalibrateButton = new QPushButton(
+        text("Calibrate delay / phase", "Калібрувати затримку / фазу"), coherentBox);
+    coherentCalibrateButton->setEnabled(false);
+    coherentSaveButton = new QPushButton(
+        text("Save IQ snapshot", "Зберегти IQ-знімок"), coherentBox);
+    coherentSaveButton->setEnabled(false);
+    coherentStatusLabel = new QLabel(
+        text("Coherent joining is locked until calibration.",
+             "Когерентне склеювання заблоковано до калібрування."), coherentBox);
+    coherentStatusLabel->setWordWrap(true);
+    coherentLayout->addWidget(coherentCaptureCheckbox, 0, 0);
+    coherentLayout->addWidget(new QLabel(text("Reference:", "Опорний RX:"), coherentBox), 0, 1);
+    coherentLayout->addWidget(coherentReferenceCombo, 0, 2);
+    coherentLayout->addWidget(new QLabel(text("Search ±", "Пошук ±"), coherentBox), 0, 3);
+    coherentLayout->addWidget(coherentMaxDelaySpin, 0, 4);
+    coherentLayout->addWidget(coherentCalibrateButton, 0, 5);
+    coherentLayout->addWidget(coherentSaveButton, 0, 6);
+    coherentLayout->addWidget(coherentStatusLabel, 1, 0, 1, 7);
+    coherentLayout->setColumnStretch(7, 1);
+    root->addWidget(coherentBox);
+
     auto *splitter = new QSplitter(Qt::Horizontal, this);
     auto *controlsScroll = new QScrollArea(splitter);
     controlsScroll->setWidgetResizable(true);
@@ -256,6 +523,17 @@ void MultiSdrDialog::buildUi() {
         source.levelOffset->setRange(-120.0, 120.0);
         source.levelOffset->setDecimals(2);
         source.levelOffset->setSuffix(QStringLiteral(" dB"));
+        source.clockRole = new QComboBox(source.group);
+        source.clockRole->addItem(text("Internal clock", "Внутрішній такт"), 0);
+        source.clockRole->addItem(text("Clock master / output", "Master / вихід такту"), 1);
+        source.clockRole->addItem(text("External clock input", "Зовнішній вхід такту"), 2);
+        source.clockId = new QLineEdit(QStringLiteral("coherent-1"), source.group);
+        source.clockId->setMaxLength(64);
+        source.clockId->setToolTip(text(
+            "Receivers intended to be coherent must use the same physical reference and the same clock-group ID.",
+            "Когерентні приймачі повинні використовувати спільне фізичне джерело та однаковий ID групи такту."));
+        source.hardwareSync = new QCheckBox(
+            text("Hardware start sync / trigger", "Апаратний sync / trigger старту"), source.group);
         source.enabled = new QCheckBox(text("Include in main window", "Додати до основного вікна"), source.group);
         source.enabled->setChecked(true);
         source.startStop = new QPushButton(text("Start RX", "Запустити RX"), source.group);
@@ -273,6 +551,9 @@ void MultiSdrDialog::buildUi() {
         form->addRow(QStringLiteral("LNA / VGA:"), gainRow);
         form->addRow(text("Discard each edge:", "Відкинути кожен край:"), source.edgeTrim);
         form->addRow(text("Level correction:", "Поправка рівня:"), source.levelOffset);
+        form->addRow(text("Clock role:", "Роль такту:"), source.clockRole);
+        form->addRow(text("Clock group ID:", "ID групи такту:"), source.clockId);
+        form->addRow(source.hardwareSync);
         form->addRow(source.enabled);
         form->addRow(source.startStop);
         if (sourceIndex > 0) form->addRow(source.remove);
@@ -360,10 +641,8 @@ void MultiSdrDialog::buildUi() {
                 this,
                 [this, sourceIndex](const float *samples, quint64 floatCount,
                                     double sampleRateHz, double centerHz) {
-            if (sourceIndex > 0 &&
-                audioSourceIndex.load(std::memory_order_acquire) == sourceIndex) {
-                emit auxiliaryIqReady(samples, floatCount, sampleRateHz, centerHz);
-            }
+            if (sourceIndex > 0)
+                emit auxiliaryIqReady(sourceIndex, samples, floatCount, sampleRateHz, centerHz);
         }, Qt::DirectConnection);
         connect(source.receiver, &AnalyzerReceiver::runningChanged,
                 this, [this, sourceIndex](bool running) {
@@ -374,11 +653,20 @@ void MultiSdrDialog::buildUi() {
             item.input->setEnabled(!running && item.input->count() > 1);
             item.sampleRate->setEnabled(!running);
             item.fft->setEnabled(!running);
+            item.clockRole->setEnabled(!running && !(hostPrimary && sourceIndex == 0));
+            item.clockId->setEnabled(!running);
+            item.hardwareSync->setEnabled(!running && !(hostPrimary && sourceIndex == 0));
             int expectedAudioSource = sourceIndex;
             if (!running && sourceIndex > 0 &&
                 audioSourceIndex.compare_exchange_strong(
                     expectedAudioSource, 0, std::memory_order_acq_rel))
                 emit audioSourceChanged(0);
+            invalidateCoherentCalibration(
+                running ? text("Receiver set changed; recalibrate.",
+                               "Склад приймачів змінено; повторіть калібрування.")
+                        : text("A receiver stopped; coherent joining is locked.",
+                               "Приймач зупинено; когерентне склеювання заблоковано."));
+            updateCoherentSubscriptions();
         });
         connect(source.receiver, &AnalyzerReceiver::receiverError,
                 this, [this, sourceIndex](const QString &message) {
@@ -405,6 +693,25 @@ void MultiSdrDialog::buildUi() {
         connect(source.levelOffset, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                 this, persistSourceSettings);
         connect(source.enabled, &QCheckBox::toggled, this, persistSourceSettings);
+        connect(source.clockRole, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [this, persistSourceSettings](int) {
+            persistSourceSettings();
+            invalidateCoherentCalibration();
+        });
+        connect(source.clockId, &QLineEdit::editingFinished,
+                this, [this, persistSourceSettings]() {
+            persistSourceSettings();
+            invalidateCoherentCalibration();
+        });
+        connect(source.hardwareSync, &QCheckBox::toggled,
+                this, [this, persistSourceSettings](bool) {
+            persistSourceSettings();
+            invalidateCoherentCalibration();
+        });
+        connect(source.sampleRate, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [this](int) { invalidateCoherentCalibration(); });
+        connect(source.centerMhz, &QDoubleSpinBox::editingFinished,
+                this, [this]() { invalidateCoherentCalibration(); });
     }
     controlsLayout->addStretch(1);
 
@@ -447,6 +754,22 @@ void MultiSdrDialog::buildUi() {
     connect(addReceiverButton, &QPushButton::clicked, this, &MultiSdrDialog::addReceiverSlot);
     connect(removeReceiverButton, &QPushButton::clicked, this,
             [this]() { removeReceiverSlot(); });
+    connect(coherentCaptureCheckbox, &QCheckBox::toggled, this, [this](bool enabled) {
+        coherentCalibrateButton->setEnabled(enabled);
+        coherentSaveButton->setEnabled(enabled);
+        if (!enabled) invalidateCoherentCalibration(text(
+            "Coherent IQ capture is disabled.", "Захоплення когерентного IQ вимкнено."));
+        updateCoherentSubscriptions();
+        saveSettings();
+    });
+    connect(coherentCalibrateButton, &QPushButton::clicked,
+            this, &MultiSdrDialog::calibrateCoherentGroup);
+    connect(coherentSaveButton, &QPushButton::clicked,
+            this, &MultiSdrDialog::saveCoherentSnapshot);
+    connect(coherentReferenceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) { invalidateCoherentCalibration(); saveSettings(); });
+    connect(coherentMaxDelaySpin, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, [this](int) { saveSettings(); });
     connect(autoAlignCheckbox, &QCheckBox::toggled, this, [this](bool enabled) {
         alignmentOverlapSpin->setEnabled(enabled);
         if (enabled) alignEnabledSources();
@@ -623,11 +946,25 @@ AnalyzerReceiverSettings MultiSdrDialog::receiverSettings(int sourceIndex) const
     for (int index = hostPrimary ? 1 : 0; index < static_cast<int>(sources.size()); ++index) {
         if (sources[static_cast<std::size_t>(index)]->active) ++enabledReceivers;
     }
-    const unsigned int hardwareThreads = std::max(1U, std::thread::hardware_concurrency());
-    settings.fftWorkerThreads = std::clamp(
-        static_cast<int>(hardwareThreads /
-                         static_cast<unsigned int>(std::max(1, enabledReceivers))),
-        1, 4);
+    settings.fftWorkerThreads = ComputeBudgetManager::instance().recommendedThreads(
+        ComputeWorkClass::AuxiliaryFft, false, enabledReceivers);
+    settings.computeSourceOrdinal = sourceIndex;
+    const DspSourceIdentity identity = sourceIdentity(sourceIndex);
+    settings.receiverId = identity.receiverId;
+    settings.channelId = identity.channelId;
+    settings.clockRole = source.clockRole->currentData().toInt();
+    settings.clockId = source.clockId->text().trimmed();
+    settings.hardwareStartSync = source.hardwareSync->isChecked();
+    if (settings.backendId.startsWith(QStringLiteral("fobos-"))) {
+        settings.nativeAdcBits = 14;
+        settings.nativeSampleFormat = QStringLiteral("ADC14 -> FC32 normalized");
+    } else if (settings.backendId == QStringLiteral("hackrf") ||
+               settings.backendId == QStringLiteral("rtl-sdr")) {
+        settings.nativeAdcBits = 8;
+        settings.nativeSampleFormat = QStringLiteral("SC8 -> FC32 normalized");
+    } else {
+        settings.nativeSampleFormat = QStringLiteral("backend FC32 normalized");
+    }
     settings.directChannel = source.input->currentData().toInt();
     settings.directSampling = settings.backendId.startsWith(QStringLiteral("fobos-")) &&
                               settings.directChannel != 0;
@@ -686,6 +1023,7 @@ bool MultiSdrDialog::startSource(int sourceIndex) {
             return false;
         }
     }
+    DspIqSourceRegistry::instance().clear(sourceIdentity(sourceIndex));
     previewMosaicEngine.setSourceSettings(sourceIndex, previewMosaicSettings(sourceIndex));
     mainMosaicEngine.setSourceSettings(sourceIndex, mainMosaicSettings(sourceIndex));
     source.hasFrame = false;
@@ -700,6 +1038,7 @@ bool MultiSdrDialog::startSource(int sourceIndex) {
 void MultiSdrDialog::stopSource(int sourceIndex) {
     SourceUi &source = *sources[static_cast<std::size_t>(sourceIndex)];
     source.receiver->stop();
+    DspIqSourceRegistry::instance().clear(sourceIdentity(sourceIndex));
     source.hasFrame = false;
     SpectrumMosaicSourceSettings disabledPreview = previewMosaicSettings(sourceIndex);
     disabledPreview.enabled = false;
@@ -713,9 +1052,13 @@ void MultiSdrDialog::stopSource(int sourceIndex) {
         audioSourceIndex.store(0, std::memory_order_release);
         emit audioSourceChanged(0);
     }
+    invalidateCoherentCalibration(text(
+        "A receiver stopped; coherent joining requires recalibration.",
+        "Приймач зупинено; когерентне склеювання потребує повторного калібрування."));
 }
 
 void MultiSdrDialog::startAll() {
+    updateCoherentSubscriptions();
     previewMosaicEngine.clear();
     mainMosaicEngine.clear();
     latestMainMosaicValid = false;
@@ -757,6 +1100,9 @@ void MultiSdrDialog::addReceiverSlot() {
     removeReceiverButton->setEnabled(activeSourceCount > 1);
     startAllButton->setText(text("Start all", "Запустити всі"));
     if (autoAlignCheckbox->isChecked()) alignEnabledSources();
+    refreshCoherentReferenceChoices();
+    updateCoherentSubscriptions();
+    invalidateCoherentCalibration();
     saveSettings();
 }
 
@@ -789,6 +1135,9 @@ void MultiSdrDialog::removeReceiverSlot(int index) {
     startAllButton->setText(activeSourceCount == 2
                                 ? text("Start both", "Запустити обидва")
                                 : text("Start all", "Запустити всі"));
+    refreshCoherentReferenceChoices();
+    updateCoherentSubscriptions();
+    invalidateCoherentCalibration();
     saveSettings();
 }
 
@@ -824,6 +1173,7 @@ void MultiSdrDialog::setPrimaryRunning(bool running) {
     primary.startStop->setText(running ? text("Stop RX", "Зупинити RX")
                                        : text("Start RX", "Запустити RX"));
     if (!running) {
+        DspIqSourceRegistry::instance().clear(sourceIdentity(0));
         primary.hasFrame = false;
         previewMosaicEngine.clear();
         mainMosaicEngine.clear();
@@ -836,6 +1186,11 @@ void MultiSdrDialog::setPrimaryRunning(bool running) {
                                      "Очікування основного спектра"));
     }
     if (!changed) return;
+    invalidateCoherentCalibration(running
+        ? text("Receiver streams restarted; recalibrate coherent alignment.",
+               "Потоки приймачів перезапущено; повторіть когерентне калібрування.")
+        : text("The primary receiver stopped; coherent joining requires recalibration.",
+               "Основний приймач зупинено; когерентне склеювання потребує повторного калібрування."));
     for (int index = 1; index < static_cast<int>(sources.size()); ++index) {
         SourceUi &source = *sources[static_cast<std::size_t>(index)];
         if (!source.active) continue;
@@ -847,6 +1202,11 @@ void MultiSdrDialog::setPrimaryRunning(bool running) {
 void MultiSdrDialog::setPrimaryConfiguration(double centerHz, double sampleRateHz, int fftLength) {
     if (!hostPrimary) return;
     SourceUi &primary = *sources[0];
+    const double previousCenterHz = primary.centerMhz->value() * 1.0e6;
+    const double previousSampleRateHz = primary.sampleRate->currentData().toDouble();
+    const bool coherentFormatChanged =
+        std::abs(previousCenterHz - centerHz) > 1.0 ||
+        std::abs(previousSampleRateHz - sampleRateHz) > 0.5;
     {
         const QSignalBlocker blocker(primary.centerMhz);
         primary.centerMhz->setValue(centerHz / 1.0e6);
@@ -866,6 +1226,10 @@ void MultiSdrDialog::setPrimaryConfiguration(double centerHz, double sampleRateH
             index = primary.fft->count() - 1;
         }
         primary.fft->setCurrentIndex(index);
+    }
+    if (coherentFormatChanged) {
+        DspIqSourceRegistry::instance().clear(sourceIdentity(0));
+        invalidateCoherentCalibration();
     }
 }
 
@@ -1021,6 +1385,8 @@ void MultiSdrDialog::retuneSource(int sourceIndex, double centerHz) {
         centerHz = std::max(centerHz, settings.sampleRateHz * 0.5);
     centerHz = std::clamp(centerHz, 0.0, 8.0e9);
     if (source.receiver->retune(centerHz)) {
+        DspIqSourceRegistry::instance().clear(sourceIdentity(sourceIndex));
+        invalidateCoherentCalibration();
         const QSignalBlocker blocker(source.centerMhz);
         source.centerMhz->setValue(centerHz / 1.0e6);
     }
@@ -1160,6 +1526,9 @@ void MultiSdrDialog::panMainDisplay(double deltaHz) {
         if (source.active && source.enabled->isChecked()) included.push_back(index);
     }
     if (included.empty()) return;
+    invalidateCoherentCalibration(text(
+        "Receiver center changed; coherent joining requires recalibration.",
+        "Центральну частоту змінено; когерентне склеювання потребує повторного калібрування."));
 
     const bool panAsGroup = synchronizedPanCheckbox->isChecked() || mainViewMode == 0;
     if (!panAsGroup) {
@@ -1233,6 +1602,25 @@ void MultiSdrDialog::saveSettings() const {
     settings.setValue(QStringLiteral("bottomDb"), bottomDbSpin->value());
     settings.setValue(QStringLiteral("autoAlign"), autoAlignCheckbox->isChecked());
     settings.setValue(QStringLiteral("alignmentOverlap"), alignmentOverlapSpin->value());
+    settings.setValue(QStringLiteral("coherentCapture"), coherentCaptureCheckbox->isChecked());
+    settings.setValue(QStringLiteral("coherentReference"), coherentReferenceCombo->currentData().toInt());
+    settings.setValue(QStringLiteral("coherentMaxDelay"), coherentMaxDelaySpin->value());
+    QJsonArray calibrationArray;
+    for (const CoherentIqCalibration &calibration : coherentCalibrations) {
+        if (!calibration.valid) continue;
+        calibrationArray.append(QJsonObject{
+            {QStringLiteral("reference"), calibration.reference.key()},
+            {QStringLiteral("target"), calibration.target.key()},
+            {QStringLiteral("sampleRateHz"), calibration.sampleRateHz},
+            {QStringLiteral("centerHz"), calibration.centerHz},
+            {QStringLiteral("integerDelay"), calibration.integerDelaySamples},
+            {QStringLiteral("fractionalDelay"), calibration.fractionalDelaySamples},
+            {QStringLiteral("phase"), calibration.phaseCorrectionRadians},
+            {QStringLiteral("gain"), calibration.gainCorrection},
+            {QStringLiteral("coherence"), calibration.coherence}});
+    }
+    settings.setValue(QStringLiteral("coherentCalibrations"),
+                      QString::fromUtf8(QJsonDocument(calibrationArray).toJson(QJsonDocument::Compact)));
     settings.setValue(QStringLiteral("sourceCount"), activeSourceCount);
     for (int index = 0; index < static_cast<int>(sources.size()); ++index) {
         const SourceUi &source = *sources[static_cast<std::size_t>(index)];
@@ -1247,6 +1635,9 @@ void MultiSdrDialog::saveSettings() const {
         settings.setValue(QStringLiteral("vga"), source.vga->value());
         settings.setValue(QStringLiteral("edgeTrim"), source.edgeTrim->value());
         settings.setValue(QStringLiteral("levelOffset"), source.levelOffset->value());
+        settings.setValue(QStringLiteral("clockRole"), source.clockRole->currentData());
+        settings.setValue(QStringLiteral("clockId"), source.clockId->text().trimmed());
+        settings.setValue(QStringLiteral("hardwareSync"), source.hardwareSync->isChecked());
         settings.setValue(QStringLiteral("enabled"), source.enabled->isChecked());
         settings.setValue(QStringLiteral("active"), source.active);
         settings.endGroup();
@@ -1273,6 +1664,40 @@ void MultiSdrDialog::restoreSettings() {
     }
     alignmentOverlapSpin->setValue(settings.value(QStringLiteral("alignmentOverlap"), 5.0).toDouble());
     alignmentOverlapSpin->setEnabled(autoAlignCheckbox->isChecked());
+    coherentCaptureCheckbox->setChecked(
+        settings.value(QStringLiteral("coherentCapture"), false).toBool());
+    coherentMaxDelaySpin->setValue(
+        settings.value(QStringLiteral("coherentMaxDelay"), 4096).toInt());
+    coherentReferenceCombo->setProperty(
+        "savedReference", settings.value(QStringLiteral("coherentReference"), 0));
+    coherentCalibrations.clear();
+    const QJsonDocument savedCalibration = QJsonDocument::fromJson(
+        settings.value(QStringLiteral("coherentCalibrations")).toString().toUtf8());
+    if (savedCalibration.isArray()) {
+        for (const QJsonValue &value : savedCalibration.array()) {
+            const QJsonObject object = value.toObject();
+            const QStringList referenceParts = object.value(QStringLiteral("reference"))
+                                                   .toString().split(QLatin1Char('/'));
+            const QStringList targetParts = object.value(QStringLiteral("target"))
+                                                .toString().split(QLatin1Char('/'));
+            if (referenceParts.size() != 2 || targetParts.size() != 2) continue;
+            CoherentIqCalibration calibration;
+            calibration.reference = DspSourceIdentity::normalized(referenceParts[0], referenceParts[1]);
+            calibration.target = DspSourceIdentity::normalized(targetParts[0], targetParts[1]);
+            calibration.sampleRateHz = object.value(QStringLiteral("sampleRateHz")).toDouble();
+            calibration.centerHz = object.value(QStringLiteral("centerHz")).toDouble();
+            calibration.integerDelaySamples = object.value(QStringLiteral("integerDelay")).toInt();
+            calibration.fractionalDelaySamples = object.value(QStringLiteral("fractionalDelay")).toDouble();
+            calibration.phaseCorrectionRadians = object.value(QStringLiteral("phase")).toDouble();
+            calibration.gainCorrection = object.value(QStringLiteral("gain")).toDouble(1.0);
+            calibration.coherence = object.value(QStringLiteral("coherence")).toDouble();
+            calibration.valid = std::isfinite(calibration.sampleRateHz) && calibration.sampleRateHz > 0.0 &&
+                                std::isfinite(calibration.centerHz) &&
+                                std::isfinite(calibration.gainCorrection) && calibration.gainCorrection > 0.0 &&
+                                calibration.coherence >= 0.10;
+            if (calibration.valid) coherentCalibrations.append(calibration);
+        }
+    }
     const int legacySourceCount = std::clamp(
         settings.value(QStringLiteral("sourceCount"), 2).toInt(), 1,
         static_cast<int>(sources.size()));
@@ -1296,6 +1721,12 @@ void MultiSdrDialog::restoreSettings() {
         source.vga->setValue(settings.value(QStringLiteral("vga"), 0).toInt());
         source.edgeTrim->setValue(settings.value(QStringLiteral("edgeTrim"), 5.0).toDouble());
         source.levelOffset->setValue(settings.value(QStringLiteral("levelOffset"), 0.0).toDouble());
+        source.clockRole->setCurrentIndex(std::max(0, source.clockRole->findData(
+            settings.value(QStringLiteral("clockRole"), 0).toInt())));
+        source.clockId->setText(settings.value(QStringLiteral("clockId"),
+                                               QStringLiteral("coherent-1")).toString());
+        source.hardwareSync->setChecked(
+            settings.value(QStringLiteral("hardwareSync"), false).toBool());
         source.enabled->setChecked(settings.value(QStringLiteral("enabled"), true).toBool());
         settings.endGroup();
     }
@@ -1321,4 +1752,6 @@ void MultiSdrDialog::restoreSettings() {
                                 : text("Start all", "Запустити всі"));
     settings.endGroup();
     restoringSettings = false;
+    coherentCalibrateButton->setEnabled(coherentCaptureCheckbox->isChecked());
+    coherentSaveButton->setEnabled(coherentCaptureCheckbox->isChecked());
 }
