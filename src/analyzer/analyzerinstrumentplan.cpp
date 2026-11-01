@@ -242,8 +242,21 @@ AnalyzerInstrumentMode AnalyzerInstrumentPlanner::modeFromId(const QString &id) 
 
 AnalyzerPlanValidation AnalyzerInstrumentPlanner::validate(const AnalyzerInstrumentPlan &plan) {
     AnalyzerPlanValidation result;
-    if (!std::isfinite(plan.startHz) || !std::isfinite(plan.stopHz) || plan.stopHz <= plan.startHz)
+    if (!std::isfinite(plan.startHz) || !std::isfinite(plan.stopHz) ||
+        plan.startHz < 0.0 || plan.stopHz <= plan.startHz)
         result.errors << QStringLiteral("Stop frequency must be above start frequency");
+    if (!std::isfinite(plan.sourceLevelDbm))
+        result.errors << QStringLiteral("Source level must be finite");
+    if (!std::isfinite(plan.capabilities.maximumSafeOutputDbm))
+        result.errors << QStringLiteral("Safe output limit must be finite");
+    if (!std::isfinite(plan.capabilities.minimumFrequencyHz) ||
+        !std::isfinite(plan.capabilities.maximumFrequencyHz) ||
+        plan.capabilities.minimumFrequencyHz < 0.0 ||
+        plan.capabilities.maximumFrequencyHz < plan.capabilities.minimumFrequencyHz)
+        result.errors << QStringLiteral("Hardware frequency range must be finite and ordered");
+    if (!std::isfinite(plan.calibration.referenceImpedanceOhm) ||
+        plan.calibration.referenceImpedanceOhm <= 0.0)
+        result.errors << QStringLiteral("Reference impedance must be finite and positive");
     if (plan.points < 2 || plan.points > 1000001)
         result.errors << QStringLiteral("Point count must be between 2 and 1,000,001");
     if (!std::isfinite(plan.dwellMs) || plan.dwellMs < 0.0 || plan.dwellMs > 60000.0)
@@ -254,6 +267,11 @@ AnalyzerPlanValidation AnalyzerInstrumentPlanner::validate(const AnalyzerInstrum
         result.errors << QStringLiteral("Average count must be between 1 and 100,000");
     if (!plan.capabilities.receiverAvailable)
         result.requirements << QStringLiteral("a confirmed RX channel");
+    else if (plan.capabilities.receiverChannels < 1)
+        result.requirements << QStringLiteral("at least one declared RX channel");
+    if (!plan.useExternalGenerator && plan.capabilities.transmitterAvailable &&
+        plan.capabilities.transmitterChannels < 1)
+        result.requirements << QStringLiteral("at least one declared TX channel");
 
     const bool sourceAvailable = plan.useExternalGenerator
                                      ? plan.capabilities.externalGenerator
@@ -284,6 +302,8 @@ AnalyzerPlanValidation AnalyzerInstrumentPlanner::validate(const AnalyzerInstrum
         result.calibratedResult = plan.calibration.scalarNormalization;
         break;
     case AnalyzerInstrumentMode::ReturnLossSwr:
+        if (!plan.useExternalGenerator && !plan.capabilities.fullDuplex)
+            result.requirements << QStringLiteral("full-duplex RX/TX or a separate external generator");
         if (!plan.capabilities.directionalCoupler)
             result.requirements << QStringLiteral("a characterized directional bridge/coupler");
         if (!plan.calibration.oslComplete())
@@ -316,11 +336,14 @@ AnalyzerPlanValidation AnalyzerInstrumentPlanner::validate(const AnalyzerInstrum
 
 QVector<double> AnalyzerInstrumentPlanner::frequencyGrid(const AnalyzerInstrumentPlan &plan) {
     QVector<double> frequencies;
-    if (plan.points < 2 || plan.stopHz <= plan.startHz) return frequencies;
+    if (plan.points < 2 || plan.points > 1000001 ||
+        !std::isfinite(plan.startHz) || !std::isfinite(plan.stopHz) ||
+        plan.startHz < 0.0 || plan.stopHz <= plan.startHz) return frequencies;
     frequencies.resize(plan.points);
     const double step = (plan.stopHz - plan.startHz) / static_cast<double>(plan.points - 1);
     for (int index = 0; index < plan.points; ++index)
         frequencies[index] = plan.startHz + step * static_cast<double>(index);
+    frequencies.last() = plan.stopHz;
     return frequencies;
 }
 

@@ -5,6 +5,7 @@
 #include <QTextStream>
 
 #include <cmath>
+#include <limits>
 
 namespace {
 int failures = 0;
@@ -73,6 +74,55 @@ int main(int argc, char **argv) {
           QStringLiteral("frequency grid start"));
     check(!grid.isEmpty() && std::abs(grid.last() - draft.stopHz) < 1.0e-6,
           QStringLiteral("frequency grid stop"));
+
+    auto invalid = draft;
+    invalid.points = std::numeric_limits<int>::max();
+    check(AnalyzerInstrumentPlanner::frequencyGrid(invalid).isEmpty(),
+          QStringLiteral("oversized imported grid must be rejected before allocation"));
+    for (double bad : {std::numeric_limits<double>::quiet_NaN(),
+                       std::numeric_limits<double>::infinity()}) {
+        invalid = draft;
+        invalid.startHz = bad;
+        check(AnalyzerInstrumentPlanner::frequencyGrid(invalid).isEmpty(),
+              QStringLiteral("nonfinite grid start must be rejected"));
+        invalid = draft;
+        invalid.stopHz = bad;
+        check(AnalyzerInstrumentPlanner::frequencyGrid(invalid).isEmpty(),
+              QStringLiteral("nonfinite grid stop must be rejected"));
+        invalid = draft;
+        invalid.sourceLevelDbm = bad;
+        check(!AnalyzerInstrumentPlanner::validate(invalid).executable,
+              QStringLiteral("nonfinite source level must block execution"));
+        invalid = draft;
+        invalid.capabilities.maximumSafeOutputDbm = bad;
+        check(!AnalyzerInstrumentPlanner::validate(invalid).executable,
+              QStringLiteral("nonfinite safe output limit must block execution"));
+    }
+    invalid = draft;
+    invalid.capabilities.transmitterChannels = 0;
+    check(!AnalyzerInstrumentPlanner::validate(invalid).executable,
+          QStringLiteral("TX availability without channels must block execution"));
+    invalid = draft;
+    invalid.calibration.referenceImpedanceOhm = 0.0;
+    check(!AnalyzerInstrumentPlanner::validate(invalid).executable,
+          QStringLiteral("zero reference impedance must block execution"));
+    invalid = draft;
+    invalid.capabilities.minimumFrequencyHz = 30.0e6;
+    invalid.capabilities.maximumFrequencyHz = 1.0e6;
+    check(!AnalyzerInstrumentPlanner::validate(invalid).executable,
+          QStringLiteral("reversed hardware range must block execution"));
+    invalid = draft;
+    invalid.mode = AnalyzerInstrumentMode::ReturnLossSwr;
+    invalid.capabilities.directionalCoupler = true;
+    invalid.capabilities.fullDuplex = false;
+    check(!AnalyzerInstrumentPlanner::validate(invalid).executable,
+          QStringLiteral("return-loss requires simultaneous source and receiver"));
+    invalid.useExternalGenerator = true;
+    invalid.capabilities.externalGenerator = true;
+    invalid.scpi.enabled = true;
+    invalid.scpi.resource = QStringLiteral("TCPIP::fixture");
+    check(AnalyzerInstrumentPlanner::validate(invalid).executable,
+          QStringLiteral("external source permits return-loss with RX-only hardware"));
 
     const double magnitude = AnalyzerInstrumentPlanner::reflectionMagnitudeFromReturnLoss(20.0);
     check(std::abs(magnitude - 0.1) < 1.0e-12, QStringLiteral("return-loss inverse"));

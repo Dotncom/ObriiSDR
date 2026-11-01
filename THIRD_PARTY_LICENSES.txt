@@ -1,5 +1,5 @@
 Obrii SDR third-party components
-Version: 6.0.0
+Version: 7.0.0
 
 Obrii SDR is published as a GPL project. The repository root
 contains the GNU General Public License version 2 text in LICENSE.
@@ -370,3 +370,11 @@ If a binary release includes rtlsdr.dll or rtl_test.exe, also publish the exact
 librtlsdr source revision used for those binaries, or provide an equivalent
 GPL-compliant source offer. The FobosAPP repository itself does not vendor the
 local RTL-SDR checkout used during development.
+
+M17 framing and symbol generation use the official libm17 1.4.1 reference
+library, revision e1f0f5ca5bfe2dd98eeda8e945725d505b7d6aae.
+Source: https://github.com/M17-Project/libm17
+License: GNU General Public License version 2 or later. The vendored source and
+upstream LICENSE are in third_party/libm17. Obrii carries two portability-only
+MSVC changes: an export-attribute guard and portable popcount/ctz helpers; the
+protocol algorithms and on-air constants are unchanged.

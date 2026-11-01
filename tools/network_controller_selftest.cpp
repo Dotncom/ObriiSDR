@@ -80,6 +80,8 @@ int main(int argc, char **argv) {
                 "First client handshake did not complete");
         const QString firstId = server.controllerPeerId();
         require(!firstId.isEmpty(), "First client did not become initial controller");
+        require(!server.peerSupportsCompactSpectrum(firstId),
+                "Legacy peer was incorrectly given compact spectrum frames");
         require(spinUntil([&]() { return hasRole(first, firstInput, true); }),
                 "First client did not receive controller role");
 
@@ -130,6 +132,17 @@ int main(int argc, char **argv) {
                 "Fragmented control command was not delivered");
         require(server.mode() == NetworkMode::Disabled,
                 "Re-entrant server shutdown did not complete safely");
+
+        NetworkController capabilityServer;
+        capabilityServer.startServer(QStringLiteral("127.0.0.1"), 0);
+        NetworkController capabilityClient;
+        capabilityClient.testClientConnection(QStringLiteral("127.0.0.1"),
+                                              capabilityServer.listeningPort());
+        require(spinUntil([&]() {
+            const QStringList peers = capabilityServer.readyPeerIds();
+            return capabilityClient.isControlReady() && peers.size() == 1 &&
+                   capabilityServer.peerSupportsCompactSpectrum(peers.first());
+        }), "Compact display capability was not negotiated");
 
         std::cout << "Network controller self-test passed\n";
         return 0;

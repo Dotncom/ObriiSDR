@@ -17,6 +17,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSaveFile>
 #include <QSettings>
 #include <QSpinBox>
 #include <QTabWidget>
@@ -420,8 +421,19 @@ void AnalyzerInstrumentDialog::loadPlan() {
     }
     QJsonParseError error;
     const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &error);
-    if (error.error != QJsonParseError::NoError || !document.isObject()) {
+    if (error.error != QJsonParseError::NoError) {
         QMessageBox::warning(this, windowTitle(), error.errorString());
+        return;
+    }
+    if (!document.isObject() ||
+        document.object().value(QStringLiteral("schema")).toString() !=
+            QStringLiteral("obrii-analyzer-plan-v1") ||
+        !QStringList{QStringLiteral("tracking-generator"), QStringLiteral("sna"),
+                     QStringLiteral("return-loss-swr"), QStringLiteral("vna")}
+             .contains(document.object().value(QStringLiteral("mode")).toString())) {
+        QMessageBox::warning(this, windowTitle(),
+                             text("Unsupported analyzer plan format or instrument mode.",
+                                  "Непідтримуваний формат плану аналізатора або режим приладу."));
         return;
     }
     applyPlan(AnalyzerInstrumentPlan::fromJson(document.object()));
@@ -432,12 +444,14 @@ void AnalyzerInstrumentDialog::savePlan() {
                                                        QStringLiteral("analyzer-plan.json"),
                                                        QStringLiteral("Analyzer plan (*.json)"));
     if (path.isEmpty()) return;
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
         QMessageBox::warning(this, windowTitle(), file.errorString());
         return;
     }
-    file.write(QJsonDocument(planFromUi().toJson()).toJson(QJsonDocument::Indented));
+    const QByteArray data = QJsonDocument(planFromUi().toJson()).toJson(QJsonDocument::Indented);
+    if (file.write(data) != data.size() || !file.commit())
+        QMessageBox::warning(this, windowTitle(), file.errorString());
 }
 
 void AnalyzerInstrumentDialog::saveSessionTemplate() {
@@ -451,12 +465,14 @@ void AnalyzerInstrumentDialog::saveSessionTemplate() {
     session.startedUtc = QDateTime::currentDateTimeUtc();
     session.plan = planFromUi();
     session.eventLog << QStringLiteral("Draft session created; no RF measurement was executed");
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
         QMessageBox::warning(this, windowTitle(), file.errorString());
         return;
     }
-    file.write(QJsonDocument(session.toJson()).toJson(QJsonDocument::Indented));
+    const QByteArray data = QJsonDocument(session.toJson()).toJson(QJsonDocument::Indented);
+    if (file.write(data) != data.size() || !file.commit())
+        QMessageBox::warning(this, windowTitle(), file.errorString());
 }
 
 void AnalyzerInstrumentDialog::restoreLastPlan() {

@@ -32,6 +32,16 @@ choose_root() {
 FOBOS_STANDARD_ROOT="$(choose_root FOBOS_STANDARD_ROOT fobos.h)"
 FOBOS_AGILE_ROOT="$(choose_root FOBOS_AGILE_ROOT fobos_sdr.h)"
 
+cmake_options=()
+if [ "${BUILD_LITE:-0}" = 1 ]; then
+    cmake_options+=(
+        -DFOBOS_ENABLE_MBELIB_NEO=OFF
+        -DFOBOS_ENABLE_HF_PREDICTION=OFF
+        -DFOBOS_ENABLE_VKFFT=OFF
+    )
+    BUILD_HF_HELPER=0
+fi
+
 missing=0
 need_cmd() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -83,7 +93,8 @@ cmake -S "${WORKSPACE}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
     -DFOBOS_STANDARD_ROOT="${FOBOS_STANDARD_ROOT}" \
     -DFOBOS_AGILE_ROOT="${FOBOS_AGILE_ROOT}" \
-    -DFFTW_ROOT="${FFTW_ROOT}"
+    -DFFTW_ROOT="${FFTW_ROOT}" \
+    "${cmake_options[@]}"
 
 cmake --build "${BUILD_DIR}" -j "${JOBS}"
 
@@ -104,5 +115,6 @@ echo
 echo "Build complete:"
 echo "  ${BUILD_DIR}/ObriiSDR"
 echo "  ${BUILD_DIR}/ObriiAnalyzer"
+echo "  ${BUILD_DIR}/ObriiIqHub"
 mkdir -p "${BUILD_DIR}/wireless"
 cp "${WORKSPACE}/tools/wifi_phy_decoder.py" "${BUILD_DIR}/wireless/"

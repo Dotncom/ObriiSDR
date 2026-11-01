@@ -287,10 +287,15 @@ void YourClassName::openNetworkSettingsDialog() {
 
     auto updateFieldState = [=]() {
         const auto selectedMode = static_cast<NetworkMode>(modeCombo->currentData().toInt());
+        const bool clientCanControl = !networkController || !networkController->isControlReady() ||
+                                      networkController->clientHasControl();
         serverAddressEdit->setEnabled(selectedMode == NetworkMode::Client);
         presetGroup->setVisible(selectedMode == NetworkMode::Client);
         bindAddressEdit->setEnabled(selectedMode == NetworkMode::Server);
-        serverDisableLocalUiCheck->setEnabled(selectedMode == NetworkMode::Server);
+        serverDisableLocalUiCheck->setEnabled(selectedMode == NetworkMode::Server ||
+            (selectedMode == NetworkMode::Client && clientCanControl &&
+             static_cast<NetworkProcessingMode>(processingCombo->currentData().toInt()) !=
+                 NetworkProcessingMode::RemoteVfoServerSide));
         fullResolutionSpectrumCheck->setEnabled(selectedMode != NetworkMode::Disabled);
         processingCombo->setEnabled(selectedMode != NetworkMode::Disabled);
         portSpin->setEnabled(selectedMode != NetworkMode::Disabled);
@@ -373,6 +378,24 @@ void YourClassName::openNetworkSettingsDialog() {
                                    &NetworkController::statusChanged,
                                    &dialog,
                                    [refreshStatus](const QString &) { refreshStatus(); });
+        connect(networkController, &NetworkController::controlCommandReceived, &dialog,
+                [=](const QJsonObject &command) {
+                    if (networkMode != NetworkMode::Server ||
+                        command.value(QStringLiteral("type")).toString() != QStringLiteral("control")) {
+                        return;
+                    }
+                    const QString action = command.value(QStringLiteral("action")).toString();
+                    if (action == QStringLiteral("setProcessingMode")) {
+                        const int index = processingCombo->findData(static_cast<int>(networkProcessingMode));
+                        if (index >= 0) {
+                            const QSignalBlocker blocker(processingCombo);
+                            processingCombo->setCurrentIndex(index);
+                        }
+                    } else if (action == QStringLiteral("setServerLocalOutput")) {
+                        const QSignalBlocker blocker(serverDisableLocalUiCheck);
+                        serverDisableLocalUiCheck->setChecked(serverDisableLocalVisualAudio);
+                    }
+                });
     }
     if (remoteWebServer) {
         connect(remoteWebServer, &RemoteWebServer::statusChanged,
@@ -387,6 +410,21 @@ void YourClassName::openNetworkSettingsDialog() {
         const NetworkMode previousNetworkMode = networkMode;
         const NetworkProcessingMode previousProcessingMode = networkProcessingMode;
         const bool previousServerDisableLocalVisualAudio = serverDisableLocalVisualAudio;
+        const QString previousServerAddress = networkServerAddress;
+        const quint16 previousControlPort = networkControlPort;
+        const auto selectedNetworkMode = static_cast<NetworkMode>(modeCombo->currentData().toInt());
+        const auto selectedProcessingMode =
+            static_cast<NetworkProcessingMode>(processingCombo->currentData().toInt());
+        if (selectedNetworkMode == NetworkMode::Client && previousNetworkMode == NetworkMode::Client &&
+            networkController && networkController->isControlReady() &&
+            !networkController->clientHasControl() &&
+            ((selectedProcessingMode != previousProcessingMode &&
+              selectedProcessingMode != NetworkProcessingMode::RemoteVfoServerSide) ||
+             serverDisableLocalUiCheck->isChecked() != previousServerDisableLocalVisualAudio)) {
+            statusLabel->setText(uiText(QStringLiteral("network_request_control_first"),
+                                        QStringLiteral("Request control before changing server settings.")));
+            return;
+        }
 
         networkMode = static_cast<NetworkMode>(modeCombo->currentData().toInt());
         networkServerAddress = serverAddressEdit->text().trimmed().isEmpty()
@@ -401,7 +439,7 @@ void YourClassName::openNetworkSettingsDialog() {
         remoteVfoSquelchDb = remoteVfoSquelchSpin->value();
         serverDisableLocalVisualAudio = serverDisableLocalUiCheck->isChecked();
         networkFullResolutionSpectrumFrames = fullResolutionSpectrumCheck->isChecked();
-        networkProcessingMode = static_cast<NetworkProcessingMode>(processingCombo->currentData().toInt());
+        networkProcessingMode = selectedProcessingMode;
         audioRelayTransmitEnabled = audioRelayTransmitCheck->isChecked();
         audioRelayHost = audioRelayHostEdit->text().trimmed().isEmpty()
                              ? QString("127.0.0.1")
@@ -425,6 +463,13 @@ void YourClassName::openNetworkSettingsDialog() {
         const bool processingModeChanged = previousProcessingMode != networkProcessingMode;
         const bool serverLocalOutputChanged =
             previousServerDisableLocalVisualAudio != serverDisableLocalVisualAudio;
+        const bool reconnectClient = networkMode == NetworkMode::Client &&
+            (previousNetworkMode != NetworkMode::Client ||
+             previousServerAddress != networkServerAddress ||
+             previousControlPort != networkControlPort ||
+             !networkController || !networkController->isControlReady() ||
+             previousProcessingMode == NetworkProcessingMode::RemoteVfoServerSide ||
+             networkProcessingMode == NetworkProcessingMode::RemoteVfoServerSide);
 
         if (!networkController) {
             statusLabel->setText("Network controller unavailable");
@@ -432,6 +477,8 @@ void YourClassName::openNetworkSettingsDialog() {
         }
 
         if (networkMode == NetworkMode::Disabled) {
+            networkClientRequestedProcessingMode = -1;
+            networkClientRequestedServerLocalOutput = -1;
             if (previousNetworkMode == NetworkMode::Client) {
                 stopNetworkClientProcessing();
                 clearRemoteReceiverDeviceList();
@@ -464,6 +511,8 @@ void YourClassName::openNetworkSettingsDialog() {
             remoteAudioPlayer->stop();
         }
         if (networkMode == NetworkMode::Server) {
+            networkClientRequestedProcessingMode = -1;
+            networkClientRequestedServerLocalOutput = -1;
             clearRemoteReceiverDeviceList();
             networkController->startServer(networkBindAddress, networkControlPort);
             updateRemoteWebServer();
@@ -491,7 +540,25 @@ void YourClassName::openNetworkSettingsDialog() {
         if (networkMode == NetworkMode::Client) {
             clearRemoteReceiverDeviceList();
         }
-        networkController->testClientConnection(networkServerAddress, networkControlPort);
+        if (networkProcessingMode == NetworkProcessingMode::RemoteVfoServerSide) {
+            networkClientRequestedProcessingMode = -1;
+            networkClientRequestedServerLocalOutput = -1;
+        } else if (processingModeChanged || reconnectClient) {
+            networkClientRequestedProcessingMode = static_cast<int>(networkProcessingMode);
+        }
+        if (serverLocalOutputChanged && networkProcessingMode != NetworkProcessingMode::RemoteVfoServerSide) {
+            networkClientRequestedServerLocalOutput = static_cast<int>(serverDisableLocalVisualAudio);
+        }
+        if (reconnectClient) {
+            networkController->testClientConnection(networkServerAddress, networkControlPort);
+        } else {
+            if (networkClientRequestedProcessingMode >= 0)
+                sendRemoteControlCommand(QStringLiteral("setProcessingMode"));
+            if (networkClientRequestedServerLocalOutput >= 0)
+                sendRemoteControlCommand(QStringLiteral("setServerLocalOutput"),
+                    {{QStringLiteral("serverDisableLocalVisualAudio"), serverDisableLocalVisualAudio}});
+            onNetworkStatusChanged(networkController->statusText());
+        }
         updateRemoteWebServer();
         savePersistentSettings();
     });
@@ -499,6 +566,8 @@ void YourClassName::openNetworkSettingsDialog() {
     connect(stopButton, &QPushButton::clicked, &dialog, [=]() {
         const NetworkMode previousNetworkMode = networkMode;
         networkMode = NetworkMode::Disabled;
+        networkClientRequestedProcessingMode = -1;
+        networkClientRequestedServerLocalOutput = -1;
         if (modeCombo) {
             modeCombo->setCurrentIndex(modeCombo->findData(static_cast<int>(NetworkMode::Disabled)));
         }

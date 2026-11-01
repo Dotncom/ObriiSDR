@@ -127,6 +127,38 @@ void RemoteAudioPlayer::setMaximumQueuedMs(int milliseconds) {
     maximumQueuedMs = value;
 }
 
+void RemoteAudioPlayer::playNetworkPcmFrame(const QByteArray &pcmData) {
+    constexpr qint64 bytesPerMs = SAMPLE_RATE * qint64(sizeof(qint16)) / 1000;
+    if (pcmData.isEmpty() || pcmData.size() % int(sizeof(qint16)) != 0 ||
+        pcmData.size() > NETWORK_MAX_PENDING_MS * bytesPerMs) return;
+
+#ifdef _WIN32
+    cleanupCompletedBuffers();
+    const bool outputDrained = networkPrimed && waveOut && activeBlocks.isEmpty();
+#elif defined(FOBOSAPP_HAS_QT_AUDIO)
+    const bool outputDrained = networkPrimed && qtAudioOutput &&
+                               qtAudioOutput->state() == QAudio::IdleState;
+#else
+    const bool outputDrained = false;
+#endif
+    if (outputDrained) networkPrimed = false;
+
+    networkPendingFrames.append(pcmData);
+    networkPendingBytes += pcmData.size();
+    while (networkPendingBytes > NETWORK_MAX_PENDING_MS * bytesPerMs &&
+           networkPendingFrames.size() > 1) {
+        networkPendingBytes -= networkPendingFrames.takeFirst().size();
+        if (fobosVerboseLoggingEnabled()) qDebug() << "[NetworkAudio] dropped stale prebuffer frame";
+    }
+    if (!networkPrimed && networkPendingBytes < NETWORK_PREBUFFER_MS * bytesPerMs) return;
+    networkPrimed = true;
+    while (!networkPendingFrames.isEmpty()) {
+        QByteArray frame = networkPendingFrames.takeFirst();
+        networkPendingBytes -= frame.size();
+        playPcmFrame(frame);
+    }
+}
+
 void RemoteAudioPlayer::playPcmFrame(const QByteArray &pcmData) {
     if (pcmData.isEmpty()) {
         return;
@@ -249,6 +281,9 @@ void RemoteAudioPlayer::releaseBlock(AudioBlock *block) {
 
 void RemoteAudioPlayer::stop() {
     cleanupTimer.stop();
+    networkPendingFrames.clear();
+    networkPendingBytes = 0;
+    networkPrimed = false;
 
 #ifdef _WIN32
     if (waveOut) {

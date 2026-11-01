@@ -10,7 +10,8 @@ enum class DspIqFormat {
     Auto = 0,
     Cf32Le = 1,
     Cs16Le = 2,
-    BlockFloat16Le = 3
+    BlockFloat16Le = 3,
+    BlockFloat8 = 4
 };
 
 struct DspEncodedIq {

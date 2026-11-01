@@ -64,6 +64,13 @@ QList<ReceiverBackendRegistration> receiverBackendRegistrySnapshot() {
                          false,
                          true,
                          QStringLiteral("Ready when SoapySDR runtime and device modules are available")),
+        makeRegistration(QStringLiteral("uhd-native"),
+                         QStringLiteral("USRP UHD native RX"),
+                         ReceiverBackendStreamKind::UhdNative,
+                         ReceiverBackendFeatures(),
+                         false,
+                         true,
+                         QStringLiteral("RX ready when UHD C runtime and device are available; hardware validation pending")),
         makeRegistration(QStringLiteral("bladerf-native"),
                          QStringLiteral("bladeRF native"),
                          ReceiverBackendStreamKind::BladeRfNative,
@@ -71,7 +78,14 @@ QList<ReceiverBackendRegistration> receiverBackendRegistrySnapshot() {
                              ReceiverBackendFeature::PpmCorrection,
                          false,
                          false,
-                         QStringLiteral("Disabled until validated with physical bladeRF hardware"))
+                         QStringLiteral("Disabled until validated with physical bladeRF hardware")),
+        makeRegistration(QStringLiteral("virtual-signal"),
+                         QStringLiteral("Virtual IQ receiver"),
+                         ReceiverBackendStreamKind::VirtualSignal,
+                         ReceiverBackendFeatures(),
+                         true,
+                         true,
+                         QStringLiteral("Local IPC or TCP CF32 stream"))
     };
 }
 

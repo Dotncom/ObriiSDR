@@ -290,6 +290,7 @@ void TransmitDialog::buildUi() {
     backendCombo = new QComboBox(hardwareBox);
     backendCombo->addItem(QStringLiteral("Simulator / IQ file"), QStringLiteral("simulator-iq-file"));
     backendCombo->addItem(QStringLiteral("HackRF native"), QStringLiteral("hackrf-native"));
+    backendCombo->addItem(QStringLiteral("Virtual IQ receiver"), QStringLiteral("virtual-signal"));
     deviceCombo = new QComboBox(hardwareBox);
     frequencySpin = new QDoubleSpinBox(hardwareBox);
     frequencySpin->setRange(1.0, 7250.0);
@@ -331,6 +332,17 @@ void TransmitDialog::buildUi() {
     rfLockLabel->setStyleSheet(QStringLiteral("color: #d0a43b; font-weight: 600;"));
     backendLabel = new QLabel(hardwareBox);
     deviceLabel = new QLabel(hardwareBox);
+    virtualTransportLabel = new QLabel(hardwareBox);
+    virtualEndpointLabel = new QLabel(hardwareBox);
+    virtualHostLabel = new QLabel(hardwareBox);
+    virtualPortLabel = new QLabel(hardwareBox);
+    virtualTransportCombo = new QComboBox(hardwareBox);
+    virtualTransportCombo->addItem(QStringLiteral("Local IPC"), 0);
+    virtualTransportCombo->addItem(QStringLiteral("TCP/IP"), 1);
+    virtualLocalNameEdit = new QLineEdit(hardwareBox);
+    virtualHostEdit = new QLineEdit(hardwareBox);
+    virtualPortSpin = new QSpinBox(hardwareBox);
+    virtualPortSpin->setRange(1, 65535);
     rfLabel = new QLabel(hardwareBox);
     basebandLabel = new QLabel(hardwareBox);
     deviceRateLabel = new QLabel(hardwareBox);
@@ -354,7 +366,15 @@ void TransmitDialog::buildUi() {
     hardware->addWidget(watchdogSpin, 3, 1);
     hardware->addWidget(rfAmpCheck, 3, 2);
     hardware->addWidget(armCheck, 3, 3);
-    hardware->addWidget(rfLockLabel, 4, 0, 1, 4);
+    hardware->addWidget(virtualTransportLabel, 4, 0);
+    hardware->addWidget(virtualTransportCombo, 4, 1);
+    hardware->addWidget(virtualEndpointLabel, 4, 2);
+    hardware->addWidget(virtualLocalNameEdit, 4, 3);
+    hardware->addWidget(virtualHostLabel, 5, 0);
+    hardware->addWidget(virtualHostEdit, 5, 1);
+    hardware->addWidget(virtualPortLabel, 5, 2);
+    hardware->addWidget(virtualPortSpin, 5, 3);
+    hardware->addWidget(rfLockLabel, 6, 0, 1, 4);
     hardware->setColumnStretch(1, 1);
     hardware->setColumnStretch(3, 1);
 
@@ -632,6 +652,10 @@ void TransmitDialog::buildUi() {
     sourceTimer = new QTimer(this);
     sourceTimer->setInterval(10);
     sourceTimer->setTimerType(Qt::PreciseTimer);
+    virtualIqTimer = new QTimer(this);
+    virtualIqTimer->setInterval(10);
+    virtualIqTimer->setTimerType(Qt::PreciseTimer);
+    connect(virtualIqTimer, &QTimer::timeout, this, &TransmitDialog::pumpVirtualIq);
     microphoneLevelApplyTimer = new QTimer(this);
     microphoneLevelApplyTimer->setSingleShot(true);
     microphoneLevelApplyTimer->setInterval(120);
@@ -650,6 +674,8 @@ void TransmitDialog::buildUi() {
                 armCheck->setChecked(false);
                 updateModeUi();
             });
+    connect(virtualTransportCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, [this]() { updateModeUi(); });
     connect(armCheck, &QCheckBox::toggled, this, [this]() {
         if (!(activeBackend && activeBackend->isRunning())) updateTexts();
     });
@@ -1087,6 +1113,16 @@ void TransmitDialog::updateTexts() {
     backendCombo->setItemText(0, text(QStringLiteral("Simulator / IQ file"),
                                       QString::fromUtf8(u8"Симулятор / файл IQ")));
     backendCombo->setItemText(1, QStringLiteral("HackRF native"));
+    backendCombo->setItemText(2, text(QStringLiteral("Virtual IQ receiver"),
+                                      QString::fromUtf8(u8"Віртуальний IQ-приймач")));
+    virtualTransportLabel->setText(text(QStringLiteral("Transport:"),
+                                        QString::fromUtf8(u8"Транспорт:")));
+    virtualEndpointLabel->setText(text(QStringLiteral("Local channel:"),
+                                       QString::fromUtf8(u8"Локальний канал:")));
+    virtualHostLabel->setText(text(QStringLiteral("Receiver IP:"),
+                                   QString::fromUtf8(u8"IP приймача:")));
+    virtualPortLabel->setText(text(QStringLiteral("Port:"),
+                                   QString::fromUtf8(u8"Порт:")));
     const auto setSourceText = [this](const QString &id, const QString &english, const QString &ukrainian) {
         const int index = sourceCombo->findData(id);
         if (index >= 0) sourceCombo->setItemText(index, text(english, ukrainian));
@@ -1133,7 +1169,9 @@ void TransmitDialog::updateTexts() {
                                 : QFileInfo(mediaPath).fileName());
     startButton->setText(hackRfSelected()
                              ? text(QStringLiteral("Start RF transmission"), QString::fromUtf8(u8"Почати RF-передачу"))
-                             : text(QStringLiteral("Start simulation"), QString::fromUtf8(u8"Почати симуляцію")));
+                             : virtualSignalSelected()
+                                   ? text(QStringLiteral("Start virtual transmission"), QString::fromUtf8(u8"Почати віртуальну передачу"))
+                                   : text(QStringLiteral("Start simulation"), QString::fromUtf8(u8"Почати симуляцію")));
     stopButton->setText(text(QStringLiteral("Stop"), QString::fromUtf8(u8"Зупинити")));
     exportButton->setText(text(QStringLiteral("Export IQ..."), QString::fromUtf8(u8"Експорт IQ...")));
     signalLabButton->setText(text(QStringLiteral("Signal lab..."),
@@ -1168,14 +1206,34 @@ bool TransmitDialog::hackRfSelected() const {
     return backendCombo && backendCombo->currentData().toString() == QStringLiteral("hackrf-native");
 }
 
+bool TransmitDialog::virtualSignalSelected() const {
+    return backendCombo && backendCombo->currentData().toString() == QStringLiteral("virtual-signal");
+}
+
+void TransmitDialog::applyVirtualSignalEndpoint() {
+    VirtualSignalEndpoint endpoint;
+    endpoint.mode = virtualTransportCombo && virtualTransportCombo->currentData().toInt() == 1
+        ? VirtualSignalTransportMode::Tcp : VirtualSignalTransportMode::LocalIpc;
+    endpoint.localName = virtualLocalNameEdit ? virtualLocalNameEdit->text().trimmed()
+                                               : QStringLiteral("obrii-virtual-iq");
+    endpoint.host = virtualHostEdit ? virtualHostEdit->text().trimmed()
+                                    : QStringLiteral("127.0.0.1");
+    endpoint.port = virtualPortSpin ? static_cast<quint16>(virtualPortSpin->value()) : 17661;
+    virtualSignal.setEndpoint(endpoint);
+}
+
 bool TransmitDialog::selectedHackRfBusyForReception() const {
     return hackRfSelected() && deviceCombo && hackRfReceiverUseChecker &&
            hackRfReceiverUseChecker(deviceCombo->currentData().toInt());
 }
 
 TransmitterBackend *TransmitDialog::selectedBackend() {
-    return hackRfSelected() ? static_cast<TransmitterBackend *>(&hackRf)
-                            : static_cast<TransmitterBackend *>(&simulator);
+    if (hackRfSelected()) return &hackRf;
+    if (virtualSignalSelected()) {
+        applyVirtualSignalEndpoint();
+        return &virtualSignal;
+    }
+    return &simulator;
 }
 
 TxModulation TransmitDialog::selectedModulation() const {
@@ -1596,6 +1654,8 @@ void TransmitDialog::updateModeUi() {
     liveKeyButton->setVisible(liveKeySource);
     liveKeyButton->setEnabled(liveKeySource);
     const bool hardware = hackRfSelected();
+    const bool virtualOutput = virtualSignalSelected();
+    const bool virtualTcp = virtualTransportCombo->currentData().toInt() == 1;
     deviceCombo->setEnabled(hardware);
     deviceSampleRateCombo->setEnabled(hardware);
     bandwidthCombo->setEnabled(hardware);
@@ -1603,6 +1663,18 @@ void TransmitDialog::updateModeUi() {
     watchdogSpin->setEnabled(hardware);
     rfAmpCheck->setEnabled(hardware);
     armCheck->setEnabled(hardware);
+    virtualTransportLabel->setVisible(virtualOutput);
+    virtualTransportCombo->setVisible(virtualOutput);
+    virtualEndpointLabel->setVisible(virtualOutput && !virtualTcp);
+    virtualLocalNameEdit->setVisible(virtualOutput && !virtualTcp);
+    virtualHostLabel->setVisible(virtualOutput && virtualTcp);
+    virtualHostEdit->setVisible(virtualOutput && virtualTcp);
+    virtualPortLabel->setVisible(virtualOutput && virtualTcp);
+    virtualPortSpin->setVisible(virtualOutput && virtualTcp);
+    virtualTransportCombo->setEnabled(virtualOutput && !(activeBackend && activeBackend->isRunning()));
+    virtualLocalNameEdit->setEnabled(virtualOutput && !(activeBackend && activeBackend->isRunning()));
+    virtualHostEdit->setEnabled(virtualOutput && !(activeBackend && activeBackend->isRunning()));
+    virtualPortSpin->setEnabled(virtualOutput && !(activeBackend && activeBackend->isRunning()));
     frequencySpin->setMaximum(hardware ? 6000.0 : 7250.0);
     updateTexts();
 }
@@ -1721,7 +1793,8 @@ void TransmitDialog::startLaboratoryTransmission(
     }
     // Laboratory IQ is already the final shaped baseband. Bypass the normal
     // modulation bandwidth limiter so OFDM pilots, cyclic prefix and PAPR stay intact.
-    if (!activeBackend->writeIq(result.iq.constData(), result.iq.size(), &error)) {
+    if (activeBackend != &virtualSignal &&
+        !activeBackend->writeIq(result.iq.constData(), result.iq.size(), &error)) {
         activeBackend->stop();
         activeBackend = nullptr;
         armCheck->setChecked(false);
@@ -1739,6 +1812,15 @@ void TransmitDialog::startLaboratoryTransmission(
     exportButton->setEnabled(false);
     statsLabel->setText(result.summary);
     elapsedTimer.restart();
+    if (activeBackend == &virtualSignal) {
+        pendingVirtualIq = result.iq;
+        pendingVirtualIqOffset = 0;
+        virtualWaveformConnected = false;
+        virtualLinkStatusInitialized = false;
+        virtualIqTimer->start();
+        pumpVirtualIq();
+        if (activeBackend != &virtualSignal || !virtualSignal.isRunning()) return;
+    }
     progressTimer->start();
     setStatus(activeBackend->isRfCapable()
                   ? text(QStringLiteral("Laboratory IQ waveform is being transmitted by HackRF"),
@@ -1793,20 +1875,66 @@ void TransmitDialog::startTextSimulation(const TxConfiguration &configuration) {
 void TransmitDialog::beginTextWaveform() {
     if (!activeBackend || pendingTextIq.isEmpty()) return;
     QString error;
-    if (!writeActiveIq(pendingTextIq.constData(), pendingTextIq.size(), &error)) {
+    if (activeBackend != &virtualSignal &&
+        !writeActiveIq(pendingTextIq.constData(), pendingTextIq.size(), &error)) {
         armCheck->setChecked(false);
         stopTransmission(error);
         return;
     }
+    elapsedTimer.restart();
+    if (activeBackend == &virtualSignal) {
+        pendingVirtualIq = std::move(pendingTextIq);
+        pendingVirtualIqOffset = 0;
+        virtualWaveformConnected = false;
+        virtualLinkStatusInitialized = false;
+        virtualIqTimer->start();
+        pumpVirtualIq();
+        if (activeBackend != &virtualSignal || !virtualSignal.isRunning()) return;
+    }
     pendingTextIq.clear();
     pendingTextIq.squeeze();
-    elapsedTimer.restart();
     progressTimer->start();
     setStatus(activeBackend->isRfCapable()
                   ? text(QStringLiteral("Text waveform is being transmitted by HackRF."),
                          QString::fromUtf8(u8"Текстовий сигнал передається через HackRF."))
                   : text(QStringLiteral("Text baseband simulation is running."),
                          QString::fromUtf8(u8"Симуляція текстового baseband запущена.")));
+}
+void TransmitDialog::pumpVirtualIq() {
+    if (activeBackend != &virtualSignal || !virtualSignal.isRunning() ||
+        pendingVirtualIq.isEmpty()) {
+        virtualIqTimer->stop();
+        return;
+    }
+    if (!virtualSignal.pollConnection()) {
+        if (virtualWaveformConnected) pendingVirtualIqOffset = 0;
+        virtualWaveformConnected = false;
+        return;
+    }
+    if (!virtualWaveformConnected) {
+        virtualWaveformConnected = true;
+        pendingVirtualIqOffset = 0;
+        elapsedTimer.restart();
+    }
+    const int rate = (std::max)(1, activeConfiguration.sampleRate);
+    const qint64 target = (std::min)(static_cast<qint64>(pendingVirtualIq.size()),
+        (elapsedTimer.nsecsElapsed() * rate / 1000000000LL) + rate / 50);
+    while (pendingVirtualIqOffset < target) {
+        const int count = static_cast<int>((std::min)(
+            static_cast<qint64>(16384), target - pendingVirtualIqOffset));
+        QString error;
+        if (!virtualSignal.writeIq(pendingVirtualIq.constData() + pendingVirtualIqOffset,
+                                   count, &error)) {
+            stopTransmission(error);
+            return;
+        }
+        pendingVirtualIqOffset += count;
+    }
+    if (pendingVirtualIqOffset >= pendingVirtualIq.size()) {
+        pendingVirtualIq.clear();
+        pendingVirtualIqOffset = 0;
+        virtualIqTimer->stop();
+    }
 }
 void TransmitDialog::startMicrophoneSimulation(TxConfiguration configuration) {
 #ifdef FOBOSAPP_HAS_QT_MULTIMEDIA
@@ -1902,6 +2030,8 @@ void TransmitDialog::startMicrophoneSimulation(TxConfiguration configuration) {
     audioCapturePendingBytes.clear();
     microphoneDiagnosticFrames = 0;
     microphoneDiagnosticNonZeroFrames = 0;
+    microphoneTotalFrames = 0;
+    microphoneFramesMissingWarned = false;
     microphoneDcPreviousInput = 0.0f;
     microphoneDcPreviousOutput = 0.0f;
     microphoneSilenceWarned = false;
@@ -2140,7 +2270,8 @@ void TransmitDialog::startImageTransmission(TxConfiguration configuration) {
         QString error;
         activeConfiguration = configuration;
         if (!activeBackend || !activeBackend->start(configuration, &error) ||
-            !writeActiveIq(iq.constData(), iq.size(), &error)) {
+            (activeBackend != &virtualSignal &&
+             !writeActiveIq(iq.constData(), iq.size(), &error))) {
             if (activeBackend) activeBackend->stop();
             armCheck->setChecked(false);
             setStatus(error, true);
@@ -2155,6 +2286,14 @@ void TransmitDialog::startImageTransmission(TxConfiguration configuration) {
         stopButton->setEnabled(true);
         sourceCombo->setEnabled(false);
         statsLabel->setText(media.summary);
+        if (activeBackend == &virtualSignal) {
+            pendingVirtualIq = iq;
+            pendingVirtualIqOffset = 0;
+            virtualWaveformConnected = false;
+            virtualLinkStatusInitialized = false;
+            virtualIqTimer->start();
+            pumpVirtualIq();
+        }
         setStatus(text(QStringLiteral("SSTV image transmission is running."),
                        QString::fromUtf8(u8"Передача зображення SSTV працює.")));
         return;
@@ -2608,6 +2747,7 @@ void TransmitDialog::processMicrophoneBytes(const QByteArray &newBytes) {
     microphonePeakDb = 20.0f * std::log10((std::max)(peak, 1.0e-6f));
     microphoneDiagnosticFrames += samples;
     microphoneDiagnosticNonZeroFrames += nonZeroFrames;
+    microphoneTotalFrames += samples;
     if (!microphoneDiagnosticTimer.isValid() || microphoneDiagnosticTimer.elapsed() >= 1000) {
         qDebug().noquote() << "[TX audio] microphone PCM"
                            << "frames" << microphoneDiagnosticFrames
@@ -2658,6 +2798,22 @@ void TransmitDialog::updateProgress() {
         progressTimer->stop();
         return;
     }
+    if (activeBackend == &virtualSignal) {
+        const bool connected = virtualSignal.pollConnection();
+        if (!virtualLinkStatusInitialized || connected != virtualLinkWasConnected) {
+            virtualLinkStatusInitialized = true;
+            virtualLinkWasConnected = connected;
+            setStatus(connected
+                          ? text(QStringLiteral("Virtual IQ receiver connected"),
+                                 QString::fromUtf8(u8"Віртуальний IQ-приймач підключений"))
+                          : text(QStringLiteral("Waiting for virtual IQ receiver"),
+                                 QString::fromUtf8(u8"Очікування віртуального IQ-приймача")));
+        }
+        if (textSimulation && !virtualWaveformConnected) {
+            progressBar->setValue(0);
+            return;
+        }
+    }
     const double elapsed = elapsedTimer.elapsed() / 1000.0;
     const double denominator = (std::max)(0.001, plannedDurationSeconds);
     const bool audioFile = sourceCombo->currentData().toString() == QStringLiteral("audio-file") &&
@@ -2666,6 +2822,25 @@ void TransmitDialog::updateProgress() {
                                 ? static_cast<double>(mediaPosition) / mediaAudio.size()
                                 : elapsed / denominator;
     progressBar->setValue((std::min)(1000, qRound(1000.0 * progress)));
+#ifdef FOBOSAPP_HAS_QT_MULTIMEDIA
+    const QString source = sourceCombo->currentData().toString();
+    if (activeBackend == &virtualSignal &&
+        (source == QStringLiteral("microphone") ||
+         source == QStringLiteral("microphone-ptt"))) {
+        statsLabel->setText(text(QStringLiteral("Mic PCM: %1 frames | RMS %2 dBFS | peak %3 dBFS"),
+                                 QString::fromUtf8(u8"Мікр. PCM: %1 кадрів | RMS %2 dBFS | пік %3 dBFS"))
+                                .arg(microphoneTotalFrames)
+                                .arg(microphoneRmsDb, 0, 'f', 1)
+                                .arg(microphonePeakDb, 0, 'f', 1));
+        if (!microphoneFramesMissingWarned && elapsed >= 2.0 &&
+            microphoneTotalFrames == 0) {
+            microphoneFramesMissingWarned = true;
+            setStatus(text(QStringLiteral("Microphone opened, but no PCM frames arrived. Try another input or refresh the device list."),
+                           QString::fromUtf8(u8"Мікрофон відкрився, але PCM-кадри не надходять. Спробуйте інший вхід або оновіть список пристроїв.")),
+                      true);
+        }
+    }
+#endif
     if (activeBackend == &hackRf) {
         if (hackRf.streamStarted() && !hackRf.hardwareStreamAlive()) {
             ++hackRfStoppedStreamPolls;
@@ -2710,7 +2885,8 @@ void TransmitDialog::updateProgress() {
         // waveform's measured duration while retaining the watchdog for live TX.
         safetyLimit = (std::max)(safetyLimit, plannedDurationSeconds + 5.0);
     }
-    if ((textSimulation && elapsed >= plannedDurationSeconds) || elapsed >= safetyLimit) {
+    if ((textSimulation && elapsed >= plannedDurationSeconds) ||
+        (activeBackend != &virtualSignal && elapsed >= safetyLimit)) {
         stopTransmission(textSimulation
                              ? text(activeBackend->isRfCapable() ? QStringLiteral("Transmission complete")
                                                                 : QStringLiteral("Simulation complete"),
@@ -2722,7 +2898,20 @@ void TransmitDialog::updateProgress() {
 }
 
 void TransmitDialog::stopTransmission(const QString &reason) {
+    const bool virtualMicrophone = activeBackend == &virtualSignal &&
+        (sourceCombo->currentData().toString() == QStringLiteral("microphone") ||
+         sourceCombo->currentData().toString() == QStringLiteral("microphone-ptt"));
+    if (virtualMicrophone) {
+        setStatus(text(QStringLiteral("Stopping microphone capture..."),
+                       QString::fromUtf8(u8"Зупинка захоплення мікрофона...")));
+        statusLabel->repaint();
+    }
     progressTimer->stop();
+    if (virtualIqTimer) virtualIqTimer->stop();
+    pendingVirtualIq.clear();
+    pendingVirtualIqOffset = 0;
+    virtualWaveformConnected = false;
+    virtualLinkStatusInitialized = false;
     hackRfStoppedStreamPolls = 0;
     if (ft8StartTimer) ft8StartTimer->stop();
     pendingTextIq.clear();
@@ -2739,6 +2928,8 @@ void TransmitDialog::stopTransmission(const QString &reason) {
     audioCapturePendingBytes.clear();
     microphoneDiagnosticFrames = 0;
     microphoneDiagnosticNonZeroFrames = 0;
+    microphoneTotalFrames = 0;
+    microphoneFramesMissingWarned = false;
     microphoneDcPreviousInput = 0.0f;
     microphoneDcPreviousOutput = 0.0f;
     microphoneSilenceWarned = false;
@@ -2750,6 +2941,11 @@ void TransmitDialog::stopTransmission(const QString &reason) {
         windowsMicrophoneCapture = nullptr;
     }
 #endif
+    if (virtualMicrophone) {
+        setStatus(text(QStringLiteral("Closing virtual IQ link..."),
+                       QString::fromUtf8(u8"Закриття віртуального IQ-каналу...")));
+        statusLabel->repaint();
+    }
     const bool hadSamples = activeBackend == &simulator && !simulator.capturedIq().isEmpty();
     QString dmrError;
     if (activeBackend && activeBackend->isRunning() && dmrCallActive) {
@@ -2916,6 +3112,14 @@ void TransmitDialog::loadSettings() {
                                            QStringLiteral("simulator-iq-file")).toString();
     const int backendIndex = backendCombo->findData(backend);
     if (backendIndex >= 0) backendCombo->setCurrentIndex(backendIndex);
+    const int virtualTransport = settings.value(QStringLiteral("transmit/virtualTransport"), 0).toInt();
+    const int virtualTransportIndex = virtualTransportCombo->findData(virtualTransport);
+    if (virtualTransportIndex >= 0) virtualTransportCombo->setCurrentIndex(virtualTransportIndex);
+    virtualLocalNameEdit->setText(settings.value(QStringLiteral("transmit/virtualLocalName"),
+                                                 QStringLiteral("obrii-virtual-iq")).toString());
+    virtualHostEdit->setText(settings.value(QStringLiteral("transmit/virtualHost"),
+                                            QStringLiteral("127.0.0.1")).toString());
+    virtualPortSpin->setValue(settings.value(QStringLiteral("transmit/virtualPort"), 17661).toInt());
     const int deviceIndex = settings.value(QStringLiteral("transmit/hackRfDeviceIndex"), 0).toInt();
     const int deviceComboIndex = deviceCombo->findData(deviceIndex);
     if (deviceComboIndex >= 0) deviceCombo->setCurrentIndex(deviceComboIndex);
@@ -2973,6 +3177,10 @@ void TransmitDialog::saveSettings() const {
     settings.setValue(QStringLiteral("transmit/dmrPrivacyKeyId"), dmrPrivacyKeyIdSpin->value());
     settings.setValue(QStringLiteral("transmit/dmrPrivacyKeyHex"), dmrPrivacyKeyEdit->text().trimmed());
     settings.setValue(QStringLiteral("transmit/backend"), backendCombo->currentData().toString());
+    settings.setValue(QStringLiteral("transmit/virtualTransport"), virtualTransportCombo->currentData().toInt());
+    settings.setValue(QStringLiteral("transmit/virtualLocalName"), virtualLocalNameEdit->text().trimmed());
+    settings.setValue(QStringLiteral("transmit/virtualHost"), virtualHostEdit->text().trimmed());
+    settings.setValue(QStringLiteral("transmit/virtualPort"), virtualPortSpin->value());
     settings.setValue(QStringLiteral("transmit/hackRfDeviceIndex"), deviceCombo->currentData().toInt());
     settings.setValue(QStringLiteral("transmit/deviceSampleRate"), deviceSampleRateCombo->currentData().toInt());
     settings.setValue(QStringLiteral("transmit/bandwidthHz"), bandwidthCombo->currentData().toUInt());

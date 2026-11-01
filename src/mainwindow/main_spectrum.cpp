@@ -265,6 +265,22 @@ void YourClassName::populateSampleRates() {
     }
 
     QSignalBlocker sampleBoxBlocker(sampleBox);
+    if (isVirtualSignalSelected()) {
+        sampleBox->clear();
+        const QVector<double> virtualRates = {
+            12000.0, 24000.0, 48000.0, 96000.0, 192000.0,
+            1000000.0, 2000000.0, 5000000.0, 8000000.0, 10000000.0,
+            20000000.0, 50000000.0, 100000000.0
+        };
+        for (const double rate : virtualRates) sampleBox->addItem(formatSampleRate(rate), rate);
+        int index = sampleBox->findData(pendingSettings.sampleRate);
+        if (index < 0) {
+            sampleBox->addItem(formatSampleRate(pendingSettings.sampleRate), pendingSettings.sampleRate);
+            index = sampleBox->count() - 1;
+        }
+        sampleBox->setCurrentIndex(index);
+        return;
+    }
     if (isHackRfNativeSelected()) {
         sampleBox->clear();
         const QVector<double> hackRfRates = {
@@ -289,7 +305,7 @@ void YourClassName::populateSampleRates() {
         qDebug() << "[HackRF] using native sample-rate list";
         return;
     }
-    if (isSoapySdrSelected()) {
+    if (isSoapySdrSelected() || isUhdNativeSelected()) {
         sampleBox->clear();
         const QVector<double> soapyRates = {
             1000000.0,

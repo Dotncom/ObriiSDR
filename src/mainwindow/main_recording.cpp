@@ -162,6 +162,8 @@ QJsonObject YourClassName::recordingScientificSnapshot(const QString &phase) con
         backend = QStringLiteral("rtlsdr-native");
     } else if (isSoapySdrSelected()) {
         backend = QStringLiteral("soapysdr");
+    } else if (isUhdNativeSelected()) {
+        backend = QStringLiteral("uhd-native");
     } else if (isBladeRfNativeSelected()) {
         backend = QStringLiteral("bladerf-native");
     } else if (isHackRfNativeSelected()) {

@@ -28,6 +28,7 @@
 #include "zoomdensitydialog.h"
 #include "transmitdialog.h"
 #include "ft8stationdialog.h"
+#include "openradiolabdialog.h"
 #include "dspflowpanel.h"
 #include "wirelesslabdialog.h"
 #include "analyzerframechannel.h"
@@ -39,6 +40,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDateTime>
+#include <chrono>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -381,6 +383,9 @@ YourClassName::YourClassName(QWidget *parent)
     markTranslatable(digitalClearButton, QStringLiteral("clear"), QStringLiteral("Clear"));
     ft8StationButton = new QPushButton(QStringLiteral("FT8 Station..."), digitalWidget);
     markTranslatable(ft8StationButton, QStringLiteral("ft8_station"), QStringLiteral("FT8 Station..."));
+    QPushButton *openRadioButton = new QPushButton(QStringLiteral("Open Radio..."), digitalWidget);
+    markTranslatable(openRadioButton, QStringLiteral("open_radio_lab"), QStringLiteral("Open Radio..."));
+    openRadioButton->setToolTip(QStringLiteral("M17, AX.25/KISS and optional open modem backends"));
     digitalStatusLabel = new QLabel(uiText(QStringLiteral("digital_audio_idle"), QStringLiteral("Digital audio decoder idle")), digitalWidget);
     digitalStatusLabel->setWordWrap(false);
     digitalStatusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -532,6 +537,7 @@ YourClassName::YourClassName(QWidget *parent)
     digitalHeaderLayout->addWidget(dmrBackendCombo);
     digitalHeaderLayout->addStretch();
     digitalHeaderLayout->addWidget(ft8StationButton);
+    digitalHeaderLayout->addWidget(openRadioButton);
     digitalHeaderLayout->addWidget(digitalClearButton);
     digitalLayout->addLayout(digitalHeaderLayout);
     digitalLayout->addWidget(dmrPrivacyCapabilityLabel);
@@ -1429,6 +1435,18 @@ YourClassName::YourClassName(QWidget *parent)
         QStringLiteral("hackrf_rx_settings_tooltip"),
         QStringLiteral("RF path, filtering, clock, Opera Cake, sweep and diagnostics")));
     hackRfSettingsButton->hide();
+    uhdSettingsButton = new QPushButton("USRP UHD RX...", this);
+    markTranslatable(uhdSettingsButton, QStringLiteral("uhd_rx_settings"),
+                     QStringLiteral("USRP UHD RX..."));
+    uhdSettingsButton->hide();
+    virtualSignalSettingsButton = new QPushButton("Virtual IQ...", this);
+    markTranslatable(virtualSignalSettingsButton,
+                     QStringLiteral("virtual_iq_settings"),
+                     QStringLiteral("Virtual IQ..."));
+    virtualSignalSettingsButton->setToolTip(uiText(
+        QStringLiteral("virtual_iq_settings_tooltip"),
+        QStringLiteral("Configure local IPC or TCP input for generated IQ signals")));
+    virtualSignalSettingsButton->hide();
     appSettingsButton = new QPushButton("Settings...", this);
     markTranslatable(appSettingsButton, QStringLiteral("settings"), QStringLiteral("Settings..."));
     dspPathButton = new QPushButton("DSP", this);
@@ -2155,6 +2173,25 @@ YourClassName::YourClassName(QWidget *parent)
                                  QStringLiteral("Obrii Analyzer"),
                                  uiText(QStringLiteral("obrii_analyzer_launch_failed"),
                                         QStringLiteral("ObriiAnalyzer executable was not found or could not be started.")));
+        }
+    });
+    auto *fpgaLabButton = new QPushButton(QStringLiteral("Obrii FPGA Lab..."), spectrumMeasurementBox);
+    fpgaLabButton->setToolTip(uiText(
+        QStringLiteral("fpga_lab_tooltip"),
+        QStringLiteral("Open the standalone FPGA project editor while Obrii SDR keeps running.")));
+    spectrumScienceActionLayout->addWidget(fpgaLabButton, 6, 0, 1, 2);
+    connect(fpgaLabButton, &QPushButton::clicked, this, [this]() {
+        const QString executableName = QStringLiteral("ObriiFpgaLab")
+#ifdef _WIN32
+            + QStringLiteral(".exe")
+#endif
+            ;
+        const QString executable = QDir(QCoreApplication::applicationDirPath()).filePath(executableName);
+        if (!QFileInfo::exists(executable) ||
+            !QProcess::startDetached(executable, {}, QCoreApplication::applicationDirPath())) {
+            QMessageBox::warning(this, QStringLiteral("Obrii FPGA Lab"),
+                uiText(QStringLiteral("fpga_lab_launch_failed"),
+                       QStringLiteral("ObriiFpgaLab executable was not found or could not be started.")));
         }
     });
     auto *multiSdrButton = new QPushButton(QStringLiteral("Multi-SDR..."), this);
@@ -3612,6 +3649,8 @@ YourClassName::YourClassName(QWidget *parent)
     receiverSection.contentLayout->addLayout(gainSliderLayout);
     receiverSection.contentLayout->addLayout(rtlGainLayout);
     receiverSection.contentLayout->addWidget(hackRfSettingsButton);
+    receiverSection.contentLayout->addWidget(uhdSettingsButton);
+    receiverSection.contentLayout->addWidget(virtualSignalSettingsButton);
     receiverSection.contentLayout->addLayout(startStopLayout);
 
     CollapsibleSection frequencySection = createCollapsibleSection(
@@ -4249,7 +4288,7 @@ YourClassName::YourClassName(QWidget *parent)
             if (!isKnownHackRfSampleRate(pendingSettings.sampleRate)) {
                 pendingSettings.sampleRate = 10000000.0;
             }
-        } else if (isSoapySdrSelected()) {
+        } else if (isSoapySdrSelected() || isUhdNativeSelected()) {
             const QVector<double> soapyCommonRates = {
                 1000000.0, 1024000.0, 1536000.0, 2048000.0, 2400000.0,
                 3200000.0, 8000000.0, 10000000.0, 20000000.0, 50000000.0
@@ -4298,6 +4337,11 @@ YourClassName::YourClassName(QWidget *parent)
             &QPushButton::clicked,
             this,
             &YourClassName::showHackRfRxSettings);
+    connect(uhdSettingsButton, &QPushButton::clicked, this, &YourClassName::showUhdRxSettings);
+    connect(virtualSignalSettingsButton,
+            &QPushButton::clicked,
+            this,
+            &YourClassName::showVirtualSignalRxSettings);
     updateReceiverSpecificControls();
     connect(transmitButton, &QPushButton::clicked, this, &YourClassName::openTransmitDialog);
     connect(networkController, &NetworkController::statusChanged, this, &YourClassName::onNetworkStatusChanged);
@@ -4328,6 +4372,12 @@ YourClassName::YourClassName(QWidget *parent)
                 }
             }
             QTimer::singleShot(0, this, [this]() {
+                if (networkClientRequestedProcessingMode >= 0)
+                    sendRemoteControlCommand(QStringLiteral("setProcessingMode"));
+                if (networkClientRequestedServerLocalOutput >= 0)
+                    sendRemoteControlCommand(QStringLiteral("setServerLocalOutput"),
+                        {{QStringLiteral("serverDisableLocalVisualAudio"),
+                          networkClientRequestedServerLocalOutput != 0}});
                 sendRemoteControlCommand(QStringLiteral("requestServerState"));
                 if (isRemoteVfoProcessingMode() && runState == RadioRunState::Running)
                     sendRemoteControlCommand(QStringLiteral("start"));
@@ -4402,6 +4452,7 @@ YourClassName::YourClassName(QWidget *parent)
         }
     });
     connect(ft8StationButton, &QPushButton::clicked, this, &YourClassName::openFt8StationDialog);
+    connect(openRadioButton, &QPushButton::clicked, this, &YourClassName::openOpenRadioLab);
     connect(digitalClearButton, &QPushButton::clicked, this, [this]() {
         if (digitalTextEdit) {
             digitalTextEdit->clear();
@@ -6483,6 +6534,7 @@ ReceiverCalibrationContext YourClassName::receiverCalibrationContext(const Radio
         isRtlTcpSelected() ? QStringLiteral("rtl-tcp") :
         isHackRfNativeSelected() ? QStringLiteral("hackrf-native") :
         isSoapySdrSelected() ? QStringLiteral("soapy") :
+        isUhdNativeSelected() ? QStringLiteral("uhd-native") :
         selectedFobosDeviceInfo().apiKind == FobosApiKind::Agile ? QStringLiteral("fobos-agile") : QStringLiteral("fobos-standard");
     context.inputMode = settings.inputMode;
     context.sampleRateHz = settings.sampleRate;
@@ -7369,15 +7421,71 @@ void YourClassName::connectDataProcessorSignals() {
             Qt::QueuedConnection);
 
     connect(processor,
+            &DataProcessor::virtualSignalMetadataChanged,
+            this,
+            [this, connectedProcessor](double sampleRateHz, double centerFrequencyHz) {
+                if (connectedProcessor != processor || !isVirtualSignalSelected() ||
+                    !pendingSettings.virtualSignalFollowMetadata) return;
+                if (!std::isfinite(sampleRateHz) || sampleRateHz < 1000.0 ||
+                    !std::isfinite(centerFrequencyHz)) return;
+                pendingSettings.sampleRate = sampleRateHz;
+                pendingSettings.centerFrequency = centerFrequencyHz;
+                pendingSettings.actualFrequency = centerFrequencyHz;
+                if (sampleBox) {
+                    QSignalBlocker blocker(sampleBox);
+                    int index = sampleBox->findData(sampleRateHz);
+                    if (index < 0) {
+                        sampleBox->addItem(formatSampleRate(sampleRateHz), sampleRateHz);
+                        index = sampleBox->count() - 1;
+                    }
+                    sampleBox->setCurrentIndex(index);
+                }
+                if (frequencyControl) {
+                    QSignalBlocker blocker(frequencyControl);
+                    frequencyControl->setValueHz(centerFrequencyHz);
+                }
+                publishSettingsToGlobals();
+                settingRange();
+            },
+            Qt::QueuedConnection);
+
+    connect(processor,
             &DataProcessor::iqFrameReady,
             this,
-            [this, connectedProcessor](const QByteArray &iqData, double sampleRate, int sampleCount,
-                                       bool channelizedFrame) {
+            [this, connectedProcessor, lastReportNs = qint64(0), maxQueueNs = qint64(0),
+             maxHandlerNs = qint64(0), queueNsSum = qint64(0), frameCount = quint64(0)]
+                (const QByteArray &iqData, double sampleRate, int sampleCount,
+                 bool channelizedFrame, qint64 queuedAtNs) mutable {
                 if (connectedProcessor != processor) {
                     return;
                 }
+                const auto nowNs = [] {
+                    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch()).count();
+                };
+                const qint64 startedNs = nowNs();
                 if (!dmrAudioIqProducerNeeded()) {
                     handleLocalIqFrame(iqData, sampleRate, sampleCount, channelizedFrame);
+                }
+                const qint64 finishedNs = nowNs();
+                const qint64 queueNs = (std::max)(qint64(0), startedNs - queuedAtNs);
+                maxQueueNs = (std::max)(maxQueueNs, queueNs);
+                maxHandlerNs = (std::max)(maxHandlerNs, finishedNs - startedNs);
+                queueNsSum += queueNs;
+                ++frameCount;
+                if (lastReportNs == 0) lastReportNs = finishedNs;
+                if (finishedNs - lastReportNs >= 3000000000LL) {
+                    if (fobosVerboseLoggingEnabled()) {
+                        qDebug() << "[IQ GUI queue] frames" << frameCount
+                                 << "avgWaitMs" << double(queueNsSum) / double(frameCount) / 1.0e6
+                                 << "maxWaitMs" << double(maxQueueNs) / 1.0e6
+                                 << "maxHandlerMs" << double(maxHandlerNs) / 1.0e6;
+                    }
+                    lastReportNs = finishedNs;
+                    maxQueueNs = 0;
+                    maxHandlerNs = 0;
+                    queueNsSum = 0;
+                    frameCount = 0;
                 }
             },
             Qt::QueuedConnection);
@@ -7452,9 +7560,16 @@ bool YourClassName::applyCenterFrequencyToHardwareIfNeeded(const RadioSettings &
     }
 
     const QString reasonText = QString::fromUtf8(reason ? reason : "");
+    if (isVirtualSignalSelected()) {
+        if (processor) processor->setCenterFrequencyHint(pendingSettings.centerFrequency);
+        pendingSettings.actualFrequency = pendingSettings.centerFrequency;
+        if (hardwareSettingsApplied) appliedHardwareSettings = pendingSettings;
+        return true;
+    }
     const bool directExternalRetune =
         isRtlBackendSelected() ||
         isSoapySdrSelected() ||
+        isUhdNativeSelected() ||
         isBladeRfNativeSelected() ||
         isHackRfNativeSelected();
     if (directExternalRetune) {
@@ -7464,6 +7579,8 @@ bool YourClassName::applyCenterFrequencyToHardwareIfNeeded(const RadioSettings &
                                         ? QStringLiteral("bladeRF")
                                     : isSoapySdrSelected()
                                         ? QStringLiteral("SoapySDR")
+                                    : isUhdNativeSelected()
+                                        ? QStringLiteral("UHD")
                                         : QStringLiteral("RTL");
         const uint64_t preRetuneIqEpoch =
             processor ? processor->beginIqRetuneBarrier() : 0;
@@ -7819,7 +7936,7 @@ void YourClassName::updateUiForRunState() {
     if (fobosButton) fobosButton->setEnabled(idle);
     if (modeBox) modeBox->setEnabled(true);
     if (sampleBox) sampleBox->setEnabled(true);
-    if (clkBox) clkBox->setEnabled(idle && !isHackRfNativeSelected());
+    if (clkBox) clkBox->setEnabled(idle && !isHackRfNativeSelected() && !isVirtualSignalSelected());
     if (fftComboBox) {
         fftComboBox->setEnabled((idle || runState == RadioRunState::Running) &&
                                 !fftBinWidthModeEnabled);
@@ -8664,8 +8781,10 @@ void YourClassName::startFobosProcessing() {
     const bool rtlTcpSelected = isRtlTcpSelected();
     const bool rtlSdrNativeSelected = isRtlSdrNativeSelected();
     const bool soapySdrSelected = isSoapySdrSelected();
+    const bool uhdNativeSelected = isUhdNativeSelected();
     const bool bladeRfNativeSelected = isBladeRfNativeSelected();
     const bool hackRfNativeSelected = isHackRfNativeSelected();
+    const bool virtualSignalSelected = isVirtualSignalSelected();
     if (bladeRfNativeSelected && !BLADERF_NATIVE_BACKEND_ENABLED) {
         qWarning() << "[bladeRF] start rejected: native backend is disabled until physical hardware validation";
         clearLiveSpectrumSnapshot();
@@ -8674,8 +8793,9 @@ void YourClassName::startFobosProcessing() {
         return;
     }
     const bool rtlBackendSelected = rtlTcpSelected || rtlSdrNativeSelected;
-    const bool externalBackendSelected = rtlBackendSelected || soapySdrSelected ||
-                                         bladeRfNativeSelected || hackRfNativeSelected;
+    const bool externalBackendSelected = rtlBackendSelected || soapySdrSelected || uhdNativeSelected ||
+                                         bladeRfNativeSelected || hackRfNativeSelected ||
+                                         virtualSignalSelected;
     if (rtlBackendSelected) {
         normalizeRtlSdrSettings();
     }
@@ -8752,8 +8872,10 @@ void YourClassName::startFobosProcessing() {
                  << "native" << rtlSdrNativeSelected
                  << "tcp" << rtlTcpSelected
                  << "soapy" << soapySdrSelected
+                 << "uhd" << uhdNativeSelected
                  << "bladerf" << bladeRfNativeSelected
                  << "hackrf" << hackRfNativeSelected
+                 << "virtual" << virtualSignalSelected
                  << "host" << RTL_TCP_DEFAULT_HOST
                  << "port" << RTL_TCP_DEFAULT_PORT
                  << "frequency" << pendingSettings.centerFrequency
@@ -8874,10 +8996,12 @@ void YourClassName::startFobosProcessing() {
     updateIqFrameProducerSettings();
     qDebug() << "[FobosLifecycle] starting DataProcessor"
              << "backend" << (hackRfNativeSelected ? "hackrf-native" :
+                              (virtualSignalSelected ? "virtual-signal" :
                               (bladeRfNativeSelected ? "bladerf-native" :
                                (soapySdrSelected ? "soapy-sdr" :
+                               (uhdNativeSelected ? "uhd-native" :
                                (rtlSdrNativeSelected ? "rtl-sdr-native" :
-                                (rtlTcpSelected ? "rtl_tcp" : fobosApiKindName(activeFobosApiKind))))))
+                                (rtlTcpSelected ? "rtl_tcp" : fobosApiKindName(activeFobosApiKind))))))))
              << "device" << activeFobosDevice()
              << "sampleRate" << pendingSettings.sampleRate
              << "syncEnabled" << pendingSettings.syncEnabled
@@ -8900,6 +9024,10 @@ void YourClassName::startFobosProcessing() {
         processor->startProcessing(makeSoapySdrStreamDescriptor(queueAudioBlocks,
                                                                 publishIqSnapshot,
                                                                 emitProcessorIqFrames));
+    } else if (uhdNativeSelected) {
+        processor->startProcessing(makeUhdNativeStreamDescriptor(queueAudioBlocks,
+                                                                 publishIqSnapshot,
+                                                                 emitProcessorIqFrames));
     } else if (bladeRfNativeSelected) {
         processor->startProcessing(makeBladeRfNativeStreamDescriptor(queueAudioBlocks,
                                                                      publishIqSnapshot,
@@ -8908,6 +9036,10 @@ void YourClassName::startFobosProcessing() {
         processor->startProcessing(makeHackRfNativeStreamDescriptor(queueAudioBlocks,
                                                                     publishIqSnapshot,
                                                                     emitProcessorIqFrames));
+    } else if (virtualSignalSelected) {
+        processor->startProcessing(makeVirtualSignalStreamDescriptor(queueAudioBlocks,
+                                                                      publishIqSnapshot,
+                                                                      emitProcessorIqFrames));
     } else {
         processor->startProcessing(makeFobosStreamDescriptor(activeFobosDevice(),
                                                              activeFobosApiKind,
@@ -9208,6 +9340,11 @@ void YourClassName::checkStreamStartup() {
                 qDebug() << "[FobosLifecycle] deferred audio start skipped because SDR is no longer running";
             }
         }
+        return;
+    }
+
+    // A virtual receiver can legitimately wait for its first transmitter indefinitely.
+    if (isVirtualSignalSelected()) {
         return;
     }
 

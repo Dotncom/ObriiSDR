@@ -2254,6 +2254,7 @@ bool typeHasInput(const QString &type) {
         QStringLiteral("gpio"), QStringLiteral("transmitter"), QStringLiteral("presets"),
         QStringLiteral("calibration"), QStringLiteral("spectrum_replay"),
         QStringLiteral("wireless_lab"),
+        QStringLiteral("open_radio_lab"),
         QStringLiteral("radio_propagation"),
         QStringLiteral("application_settings")
     };
@@ -2273,6 +2274,7 @@ bool typeHasOutput(const QString &type) {
         QStringLiteral("spectrum_measurement"), QStringLiteral("zoom_spectrum"), QStringLiteral("zero_span"),
         QStringLiteral("research_analysis"), QStringLiteral("oscilloscope_view"),
         QStringLiteral("wireless_lab"),
+        QStringLiteral("open_radio_lab"),
         QStringLiteral("radio_propagation"),
         QStringLiteral("constellation_view"), QStringLiteral("eye_diagram_view"),
         QStringLiteral("digital_sync_view"),
@@ -2329,6 +2331,7 @@ QStringList allBlockTypes() {
             QStringLiteral("zoom_spectrum"), QStringLiteral("zoom_density"), QStringLiteral("zero_span"),
             QStringLiteral("research_analysis"), QStringLiteral("research_interference"),
             QStringLiteral("wireless_lab"),
+            QStringLiteral("open_radio_lab"),
             QStringLiteral("radio_propagation"),
             QStringLiteral("research_statistics"), QStringLiteral("research_iq"),
             QStringLiteral("research_dual_input"), QStringLiteral("research_analyzer"),
@@ -2377,6 +2380,7 @@ QString blockCategory(const QString &type) {
         return QStringLiteral("measurement");
     if (type == QStringLiteral("decoder") || type == QStringLiteral("dmr_decoder") ||
         type == QStringLiteral("cw_decoder") || type == QStringLiteral("sstv_decoder") ||
+        type == QStringLiteral("open_radio_lab") ||
         type.startsWith(QStringLiteral("digital_"))) return QStringLiteral("digital");
     if (type.startsWith(QStringLiteral("gnss_")) || type == QStringLiteral("qth_map"))
         return QStringLiteral("navigation");
@@ -2792,6 +2796,10 @@ public:
         }
         if (nativeWaterfall_) delete nativeWaterfall_.data();
         nativeView_ = view;
+        if (!nativeWaterfall3DActive_) {
+            applyNativeWaterfallSettings();
+            return;
+        }
         nativeWaterfall_ = new MyWaterfallWidget(view->viewport());
         nativeWaterfall_->setObjectName(QStringLiteral("dspWorkspaceNativeWaterfall_%1").arg(id_));
         nativeWaterfall_->setPauseControlVisible(true);
@@ -3018,6 +3026,10 @@ private:
             value(QStringLiteral("displayMode"), 0).toInt(), 0, 2);
         const bool wasNativeActive = nativeWaterfall3DActive_;
         nativeWaterfall3DActive_ = displayMode != 0;
+        if (nativeWaterfall3DActive_ && !nativeWaterfall_ && nativeView_ && nativeView_->viewport()) {
+            attachNativeWorkspaceView(nativeView_);
+            return;
+        }
         nativeSecondGraph_ = value(QStringLiteral("secondSpectrum"), false).toBool();
         nativeColorSpectrum_ = value(QStringLiteral("colorSpectrum"), true).toBool();
         nativeContrast_ = static_cast<float>((std::clamp)(
@@ -7186,7 +7198,7 @@ void DspFlowPanel::setSpectrumComputeOptions(const SpectrumComputeOptions &optio
     if (int(normalized.mode) < 0 || int(normalized.mode) > 2) normalized.mode = SpectrumComputeMode::Local;
     if (normalized.backend < 0 || normalized.backend > 2) normalized.backend = 1;
     if (int(normalized.iqFormat) < int(DspIqFormat::Auto) ||
-        int(normalized.iqFormat) > int(DspIqFormat::BlockFloat16Le)) normalized.iqFormat = DspIqFormat::Auto;
+        int(normalized.iqFormat) > int(DspIqFormat::BlockFloat8)) normalized.iqFormat = DspIqFormat::Auto;
     normalized.uploadLimitMBps = std::clamp(normalized.uploadLimitMBps, 1, 2000);
     if (spectrumComputeOptions_ == normalized) return;
     spectrumComputeOptions_ = normalized;
@@ -7623,6 +7635,7 @@ QString DspFlowPanel::blockTitle(const QString &type) const {
     if (type == QStringLiteral("zero_span")) return QStringLiteral("Zero-span");
     if (type == QStringLiteral("research_analysis")) return ukrainian_ ? QStringLiteral("Дослідницький аналіз") : QStringLiteral("Research analysis");
     if (type == QStringLiteral("wireless_lab")) return ukrainian_ ? QStringLiteral("Бездротова лабораторія (бета)") : QStringLiteral("Wireless lab (beta)");
+    if (type == QStringLiteral("open_radio_lab")) return ukrainian_ ? QStringLiteral("Відкрите радіо") : QStringLiteral("Open radio");
     if (type == QStringLiteral("radio_propagation")) return ukrainian_ ? QStringLiteral("Радіопоширення / КХ") : QStringLiteral("Radio propagation / HF");
     if (type == QStringLiteral("research_interference")) return ukrainian_ ? QStringLiteral("Гребінки та завади") : QStringLiteral("Interference and combs");
     if (type == QStringLiteral("research_statistics")) return ukrainian_ ? QStringLiteral("Статистика сигналу") : QStringLiteral("Signal statistics");

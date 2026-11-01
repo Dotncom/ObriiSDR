@@ -6,6 +6,7 @@
 #include "gophertrunkbridge.h"
 #include "iqbuffer.h"
 #include "tuningutils.h"
+#include "openradiolabdialog.h"
 
 #include <QAbstractItemView>
 #include <QCoreApplication>
@@ -33,6 +34,22 @@
 #include <cstddef>
 #include <utility>
 #include <vector>
+
+void YourClassName::openOpenRadioLab() {
+    if (openRadioLabDialog) {
+        openRadioLabDialog->show();
+        openRadioLabDialog->raise();
+        openRadioLabDialog->activateWindow();
+        return;
+    }
+    openRadioLabDialog = new OpenRadioLabDialog(
+        normalizedUiLanguage(uiLanguage) == QStringLiteral("uk"), this);
+    connect(openRadioLabDialog, &QObject::destroyed, this, [this]() {
+        openRadioLabDialog = nullptr;
+    });
+    openRadioLabDialog->show();
+}
+
 void YourClassName::processSstvAudioFrame(const QByteArray &pcmData) {
     const bool suppressServerLocalOutput =
         networkMode == NetworkMode::Server &&

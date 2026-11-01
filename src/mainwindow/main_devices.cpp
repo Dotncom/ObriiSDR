@@ -7,9 +7,23 @@
 #include "receiverdeviceutils.h"
 
 #include <QDebug>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDoubleSpinBox>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QFormLayout>
+#include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QLabel>
+#include <QLineEdit>
 #include <QSignalBlocker>
+#include <QSpinBox>
+#include <QStyle>
+#include <QToolButton>
 
 #include <algorithm>
 #include <cmath>
@@ -102,6 +116,13 @@ void YourClassName::buildLocalReceiverDeviceChoices(QStringList &labels, QVector
 
     labels << QStringLiteral("SoapySDR auto (SoapySDR.dll)");
     values << SOAPY_SDR_DEVICE_INDEX;
+
+    labels << QStringLiteral("USRP UHD native auto (uhd.dll / libuhd.so)");
+    values << uhdNativeComboValue(0);
+
+    labels << uiText(QStringLiteral("virtual_iq_receiver"),
+                     QStringLiteral("Virtual IQ receiver (local / network)"));
+    values << VIRTUAL_SIGNAL_DEVICE_INDEX;
 
     if (labels.isEmpty()) {
         labels << uiText(QStringLiteral("no_fobos_devices_detected"),
@@ -212,6 +233,10 @@ QJsonArray YourClassName::receiverDeviceListToJson() const {
     values << hackRfNativeComboValue(0);
     labels << QStringLiteral("SoapySDR auto (server)");
     values << SOAPY_SDR_DEVICE_INDEX;
+    labels << QStringLiteral("USRP UHD native auto (server)");
+    values << uhdNativeComboValue(0);
+    labels << QStringLiteral("Virtual IQ receiver (server local / TCP)");
+    values << VIRTUAL_SIGNAL_DEVICE_INDEX;
 
     QJsonArray array;
     const int count = std::min(labels.size(), values.size());
@@ -503,6 +528,16 @@ bool YourClassName::isSoapySdrSelected() const {
     return selected == SOAPY_SDR_DEVICE_INDEX;
 }
 
+bool YourClassName::isUhdNativeSelected() const {
+    int selected = pendingSettings.deviceIndex;
+    if (comboBox) {
+        bool ok = false;
+        const int value = comboBox->currentData().toInt(&ok);
+        if (ok) selected = receiverDeviceIndexFromComboValue(value);
+    }
+    return isUhdNativeComboValue(selected);
+}
+
 bool YourClassName::isBladeRfNativeSelected() const {
     int selected = pendingSettings.deviceIndex;
     if (comboBox) {
@@ -551,6 +586,16 @@ bool YourClassName::isHackRfNativeSelected() const {
     return isHackRfNativeComboValue(selected);
 }
 
+bool YourClassName::isVirtualSignalSelected() const {
+    int selected = pendingSettings.deviceIndex;
+    if (comboBox) {
+        bool ok = false;
+        const int value = comboBox->currentData().toInt(&ok);
+        if (ok) selected = receiverDeviceIndexFromComboValue(value);
+    }
+    return selected == VIRTUAL_SIGNAL_DEVICE_INDEX;
+}
+
 int YourClassName::selectedHackRfNativeIndex() const {
     int selected = pendingSettings.deviceIndex;
     if (comboBox) {
@@ -568,8 +613,8 @@ bool YourClassName::isRtlBackendSelected() const {
 }
 
 bool YourClassName::isExternalReceiverBackendSelected() const {
-    return isRtlBackendSelected() || isSoapySdrSelected() || isBladeRfNativeSelected() ||
-           isHackRfNativeSelected();
+    return isRtlBackendSelected() || isSoapySdrSelected() || isUhdNativeSelected() || isBladeRfNativeSelected() ||
+           isHackRfNativeSelected() || isVirtualSignalSelected();
 }
 
 bool YourClassName::normalizeRtlSdrSettings() {
@@ -662,6 +707,74 @@ ReceiverStreamDescriptor YourClassName::makeSoapySdrStreamDescriptor(bool queueA
     return stream;
 }
 
+ReceiverStreamDescriptor YourClassName::makeUhdNativeStreamDescriptor(bool queueAudioBlocks,
+                                                                      bool publishIqSnapshot,
+                                                                      bool emitIqFrames) const {
+    ReceiverStreamDescriptor stream;
+    stream.kind = ReceiverBackendStreamKind::UhdNative;
+    stream.backendId = QStringLiteral("uhd-native");
+    stream.backendName = QStringLiteral("USRP UHD native RX");
+    stream.sampleRateHz = pendingSettings.sampleRate;
+    stream.centerFrequencyHz = pendingSettings.centerFrequency;
+    stream.frequencyCalibrationOffsetHz = effectiveFrequencyCalibrationOffsetHz(pendingSettings.centerFrequency);
+    stream.uhdNativeDeviceIndex = uhdNativeIndexFromComboValue(pendingSettings.deviceIndex);
+    stream.uhdRxChannel = pendingSettings.uhdRxChannel;
+    stream.uhdRxGainDb = pendingSettings.uhdRxGainDb;
+    stream.uhdRxAntenna = pendingSettings.uhdRxAntenna;
+    stream.uhdFpgaImagePath = pendingSettings.uhdFpgaImagePath;
+    stream.queueAudioBlocks = queueAudioBlocks;
+    stream.publishIqSnapshot = publishIqSnapshot;
+    stream.emitIqFrames = emitIqFrames;
+    return stream;
+}
+
+void YourClassName::showUhdRxSettings() {
+    QDialog dialog(this);
+    dialog.setWindowTitle(uiText(QStringLiteral("uhd_rx_settings"), QStringLiteral("USRP UHD RX")));
+    auto *layout = new QFormLayout(&dialog);
+    auto *channel = new QComboBox(&dialog);
+    channel->addItem(QStringLiteral("RX 0"), 0);
+    channel->addItem(QStringLiteral("RX 1"), 1);
+    channel->setCurrentIndex((std::clamp)(pendingSettings.uhdRxChannel, 0, 1));
+    auto *gain = new QDoubleSpinBox(&dialog);
+    gain->setRange(0.0, 100.0);
+    gain->setSuffix(QStringLiteral(" dB"));
+    gain->setValue(pendingSettings.uhdRxGainDb);
+    auto *antenna = new QComboBox(&dialog);
+    antenna->addItem(uiText(QStringLiteral("uhd_default_antenna"), QStringLiteral("Driver default")), QString());
+    antenna->addItem(QStringLiteral("RX2"), QStringLiteral("RX2"));
+    antenna->addItem(QStringLiteral("TX/RX"), QStringLiteral("TX/RX"));
+    antenna->setCurrentIndex((std::max)(0, antenna->findData(pendingSettings.uhdRxAntenna)));
+    auto *fpgaRow = new QWidget(&dialog);
+    auto *fpgaLayout = new QHBoxLayout(fpgaRow);
+    fpgaLayout->setContentsMargins(0, 0, 0, 0);
+    auto *fpgaPath = new QLineEdit(pendingSettings.uhdFpgaImagePath, fpgaRow);
+    auto *browse = new QToolButton(fpgaRow);
+    browse->setIcon(dialog.style()->standardIcon(QStyle::SP_DirOpenIcon));
+    browse->setToolTip(uiText(QStringLiteral("uhd_browse_fpga"), QStringLiteral("Choose FPGA image")));
+    fpgaLayout->addWidget(fpgaPath, 1);
+    fpgaLayout->addWidget(browse);
+    connect(browse, &QToolButton::clicked, &dialog, [fpgaPath, &dialog]() {
+        const QString file = QFileDialog::getOpenFileName(&dialog,
+            QStringLiteral("UHD FPGA image"), fpgaPath->text(), QStringLiteral("FPGA image (*.bin);;All files (*)"));
+        if (!file.isEmpty()) fpgaPath->setText(file);
+    });
+    layout->addRow(uiText(QStringLiteral("uhd_rx_channel"), QStringLiteral("RX channel")), channel);
+    layout->addRow(uiText(QStringLiteral("uhd_rx_gain"), QStringLiteral("RX gain")), gain);
+    layout->addRow(uiText(QStringLiteral("uhd_rx_antenna"), QStringLiteral("RX antenna")), antenna);
+    layout->addRow(uiText(QStringLiteral("uhd_fpga_image"), QStringLiteral("FPGA image (optional)")), fpgaRow);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) return;
+    pendingSettings.uhdRxChannel = channel->currentData().toInt();
+    pendingSettings.uhdRxGainDb = gain->value();
+    pendingSettings.uhdRxAntenna = antenna->currentData().toString();
+    pendingSettings.uhdFpgaImagePath = fpgaPath->text().trimmed();
+    savePersistentSettings();
+}
+
 ReceiverStreamDescriptor YourClassName::makeBladeRfNativeStreamDescriptor(bool queueAudioBlocks,
                                                                          bool publishIqSnapshot,
                                                                          bool emitIqFrames) const {
@@ -724,6 +837,83 @@ ReceiverStreamDescriptor YourClassName::makeHackRfNativeStreamDescriptor(bool qu
     stream.emitIqFrames = emitIqFrames;
     stream.agileScanEnabled = false;
     return stream;
+}
+
+ReceiverStreamDescriptor YourClassName::makeVirtualSignalStreamDescriptor(bool queueAudioBlocks,
+                                                                           bool publishIqSnapshot,
+                                                                           bool emitIqFrames) const {
+    ReceiverStreamDescriptor stream;
+    stream.kind = ReceiverBackendStreamKind::VirtualSignal;
+    stream.backendId = QStringLiteral("virtual-signal");
+    stream.backendName = QStringLiteral("Virtual IQ receiver");
+    stream.sampleRateHz = pendingSettings.sampleRate;
+    stream.centerFrequencyHz = pendingSettings.centerFrequency;
+    stream.virtualSignalUseTcp = pendingSettings.virtualSignalUseTcp;
+    stream.virtualSignalLocalName = pendingSettings.virtualSignalLocalName.trimmed();
+    stream.virtualSignalListenAddress = pendingSettings.virtualSignalListenAddress.trimmed();
+    stream.virtualSignalPort = static_cast<quint16>(
+        (std::clamp)(pendingSettings.virtualSignalPort, 1, 65535));
+    stream.virtualSignalFollowMetadata = pendingSettings.virtualSignalFollowMetadata;
+    stream.queueAudioBlocks = queueAudioBlocks;
+    stream.publishIqSnapshot = publishIqSnapshot;
+    stream.emitIqFrames = emitIqFrames;
+    return stream;
+}
+
+void YourClassName::showVirtualSignalRxSettings() {
+    QDialog dialog(this);
+    dialog.setWindowTitle(uiText(QStringLiteral("virtual_iq_receiver_settings"),
+                                 QStringLiteral("Virtual IQ receiver")));
+    QFormLayout *layout = new QFormLayout(&dialog);
+    QComboBox *transport = new QComboBox(&dialog);
+    transport->addItem(uiText(QStringLiteral("virtual_iq_local_ipc"),
+                              QStringLiteral("Local IPC (same computer)")), 0);
+    transport->addItem(QStringLiteral("TCP/IP"), 1);
+    transport->setCurrentIndex(pendingSettings.virtualSignalUseTcp ? 1 : 0);
+    QLineEdit *localName = new QLineEdit(pendingSettings.virtualSignalLocalName, &dialog);
+    QLineEdit *listenAddress = new QLineEdit(pendingSettings.virtualSignalListenAddress, &dialog);
+    QSpinBox *port = new QSpinBox(&dialog);
+    port->setRange(1, 65535);
+    port->setValue(pendingSettings.virtualSignalPort);
+    QCheckBox *followMetadata = new QCheckBox(
+        uiText(QStringLiteral("virtual_iq_follow_metadata"),
+               QStringLiteral("Follow incoming center frequency and sample rate")), &dialog);
+    followMetadata->setChecked(pendingSettings.virtualSignalFollowMetadata);
+    QLabel *hint = new QLabel(uiText(
+        QStringLiteral("virtual_iq_rx_hint"),
+        QStringLiteral("Use Local IPC for two Obrii SDR instances on one computer. "
+                       "For another computer select TCP and listen on 0.0.0.0 or a local interface address.")),
+        &dialog);
+    hint->setWordWrap(true);
+    layout->addRow(uiText(QStringLiteral("transport"), QStringLiteral("Transport:")), transport);
+    layout->addRow(uiText(QStringLiteral("local_channel"), QStringLiteral("Local channel:")), localName);
+    layout->addRow(uiText(QStringLiteral("listen_address"), QStringLiteral("Listen address:")), listenAddress);
+    layout->addRow(uiText(QStringLiteral("port"), QStringLiteral("Port:")), port);
+    layout->addRow(followMetadata);
+    layout->addRow(hint);
+    QDialogButtonBox *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addRow(buttons);
+    auto updateFields = [transport, localName, listenAddress, port]() {
+        const bool tcp = transport->currentData().toInt() == 1;
+        localName->setEnabled(!tcp);
+        listenAddress->setEnabled(tcp);
+        port->setEnabled(tcp);
+    };
+    connect(transport, qOverload<int>(&QComboBox::currentIndexChanged), &dialog,
+            [updateFields](int) { updateFields(); });
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    updateFields();
+    if (dialog.exec() != QDialog::Accepted) return;
+    pendingSettings.virtualSignalUseTcp = transport->currentData().toInt() == 1;
+    pendingSettings.virtualSignalLocalName = localName->text().trimmed().isEmpty()
+        ? QStringLiteral("obrii-virtual-iq") : localName->text().trimmed();
+    pendingSettings.virtualSignalListenAddress = listenAddress->text().trimmed().isEmpty()
+        ? QStringLiteral("127.0.0.1") : listenAddress->text().trimmed();
+    pendingSettings.virtualSignalPort = port->value();
+    pendingSettings.virtualSignalFollowMetadata = followMetadata->isChecked();
+    savePersistentSettings();
 }
 
 void YourClassName::listFobosDevices() {

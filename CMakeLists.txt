@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 6.6.0)
+project(ObriiSDR VERSION 7.0.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -134,6 +134,85 @@ add_library(ObriiDmrCrypto STATIC src/digital/dmrprivacycodec.cpp third_party/ti
 target_compile_definitions(ObriiDmrCrypto PRIVATE AES256=1 CBC=0 CTR=0 ECB=1)
 target_include_directories(ObriiDmrCrypto PRIVATE src/digital src/utils third_party/tiny_aes)
 target_link_libraries(ObriiDmrCrypto PRIVATE Qt5::Core)
+
+# Open amateur-radio protocols are isolated from the receiver hot path. M17
+# uses the upstream reference implementation; AX.25/KISS and the versioned
+# virtual-signal envelope live in the small QtCore-only ObriiOpenRadio library.
+set(OBRII_M17_SOURCES
+    third_party/libm17/encode/convol.c
+    third_party/libm17/encode/symbols.c
+    third_party/libm17/decode/viterbi.c
+    third_party/libm17/decode/symbols.c
+    third_party/libm17/phy/sync.c
+    third_party/libm17/phy/slice.c
+    third_party/libm17/phy/interleave.c
+    third_party/libm17/phy/randomize.c
+    third_party/libm17/math/rrc.c
+    third_party/libm17/math/math.c
+    third_party/libm17/math/golay.c
+    third_party/libm17/payload/lich.c
+    third_party/libm17/payload/call.c
+    third_party/libm17/payload/crc.c
+    third_party/libm17/payload/lsf.c
+    third_party/libm17/m17.c
+)
+add_library(ObriiM17 STATIC ${OBRII_M17_SOURCES})
+set_target_properties(ObriiM17 PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_include_directories(ObriiM17 PUBLIC ${CMAKE_SOURCE_DIR}/third_party/libm17)
+if(UNIX)
+    target_link_libraries(ObriiM17 PUBLIC m)
+endif()
+
+add_library(ObriiOpenRadio STATIC
+    src/openradio/openradioprotocol.cpp
+    src/openradio/openradioprotocol.h
+    src/openradio/openradiobackend.cpp
+    src/openradio/openradiobackend.h
+    src/openradio/ax25codec.cpp
+    src/openradio/ax25codec.h
+    src/openradio/ax25afsk1200.cpp
+    src/openradio/ax25afsk1200.h
+    src/openradio/ax25livedecoder.cpp
+    src/openradio/ax25livedecoder.h
+    src/openradio/kisscodec.cpp
+    src/openradio/kisscodec.h
+    src/openradio/m17adapter.cpp
+    src/openradio/m17adapter.h
+    src/openradio/virtualsignalframe.cpp
+    src/openradio/virtualsignalframe.h
+    src/openradio/virtualsignaltransport.cpp
+    src/openradio/virtualsignaltransport.h
+    src/openradio/virtualiqhub.cpp
+    src/openradio/virtualiqhub.h
+)
+target_include_directories(ObriiOpenRadio PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/openradio
+    ${CMAKE_SOURCE_DIR}/third_party/libm17)
+target_link_libraries(ObriiOpenRadio PUBLIC Qt5::Core ObriiM17)
+if(MSVC)
+    target_compile_options(ObriiOpenRadio PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiIqHub tools/virtual_iq_hub_main.cpp)
+target_link_libraries(ObriiIqHub PRIVATE ObriiOpenRadio Qt5::Core Qt5::Network)
+if(MSVC)
+    target_compile_options(ObriiIqHub PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiIqFormatBench
+    tools/iq_format_benchmark.cpp
+    src/core/dspiqcodec.cpp)
+target_include_directories(ObriiIqFormatBench PRIVATE src/core)
+target_link_libraries(ObriiIqFormatBench PRIVATE Qt5::Core)
+if(MSVC)
+    target_compile_options(ObriiIqFormatBench PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiIq8QuantizerSelfTest tools/iq8_quantizer_selftest.cpp)
+target_include_directories(ObriiIq8QuantizerSelfTest PRIVATE src/core)
+
+add_executable(ObriiIq16QuantizerSelfTest tools/iq16_quantizer_selftest.cpp)
+target_include_directories(ObriiIq16QuantizerSelfTest PRIVATE src/core)
 
 add_library(ObriiItm STATIC
     third_party/ntia_itm/src/ComputeDeltaH.cpp
@@ -352,6 +431,8 @@ set(SOURCES
     src/digital/psk31audiodecoder.cpp
     src/digital/psk31audiodecoder.h
     src/digital/cwaudiodecoder.h
+    src/openradio/openradiolabdialog.cpp
+    src/openradio/openradiolabdialog.h
     src/backends/bladerfbackend.cpp
     src/backends/bladerfbackend.h
     src/backends/hackrfbackend.cpp
@@ -380,6 +461,8 @@ set(SOURCES
     src/core/iqbuffer.h
     src/network/networkcontroller.cpp
     src/network/networkcontroller.h
+    src/network/displayspectrumcodec.cpp
+    src/network/displayspectrumcodec.h
     src/network/remotevfoservice.cpp
     src/network/remotevfoservice.h
     src/network/remotewebserver.cpp
@@ -425,6 +508,8 @@ set(SOURCES
     src/transmit/transmitterbackend.h
     src/transmit/hackrftransmitterbackend.cpp
     src/transmit/hackrftransmitterbackend.h
+    src/transmit/virtualtransmitterbackend.cpp
+    src/transmit/virtualtransmitterbackend.h
     src/transmit/transmitwaveformgenerator.cpp
     src/transmit/transmitwaveformgenerator.h
     src/transmit/signallabgenerator.cpp
@@ -519,6 +604,8 @@ set(SOURCES
     src/utils/scanvisualutils.h
     src/backends/soapysdrbackend.cpp
     src/backends/soapysdrbackend.h
+    src/backends/uhdbackend.cpp
+    src/backends/uhdbackend.h
     src/utils/tuningutils.cpp
     src/utils/tuningutils.h
     src/app_resources.qrc
@@ -529,6 +616,16 @@ if(WIN32)
 endif()
 
 add_executable(ObriiSDR ${SOURCES})
+
+add_executable(ObriiUhdBackendSelfTest
+    tools/uhd_backend_selftest.cpp
+    src/backends/uhdbackend.cpp
+    src/backends/uhdbackend.h)
+target_include_directories(ObriiUhdBackendSelfTest PRIVATE src)
+target_link_libraries(ObriiUhdBackendSelfTest PRIVATE Qt5::Core)
+if(MSVC)
+    target_compile_options(ObriiUhdBackendSelfTest PRIVATE /utf-8)
+endif()
 
 add_executable(ObriiAnalyzer
     src/analyzer/analyzerfobosglobals.cpp
@@ -570,6 +667,70 @@ add_executable(ObriiAnalyzer
 if(WIN32)
     target_sources(ObriiAnalyzer PRIVATE packaging/windows/fobosapp.rc)
 endif()
+add_executable(ObriiFpgaLab
+    src/fpgalab/fpgalabmain.cpp
+    src/fpgalab/fpgalabwindow.cpp
+    src/fpgalab/fpgalabwindow.h
+    src/fpgalab/fpgapipelinecompiler.cpp
+    src/fpgalab/fpgapipelinecompiler.h
+    src/fpgalab/fpgalogicblock.cpp
+    src/fpgalab/fpgalogicblock.h
+    src/fpgalab/fpgalogiceditor.cpp
+    src/fpgalab/fpgalogiceditor.h
+    src/fpgalab/openxc7project.cpp
+    src/fpgalab/openxc7project.h
+    src/app_resources.qrc)
+target_link_libraries(ObriiFpgaLab PRIVATE Qt5::Core Qt5::Widgets)
+add_executable(ObriiFpgaLabSelfTest EXCLUDE_FROM_ALL
+    tools/fpgalab_selftest.cpp
+    src/fpgalab/fpgalabwindow.cpp
+    src/fpgalab/fpgalabwindow.h
+    src/fpgalab/fpgapipelinecompiler.cpp
+    src/fpgalab/fpgapipelinecompiler.h
+    src/fpgalab/fpgalogicblock.cpp
+    src/fpgalab/fpgalogicblock.h
+    src/fpgalab/fpgalogiceditor.cpp
+    src/fpgalab/fpgalogiceditor.h
+    src/fpgalab/openxc7project.cpp
+    src/fpgalab/openxc7project.h)
+target_include_directories(ObriiFpgaLabSelfTest PRIVATE src/fpgalab)
+target_link_libraries(ObriiFpgaLabSelfTest PRIVATE Qt5::Core Qt5::Widgets)
+if(WIN32)
+    target_sources(ObriiFpgaLab PRIVATE packaging/windows/fobosapp.rc)
+endif()
+if(MSVC)
+    target_compile_options(ObriiFpgaLab PRIVATE /utf-8)
+    target_compile_options(ObriiFpgaLabSelfTest PRIVATE /utf-8)
+endif()
+add_executable(ObriiOpenXc7ProjectSelfTest EXCLUDE_FROM_ALL
+    tools/openxc7_project_selftest.cpp
+    src/fpgalab/openxc7project.cpp
+    src/fpgalab/openxc7project.h)
+target_include_directories(ObriiOpenXc7ProjectSelfTest PRIVATE src/fpgalab)
+target_link_libraries(ObriiOpenXc7ProjectSelfTest PRIVATE Qt5::Core)
+if(MSVC)
+    target_compile_options(ObriiOpenXc7ProjectSelfTest PRIVATE /utf-8)
+endif()
+add_executable(ObriiFpgaPipelineCompilerSelfTest EXCLUDE_FROM_ALL
+    tools/fpgapipeline_compiler_selftest.cpp
+    src/fpgalab/fpgapipelinecompiler.cpp
+    src/fpgalab/fpgapipelinecompiler.h
+    src/fpgalab/fpgalogicblock.cpp
+    src/fpgalab/fpgalogicblock.h)
+target_include_directories(ObriiFpgaPipelineCompilerSelfTest PRIVATE src/fpgalab)
+target_link_libraries(ObriiFpgaPipelineCompilerSelfTest PRIVATE Qt5::Core)
+if(MSVC)
+    target_compile_options(ObriiFpgaPipelineCompilerSelfTest PRIVATE /utf-8)
+endif()
+add_executable(ObriiFpgaLogicBlockSelfTest EXCLUDE_FROM_ALL
+    tools/fpgalogicblock_selftest.cpp
+    src/fpgalab/fpgalogicblock.cpp
+    src/fpgalab/fpgalogicblock.h)
+target_include_directories(ObriiFpgaLogicBlockSelfTest PRIVATE src/fpgalab)
+target_link_libraries(ObriiFpgaLogicBlockSelfTest PRIVATE Qt5::Core)
+if(MSVC)
+    target_compile_options(ObriiFpgaLogicBlockSelfTest PRIVATE /utf-8)
+endif()
 target_include_directories(ObriiAnalyzer PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/analyzer
@@ -598,6 +759,12 @@ if(WIN32 AND OBRII_RUNTIME_OUTPUT_DIR)
         RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
     set_target_properties(ObriiAnalyzer PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+    set_target_properties(ObriiFpgaLab PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+    set_target_properties(ObriiIqHub PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+    set_target_properties(ObriiIqHub PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
 endif()
 option(FOBOS_ENABLE_HF_PREDICTION "Optional isolated ITU HF planning dialog" ON)
 if(FOBOS_ENABLE_HF_PREDICTION)
@@ -621,6 +788,7 @@ target_include_directories(ObriiSDR PRIVATE
     ${CMAKE_SOURCE_DIR}/src/gnss
     ${CMAKE_SOURCE_DIR}/src/mainwindow
     ${CMAKE_SOURCE_DIR}/src/network
+    ${CMAKE_SOURCE_DIR}/src/openradio
     ${CMAKE_SOURCE_DIR}/src/presets
     ${CMAKE_SOURCE_DIR}/src/research
     ${CMAKE_SOURCE_DIR}/src/scan
@@ -639,6 +807,7 @@ target_link_libraries(ObriiSDR PRIVATE
     ObriiDmrCrypto
     ObriiItm
     ObriiMeasurementCore
+    ObriiOpenRadio
     ${FOBOS_STANDARD_LIBRARY}
     ${FOBOS_AGILE_LIBRARY}
     ${FFTW_FLOAT_LIBRARY}
@@ -711,6 +880,44 @@ if(OBRII_HDF5_INCLUDE_DIR)
 endif()
 
 if(FOBOS_BUILD_CW_SELFTEST)
+    add_executable(ObriiVirtualIqHubSelfTest tools/virtual_iq_hub_selftest.cpp)
+    target_link_libraries(ObriiVirtualIqHubSelfTest PRIVATE ObriiOpenRadio Qt5::Core)
+    if(MSVC)
+        target_compile_options(ObriiVirtualIqHubSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiVirtualIqHubNetworkSelfTest tools/virtual_iq_hub_network_selftest.cpp)
+    target_link_libraries(ObriiVirtualIqHubNetworkSelfTest PRIVATE ObriiOpenRadio Qt5::Core Qt5::Network)
+    if(MSVC)
+        target_compile_options(ObriiVirtualIqHubNetworkSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiDisplaySpectrumCodecSelfTest
+        tools/display_spectrum_codec_selftest.cpp
+        src/network/displayspectrumcodec.cpp)
+    target_include_directories(ObriiDisplaySpectrumCodecSelfTest PRIVATE src/network)
+    target_link_libraries(ObriiDisplaySpectrumCodecSelfTest PRIVATE Qt5::Core)
+    if(MSVC)
+        target_compile_options(ObriiDisplaySpectrumCodecSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiVirtualSignalSelfTest
+        tools/virtual_signal_transport_selftest.cpp
+        src/transmit/virtualtransmitterbackend.cpp
+        src/transmit/virtualtransmitterbackend.h)
+    target_include_directories(ObriiVirtualSignalSelfTest PRIVATE src src/openradio src/transmit)
+    target_link_libraries(ObriiVirtualSignalSelfTest PRIVATE ObriiOpenRadio Qt5::Core Qt5::Network)
+    if(MSVC)
+        target_compile_options(ObriiVirtualSignalSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiOpenRadioSelfTest tools/open_radio_selftest.cpp)
+    target_include_directories(ObriiOpenRadioSelfTest PRIVATE src/openradio)
+    target_link_libraries(ObriiOpenRadioSelfTest PRIVATE ObriiOpenRadio Qt5::Core)
+    if(MSVC)
+        target_compile_options(ObriiOpenRadioSelfTest PRIVATE /utf-8)
+    endif()
+
     add_executable(ObriiInstrumentSweepSelfTest tools/instrument_sweep_selftest.cpp)
     target_include_directories(ObriiInstrumentSweepSelfTest PRIVATE src/analyzer)
     target_link_libraries(ObriiInstrumentSweepSelfTest PRIVATE ObriiMeasurementCore Qt5::Core)
@@ -1232,7 +1439,7 @@ elseif(NOT WIN32)
     message(WARNING "Qt5 Multimedia was not found. Linux audio playback will be disabled until the Qt Multimedia development package is installed.")
 endif()
 
-install(TARGETS ObriiSDR RUNTIME DESTINATION bin)
+install(TARGETS ObriiSDR ObriiIqHub RUNTIME DESTINATION bin)
 
 if(UNIX AND NOT APPLE)
     install(FILES packaging/linux/99-fobos-sdr.rules

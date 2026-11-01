@@ -38,6 +38,8 @@ inline constexpr int RTLSDR_NATIVE_DEVICE_INDEX_BASE = -2000;
 inline constexpr int SOAPY_SDR_DEVICE_INDEX = -3000;
 inline constexpr int BLADERF_NATIVE_DEVICE_INDEX_BASE = -4000;
 inline constexpr int HACKRF_NATIVE_DEVICE_INDEX_BASE = -5000;
+inline constexpr int VIRTUAL_SIGNAL_DEVICE_INDEX = -6000;
+inline constexpr int UHD_NATIVE_DEVICE_INDEX_BASE = -7000;
 // Keep the prototype compiled for future hardware work, but do not expose or
 // start it until enumeration and streaming are validated on a physical unit.
 inline constexpr bool BLADERF_NATIVE_BACKEND_ENABLED = false;
@@ -46,6 +48,7 @@ inline constexpr int NETWORK_REMOTE_RECEIVER_DEVICE_INDEX_MIN = 90000000;
 inline constexpr int NETWORK_REMOTE_RECEIVER_DEVICE_INDEX_MAX = 110000000;
 inline constexpr const char *RTL_TCP_DEFAULT_HOST = "127.0.0.1";
 inline constexpr quint16 RTL_TCP_DEFAULT_PORT = 1234;
+inline constexpr quint16 VIRTUAL_SIGNAL_DEFAULT_PORT = 17661;
 inline constexpr double FOBOS_DEFAULT_SAMPLE_RATE = 50000000.0;
 inline constexpr double RTL_TCP_SAFE_SAMPLE_RATE = 2048000.0;
 

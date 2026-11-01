@@ -9,6 +9,7 @@
 #include <QLabel>
 #include <QDateTime>
 #include <QLinearGradient>
+#include <QOpenGLContext>
 #include <QPainterPath>
 #include <QStyle>
 #include <QToolButton>
@@ -1881,7 +1882,17 @@ void MyWaterfallWidget::paintGL() {
 	if (width() <= 0 || height() <= 0) {
 		return;
 	}
+	if (!context() || !context()->isValid() || QOpenGLContext::currentContext() != context()) {
+        QMutexLocker locker(&mutex);
+        updateQueued = false;
+        return;
+    }
 	QPainter painter(this);
+	if (!painter.isActive()) {
+        QMutexLocker locker(&mutex);
+        updateQueued = false;
+        return;
+    }
 	painter.beginNativePainting();
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     bool drawSegmentOverlay = true;

@@ -3,6 +3,7 @@
 
 #include "transmitterbackend.h"
 #include "hackrftransmitterbackend.h"
+#include "virtualtransmitterbackend.h"
 #include "transmitwaveformgenerator.h"
 #include "signallabgenerator.h"
 
@@ -80,6 +81,7 @@ private:
     void saveSettings() const;
     void startTransmission();
     void startLaboratoryTransmission(const SignalLabGenerationResult &result);
+    void pumpVirtualIq();
     void stopTransmission(const QString &reason = QString());
     void startTextSimulation(const TxConfiguration &configuration);
     void beginTextWaveform();
@@ -102,6 +104,8 @@ private:
     void exportIq();
     void setStatus(const QString &message, bool error = false);
     bool hackRfSelected() const;
+    bool virtualSignalSelected() const;
+    void applyVirtualSignalEndpoint();
     bool selectedHackRfBusyForReception() const;
     TransmitterBackend *selectedBackend();
 
@@ -109,6 +113,7 @@ private:
     HackRfReceiverUseChecker hackRfReceiverUseChecker;
     SimulatorTransmitterBackend simulator;
     HackRfTransmitterBackend hackRf;
+    VirtualTransmitterBackend virtualSignal;
     TransmitterBackend *activeBackend = nullptr;
     TxConfiguration activeConfiguration;
     TxModulatorState modulatorState;
@@ -120,6 +125,10 @@ private:
 
     QComboBox *backendCombo = nullptr;
     QComboBox *deviceCombo = nullptr;
+    QComboBox *virtualTransportCombo = nullptr;
+    QLineEdit *virtualLocalNameEdit = nullptr;
+    QLineEdit *virtualHostEdit = nullptr;
+    QSpinBox *virtualPortSpin = nullptr;
     QComboBox *modulationCombo = nullptr;
     QComboBox *sourceCombo = nullptr;
     QComboBox *mediaModeCombo = nullptr;
@@ -170,6 +179,10 @@ private:
     QLabel *backendLabel = nullptr;
     QLabel *rfLabel = nullptr;
     QLabel *deviceLabel = nullptr;
+    QLabel *virtualTransportLabel = nullptr;
+    QLabel *virtualEndpointLabel = nullptr;
+    QLabel *virtualHostLabel = nullptr;
+    QLabel *virtualPortLabel = nullptr;
     QLabel *basebandLabel = nullptr;
     QLabel *deviceRateLabel = nullptr;
     QLabel *bandwidthLabel = nullptr;
@@ -212,6 +225,12 @@ private:
     int hackRfStoppedStreamPolls = 0;
     double plannedDurationSeconds = 0.0;
     QVector<std::complex<float>> pendingTextIq;
+    QVector<std::complex<float>> pendingVirtualIq;
+    int pendingVirtualIqOffset = 0;
+    bool virtualWaveformConnected = false;
+    bool virtualLinkWasConnected = false;
+    bool virtualLinkStatusInitialized = false;
+    QTimer *virtualIqTimer = nullptr;
     bool textSimulation = false;
     bool automaticFt8Active = false;
     bool pttMode = false;
@@ -238,6 +257,8 @@ private:
     QElapsedTimer microphoneDiagnosticTimer;
     qint64 microphoneDiagnosticFrames = 0;
     qint64 microphoneDiagnosticNonZeroFrames = 0;
+    qint64 microphoneTotalFrames = 0;
+    bool microphoneFramesMissingWarned = false;
     float microphoneDcPreviousInput = 0.0f;
     float microphoneDcPreviousOutput = 0.0f;
     bool microphoneSilenceWarned = false;

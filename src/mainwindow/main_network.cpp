@@ -95,16 +95,21 @@ void YourClassName::appendNetworkState(QJsonObject &command) const {
 
 void YourClassName::applyNetworkStateFromCommand(const QJsonObject &command) {
     if (command.contains("processingMode") && !isRemoteVfoProcessingMode()) {
-        networkProcessingMode = static_cast<NetworkProcessingMode>(command.value("processingMode").toInt(
-            static_cast<int>(networkProcessingMode)));
+        const int mode = command.value("processingMode").toInt(static_cast<int>(networkProcessingMode));
+        if (networkMode != NetworkMode::Client || networkClientRequestedProcessingMode < 0 ||
+            networkClientRequestedProcessingMode == mode) {
+            networkProcessingMode = static_cast<NetworkProcessingMode>(mode);
+            if (networkMode == NetworkMode::Client) networkClientRequestedProcessingMode = -1;
+        }
     }
-    // This is a policy of the receiver host, not a client-controlled setting.
-    // Clients still consume it from authoritative server state so their UI can
-    // show the effective policy, but an ordinary client command must never
-    // overwrite the server's local choice.
-    if (networkMode != NetworkMode::Server &&
-        command.contains("serverDisableLocalVisualAudio")) {
-        serverDisableLocalVisualAudio = command.value("serverDisableLocalVisualAudio").toBool(serverDisableLocalVisualAudio);
+    // Only an explicit controller command may change this server policy.
+    if (networkMode != NetworkMode::Server && command.contains("serverDisableLocalVisualAudio")) {
+        const bool disabled = command.value("serverDisableLocalVisualAudio").toBool(serverDisableLocalVisualAudio);
+        if (networkClientRequestedServerLocalOutput < 0 ||
+            networkClientRequestedServerLocalOutput == static_cast<int>(disabled)) {
+            serverDisableLocalVisualAudio = disabled;
+            networkClientRequestedServerLocalOutput = -1;
+        }
     }
     if (command.contains("fullResolutionSpectrumFrames")) {
         networkFullResolutionSpectrumFrames =
@@ -161,6 +166,7 @@ QJsonObject YourClassName::networkClientSettingsForCommand(const QJsonObject &se
 
 void YourClassName::applyAuthoritativeNetworkState(const QJsonObject &command) {
     const RadioSettings previousSettings = pendingSettings;
+    const NetworkProcessingMode previousProcessingMode = networkProcessingMode;
     const int previousFftLength = pendingSettings.fftLength;
     const int previousScanVisualMode = scanVisualMode;
     const QJsonObject settings = command.value(QStringLiteral("settings")).toObject();
@@ -169,6 +175,11 @@ void YourClassName::applyAuthoritativeNetworkState(const QJsonObject &command) {
     applyReceiverDeviceListFromJson(command.value(QStringLiteral("receiverDevices")).toArray());
     applySettingsFromJson(settings, false);
     publishSettingsToGlobals();
+    if (networkMode == NetworkMode::Client && runState == RadioRunState::Running &&
+        previousProcessingMode != networkProcessingMode) {
+        if (isClientIqProcessingMode()) startNetworkClientProcessing();
+        else stopNetworkClientProcessing();
+    }
     if (previousFftLength != pendingSettings.fftLength) {
         applyFftLengthChange(pendingSettings.fftLength, false);
     }
@@ -632,6 +643,13 @@ void YourClassName::onNetworkControlCommandReceived(const QJsonObject &command) 
         if (action == QStringLiteral("role")) {
             const bool canControl = command.value("canControl").toBool(true);
             const QString peerLabel = command.value("peerLabel").toString();
+            if (!canControl &&
+                (networkClientRequestedProcessingMode >= 0 ||
+                 networkClientRequestedServerLocalOutput >= 0)) {
+                networkClientRequestedProcessingMode = -1;
+                networkClientRequestedServerLocalOutput = -1;
+                sendRemoteControlCommand(QStringLiteral("requestServerState"));
+            }
             qDebug() << "[Network] client role update"
                      << "canControl" << canControl
                      << "peer" << peerLabel
@@ -669,6 +687,13 @@ void YourClassName::onNetworkControlCommandReceived(const QJsonObject &command) 
 
         if (action == QStringLiteral("priorityDenied") ||
             action == QStringLiteral("controlRejected")) {
+            if (action == QStringLiteral("controlRejected") &&
+                (networkClientRequestedProcessingMode >= 0 ||
+                 networkClientRequestedServerLocalOutput >= 0)) {
+                networkClientRequestedProcessingMode = -1;
+                networkClientRequestedServerLocalOutput = -1;
+                sendRemoteControlCommand(QStringLiteral("requestServerState"));
+            }
             const QString reason = command.value("reason").toString("Request denied");
             qDebug() << "[Network]" << reason;
             QMessageBox::information(this, "Network Control", reason);
@@ -793,14 +818,6 @@ void YourClassName::onNetworkControlCommandReceived(const QJsonObject &command) 
         return;
     }
 
-    const NetworkProcessingMode previousProcessingMode = networkProcessingMode;
-    const bool previousServerDisableLocalVisualAudio = serverDisableLocalVisualAudio;
-    applyNetworkStateFromCommand(command);
-    const bool serverLocalOutputChanged =
-        previousServerDisableLocalVisualAudio != serverDisableLocalVisualAudio;
-    if (action != QStringLiteral("setViewport") || fobosVerboseLoggingEnabled())
-        qDebug() << "[Network] received remote control command" << action;
-
     if (action == QStringLiteral("setViewport")) {
         const double centerHz = command.value(QStringLiteral("centerHz")).toDouble(
             std::numeric_limits<double>::quiet_NaN());
@@ -812,6 +829,49 @@ void YourClassName::onNetworkControlCommandReceived(const QJsonObject &command) 
         }
         return;
     }
+
+    if (action == QStringLiteral("setProcessingMode")) {
+        const int requestedMode = command.value(QStringLiteral("processingMode")).toInt(-1);
+        if (requestedMode < static_cast<int>(NetworkProcessingMode::ServerSide) ||
+            requestedMode > static_cast<int>(NetworkProcessingMode::FullIqClientSide)) {
+            if (networkController && !peerId.isEmpty()) {
+                QJsonObject rejected{{QStringLiteral("type"), QStringLiteral("control")},
+                                     {QStringLiteral("action"), QStringLiteral("controlRejected")},
+                                     {QStringLiteral("reason"), QStringLiteral("Invalid processing mode")}};
+                networkController->sendControlCommandToPeer(peerId, rejected);
+            }
+            sendServerStateToClients();
+            return;
+        }
+        const NetworkProcessingMode previousMode = networkProcessingMode;
+        networkProcessingMode = static_cast<NetworkProcessingMode>(requestedMode);
+        updateNetworkButtonText();
+        if (previousMode != networkProcessingMode && !isIdle()) {
+            restartStreamForHardwareChange();
+        } else if (processor && processor->isRunning()) {
+            updateIqFrameProducerSettings();
+        }
+        savePersistentSettings();
+        sendServerStateToClients();
+        return;
+    }
+
+    if (action == QStringLiteral("setServerLocalOutput")) {
+        serverDisableLocalVisualAudio = command.value(QStringLiteral("serverDisableLocalVisualAudio"))
+                                            .toBool(serverDisableLocalVisualAudio);
+        applyServerLocalOutputPolicy();
+        savePersistentSettings();
+        sendServerStateToClients();
+        return;
+    }
+
+    const NetworkProcessingMode previousProcessingMode = networkProcessingMode;
+    const bool previousServerDisableLocalVisualAudio = serverDisableLocalVisualAudio;
+    applyNetworkStateFromCommand(command);
+    const bool serverLocalOutputChanged =
+        previousServerDisableLocalVisualAudio != serverDisableLocalVisualAudio;
+    if (action != QStringLiteral("setViewport") || fobosVerboseLoggingEnabled())
+        qDebug() << "[Network] received remote control command" << action;
 
     if (action == "setParameters" || action == "settings" || action == "start") {
         const RadioSettings previousSettings = pendingSettings;

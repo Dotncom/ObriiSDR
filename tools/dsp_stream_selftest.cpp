@@ -63,22 +63,44 @@ void codecTests() {
     require(DspStreamProtocol::extract(partial, json, payload, error) == -1, "Oversized packet accepted");
     partial = QByteArray("WRONG001", 8)+QByteArray(8, char(0));
     require(DspStreamProtocol::extract(partial, json, payload, error) == -1, "Bad protocol signature accepted");
-    for (const auto format : {DspIqFormat::Cs16Le, DspIqFormat::BlockFloat16Le}) {
+    for (const auto format : {DspIqFormat::Cs16Le, DspIqFormat::BlockFloat16Le,
+                              DspIqFormat::BlockFloat8}) {
         const auto encoded = DspIqCodec::encode(b.iq, format);
         auto metadata = DspStreamProtocol::request(b);
         DspIqCodec::addMetadata(metadata, encoded);
         std::vector<float> restored;
-        require(encoded.payload.size() == int(b.iq.size() * 2U) &&
+        require(encoded.payload.size() == int(b.iq.size() *
+                    (format == DspIqFormat::BlockFloat8 ? 1U : 2U)) &&
                     DspIqCodec::decode(metadata, encoded.payload, int(b.iq.size() / 2U), restored, error),
                 "Packed IQ codec rejected its own payload");
-        const double tolerance = format == DspIqFormat::BlockFloat16Le ? 2.0e-5 : 4.0e-5;
+        const double tolerance = format == DspIqFormat::BlockFloat8 ? encoded.scale * 0.51 + 1.0e-6
+            : (format == DspIqFormat::BlockFloat16Le ? 2.0e-5 : 4.0e-5);
         for (std::size_t i = 0; i < b.iq.size(); ++i)
             require(std::abs(double(restored[i]) - b.iq[i]) <= tolerance, "Packed IQ quantization exceeded its bound");
+        if (format == DspIqFormat::BlockFloat8) {
+            auto invalidScale = metadata;
+            invalidScale["iqScale"] = 0.0;
+            require(!DspIqCodec::decode(invalidScale, encoded.payload,
+                                        int(b.iq.size() / 2U), restored, error),
+                    "BFP8 accepted a zero block scale");
+            require(!DspIqCodec::decode(metadata, encoded.payload.left(encoded.payload.size() - 1),
+                                        int(b.iq.size() / 2U), restored, error),
+                    "BFP8 accepted a truncated payload");
+        }
     }
     auto advertised = DspIqCodec::advertisedFormats();
     require(DspIqCodec::resolve(DspIqFormat::Auto, advertised) == DspIqFormat::BlockFloat16Le &&
-                DspIqCodec::resolve(DspIqFormat::Auto, {}) == DspIqFormat::Cf32Le,
+                DspIqCodec::resolve(DspIqFormat::Auto, {}) == DspIqFormat::Cf32Le &&
+                DspIqCodec::resolve(DspIqFormat::BlockFloat8, advertised) == DspIqFormat::BlockFloat8 &&
+                DspIqCodec::resolve(DspIqFormat::BlockFloat8, {}) == DspIqFormat::Cf32Le,
             "IQ capability negotiation lost modern or legacy compatibility");
+    const std::vector<float> zeros(32, 0.0f);
+    const auto encodedZeros = DspIqCodec::encode(zeros, DspIqFormat::BlockFloat8);
+    QJsonObject zeroHeader;
+    DspIqCodec::addMetadata(zeroHeader, encodedZeros);
+    std::vector<float> restoredZeros;
+    require(DspIqCodec::decode(zeroHeader, encodedZeros.payload, 16, restoredZeros, error) &&
+                restoredZeros == zeros, "BFP8 zero block failed");
     DspStreamBlock selected;
     const auto selectedOpen = DspStreamProtocol::selectedBandOpen(b);
     require(DspStreamProtocol::decodeSelectedBandOpen(selectedOpen, selected, error) &&

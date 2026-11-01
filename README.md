@@ -4,8 +4,14 @@ Obrii SDR is a wideband SDR receiver and research workstation, optimized first
 for RigExpert Fobos SDR hardware while also supporting additional receiver
 backends.
 The current packaged release is Windows-first, with active Linux/Raspberry Pi
-support and a separately maintained Android USB/network client. Version 6.5.0
-adds the standalone Obrii Analyzer instrument interface and an opt-in Multi-SDR
+support and a separately maintained Android USB/network client. Version 7.0.0
+adds a separate FPGA laboratory, a bounded virtual IQ hub, experimental open
+amateur-radio framing, and display-only network spectrum reduction. It also
+repairs client/server processing-mode control and Raspberry server UI updates.
+Version 6.6.0
+adds multi-user server-side VFO sessions, source-aware DSP/network routing,
+automatic known-key DMR PI ALG/KID selection, and the foundations for coherent
+multi-SDR work. Version 6.5.0 added the standalone Obrii Analyzer instrument interface and an opt-in Multi-SDR
 workspace with stitched absolute-frequency spectrum/waterfall, persistent RX
 configuration, synchronized panning and automatic audio-IQ routing by listening
 frequency. Version 6.4 added receiver-noise/Y-factor calibration, protected DMR
@@ -25,6 +31,13 @@ interface. It shares the statically linked measurement core with Obrii SDR,
 opens spectrum-frame recordings on its own, and can attach to the live spectrum
 of a running Obrii SDR instance without taking ownership of the receiver. See
 `docs/obrii_analyzer.md`.
+The separate `ObriiFpgaLab` application can open/edit a local Vivado HDL project,
+save a graphical FPGA experiment plan, inspect a finished `.bin`, and launch
+an installed Vivado for a project build without stopping Obrii SDR. The graph
+does not yet generate RTL or modify the running receiver. An openXC7 tab now
+checks project portability and can run the open-source toolchain through
+Linux/WSL for standalone RTL modules or compatible pure-Verilog designs; the
+clone's full image still has vendor IP and netlist blockers. See `docs/fpga_lab.md`.
 The main application also has an opt-in Multi-SDR spectrum workspace: its
 existing receiver remains RX 1 and up to seven additional native receiver
 sessions can be placed on one stitched frequency axis. Architecture, coherence
@@ -40,8 +53,8 @@ dropping, and multistage channel extraction keep the wideband desktop and
 Raspberry paths responsive. Android is released separately only when its
 package changes.
 
-Release 6.5.0 packages the separate analyzer and the Multi-SDR spectrum/audio
-workspace. Release 6.4.1 keeps receiver calibration beside Spectrum measurement
+Release 6.6.0 packages the separate analyzer, multi-user networking, source-aware
+DSP branches, and the Multi-SDR spectrum/audio workspace. Release 6.4.1 keeps receiver calibration beside Spectrum measurement
 and adds deterministic self-tests for its calculations and scientific export.
 Release 6.4.0 also improved HackRF TX buffering and stop handling, signal-lab
 generation and decoder self-tests. Protected DMR TX requires the optional
@@ -59,15 +72,17 @@ Remove API keys, private coordinates and other sensitive data from any attachmen
 
 ## Windows Release Package
 
-Release 6.5.0 provides a Windows x64 core ZIP and a Raspberry/Linux source tar.gz.
+Release 7.0.0 provides Full and Lite packages for both Windows x64 and
+Raspberry/Linux source. Lite uses the same UI and omits optional large research
+backends; on Raspberry build it with `BUILD_LITE=1 ./tools/build_linux.sh`.
 No Wireless add-on or Android package is uploaded with this release.
-The unchanged optional Wireless add-on from 6.1.1 is also compatible with 6.5.0;
+The unchanged optional Wireless add-on from 6.1.1 is also compatible with 6.6.0;
 it does not need to be downloaded again for an existing installation.
 The add-on contains the portable GNU Radio
 Wi-Fi and Wireshark tools; to enable them, run `Install-Wireless-AddOn.ps1` beside
 `ObriiSDR.exe` or extract the add-on into that same folder. See
 `docs/wireless_addon.md`. Npcap is not bundled.
-Extract the Linux source with `tar -xzf ObriiSDR-v6.5.0-raspberry-source.tar.gz`;
+Extract the Linux source with `tar -xzf ObriiSDR-v7.0.0-raspberry-source.tar.gz`;
 the build/run shell scripts have executable permissions. Android packages are
 maintained and released separately.
 
@@ -209,6 +224,9 @@ required for normal SDR, scan, GNSS, or internal DMR metadata use.
   WEFAX, Meteor LRPT beta, and DMR beta mode selection.
 - Digital Audio dock with FT8/RTTY/FSK/PSK decoding work, DMR beta
   sync/activity monitoring, and an optional DSD-neo lab bridge.
+- Open Radio laboratory with native AX.25 UI/FCS and KISS framing, official
+  libm17 packet/4FSK-symbol generation, lazy NPR/AREDN/FreeDV/ARDOP backend
+  contracts, and a versioned envelope for future local/network signal loopback.
 - FT8 Station workspace with structured decodes, standard QSO sequencing, true UTC-slot scheduling, local ADIF logbook, optional WSJT-X UDP interoperability, PSK Reporter, QRZ Logbook, and external TQSL/LoTW workflow.
 - DMR Lab Capture metadata fields and JSON sidecar files for controlled audio
   and Channel IQ recordings.

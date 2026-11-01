@@ -52,6 +52,8 @@ if (Test-Path -LiteralPath $LegacyExecutable) {
 $RootFiles = @(
     @{ Source = Join-Path $BuildPath "ObriiSDR.exe"; Name = "ObriiSDR.exe" },
     @{ Source = Join-Path $BuildPath "ObriiAnalyzer.exe"; Name = "ObriiAnalyzer.exe" },
+    @{ Source = Join-Path $BuildPath "ObriiFpgaLab.exe"; Name = "ObriiFpgaLab.exe" },
+    @{ Source = Join-Path $BuildPath "ObriiIqHub.exe"; Name = "ObriiIqHub.exe" },
     @{ Source = Join-Path $Workspace "fobos\fobos.dll"; Name = "fobos.dll" },
     @{ Source = Join-Path $Workspace "fobos_agile\fobos_sdr.dll"; Name = "fobos_sdr.dll" },
     @{ Source = Join-Path $Workspace "fftw-3.3.5-dll64\libfftw3f-3.dll"; Name = "libfftw3f-3.dll" },
@@ -178,7 +180,7 @@ $ReleaseDocFiles = @(
     "docs\dmr_external_backend.md",
     "docs\gnss_preflight_4.1.md",
     "docs\iq_pipeline_audit.md",
-    "docs\release_notes_6.6.0.md",
+    "docs\release_notes_7.0.0.md",
     "docs\dmr_motorola_privacy.md",
     "docs\performance_and_dmr_audit.md",
     "docs\wireless_lab.md",
@@ -187,9 +189,12 @@ $ReleaseDocFiles = @(
     "docs\psk31_decoder.md",
     "docs\hf_prediction.md",
     "docs\wireless_addon.md",
+    "docs\lite_windows_package.md",
+    "docs\lite_raspberry_package.md",
     "docs\dsp_stream_protocol.md",
     "docs\dsp_stream_manager.md",
     "docs\network_multi_user.md",
+    "docs\open_amateur_radio.md",
     "docs\gnu_radio_bridge_usage.md",
     "docs\pfb_channelizer.md",
     "docs\dsp_board_coverage.md",
@@ -254,6 +259,12 @@ foreach ($Component in $ResearchNotices.Keys) {
     foreach ($Name in $ResearchNotices[$Component]) {
         Copy-Item -LiteralPath (Join-Path $Workspace "third_party\$Component\$Name") -Destination $Destination -Force
     }
+}
+if (Test-Path -LiteralPath (Join-Path $Workspace 'third_party/libm17/LICENSE')) {
+    $Libm17NoticePath = Join-Path $DeployPath 'licenses/libm17'
+    New-Item -ItemType Directory -Path $Libm17NoticePath -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $Workspace 'third_party/libm17/LICENSE') `
+        -Destination (Join-Path $Libm17NoticePath 'LICENSE.txt') -Force
 }
 
 $DsdNeoBinPath = Join-Path $DsdNeoExtractPath "bin"
@@ -372,6 +383,7 @@ if ($Sign) {
     $SignScript = Join-Path $PSScriptRoot "sign_windows.ps1"
     & $SignScript -Path (Join-Path $DeployPath "ObriiSDR.exe") -PfxPath $PfxPath -CertPassword $CertPassword -CertSubject $CertSubject
     & $SignScript -Path (Join-Path $DeployPath "ObriiAnalyzer.exe") -PfxPath $PfxPath -CertPassword $CertPassword -CertSubject $CertSubject
+    & $SignScript -Path (Join-Path $DeployPath "ObriiFpgaLab.exe") -PfxPath $PfxPath -CertPassword $CertPassword -CertSubject $CertSubject
 }
 
 Write-Host "Deployed Obrii SDR to $DeployPath"

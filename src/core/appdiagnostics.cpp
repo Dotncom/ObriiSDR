@@ -13,6 +13,7 @@
 #include <QMutexLocker>
 #include <QThread>
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
@@ -34,6 +35,7 @@ QMutex gLogMutex;
 QFile gLogFile;
 qint64 gLogBytesWritten = 0;
 int gLogLinesUntilFlush = 0;
+std::atomic_bool gReportedBrokenLocalPipe{false};
 
 const char *messageTypeName(QtMsgType type) {
     switch (type) {
@@ -61,6 +63,11 @@ bool shouldWriteDiagnosticLogLine(QtMsgType type, const QString &message) {
 }
 
 void diagnosticMessageHandler(QtMsgType type, const QMessageLogContext &context, const QString &message) {
+    if (!fobosVerboseLoggingEnabled() &&
+        message.startsWith(QStringLiteral("QWindowsPipeWriter::write failed.")) &&
+        gReportedBrokenLocalPipe.exchange(true, std::memory_order_relaxed)) {
+        return;
+    }
     const bool writeDiagnosticOutput = shouldWriteDiagnosticLogLine(type, message);
     const bool echoDebugOutput =
         (type != QtDebugMsg && type != QtInfoMsg) || fobosVerboseLoggingEnabled();
@@ -166,6 +173,7 @@ void diagnosticTerminateHandler() {
 } // namespace
 
 void installDiagnosticLogger() {
+    gReportedBrokenLocalPipe.store(false, std::memory_order_relaxed);
     const QString logPath = QDir(QCoreApplication::applicationDirPath()).filePath("ObriiSDR_diagnostic.log");
     if (QFileInfo(logPath).size() >= DIAGNOSTIC_LOG_MAX_BYTES) {
         QFile::remove(logPath + QStringLiteral(".1"));

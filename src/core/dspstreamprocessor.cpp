@@ -298,7 +298,8 @@ QByteArray response(const DspStreamBlock &b, const DspStreamResult &r) {
             const auto encoded = DspIqCodec::encode(*r.iq, b.wireFormat);
             if (encoded.payload.isEmpty()) return encode({{"type", "error"}, {"error", "IQ response encoding failed"}});
             payload = encoded.payload;
-            if (encoded.format == DspIqFormat::BlockFloat16Le) json["iqScale"] = encoded.scale;
+            if (encoded.format == DspIqFormat::BlockFloat16Le ||
+                encoded.format == DspIqFormat::BlockFloat8) json["iqScale"] = encoded.scale;
             if (encoded.clippedComponents) json["iqClipped"] = encoded.clippedComponents;
         }
     }

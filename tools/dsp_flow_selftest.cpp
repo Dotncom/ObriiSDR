@@ -2,6 +2,7 @@
 #include "multivfowidget.h"
 #include "dspresearchwidget.h"
 #include "signallabconstellation3d.h"
+#include "MyWaterfallWidget.h"
 #include "iqbuffer.h"
 #include "dspcomputedialog.h"
 #include "audiofilterchainwidget.h"
@@ -836,6 +837,19 @@ void testBoard() {
     require(panel.workspaceSpectrumTargetBins() == 0, "hidden board still requests display width");
 }
 
+void testLazyWorkspaceWaterfall() {
+    DspFlowPanel panel;
+    const QJsonObject graph{{"version", 8}, {"blocks", QJsonArray{
+        QJsonObject{{"id", "receiver"}, {"type", "receiver_source"}},
+        QJsonObject{{"id", "waterfall"}, {"type", "workspace_waterfall"}}}}};
+    require(panel.setConfigurationJson(graphJson(graph)), "Workspace waterfall fixture failed");
+    require(panel.findChildren<MyWaterfallWidget *>().isEmpty(),
+            "2D workspace waterfall allocated an OpenGL widget");
+    panel.setWorkspaceVisualizationSettings({{"displayMode", 1}});
+    require(panel.findChildren<MyWaterfallWidget *>().size() == 1,
+            "3D workspace waterfall did not allocate its renderer");
+}
+
 void testComputeDialog() {
     DspStreamEndpoint endpoint;
     DspComputeDialog dialog(endpoint, true);
@@ -1070,7 +1084,11 @@ int main(int argc, char **argv) {
 #endif
     if (qEnvironmentVariableIsSet("OBRII_REMOTE_VFO_SELFTEST"))
         std::cerr << "Remote VFO self-test: initializing Qt\n" << std::flush;
+    if (qEnvironmentVariableIsSet("OBRII_DSP_BOARD_SETTINGS"))
+        std::cerr << "Saved DSP board: initializing Qt\n" << std::flush;
     QApplication app(argc, argv);
+    if (qEnvironmentVariableIsSet("OBRII_DSP_BOARD_SETTINGS"))
+        std::cerr << "Saved DSP board: Qt initialized\n" << std::flush;
 #ifdef _WIN32
     if (qEnvironmentVariableIsSet("OBRII_DSP_RENDER_TEST")) {
         const int font = QFontDatabase::addApplicationFont(QStringLiteral("C:/Windows/Fonts/arial.ttf"));
@@ -1081,6 +1099,23 @@ int main(int argc, char **argv) {
     QStandardPaths::setTestModeEnabled(true);
     QApplication::setApplicationName("ObriiDspFlowSelfTest");
     try {
+        if (qEnvironmentVariableIsSet("OBRII_DSP_BOARD_SETTINGS")) {
+            QSettings settings(qEnvironmentVariable("OBRII_DSP_BOARD_SETTINGS"), QSettings::IniFormat);
+            const QString boardJson = settings.value(QStringLiteral("dspFlow/configuration")).toString();
+            require(!boardJson.isEmpty(), "No saved DSP board in settings");
+            std::cerr << "Saved DSP board: constructing panel\n" << std::flush;
+            DspFlowPanel panel;
+            std::cerr << "Saved DSP board: loading configuration\n" << std::flush;
+            require(panel.setConfigurationJson(boardJson), "Saved DSP board did not load");
+            std::cerr << "Saved DSP board: showing panel\n" << std::flush;
+            panel.show();
+            for (int i = 0; i < 100; ++i) {
+                QApplication::processEvents();
+                QThread::msleep(10);
+            }
+            std::cout << "Saved DSP board opened successfully\n";
+            return 0;
+        }
         if (qEnvironmentVariableIsSet("OBRII_REMOTE_VFO_SELFTEST")) {
             std::cerr << "Remote VFO self-test: running protocol checks\n" << std::flush;
             require(runRemoteVfoServiceTests(), "Remote VFO session tests failed");
@@ -1091,6 +1126,7 @@ int main(int argc, char **argv) {
         testBoardFilterHistory();
         testSelectionDeletion();
         testBoard();
+        testLazyWorkspaceWaterfall();
         testMainFftGraph();
         testMainFftBoardRouting();
         testMainFftAliases();

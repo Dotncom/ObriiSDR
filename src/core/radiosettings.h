@@ -242,6 +242,10 @@ struct RadioSettings {
     int vgaGain = 3;
     int hackRfLnaGainDb = 16;
     int hackRfVgaGainDb = 20;
+    int uhdRxChannel = 0;
+    double uhdRxGainDb = 30.0;
+    QString uhdRxAntenna;
+    QString uhdFpgaImagePath;
     bool hackRfAmpEnabled = false;
     bool hackRfBiasTeeEnabled = false;
     bool hackRfAutomaticBandwidth = true;
@@ -264,6 +268,11 @@ struct RadioSettings {
     int hackRfSweepStepHz = 1000000;
     int hackRfSweepBytesPerTune = 16384;
     bool hackRfSweepInterleaved = true;
+    bool virtualSignalUseTcp = false;
+    QString virtualSignalLocalName = QStringLiteral("obrii-virtual-iq");
+    QString virtualSignalListenAddress = QStringLiteral("127.0.0.1");
+    int virtualSignalPort = 17661;
+    bool virtualSignalFollowMetadata = true;
     bool rtlAgc = true;
     int rtlTunerGainTenthsDb = 166;
     int audioDeviceId = 0;

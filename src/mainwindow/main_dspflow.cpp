@@ -657,6 +657,7 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
     if (type == QStringLiteral("zero_span")) { openZeroSpanDialog(); return; }
     if (type == QStringLiteral("research_analysis")) { openResearchAnalysis(0); return; }
     if (type == QStringLiteral("wireless_lab")) { openWirelessLab(); return; }
+    if (type == QStringLiteral("open_radio_lab")) { openOpenRadioLab(); return; }
     if (type == QStringLiteral("radio_propagation")) { openPropagationLab(); return; }
     static const QHash<QString, ResearchAnalysisDialog::Tab> researchTabs = {
         {QStringLiteral("research_interference"), ResearchAnalysisDialog::InterferenceTab},
@@ -1093,7 +1094,8 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         form->addRow(QStringLiteral("RTL gain:"), linkedSlider(rtlGainSlider, dialog, syncTimer, QStringLiteral(" dB"), 10.0));
         form->addRow(QString(), buttonRow({
             actionButton(fobosButton, text("Деталі Fobos", "Fobos details")),
-            actionButton(hackRfSettingsButton, QStringLiteral("HackRF RX..."))
+            actionButton(hackRfSettingsButton, QStringLiteral("HackRF RX...")),
+            actionButton(virtualSignalSettingsButton, text("Віртуальний IQ...", "Virtual IQ..."))
         }));
         auto *refresh = new QPushButton(text("Оновити список пристроїв", "Refresh device list"), dialog);
         connect(refresh, &QPushButton::clicked, refreshButton, &QPushButton::click);

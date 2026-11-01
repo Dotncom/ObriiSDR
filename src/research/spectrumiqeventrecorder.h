@@ -50,6 +50,11 @@ private:
     qint64 lastFrameUtcMs = 0;
     qint64 spectrumFirstFrameUtcMs = 0;
     quint64 writtenBytes = 0;
+    quint64 framesWritten = 0;
+    quint64 writeErrors = 0;
+    qint64 writeNsSum = 0;
+    qint64 writeNsMax = 0;
+    qint64 flushNs = 0;
     qint64 dataSizeFieldOffset = -1;
     quint64 waveHeaderBytes = 0;
     bool active = false;

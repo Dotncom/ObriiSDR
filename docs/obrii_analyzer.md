@@ -154,6 +154,14 @@ normalization or fixture calibration is present. This lets development pause
 safely until the B210-class receiver arrives without presenting a simulated
 instrument as a finished one.
 
+Plan validation rejects non-finite source/safety levels, invalid hardware
+frequency ranges and reference impedance, and available RX/TX devices without
+declared channels. Return-loss measurements require simultaneous RX/TX or an
+external generator. Frequency-grid generation rejects invalid or oversized
+inputs before allocating memory. Plan import checks the format version and
+instrument mode; plan and session-template saves use atomic replacement and
+report write failures.
+
 The current Windows bundle contains UHD command-line/runtime components used by
 the wireless toolchain, but not a SoapyUHD device module. A future USRP can be
 used through this acquisition path once a matching SoapyUHD module is deployed;

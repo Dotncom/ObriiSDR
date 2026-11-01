@@ -2,6 +2,7 @@
 
 #include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -67,6 +68,11 @@ bool SpectrumIqEventRecorder::start(const QString &eventBasePath,
     lastFrameUtcMs = firstFrameUtcMsValue;
     spectrumFirstFrameUtcMs = spectrumFirstFrameUtcMsValue;
     writtenBytes = 0;
+    framesWritten = 0;
+    writeErrors = 0;
+    writeNsSum = 0;
+    writeNsMax = 0;
+    flushNs = 0;
     dataSizeFieldOffset = -1;
     waveHeaderBytes = 0;
     filePath = eventBasePath + (mode == Mode::ChannelIqS16
@@ -85,7 +91,10 @@ void SpectrumIqEventRecorder::stop() {
     }
     patchWavHeader();
     if (outputFile.isOpen()) {
-        outputFile.flush();
+        QElapsedTimer timer;
+        timer.start();
+        if (!outputFile.flush()) ++writeErrors;
+        flushNs = timer.nsecsElapsed();
         outputFile.close();
     }
     writeSidecar();
@@ -127,15 +136,21 @@ bool SpectrumIqEventRecorder::appendFrame(const QByteArray &iqData,
     if (firstFrameUtcMs <= 0 && frameUtcMs > 0) {
         firstFrameUtcMs = frameUtcMs;
     }
-    if (frameUtcMs > 0) {
-        lastFrameUtcMs = frameUtcMs;
-    }
+    QElapsedTimer timer;
+    timer.start();
     const qint64 written = outputFile.write(iqData);
-    if (written <= 0) {
+    const qint64 writeNs = timer.nsecsElapsed();
+    writeNsSum += writeNs;
+    writeNsMax = (std::max)(writeNsMax, writeNs);
+    if (written != iqData.size()) {
+        if (written > 0) writtenBytes += static_cast<quint64>(written);
+        ++writeErrors;
         active = false;
         return false;
     }
     writtenBytes += static_cast<quint64>(written);
+    ++framesWritten;
+    if (frameUtcMs > 0) lastFrameUtcMs = frameUtcMs;
     return true;
 }
 
@@ -279,6 +294,11 @@ QJsonObject SpectrumIqEventRecorder::makeMetadataObject() const {
     root["filePath"] = filePath;
     root["sampleRate"] = recordingSampleRate;
     root["bytesWritten"] = static_cast<double>(writtenBytes);
+    root["framesWritten"] = static_cast<double>(framesWritten);
+    root["writeErrors"] = static_cast<double>(writeErrors);
+    root["writeCallAvgMs"] = framesWritten ? double(writeNsSum) / double(framesWritten) / 1.0e6 : 0.0;
+    root["writeCallMaxMs"] = double(writeNsMax) / 1.0e6;
+    root["flushMs"] = double(flushNs) / 1.0e6;
     root["firstFrameUtcMs"] = static_cast<double>(firstFrameUtcMs);
     root["lastFrameUtcMs"] = static_cast<double>(lastFrameUtcMs);
     root["spectrumFirstFrameUtcMs"] = static_cast<double>(spectrumFirstFrameUtcMs);

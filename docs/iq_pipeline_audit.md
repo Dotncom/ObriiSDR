@@ -75,3 +75,53 @@ hot-path invariants, and the evaluation of whether `DataProcessor` and
 2. Record GNSS IQ with the current bicone setup, then run Obrii SDR acquisition offline with the `GPS replay` button and compare with GNSS-SDR.
 3. Test with a GNSS active antenna plus bias tee or an external GNSS LNA/filter if available.
 4. Repeat DMR with the same IQ stream diagnostics enabled and check whether the raw stream remains stable during voice tests.
+
+## Full-IQ 50 MS/s Throughput Check
+
+The 2026-10-31 23:52:23 Full-IQ capture reported 41.01 MS/s in the async
+callback, while the same receiver path later reported roughly 50 MS/s with no
+recording (2026-11-01 00:12:59, 262144 samples per callback, no late callbacks).
+This makes a permanent receiver speed limit unlikely, but does not distinguish
+CPU scheduling, callback work, storage pressure, and a USB hub under load.
+
+For a controlled test, enable verbose logging briefly and use the same
+receiver, 50 MS/s, frequency, FFT and visualization settings each time:
+
+1. Run 5 seconds with no Full-IQ recording.
+2. Run 5 seconds with Full-IQ recording to the normal disk.
+3. Repeat both with a direct USB 3 port instead of the hub, if available.
+
+Compare `[DataProcessor] async sample-rate check` (about once every two seconds
+with verbose logging, including `measured`, `workAvgMs`,
+`workMaxMs`, `bufferAvgMs`, `iqEncodeAvgMs`, `bufferRejected`) and `[IQ GUI queue]`
+(`avgWaitMs`, `maxWaitMs`, `maxHandlerMs`). A 262144-sample callback at 50 MS/s
+has about 5.24 ms before the next block. The new recording sidecar reports
+`writeCallAvgMs`, `writeCallMaxMs`, `flushMs`, and `writeErrors`. Large callback
+work points to synchronous RX processing; growing GUI queue delay points to
+GUI/storage backlog. Late callbacks with low callback work require a separate
+USB/host scheduling check. Compare hub versus direct-port results before
+blaming either the hub or receiver.
+
+`effectiveSampleRate` in the recording JSON is written bytes divided by the
+host timestamp span. It is useful as a capture-throughput estimate, but is
+not an independent measurement of the receiver ADC clock or proof of a USB
+transfer failure.
+
+### 2026-11-01 Capture Result
+
+The same 50 MS/s receiver ran at approximately 50 MS/s before and after the
+Full-IQ capture, but at 39-40 MS/s while recording. During that interval,
+`iqEncodeAvgMs` rose to 5.3-5.6 ms per 262144-complex-sample callback, which
+has only 5.24 ms at the configured rate. The recorder reported 0.42 ms average
+write time, 2.32 ms maximum, no write errors, and the GUI queue averaged about
+1.1-1.6 ms rather than growing. The callback's synchronous float-to-IQ8
+quantizer, not sustained disk bandwidth or the GUI queue, explains the rate
+drop in this capture. It does not prove that every hub and port combination is
+equivalent under load.
+
+An x64 SSE2 quantizer now preserves the scalar byte values and was checked
+against them in `ObriiIq8QuantizerSelfTest`, including non-finite inputs and
+block tails. The standalone synthetic test ran in about 0.25 ms per 262144
+complex-sample block on this PC. A repeat live recording is needed to confirm
+that the entire RX path now sustains 50 MS/s. ARM currently retains the scalar
+fallback until a native Raspberry build and benchmark are available.

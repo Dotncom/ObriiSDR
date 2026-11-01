@@ -40,6 +40,9 @@ Audit scope: user-visible desktop functions in the current development tree.
   measurement sessions.
 - DMR, CW, SSTV, digital video, GNSS over SDR, serial NMEA/UBX, QTH map,
   presets/calibration, and general settings.
+- Open radio launches the isolated M17 and AX.25/KISS framing laboratory and
+  virtual-signal envelope builder. It remains a launcher until each protocol
+  has a bounded, tested IQ modem block; no placeholder is wired into live DSP.
 
 ## Board Editing History
 

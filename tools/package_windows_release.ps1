@@ -52,7 +52,7 @@ New-Item -ItemType Directory -Path $Stage -Force | Out-Null
 # Explicit runtime manifest: a development folder also contains private overrides,
 # rotated logs, captures and screenshots. Unknown files never enter a release.
 $RootFiles = @(
-    'ObriiSDR.exe', 'ObriiAnalyzer.exe', 'Install-Wireless-AddOn.ps1', 'LICENSE', 'README.md', 'CHANGELOG.md', 'THIRD_PARTY_LICENSES.txt',
+    'ObriiSDR.exe', 'ObriiAnalyzer.exe', 'ObriiFpgaLab.exe', 'ObriiIqHub.exe', 'Install-Wireless-AddOn.ps1', 'LICENSE', 'README.md', 'CHANGELOG.md', 'THIRD_PARTY_LICENSES.txt',
     'translations.json', 'fobos.dll', 'fobos_sdr.dll', 'libfftw3f-3.dll', 'libusb-1.0.dll',
     'rtlsdr.dll', 'Qt5Core.dll', 'Qt5Concurrent.dll', 'Qt5Gui.dll', 'Qt5Widgets.dll', 'Qt5Network.dll',
     'Qt5SerialPort.dll', 'Qt5Multimedia.dll', 'MSVCP140.dll', 'MSVCP140_1.dll',
@@ -63,8 +63,9 @@ $PublicDocs = @(
     'gnss_preflight_4.1.md', 'iq_pipeline_audit.md', 'performance_and_dmr_audit.md',
     'radio_propagation_lab.md', 'wireless_lab.md',
     "release_notes_$Version.md"
-    'research_backends.md', 'psk31_decoder.md', 'hf_prediction.md', 'wireless_addon.md'
-    'dsp_stream_protocol.md', 'dsp_stream_manager.md', 'network_multi_user.md', 'gnu_radio_bridge_usage.md'
+    'research_backends.md', 'psk31_decoder.md', 'hf_prediction.md', 'wireless_addon.md', 'fpga_lab.md',
+    'lite_windows_package.md', 'lite_raspberry_package.md'
+    'dsp_stream_protocol.md', 'dsp_stream_manager.md', 'network_multi_user.md', 'open_amateur_radio.md', 'gnu_radio_bridge_usage.md'
     'pfb_channelizer.md', 'dsp_board_coverage.md', 'experiment_bundle.md', 'obrii_analyzer.md',
     'multi_sdr_architecture.md', 'usrp_b210_plan.md'
 )
@@ -124,7 +125,7 @@ $RequiredFiles = if ($WirelessAddOn) {
       'wireshark/extcap/ObriiWifiExtcap.bat', 'wireless/wifi_phy_decoder.py',
       'wireless/wifi_packet_bus.py', 'wireless/wifi_extcap.py', 'docs/wireless_addon.md')
 } else {
-    @('ObriiSDR.exe', 'ObriiAnalyzer.exe', 'Install-Wireless-AddOn.ps1', 'LICENSE', 'translations.json', 'platforms/qwindows.dll')
+    @('ObriiSDR.exe', 'ObriiAnalyzer.exe', 'ObriiFpgaLab.exe', 'ObriiIqHub.exe', 'Install-Wireless-AddOn.ps1', 'LICENSE', 'translations.json', 'platforms/qwindows.dll')
 }
 foreach ($Required in $RequiredFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $Stage $Required))) { throw "Missing release file: $Required" }

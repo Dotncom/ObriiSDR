@@ -6,6 +6,7 @@
 #include "dmrprivacyutils.h"
 #include "dsdneobridge.h"
 #include "gophertrunkbridge.h"
+#include "openradiolabdialog.h"
 #include "tuningutils.h"
 
 #include <QAbstractItemView>
@@ -161,6 +162,8 @@ void YourClassName::updateGopherTrunkBridgeSettings() {
 }
 
 void YourClassName::processDigitalAudioFrame(const QByteArray &pcmData, int sampleRate) {
+    if (openRadioLabDialog && pendingSettings.modulationType != MOD_DMR)
+        openRadioLabDialog->submitAfskAudioFrame(pcmData, sampleRate > 0 ? sampleRate : 48000);
     if (!digitalDecoder ||
         !digitalDecoderThread ||
         !digitalDecodeEnabled ||

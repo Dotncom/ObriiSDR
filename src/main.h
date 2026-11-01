@@ -106,6 +106,7 @@ class ZoomSpectrumDialog;
 class ZoomDensityDialog;
 class TransmitDialog;
 class Ft8StationDialog;
+class OpenRadioLabDialog;
 class AudioFilterChainWidget;
 class DspFlowPanel;
 class MultiVfoWidget;
@@ -220,6 +221,7 @@ private slots:
     void checkStreamStartup();
     void openNetworkSettingsDialog();
     void showHackRfRxSettings();
+    void showUhdRxSettings();
     void onNetworkStatusChanged(const QString &status);
     void onNetworkControlCommandReceived(const QJsonObject &command);
     void onAudioEnabledChanged(bool checked);
@@ -273,9 +275,11 @@ private:
     bool isRtlSdrNativeSelected() const;
     int selectedRtlSdrNativeIndex() const;
     bool isSoapySdrSelected() const;
+    bool isUhdNativeSelected() const;
     bool isBladeRfNativeSelected() const;
     int selectedBladeRfNativeIndex() const;
     bool isHackRfNativeSelected() const;
+    bool isVirtualSignalSelected() const;
     int selectedHackRfNativeIndex() const;
     bool isRtlBackendSelected() const;
     bool isExternalReceiverBackendSelected() const;
@@ -291,12 +295,19 @@ private:
     ReceiverStreamDescriptor makeSoapySdrStreamDescriptor(bool queueAudioBlocks,
                                                           bool publishIqSnapshot,
                                                           bool emitIqFrames) const;
+    ReceiverStreamDescriptor makeUhdNativeStreamDescriptor(bool queueAudioBlocks,
+                                                           bool publishIqSnapshot,
+                                                           bool emitIqFrames) const;
     ReceiverStreamDescriptor makeBladeRfNativeStreamDescriptor(bool queueAudioBlocks,
                                                                bool publishIqSnapshot,
                                                                bool emitIqFrames) const;
     ReceiverStreamDescriptor makeHackRfNativeStreamDescriptor(bool queueAudioBlocks,
                                                               bool publishIqSnapshot,
                                                               bool emitIqFrames) const;
+    ReceiverStreamDescriptor makeVirtualSignalStreamDescriptor(bool queueAudioBlocks,
+                                                               bool publishIqSnapshot,
+                                                               bool emitIqFrames) const;
+    void showVirtualSignalRxSettings();
     bool restartStreamForHardwareChange();
     void abandonFobosSessionWithoutClose(const char *reason);
     bool openFobosSession();
@@ -422,6 +433,7 @@ private:
     void openZoomDensity();
     void openTransmitDialog();
     void openFt8StationDialog();
+    void openOpenRadioLab();
     void openApplicationSettings();
     bool isAnyVideoOutputVisible() const;
     void openDspBlockReference(const QString &type, const QString &id);
@@ -743,6 +755,8 @@ private:
     QPushButton *fobosButton = nullptr;
     QPushButton *networkButton = nullptr;
     QPushButton *hackRfSettingsButton = nullptr;
+    QPushButton *uhdSettingsButton = nullptr;
+    QPushButton *virtualSignalSettingsButton = nullptr;
     QPushButton *presetManagerButton = nullptr;
     QPushButton *zoomSpectrumButton = nullptr;
     QPushButton *zoomDensityButton = nullptr;
@@ -996,6 +1010,7 @@ private:
     ZoomDensityDialog *zoomDensityDialog = nullptr;
     TransmitDialog *transmitDialog = nullptr;
     Ft8StationDialog *ft8StationDialog = nullptr;
+    OpenRadioLabDialog *openRadioLabDialog = nullptr;
     QTableWidget *gnssSatelliteTable = nullptr;
     QLabel *dsdNeoStatusLabel = nullptr;
     QString lastDmrPrivacyCapabilityWarning;
@@ -1071,6 +1086,8 @@ private:
     bool fobosCloseKnownUnsafe = false;
     bool networkClientIqProcessingActive = false;
     bool networkClientReconnectPending = false;
+    int networkClientRequestedProcessingMode = -1;
+    int networkClientRequestedServerLocalOutput = -1;
     NetworkProcessingMode activeNetworkClientProcessingMode = NetworkProcessingMode::ServerSide;
     bool networkIqStreamMetadataValid = false;
     bool networkIqStreamWasChannelized = false;

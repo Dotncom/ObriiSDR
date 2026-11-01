@@ -23,6 +23,7 @@ public:
     ~RemoteAudioPlayer();
 
     void playPcmFrame(const QByteArray &pcmData);
+    void playNetworkPcmFrame(const QByteArray &pcmData);
     void stop();
     void setVolume(float volume);
     void setOutputDevice(int index);
@@ -41,6 +42,9 @@ private:
     std::atomic<float> outputVolume = 1.0f;
     int outputDeviceIndex = -1;
     int maximumQueuedMs = 0;
+    QList<QByteArray> networkPendingFrames;
+    qint64 networkPendingBytes = 0;
+    bool networkPrimed = false;
 #ifdef _WIN32
     void releaseBlock(AudioBlock *block);
 #endif
@@ -57,6 +61,8 @@ private:
 
     static constexpr int SAMPLE_RATE = 48000;
     static constexpr int MAX_ACTIVE_BLOCKS = 24;
+    static constexpr int NETWORK_PREBUFFER_MS = 80;
+    static constexpr int NETWORK_MAX_PENDING_MS = 250;
 };
 
 #endif // REMOTEAUDIOPLAYER_H

@@ -1,5 +1,6 @@
 #include "dataprocessor.h"
 #include "iqbuffer.h"
+#include "iq8quantizer.h"
 #include "dspiqsourceregistry.h"
 #include "channelizerutils.h"
 #include "diagnosticlogging.h"
@@ -8,7 +9,9 @@
 #include "hackrfbackend.h"
 #include "rtlsdrbackend.h"
 #include "soapysdrbackend.h"
+#include "uhdbackend.h"
 #include "zoomspectrumprocessor.h"
+#include "openradio/virtualsignaltransport.h"
 
 #include <algorithm>
 #include <chrono>
@@ -25,6 +28,10 @@
 #include <QJsonObject>
 #include <QStringList>
 #include <QTcpSocket>
+#include <QTcpServer>
+#include <QHostAddress>
+#include <QLocalServer>
+#include <QLocalSocket>
 #ifdef _WIN32
 #include <Windows.h>
 #endif
@@ -34,6 +41,10 @@
 namespace {
 
 constexpr double TWO_PI = 6.28318530717958647692;
+qint64 monotonicNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 constexpr bool FORCE_SYNC_READER = false;
 constexpr double SYNC_BLOCKS_PER_SECOND = 20.0;
 constexpr double ASYNC_BLOCKS_PER_SECOND = 400.0;
@@ -42,7 +53,6 @@ constexpr uint32_t MAX_SYNC_BLOCK_SAMPLES = 4000000;
 constexpr uint32_t MIN_ASYNC_BLOCK_SAMPLES = 32768;
 constexpr uint32_t MAX_ASYNC_BLOCK_SAMPLES = 262144;
 constexpr int NETWORK_CHANNEL_FRAME_SAMPLES = 8192;
-constexpr float NETWORK_IQ_QUANTIZE_GAIN = 16.0f;
 constexpr float NETWORK_CHANNEL_IQ_TARGET_LEVEL = 0.45f;
 constexpr float HF_NOISE_CANCEL_MAX_COEFF = 2.5f;
 constexpr double SAMPLE_RATE_DIAGNOSTIC_RELATIVE_WARN = 0.03;
@@ -63,6 +73,8 @@ constexpr int SOAPY_SDR_ERR_OPEN = -14101;
 constexpr int SOAPY_SDR_ERR_CONFIGURE = -14102;
 constexpr int SOAPY_SDR_ERR_STREAM = -14103;
 constexpr int SOAPY_SDR_TIMEOUT = -1;
+constexpr int UHD_NATIVE_ERR_OPEN = -18101;
+constexpr int UHD_NATIVE_ERR_STREAM = -18102;
 constexpr int BLADERF_NATIVE_ERR_OPEN = -15101;
 constexpr int BLADERF_NATIVE_ERR_CONFIGURE = -15102;
 constexpr int BLADERF_NATIVE_ERR_STREAM = -15103;
@@ -70,6 +82,8 @@ constexpr uint32_t BLADERF_SYNC_TIMEOUT_MS = 250;
 constexpr int HACKRF_NATIVE_ERR_OPEN = -16101;
 constexpr int HACKRF_NATIVE_ERR_CONFIGURE = -16102;
 constexpr int HACKRF_NATIVE_ERR_STREAM = -16103;
+constexpr int VIRTUAL_SIGNAL_ERR_LISTEN = -17101;
+constexpr int VIRTUAL_SIGNAL_ERR_STREAM = -17102;
 
 QVector<HackRfOperaCakeFrequencyRange> parseHackRfOperaCakeRanges(const QString &json) {
     QVector<HackRfOperaCakeFrequencyRange> ranges;
@@ -143,18 +157,6 @@ QString safeFileToken(QString value) {
         value.replace(QStringLiteral("__"), QStringLiteral("_"));
     }
     return value;
-}
-
-char quantizeIqSample(float sample) {
-    if (!std::isfinite(sample)) {
-        sample = 0.0f;
-    }
-    const float scaled = (std::clamp)(sample * NETWORK_IQ_QUANTIZE_GAIN, -1.0f, 1.0f) * 127.0f;
-    int value = scaled >= 0.0f
-                    ? static_cast<int>(scaled + 0.5f)
-                    : static_cast<int>(scaled - 0.5f);
-    value = (std::clamp)(value, -128, 127);
-    return static_cast<char>(value);
 }
 
 void appendInt16Le(QByteArray &buffer, float sample) {
@@ -352,6 +354,13 @@ void DataProcessor::startProcessing(const ReceiverStreamDescriptor &stream) {
     totalCallbackCounter = 0;
     coherentSampleCounter = 0;
     asyncRateReportCount = 0;
+    asyncProfileCount = 0;
+    asyncWorkNsSum = 0;
+    asyncWorkNsMax = 0;
+    asyncRegistryNsSum = 0;
+    asyncBufferNsSum = 0;
+    asyncIqEncodeNsSum = 0;
+    asyncBufferRejected = 0;
     resetStreamDiagnostics();
     if (fobosVerboseLoggingEnabled()) {
         qDebug() << "[DataProcessor] IQ stream epoch"
@@ -441,6 +450,12 @@ void DataProcessor::run() {
         runSoapySdrReader(readerStream, readBlockSamples);
         return;
     }
+    if (readerStreamKind == ReceiverBackendStreamKind::UhdNative) {
+        readBlockSamples = asyncBlockSamplesForRate(sampleRate);
+        activeSyncMode = false;
+        runUhdNativeReader(readerStream, readBlockSamples);
+        return;
+    }
     if (readerStreamKind == ReceiverBackendStreamKind::BladeRfNative) {
         readBlockSamples = asyncBlockSamplesForRate(sampleRate);
         activeSyncMode = false;
@@ -451,6 +466,11 @@ void DataProcessor::run() {
         readBlockSamples = asyncBlockSamplesForRate(sampleRate);
         activeSyncMode = false;
         runHackRfNativeReader(readerStream, readBlockSamples);
+        return;
+    }
+    if (readerStreamKind == ReceiverBackendStreamKind::VirtualSignal) {
+        activeSyncMode = false;
+        runVirtualSignalReader(readerStream);
         return;
     }
     if (readerApiKind == FobosApiKind::Agile && requestedAgileScanEnabled.load()) {
@@ -1080,6 +1100,52 @@ void DataProcessor::runSoapySdrReader(const ReceiverStreamDescriptor &stream, ui
     running = false;
 }
 
+void DataProcessor::runUhdNativeReader(const ReceiverStreamDescriptor &stream, uint32_t blockSamples) {
+    UhdRxSession session;
+    QString error;
+    const double logicalCenter = requestedCenterFrequency.load() > 0.0
+                                     ? requestedCenterFrequency.load() : stream.centerFrequencyHz;
+    if (!session.open(stream.uhdNativeDeviceIndex, stream.uhdRxChannel,
+                      stream.sampleRateHz, logicalCenter + frequencyCalibrationOffsetHz.load(),
+                      stream.uhdRxGainDb, stream.uhdRxAntenna, stream.uhdFpgaImagePath, &error)) {
+        qWarning().noquote() << "[UHD]" << error;
+        if (running.load()) emit readerFailed(UHD_NATIVE_ERR_OPEN, false);
+        running = false;
+        return;
+    }
+    activeDevice = &session;
+    IqBuffer::setSampleRateEstimate(stream.sampleRateHz);
+    asyncMeasuredSamples = 0;
+    asyncCallbackCounter = 0;
+    asyncRateReportCount = 0;
+    asyncRateTimer.restart();
+    std::vector<float> iq(static_cast<std::size_t>((std::max)(blockSamples, MIN_ASYNC_BLOCK_SAMPLES)) * 2);
+    double appliedCenter = logicalCenter;
+    while (running.load()) {
+        const double nextCenter = requestedCenterFrequency.load();
+        if (nextCenter > 0.0 && std::abs(nextCenter - appliedCenter) > 0.5) {
+            if (!session.retune(nextCenter + frequencyCalibrationOffsetHz.load(), &error)) {
+                qWarning().noquote() << "[UHD]" << error;
+                emit readerFailed(UHD_NATIVE_ERR_STREAM, false);
+                break;
+            }
+            appliedCenter = nextCenter;
+        }
+        const int count = session.receive(iq.data(), iq.size() / 2, &error);
+        if (count > 0) handleData(iq.data(), static_cast<uint32_t>(count));
+        else if (count < 0) {
+            if (running.load()) {
+                qWarning().noquote() << "[UHD]" << error;
+                emit readerFailed(UHD_NATIVE_ERR_STREAM, false);
+            }
+            break;
+        }
+    }
+    activeDevice = nullptr;
+    session.close();
+    running = false;
+}
+
 void DataProcessor::runBladeRfNativeReader(const ReceiverStreamDescriptor &stream, uint32_t blockSamples) {
     QString loadedPath;
     QString errorMessage;
@@ -1502,6 +1568,162 @@ void DataProcessor::runHackRfNativeReader(const ReceiverStreamDescriptor &stream
     running = false;
 }
 
+void DataProcessor::runVirtualSignalReader(const ReceiverStreamDescriptor &stream) {
+    VirtualSignalStreamParser parser;
+    QVector<float> floatIq;
+    quint32 expectedSequence = 0;
+    bool haveSequence = false;
+    bool havePayload = false;
+    double activeRate = stream.sampleRateHz;
+    double activeCenter = stream.centerFrequencyHz;
+
+    auto consumeAvailableFrames = [&](QIODevice *socket) {
+        parser.append(socket->readAll());
+        while (running.load()) {
+            VirtualSignalFrame frame;
+            QString error;
+            if (!parser.takeFrame(&frame, &error)) {
+                if (!error.isEmpty()) {
+                    qWarning() << "[Virtual IQ] frame error" << error;
+                    parser.clear();
+                }
+                break;
+            }
+            const bool sequenceGap = haveSequence && frame.sequence != expectedSequence;
+            expectedSequence = frame.sequence + 1;
+            haveSequence = true;
+            if (sequenceGap || frame.discontinuity) {
+                IqBuffer::clear(beginIqRetuneBarrier());
+            }
+            if (frame.protocolId == QStringLiteral("keepalive") && frame.payload.isEmpty()) {
+                VirtualSignalFrame acknowledgement;
+                acknowledgement.sequence = frame.sequence;
+                acknowledgement.timestampNs = QDateTime::currentMSecsSinceEpoch() * 1000000LL;
+                acknowledgement.streamId = frame.streamId;
+                acknowledgement.protocolId = QStringLiteral("keepalive-ack");
+                acknowledgement.payloadType = VirtualSignalPayloadType::ProtocolFrame;
+                QString replyError;
+                const QByteArray reply = VirtualSignalStreamParser::wrap(acknowledgement,
+                                                                          &replyError);
+                if (!reply.isEmpty()) {
+                    socket->write(reply);
+                    if (auto *local = qobject_cast<QLocalSocket *>(socket)) local->flush();
+                    if (auto *tcp = qobject_cast<QTcpSocket *>(socket)) tcp->flush();
+                }
+                continue;
+            }
+            if (frame.endOfStream) {
+                continue;
+            }
+            if (frame.payloadType != VirtualSignalPayloadType::ComplexFloat32) {
+                qWarning() << "[Virtual IQ] unsupported payload type"
+                           << static_cast<int>(frame.payloadType);
+                continue;
+            }
+            if (stream.virtualSignalFollowMetadata && frame.sampleRate > 0) {
+                const double frameRate = static_cast<double>(frame.sampleRate);
+                const double frameCenter = static_cast<double>(frame.centerFrequencyHz);
+                if (std::abs(frameRate - activeRate) > 0.5 ||
+                    std::abs(frameCenter - activeCenter) > 0.5) {
+                    activeRate = frameRate;
+                    activeCenter = frameCenter;
+                    requestedSampleRate = activeRate;
+                    requestedCenterFrequency = activeCenter;
+                    IqBuffer::setSampleRateEstimate(activeRate);
+                    emit virtualSignalMetadataChanged(activeRate, activeCenter);
+                }
+            }
+            if (!virtualSignalDecodeComplexFloat32(frame.payload, &floatIq, &error)) {
+                qWarning() << "[Virtual IQ] CF32 decode failed" << error;
+                continue;
+            }
+            if (!havePayload) {
+                havePayload = true;
+                qInfo() << "[Virtual IQ] first IQ frame received"
+                        << "sampleRate" << frame.sampleRate
+                        << "centerHz" << frame.centerFrequencyHz
+                        << "samples" << floatIq.size() / 2;
+            }
+            handleData(floatIq.data(), static_cast<uint32_t>(floatIq.size() / 2));
+        }
+    };
+
+    qDebug() << "[Virtual IQ] receiver starting"
+             << (stream.virtualSignalUseTcp ? QStringLiteral("TCP") : QStringLiteral("local IPC"))
+             << (stream.virtualSignalUseTcp ? stream.virtualSignalListenAddress
+                                            : stream.virtualSignalLocalName)
+             << stream.virtualSignalPort;
+
+    if (stream.virtualSignalUseTcp) {
+        QTcpServer server;
+        QHostAddress address;
+        const QString listenAddress = stream.virtualSignalListenAddress.trimmed();
+        if (listenAddress.isEmpty() || listenAddress == QStringLiteral("0.0.0.0") ||
+            listenAddress == QStringLiteral("*")) {
+            address = QHostAddress::Any;
+        } else if (!address.setAddress(listenAddress)) {
+            qWarning() << "[Virtual IQ] invalid listen address" << listenAddress;
+            emit readerFailed(VIRTUAL_SIGNAL_ERR_LISTEN, !running.load());
+            running = false;
+            return;
+        }
+        if (!server.listen(address, stream.virtualSignalPort)) {
+            qWarning() << "[Virtual IQ] TCP listen failed" << server.errorString();
+            emit readerFailed(VIRTUAL_SIGNAL_ERR_LISTEN, !running.load());
+            running = false;
+            return;
+        }
+        while (running.load()) {
+            if (!server.waitForNewConnection(100)) continue;
+            std::unique_ptr<QTcpSocket> socket(server.nextPendingConnection());
+            if (!socket) continue;
+            socket->setSocketOption(QAbstractSocket::LowDelayOption, 1);
+            parser.clear();
+            haveSequence = false;
+            havePayload = false;
+            IqBuffer::clear(beginIqRetuneBarrier());
+            qDebug() << "[Virtual IQ] TCP transmitter connected" << socket->peerAddress();
+            while (running.load()) {
+                if (socket->bytesAvailable() > 0) consumeAvailableFrames(socket.get());
+                if (socket->state() != QAbstractSocket::ConnectedState) break;
+                socket->waitForReadyRead(100);
+            }
+            if (running.load() && socket->bytesAvailable() > 0) consumeAvailableFrames(socket.get());
+        }
+        server.close();
+    } else {
+        const QString localName = stream.virtualSignalLocalName.trimmed().isEmpty()
+            ? QStringLiteral("obrii-virtual-iq") : stream.virtualSignalLocalName.trimmed();
+        QLocalServer server;
+        if (!server.listen(localName)) {
+            qWarning() << "[Virtual IQ] local listen failed" << localName << server.errorString();
+            emit readerFailed(VIRTUAL_SIGNAL_ERR_LISTEN, !running.load());
+            running = false;
+            return;
+        }
+        while (running.load()) {
+            if (!server.waitForNewConnection(100)) continue;
+            std::unique_ptr<QLocalSocket> socket(server.nextPendingConnection());
+            if (!socket) continue;
+            parser.clear();
+            haveSequence = false;
+            havePayload = false;
+            IqBuffer::clear(beginIqRetuneBarrier());
+            qDebug() << "[Virtual IQ] local transmitter connected" << localName;
+            while (running.load()) {
+                if (socket->bytesAvailable() > 0) consumeAvailableFrames(socket.get());
+                if (socket->state() != QLocalSocket::ConnectedState) break;
+                socket->waitForReadyRead(100);
+            }
+            if (running.load() && socket->bytesAvailable() > 0) consumeAvailableFrames(socket.get());
+        }
+        server.close();
+    }
+    const bool stoppedByRequest = !running.load();
+    running = false;
+    qDebug() << "[Virtual IQ] receiver stopped" << "requested" << stoppedByRequest;
+}
+
 void DataProcessor::handleUnsigned8IqData(const unsigned char *buf, uint32_t byteCount, const char *readerMode) {
     if (!running.load() || !buf || byteCount < 2) {
         return;
@@ -1572,8 +1794,12 @@ void DataProcessor::handleData(float *buf, uint32_t buf_length, int agileScanInd
     if (!running.load()) {
         return;
     }
+    QElapsedTimer callbackTimer;
+    callbackTimer.start();
     const uint64_t callbackEpoch = iqRetuneEpoch.load(std::memory_order_acquire);
     ++totalCallbackCounter;
+    ++asyncCallbackCounter;
+    asyncMeasuredSamples += buf_length;
     captureRetuneRawDumpBlock(buf, buf_length, callbackEpoch);
     const bool queueAudioBlocks = requestedQueueAudioBlocks.load();
     const bool publishIqSnapshot = requestedPublishIqSnapshot.load();
@@ -1591,13 +1817,12 @@ void DataProcessor::handleData(float *buf, uint32_t buf_length, int agileScanInd
     }
     if (agileScanMetadataEnabled && !blockMetadata.valid) {
         updateStreamDiagnostics(buf, buf_length, "async-agile-tuning");
-        ++asyncCallbackCounter;
-        asyncMeasuredSamples += buf_length;
         return;
     }
     publishCoherentIq(buf,
                       static_cast<size_t>(buf_length) * FLOATS_PER_IQ_SAMPLE,
                       callbackEpoch);
+    const qint64 registryNs = callbackTimer.nsecsElapsed();
     if (zoomProcessor && zoomProcessor->enabled()) {
         const double blockCenterHz = blockMetadata.valid
                                          ? blockMetadata.centerFrequencyHz
@@ -1607,6 +1832,7 @@ void DataProcessor::handleData(float *buf, uint32_t buf_length, int agileScanInd
                                  requestedSampleRate.load(),
                                  blockCenterHz);
     }
+    const qint64 beforeBufferNs = callbackTimer.nsecsElapsed();
     if (queueAudioBlocks || publishIqSnapshot) {
         if (!IqBuffer::publish(buf,
                                static_cast<size_t>(buf_length) * FLOATS_PER_IQ_SAMPLE,
@@ -1614,22 +1840,35 @@ void DataProcessor::handleData(float *buf, uint32_t buf_length, int agileScanInd
                                publishIqSnapshot,
                                callbackEpoch,
                                agileScanMetadataEnabled ? &blockMetadata : nullptr)) {
+            ++asyncBufferRejected;
             return;
         }
     }
+    const qint64 bufferNs = callbackTimer.nsecsElapsed() - beforeBufferNs;
     updateStreamDiagnostics(buf, buf_length, "async");
+    const qint64 beforeIqEncodeNs = callbackTimer.nsecsElapsed();
     if (requestedEmitIqFrames.load() || requestedWifiIqFrames.load()) {
         emitIqFrame(buf, static_cast<size_t>(buf_length) * FLOATS_PER_IQ_SAMPLE);
     }
-    ++asyncCallbackCounter;
-    asyncMeasuredSamples += buf_length;
+    const qint64 workNs = callbackTimer.nsecsElapsed();
+    ++asyncProfileCount;
+    asyncWorkNsSum += workNs;
+    asyncWorkNsMax = (std::max)(asyncWorkNsMax, workNs);
+    asyncRegistryNsSum += registryNs;
+    asyncBufferNsSum += bufferNs;
+    asyncIqEncodeNsSum += workNs - beforeIqEncodeNs;
     const qint64 elapsedMs = asyncRateTimer.isValid() ? asyncRateTimer.elapsed() : 0;
     if (elapsedMs >= 500) {
         const double measuredRate = static_cast<double>(asyncMeasuredSamples) * 1000.0 /
                                     static_cast<double>((std::max)(qint64(1), elapsedMs));
         IqBuffer::setSampleRateEstimate(measuredRate);
         const double configuredRate = requestedSampleRate.load();
-        if (shouldReportMeasuredSampleRate(configuredRate, measuredRate, asyncRateReportCount)) {
+        const auto averageMs = [this](qint64 ns) {
+            return asyncProfileCount ? double(ns) / double(asyncProfileCount) / 1.0e6 : 0.0;
+        };
+        const bool verbose = fobosVerboseLoggingEnabled();
+        if (shouldReportMeasuredSampleRate(configuredRate, measuredRate, asyncRateReportCount) ||
+            (verbose && asyncRateReportCount % 4 == 0)) {
             const double errorPercent =
                 configuredRate > 0.0
                     ? ((measuredRate - configuredRate) / configuredRate) * 100.0
@@ -1645,20 +1884,39 @@ void DataProcessor::handleData(float *buf, uint32_t buf_length, int agileScanInd
                            << "errorPercent" << errorPercent
                            << "elapsedMs" << elapsedMs
                            << "callbackCounter" << asyncCallbackCounter
-                           << "blockSamples" << buf_length;
-            } else if (fobosVerboseLoggingEnabled()) {
+                           << "blockSamples" << buf_length
+                           << "workAvgMs" << averageMs(asyncWorkNsSum)
+                           << "workMaxMs" << double(asyncWorkNsMax) / 1.0e6
+                           << "registryAvgMs" << averageMs(asyncRegistryNsSum)
+                           << "bufferAvgMs" << averageMs(asyncBufferNsSum)
+                           << "iqEncodeAvgMs" << averageMs(asyncIqEncodeNsSum)
+                           << "bufferRejected" << asyncBufferRejected;
+            } else if (verbose) {
                 qDebug() << "[DataProcessor] async sample-rate check"
                          << "configured" << configuredRate
                          << "measured" << measuredRate
                          << "errorPercent" << errorPercent
                          << "elapsedMs" << elapsedMs
                          << "callbackCounter" << asyncCallbackCounter
-                         << "blockSamples" << buf_length;
+                         << "blockSamples" << buf_length
+                         << "workAvgMs" << averageMs(asyncWorkNsSum)
+                         << "workMaxMs" << double(asyncWorkNsMax) / 1.0e6
+                         << "registryAvgMs" << averageMs(asyncRegistryNsSum)
+                         << "bufferAvgMs" << averageMs(asyncBufferNsSum)
+                         << "iqEncodeAvgMs" << averageMs(asyncIqEncodeNsSum)
+                         << "bufferRejected" << asyncBufferRejected;
             }
-            ++asyncRateReportCount;
         }
+        ++asyncRateReportCount;
         asyncMeasuredSamples = 0;
         asyncCallbackCounter = 0;
+        asyncProfileCount = 0;
+        asyncWorkNsSum = 0;
+        asyncWorkNsMax = 0;
+        asyncRegistryNsSum = 0;
+        asyncBufferNsSum = 0;
+        asyncIqEncodeNsSum = 0;
+        asyncBufferRejected = 0;
         asyncRateTimer.restart();
     }
 }
@@ -1949,8 +2207,8 @@ void DataProcessor::emitFullIqFrame(const float *samples, std::size_t floatCount
     if (requestedEmitIqFrames.load(std::memory_order_acquire)) {
         QByteArray quantized(static_cast<int>(floatCount), Qt::Uninitialized);
         char *dst = quantized.data();
-        for (std::size_t i = 0; i < floatCount; ++i) dst[i] = quantizeIqSample(samples[i]);
-        emit iqFrameReady(quantized, rate, count, false);
+        ObriiIq8Quantizer::quantize(samples, dst, floatCount);
+        emit iqFrameReady(quantized, rate, count, false, monotonicNowNs());
     }
 }
 
@@ -2072,7 +2330,8 @@ void DataProcessor::emitChannelIqFrame(const float *samples,
                 emit iqFrameReady(networkIqFrameBuffer,
                                   result.outputRate,
                                   networkIqFrameBuffer.size() /
-                                      (FLOATS_PER_IQ_SAMPLE * static_cast<int>(sizeof(qint16))), true);
+                                      (FLOATS_PER_IQ_SAMPLE * static_cast<int>(sizeof(qint16))),
+                                  true, monotonicNowNs());
                 networkIqFrameBuffer.clear();
             }
         }
@@ -2284,7 +2543,8 @@ void DataProcessor::emitChannelIqFrame(const float *samples,
         if (networkIqFrameBuffer.size() >= frameSamples * FLOATS_PER_IQ_SAMPLE * static_cast<int>(sizeof(qint16))) {
             emit iqFrameReady(networkIqFrameBuffer,
                               outputRate,
-                              networkIqFrameBuffer.size() / (FLOATS_PER_IQ_SAMPLE * static_cast<int>(sizeof(qint16))), true);
+                              networkIqFrameBuffer.size() / (FLOATS_PER_IQ_SAMPLE * static_cast<int>(sizeof(qint16))),
+                              true, monotonicNowNs());
             networkIqFrameBuffer.clear();
         }
     }
@@ -2616,6 +2876,9 @@ bool DataProcessor::retuneCenterFrequency(double centerFrequencyHz) {
         qDebug() << "[RTL-TCP] live center retune queued" << centerFrequencyHz;
         return running.load();
     }
+    if (streamKind == ReceiverBackendStreamKind::UhdNative) {
+        return running.load() && activeDevice.load() != nullptr;
+    }
     if (streamKind == ReceiverBackendStreamKind::SoapySdr) {
         void *soapyDevice = activeDevice.load();
         if (!running.load() || !soapyDevice) {
@@ -2807,6 +3070,8 @@ void DataProcessor::requestStop() {
                     if (fobosVerboseLoggingEnabled()) {
                         qDebug() << "[DataProcessor] SoapySDR stop requested; readStream loop will exit after timeout";
                     }
+                } else if (activeStreamKind == ReceiverBackendStreamKind::UhdNative) {
+                    // recv() has a short timeout; the reader owns all UHD calls.
                 } else if (activeStreamKind == ReceiverBackendStreamKind::BladeRfNative) {
                     if (readerDevice) {
                         enableBladeRfRxSafely(readerDevice, false);

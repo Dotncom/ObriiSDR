@@ -82,6 +82,18 @@ bool isKnownHackRfSampleRate(double value) {
     return false;
 }
 
+int uhdNativeComboValue(int nativeIndex) {
+    return UHD_NATIVE_DEVICE_INDEX_BASE - nativeIndex;
+}
+
+bool isUhdNativeComboValue(int value) {
+    return value <= UHD_NATIVE_DEVICE_INDEX_BASE && value > UHD_NATIVE_DEVICE_INDEX_BASE - 1000;
+}
+
+int uhdNativeIndexFromComboValue(int value) {
+    return UHD_NATIVE_DEVICE_INDEX_BASE - value;
+}
+
 int remoteReceiverComboValue(int serverDeviceIndex) {
     return NETWORK_REMOTE_RECEIVER_DEVICE_INDEX_BASE + serverDeviceIndex;
 }

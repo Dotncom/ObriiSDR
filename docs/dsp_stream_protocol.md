@@ -22,7 +22,7 @@ An older DDC-only endpoint replies `{ "type":"hello", "version":1 }`.
 The native main FFT worker replies, with an empty binary payload:
 
 ```json
-{"type":"hello","version":1,"iqFormats":["cf32le","cs16le","bfp16le"],"mainFftVersion":1,"mainFftMaxLength":8388608,"connectionProbeVersion":1,"selectedBandVersion":1,"selectedBandMaxStreams":8}
+{"type":"hello","version":1,"iqFormats":["cf32le","cs16le","bfp16le","bfp8"],"mainFftVersion":1,"mainFftMaxLength":8388608,"connectionProbeVersion":1,"selectedBandVersion":1,"selectedBandMaxStreams":8}
 ```
 
 `mainFftMaxLength` is a number of complex input samples/FFT points, not bytes.
@@ -139,10 +139,13 @@ The client sends `{ "type":"work", "stream":"block-id", "receiverId":"main",
 "centerHz":100100000, "gap":false, "returnIq":true, "ffts":[
 { "id":"fft-id", "length":2048, "window":1, "refreshMs":100 }] }`.
 
-Input includes `iqFormat` and is interleaved `cf32le`, signed `cs16le`, or
-block-floating signed `bfp16le`. Binary length is sampleCount*8 for CF32 and
-sampleCount*4 for either 16-bit format. BFP16 additionally carries finite positive
-`iqScale`; decoded components are `int16 * iqScale`. Missing `iqFormat` means
+Input includes `iqFormat` and is interleaved `cf32le`, signed `cs16le`,
+block-floating signed `bfp16le`, or explicitly selected block-floating signed
+`bfp8`. Binary length is sampleCount*8 for CF32, sampleCount*4 for either
+16-bit format, and sampleCount*2 for BFP8. Both block-floating formats carry a
+finite positive `iqScale`; decoded components are `int16 * iqScale` or
+`int8 * iqScale` respectively. BFP8 is lossy and Auto never selects it.
+Missing `iqFormat` means
 legacy CF32. Sample count is 1..65536; sampleRate is 1000..100000000
 complex samples/s. All floats must be finite. centerHz is finite, 0..8e9.
 Identifiers are 1..128 characters. `receiverId + channelId` identifies the IQ
@@ -272,9 +275,9 @@ After ready, send each chunk and await its acknowledgment before the next reques
 {"type":"main_fft_iq","job":"fft-job-1","first":"0","gap":false,"sampleCount":131072,"iqFormat":"bfp16le","iqScale":0.0000152}
 ```
 
-Binary input is finite CF32LE, CS16LE or block-floating CS16LE, 1-131072 complex
+Binary input is finite CF32LE, CS16LE, BFP16 or BFP8, 1-131072 complex
 samples per message. `main_fft_begin` fixes `iqFormat` for the job; each chunk
-repeats it and carries `sampleCount`, while BFP16 carries a per-chunk `iqScale`.
+repeats it and carries `sampleCount`, while BFP16/BFP8 carry a per-chunk `iqScale`.
 The enclosing payload remains capped at 2 MiB. Legacy begin/chunk requests without
 format metadata remain CF32-compatible. `first` is a decimal uint64 string
 (1-20 digits, no sign), counting complex source samples, not floats, bytes or DDC

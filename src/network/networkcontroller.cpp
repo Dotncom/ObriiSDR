@@ -223,6 +223,10 @@ qint64 NetworkController::pendingBytesForPeer(const QString &peerIdValue) const 
     return isReadyPeer(socket) ? socket->bytesToWrite() : -1;
 }
 
+bool NetworkController::peerSupportsCompactSpectrum(const QString &peerIdValue) const {
+    return compactSpectrumPeers.contains(peerForId(peerIdValue));
+}
+
 void NetworkController::stop() {
     handshakeTimer->stop();
     stopHeartbeat();
@@ -506,6 +510,7 @@ void NetworkController::closePeerSocket(QTcpSocket *socket) {
         peerLabels.remove(peer);
         peerPriorityKeys.remove(peer);
         peerStreamProfiles.remove(peer);
+        compactSpectrumPeers.remove(peer);
         peerLastMessageTimers.remove(peer);
         processingPeerReads.remove(peer);
         peerSockets.removeAll(peer);
@@ -538,6 +543,7 @@ void NetworkController::closePeerSocket(QTcpSocket *socket) {
     peerLabels.clear();
     peerPriorityKeys.clear();
     peerStreamProfiles.clear();
+    compactSpectrumPeers.clear();
     peerLastMessageTimers.clear();
     processingPeerReads.clear();
     peerSocket = nullptr;
@@ -857,6 +863,10 @@ void NetworkController::processLine(QTcpSocket *socket, const QByteArray &line) 
             }
             handshakeTimer->stop();
             controlReady = true;
+            QJsonObject capabilities;
+            capabilities[QStringLiteral("type")] = QStringLiteral("capabilities");
+            capabilities[QStringLiteral("compactSpectrumS16")] = true;
+            sendJsonToSocket(socket, capabilities);
             const QString message = QString("Control channel ready: %1:%2")
                                         .arg(clientSocket->peerAddress().toString())
                                         .arg(clientSocket->peerPort());
@@ -884,6 +894,15 @@ void NetworkController::processLine(QTcpSocket *socket, const QByteArray &line) 
     }
 
     QJsonObject command = document.object();
+    if (currentMode == NetworkMode::Server && peerSockets.contains(socket) &&
+        readyPeerSockets.contains(socket) &&
+        command.value(QStringLiteral("type")).toString() == QStringLiteral("capabilities")) {
+        if (command.value(QStringLiteral("compactSpectrumS16")).toBool(false))
+            compactSpectrumPeers.insert(socket);
+        else
+            compactSpectrumPeers.remove(socket);
+        return;
+    }
     if (command.contains("payloadBytes")) {
         bool ok = false;
         const qint64 payloadBytes = command.value("payloadBytes").toVariant().toLongLong(&ok);

@@ -1,5 +1,18 @@
 # Changelog
 
+## 7.0.0 - 2026-11-01
+- Added the standalone Obrii FPGA Lab for editing HDL projects and generating
+  validated, standalone IQ-pipeline RTL. Vendor-image integration remains pending.
+- Added the bounded virtual IQ hub for multiple software transmitters and
+  receivers, with independent queues, loss/delay statistics and optional
+  deterministic noise, delay and collision experiments.
+- Added experimental AX.25/KISS live receive, M17 file framing, native UHD
+  backend groundwork, and reduced display-only network spectrum transport.
+- Repaired client/server processing-mode control and refreshed server-side
+  mode labels when changed remotely.
+- Release Full and Lite Windows/Raspberry packages. Lite omits optional heavy
+  runtime engines; neither Wireless add-on nor Android is republished.
+
 ## 6.5.0 - 2026-10-26
 - Added the standalone Obrii Analyzer application with direct SDR ownership,
   live attachment to Obrii SDR, recordings, wide sweep/scanning, reduction,

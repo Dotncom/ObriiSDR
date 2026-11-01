@@ -42,6 +42,8 @@ SpectrumComputeControls::SpectrumComputeControls(bool uk, QWidget *parent)
     iqFormat_->addItem(QStringLiteral("CF32 (8 B/sample)"), int(DspIqFormat::Cf32Le));
     iqFormat_->addItem(QStringLiteral("CS16 (4 B/sample)"), int(DspIqFormat::Cs16Le));
     iqFormat_->addItem(QStringLiteral("Block-float CS16 (4 B/sample)"), int(DspIqFormat::BlockFloat16Le));
+    iqFormat_->addItem(text("BFP8 (2 Б/семпл, втратний)", "BFP8 (2 B/sample, lossy)"),
+                       int(DspIqFormat::BlockFloat8));
     iqFormat_->setToolTip(text("Auto використовує block-float CS16 з новим обчислювачем і CF32 зі старим.",
                                "Auto uses block-float CS16 with a current worker and CF32 with a legacy worker."));
     uploadLimit_ = new QSpinBox(this);
@@ -129,6 +131,7 @@ DspComputeDialog::DspComputeDialog(const DspStreamEndpoint &endpoint, bool uk, Q
     iqFormat->addItem(QStringLiteral("CF32"), int(DspIqFormat::Cf32Le));
     iqFormat->addItem(QStringLiteral("CS16"), int(DspIqFormat::Cs16Le));
     iqFormat->addItem(QStringLiteral("Block-float CS16"), int(DspIqFormat::BlockFloat16Le));
+    iqFormat->addItem(text("BFP8 (втратний)", "BFP8 (lossy)"), int(DspIqFormat::BlockFloat8));
     iqFormat->setCurrentIndex((std::max)(0, iqFormat->findData(int(endpoint.iqFormat))));
     port->setObjectName("dspRemotePort"); token->setObjectName("dspRemoteToken");
     endpointEnabled_ = enabled; endpointAddress_ = address; endpointPort_ = port; endpointToken_ = token;
@@ -390,8 +393,8 @@ void DspComputeDialog::refreshProbeResults() {
     probeUpload_->setText(speed(r.uploadMBps, r.uploadBytes));
     probeDownload_->setText(speed(r.downloadMBps, r.downloadBytes));
     const auto options = spectrumControls_->options();
-    const int iqBytes = DspIqCodec::bytesPerComplexSample(options.iqFormat == DspIqFormat::Cf32Le
-        ? DspIqFormat::Cf32Le : DspIqFormat::BlockFloat16Le);
+    const int iqBytes = DspIqCodec::bytesPerComplexSample(
+        options.iqFormat == DspIqFormat::Auto ? DspIqFormat::BlockFloat16Le : options.iqFormat);
     const auto e = estimateDspConnection(r, probeRate_->value() * 1e6, probeLength_->value(),
                                         probeInterval_->value(), probeOverlap_->value(), options.uploadLimitMBps, iqBytes);
     QString estimate = text("Потрібно: повний IQ (%1 Б/семпл) %2 MB/s; вікна %3 MB/s; спектри назад %4 MB/s при %5 кадр/с.",

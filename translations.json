@@ -5,6 +5,15 @@
     "language_name_key": "__language_name"
   },
   "en": {
+    "fpga_lab_tooltip": "Open the standalone FPGA project editor while Obrii SDR keeps running.",
+    "fpga_lab_launch_failed": "ObriiFpgaLab executable was not found or could not be started.",
+    "uhd_rx_settings": "USRP UHD RX...",
+    "uhd_rx_channel": "RX channel",
+    "uhd_rx_gain": "RX gain",
+    "uhd_rx_antenna": "RX antenna",
+    "uhd_default_antenna": "Driver default",
+    "uhd_fpga_image": "FPGA image (optional)",
+    "uhd_browse_fpga": "Choose FPGA image",
     "experiment_export": "Export experiment...",
     "experiment_open": "Open experiment...",
     "experiment_stop_rx": "Stop reception before restoring the DSP workspace.",
@@ -166,6 +175,7 @@
     "video": "Video",
     "transmitter": "TX...",
     "ft8_station": "FT8 Station...",
+    "open_radio_lab": "Open Radio...",
     "radio_propagation": "Radio propagation / HF...",
     "transmitter_tooltip": "Open the transmitter laboratory for safe simulation/IQ export or explicitly armed experimental native HackRF RF output.",
     "settings_short": "Cfg",
@@ -1110,6 +1120,15 @@
     "product": "product:"
   },
   "uk": {
+    "fpga_lab_tooltip": "Відкрити окремий редактор FPGA-проєкту, не зупиняючи Obrii SDR.",
+    "fpga_lab_launch_failed": "Не знайдено або не вдалося запустити ObriiFpgaLab.",
+    "uhd_rx_settings": "USRP UHD RX...",
+    "uhd_rx_channel": "Канал RX",
+    "uhd_rx_gain": "Підсилення RX",
+    "uhd_rx_antenna": "Антенний вхід RX",
+    "uhd_default_antenna": "За замовчуванням драйвера",
+    "uhd_fpga_image": "Образ FPGA (необов'язково)",
+    "uhd_browse_fpga": "Вибрати образ FPGA",
     "experiment_export": "Експортувати експеримент...",
     "experiment_open": "Відкрити експеримент...",
     "experiment_stop_rx": "Зупиніть приймання перед відновленням робочого місця DSP.",
@@ -1271,6 +1290,7 @@
     "video": "Відео",
     "transmitter": "TX...",
     "ft8_station": "Станція FT8...",
+    "open_radio_lab": "Відкрите радіо...",
     "radio_propagation": "Радіопоширення / КХ...",
     "transmitter_tooltip": "Відкрити лабораторію передавача для безпечної симуляції/експорту IQ або явно озброєного експериментального RF-виходу через нативний HackRF.",
     "settings_short": "Нал",
@@ -2211,6 +2231,8 @@
     "product": "продукт:"
   },
   "es": {
+    "fpga_lab_tooltip": "Abrir el editor independiente de proyectos FPGA sin detener Obrii SDR.",
+    "fpga_lab_launch_failed": "No se encontró o no se pudo iniciar ObriiFpgaLab.",
     "__language_name": "Español",
     "controls": "Controles",
     "device": "Dispositivo",

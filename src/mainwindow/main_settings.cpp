@@ -177,6 +177,14 @@ void YourClassName::loadPersistentSettings() {
                                     pendingSettings.hackRfVgaGainDb).toInt(),
                      0,
                      62) / 2 * 2;
+    pendingSettings.uhdRxChannel =
+        (std::clamp)(settings.value("receiver/uhdRxChannel", 0).toInt(), 0, 1);
+    pendingSettings.uhdRxGainDb =
+        (std::clamp)(settings.value("receiver/uhdRxGainDb", 30.0).toDouble(), 0.0, 100.0);
+    pendingSettings.uhdRxAntenna =
+        settings.value("receiver/uhdRxAntenna", QString()).toString();
+    pendingSettings.uhdFpgaImagePath =
+        settings.value("receiver/uhdFpgaImagePath", QString()).toString();
     pendingSettings.hackRfAmpEnabled =
         settings.value("receiver/hackRfAmpEnabled", pendingSettings.hackRfAmpEnabled).toBool();
     pendingSettings.hackRfBiasTeeEnabled =
@@ -244,6 +252,21 @@ void YourClassName::loadPersistentSettings() {
     pendingSettings.hackRfSweepInterleaved =
         settings.value("receiver/hackRfSweepInterleaved",
                        pendingSettings.hackRfSweepInterleaved).toBool();
+    pendingSettings.virtualSignalUseTcp =
+        settings.value("receiver/virtualSignalUseTcp",
+                       pendingSettings.virtualSignalUseTcp).toBool();
+    pendingSettings.virtualSignalLocalName =
+        settings.value("receiver/virtualSignalLocalName",
+                       pendingSettings.virtualSignalLocalName).toString();
+    pendingSettings.virtualSignalListenAddress =
+        settings.value("receiver/virtualSignalListenAddress",
+                       pendingSettings.virtualSignalListenAddress).toString();
+    pendingSettings.virtualSignalPort =
+        (std::clamp)(settings.value("receiver/virtualSignalPort",
+                                    pendingSettings.virtualSignalPort).toInt(), 1, 65535);
+    pendingSettings.virtualSignalFollowMetadata =
+        settings.value("receiver/virtualSignalFollowMetadata",
+                       pendingSettings.virtualSignalFollowMetadata).toBool();
     pendingSettings.rtlAgc = settings.value("receiver/rtlAgc", pendingSettings.rtlAgc).toBool();
     pendingSettings.rtlTunerGainTenthsDb =
         (std::clamp)(settings.value("receiver/rtlTunerGainTenthsDb",
@@ -1596,6 +1619,10 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("receiver/vgaGain", settingsToSave.vgaGain);
     settings.setValue("receiver/hackRfLnaGainDb", settingsToSave.hackRfLnaGainDb);
     settings.setValue("receiver/hackRfVgaGainDb", settingsToSave.hackRfVgaGainDb);
+    settings.setValue("receiver/uhdRxChannel", settingsToSave.uhdRxChannel);
+    settings.setValue("receiver/uhdRxGainDb", settingsToSave.uhdRxGainDb);
+    settings.setValue("receiver/uhdRxAntenna", settingsToSave.uhdRxAntenna);
+    settings.setValue("receiver/uhdFpgaImagePath", settingsToSave.uhdFpgaImagePath);
     settings.setValue("receiver/hackRfAmpEnabled", settingsToSave.hackRfAmpEnabled);
     settings.setValue("receiver/hackRfBiasTeeEnabled", settingsToSave.hackRfBiasTeeEnabled);
     settings.setValue("receiver/hackRfAutomaticBandwidth", settingsToSave.hackRfAutomaticBandwidth);
@@ -1618,6 +1645,11 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("receiver/hackRfSweepStepHz", settingsToSave.hackRfSweepStepHz);
     settings.setValue("receiver/hackRfSweepBytesPerTune", settingsToSave.hackRfSweepBytesPerTune);
     settings.setValue("receiver/hackRfSweepInterleaved", settingsToSave.hackRfSweepInterleaved);
+    settings.setValue("receiver/virtualSignalUseTcp", settingsToSave.virtualSignalUseTcp);
+    settings.setValue("receiver/virtualSignalLocalName", settingsToSave.virtualSignalLocalName);
+    settings.setValue("receiver/virtualSignalListenAddress", settingsToSave.virtualSignalListenAddress);
+    settings.setValue("receiver/virtualSignalPort", settingsToSave.virtualSignalPort);
+    settings.setValue("receiver/virtualSignalFollowMetadata", settingsToSave.virtualSignalFollowMetadata);
     settings.setValue("receiver/rtlAgc", settingsToSave.rtlAgc);
     settings.setValue("receiver/rtlTunerGainTenthsDb", settingsToSave.rtlTunerGainTenthsDb);
     settings.setValue("receiver/audioDeviceId", settingsToSave.audioDeviceId);

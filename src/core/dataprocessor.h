@@ -72,10 +72,12 @@ public:
     void setWifiIqStreamingEnabled(bool enabled);
     std::shared_ptr<ZoomSpectrumProcessor> zoomSpectrumProcessor() const { return zoomProcessor; }
 signals:
-    void iqFrameReady(const QByteArray &iqData, double sampleRate, int sampleCount, bool channelized);
+    void iqFrameReady(const QByteArray &iqData, double sampleRate, int sampleCount,
+                      bool channelized, qint64 queuedAtNs);
     void wifiIqFrameReady(const QByteArray &iqData, double sampleRate,
                           double centerFrequency, int sampleCount);
     void readerFailed(int errorCode, bool stoppedByRequest);
+    void virtualSignalMetadataChanged(double sampleRateHz, double centerFrequencyHz);
 
 private:
     void publishCoherentIq(const float *samples, std::size_t floatCount,
@@ -92,8 +94,10 @@ private:
     void runRtlTcpReader(const ReceiverStreamDescriptor &stream, uint32_t blockSamples);
     void runRtlSdrNativeReader(const ReceiverStreamDescriptor &stream, uint32_t blockSamples);
     void runSoapySdrReader(const ReceiverStreamDescriptor &stream, uint32_t blockSamples);
+    void runUhdNativeReader(const ReceiverStreamDescriptor &stream, uint32_t blockSamples);
     void runBladeRfNativeReader(const ReceiverStreamDescriptor &stream, uint32_t blockSamples);
     void runHackRfNativeReader(const ReceiverStreamDescriptor &stream, uint32_t blockSamples);
+    void runVirtualSignalReader(const ReceiverStreamDescriptor &stream);
     void handleUnsigned8IqData(const unsigned char *buf, uint32_t byteCount, const char *readerMode);
 
     std::atomic<bool> running;
@@ -147,6 +151,13 @@ private:
     uint64_t asyncMeasuredSamples = 0;
     uint64_t asyncCallbackCounter = 0;
     int asyncRateReportCount = 0;
+    uint64_t asyncProfileCount = 0;
+    qint64 asyncWorkNsSum = 0;
+    qint64 asyncWorkNsMax = 0;
+    qint64 asyncRegistryNsSum = 0;
+    qint64 asyncBufferNsSum = 0;
+    qint64 asyncIqEncodeNsSum = 0;
+    uint64_t asyncBufferRejected = 0;
     std::atomic<uint64_t> totalCallbackCounter;
     qint64 streamDiagnosticLastNs = -1;
     uint64_t streamDiagnosticCallbacks = 0;

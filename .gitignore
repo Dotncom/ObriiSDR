@@ -110,6 +110,12 @@ third_party/rtl-sdr/
 third_party/src/
 third_party/dsd-fme/
 
+# Local vendor FPGA project and generated Vivado outputs
+/B210_Project_Firmwire/
+
+# Private development plans
+/docs/roadmap_4.0_cleanup.md
+
 # unused source
 src/udp_sender.cpp
 src/udp_sender.h

@@ -14,8 +14,9 @@ The DDC and anti-alias filtering still run on the receiver PC. Only downstream
 channel processing/FFT is offloaded by DDC controls. Main wide FFT offload is a
 separate, explicit selection. Neither route offloads Wi-Fi/GNSS engines or existing
 audio/DMR. A network is not inherently faster: before framing, 96 ksps costs
-768 kB/s each way in CF32LE or 384 kB/s in CS16/BFP16 when returned IQ is requested;
-2 Msps costs 16 or 8 MB/s each way. Spectrum-only consumers do not return IQ.
+768 kB/s each way in CF32LE, 384 kB/s in CS16/BFP16, or 192 kB/s in BFP8
+when returned IQ is requested; 2 Msps costs 16, 8, or 4 MB/s respectively.
+Spectrum-only consumers do not return IQ.
 
 Current native peers negotiate selected-band protocol v1. Before the first work
 block for a branch, the client opens its `receiverId/channelId/stream` window with
@@ -128,10 +129,37 @@ endpoint/transfer permission on the **External processor** tab is separate.
   require substantially more upload bandwidth than individual windows.
 - Backend values are CPU (FFTW) = 1, GPU = 2, Auto = 0. The selected remote backend
   is a compute request, not a change to graph signal routing.
-- Network IQ is CF32LE (8 bytes/complex sample), CS16LE (4 bytes), or block-floating
-  CS16LE (4 bytes plus one scale per block). Auto negotiates block-floating CS16 with
-  a current Obrii worker and falls back to CF32 with a legacy peer. Both 16-bit modes
-  are quantized; block-floating avoids a fixed full-scale floor for weak receiver IQ.
+- Network IQ is CF32LE (8 bytes/complex sample), CS16LE (4 bytes), block-floating
+  CS16LE (4 bytes plus one scale per block), or explicit BFP8 (2 bytes plus one
+  scale per block). Auto still negotiates block-floating CS16 with a current
+  Obrii worker and falls back to CF32 with a legacy peer. All packed modes are
+  quantized; BFP8 is visibly labelled lossy and should not be used for precise
+  amplitude calibration or archival scientific IQ. Old peers fall back to CF32.
+- `ObriiIqFormatBench <recording.cf32le|recording.iq8>` measures actual
+  encode/decode cost, byte ratio, clipping and reconstruction SNR. An `.iq8`
+  recording is signed interleaved IQ and is expanded to float for the codec
+  comparison. Results depend on the recording and CPU; no source is bundled.
+  An infinite BFP8 SNR on an already quantized IQ8 file does not imply that
+  BFP8 preserves the source receiver's higher-bit-depth IQ.
+  On the 2026-11-01 IQ8 capture, the Windows x64 encoder measured about
+  96 MS/s for BFP16 and 104 MS/s for BFP8 over the middle 32 MiB. The former
+  was about 6.5 MS/s before the bit-exact x64 SIMD quantizer. These are codec
+  figures, not an end-to-end receiver/network throughput guarantee. ARM keeps
+  the scalar fallback pending native measurement.
+- In server-side processing, new clients advertise compact display-spectrum
+  support. Reduced display frames use signed 16-bit dB values at 0.1 dB steps;
+  old clients retain JSON. This lossy display branch is separate from full
+  resolution frames and all scientific IQ/measurement paths. A slow client's
+  visual frames are skipped once its TCP send queue reaches 64 KiB, preserving
+  room for audio and control. This mitigates, but does not eliminate, TCP
+  head-of-line blocking if a single very large frame is already in flight.
+- Server-processed PCM carries sequence and send-time fields. With verbose
+  logging enabled, the client reports missing audio frames and its worst
+  interarrival gap every 200 frames; the server reports slow peers. These
+  diagnostics help distinguish network/GUI stalls from demodulation artifacts.
+  This playback path now inserts up to three missing frames of silence and
+  starts after an 80 ms local prebuffer, capped at 250 ms. It remains on the
+  shared TCP connection, so this does not eliminate head-of-line blocking.
 - Upload budget is 1-2000 MB/s, default 100, using decimal MB/s. This is a resource
   limit, not a throughput guarantee. Before protocol overhead, 20 Msps requires
   160 MB/s in CF32 or 80 MB/s in either packed 16-bit format.

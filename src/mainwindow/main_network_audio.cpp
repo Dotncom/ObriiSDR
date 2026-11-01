@@ -12,6 +12,7 @@
 #include <QAbstractSocket>
 #include <QByteArray>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDebug>
 #include <QHostAddress>
 #include <QJsonArray>
@@ -47,14 +48,23 @@ void YourClassName::sendNetworkAudioFrame(const QByteArray &pcmData) {
     frame["channels"] = 1;
     frame["sampleFormat"] = "pcm_s16le";
     frame["pcm"] = QString::fromLatin1(pcmData.toBase64());
-    networkController->sendControlCommand(frame);
-
     static quint64 sentAudioFrames = 0;
-    ++sentAudioFrames;
+    frame["sequence"] = QString::number(++sentAudioFrames);
+    frame["sourceTimeMs"] = QString::number(QDateTime::currentMSecsSinceEpoch());
+    quint64 slowPeers = 0;
+    for (const QString &peerId : networkController->readyPeerIds()) {
+        if (networkController->peerStreamProfile(peerId) == QStringLiteral("remote-vfo")) continue;
+        if (networkController->pendingBytesForPeer(peerId) > 256 * 1024) {
+            ++slowPeers;
+            continue;
+        }
+        networkController->sendControlCommandToPeer(peerId, frame);
+    }
     if (fobosVerboseLoggingEnabled() && sentAudioFrames % 200 == 1) {
         qDebug() << "[NetworkAudio] sent PCM frame"
                  << "frames" << static_cast<qulonglong>(sentAudioFrames)
-                 << "bytes" << pcmData.size();
+                 << "bytes" << pcmData.size()
+                 << "slowPeers" << slowPeers;
     }
 }
 
@@ -74,20 +84,43 @@ void YourClassName::playNetworkAudioFrame(const QJsonObject &frame) {
     }
 
     const QByteArray pcmData = QByteArray::fromBase64(frame.value("pcm").toString().toLatin1());
+    if (pcmData.isEmpty() || pcmData.size() % int(sizeof(qint16)) != 0) return;
+    static quint64 receivedAudioFrames = 0;
+    static quint64 expectedSequence = 0;
+    static quint64 missingFrames = 0;
+    static qint64 lastArrivalMs = 0;
+    static qint64 worstArrivalGapMs = 0;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const quint64 sequence = frame.value("sequence").toString().toULongLong();
+    if (sequence > 0) {
+        if (expectedSequence > 0 && sequence > expectedSequence) {
+            const quint64 gap = sequence - expectedSequence;
+            missingFrames += gap;
+            if (gap <= 3) {
+                const QByteArray silence(pcmData.size(), '\0');
+                for (quint64 i = 0; i < gap; ++i)
+                    remoteAudioPlayer->playNetworkPcmFrame(silence);
+            }
+        }
+        expectedSequence = sequence + 1;
+    }
+    remoteAudioPlayer->playNetworkPcmFrame(pcmData);
     processDigitalAudioFrame(pcmData);
     processSstvAudioFrame(pcmData);
     processAptAudioFrame(pcmData);
     processWefaxAudioFrame(pcmData);
     sendAudioRelayFrame(pcmData);
     sendAudioHttpFrame(pcmData);
-    remoteAudioPlayer->playPcmFrame(pcmData);
-
-    static quint64 receivedAudioFrames = 0;
+    if (lastArrivalMs > 0) worstArrivalGapMs = (std::max)(worstArrivalGapMs, nowMs - lastArrivalMs);
+    lastArrivalMs = nowMs;
     ++receivedAudioFrames;
     if (fobosVerboseLoggingEnabled() && receivedAudioFrames % 200 == 1) {
         qDebug() << "[NetworkAudio] received PCM frame"
                  << "frames" << static_cast<qulonglong>(receivedAudioFrames)
-                 << "bytes" << pcmData.size();
+                 << "bytes" << pcmData.size()
+                 << "missing" << missingFrames
+                 << "worstGapMs" << worstArrivalGapMs;
+        worstArrivalGapMs = 0;
     }
 }
 

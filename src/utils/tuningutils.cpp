@@ -16,12 +16,18 @@ double directMinFrequencyForMode(int inputMode, double sampleRate) {
 }
 
 double rfMinimumCenterFrequency(const RadioSettings &settings) {
+    if (settings.deviceIndex == VIRTUAL_SIGNAL_DEVICE_INDEX) return DIRECT_MIN_FREQUENCY;
+    if (isUhdNativeComboValue(settings.deviceIndex))
+        return (std::max)(70000000.0, settings.sampleRate * 0.5);
     return isHackRfNativeComboValue(settings.deviceIndex)
                ? (std::max)(HACKRF_MIN_FREQUENCY, settings.sampleRate * 0.5)
                : RF_MIN_CENTER_FREQUENCY;
 }
 
 double rfMaximumCenterFrequency(const RadioSettings &settings) {
+    if (isUhdNativeComboValue(settings.deviceIndex))
+        return (std::max)(rfMinimumCenterFrequency(settings),
+                          6000000000.0 - settings.sampleRate * 0.5);
     return isHackRfNativeComboValue(settings.deviceIndex)
                ? (std::max)(rfMinimumCenterFrequency(settings),
                             HACKRF_MAX_FREQUENCY - settings.sampleRate * 0.5)
@@ -29,12 +35,15 @@ double rfMaximumCenterFrequency(const RadioSettings &settings) {
 }
 
 double rfMinimumListeningFrequency(const RadioSettings &settings) {
+    if (settings.deviceIndex == VIRTUAL_SIGNAL_DEVICE_INDEX) return DIRECT_MIN_FREQUENCY;
+    if (isUhdNativeComboValue(settings.deviceIndex)) return 70000000.0;
     return isHackRfNativeComboValue(settings.deviceIndex)
                ? DIRECT_MIN_FREQUENCY
                : RF_MIN_LISTENING_FREQUENCY;
 }
 
 double rfMaximumFrequency(const RadioSettings &settings) {
+    if (isUhdNativeComboValue(settings.deviceIndex)) return 6000000000.0;
     return isHackRfNativeComboValue(settings.deviceIndex)
                ? HACKRF_MAX_FREQUENCY
                : RF_EXPERIMENTAL_MAX_FREQUENCY;

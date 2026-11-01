@@ -33,8 +33,10 @@ enum class ReceiverBackendStreamKind {
     RtlSdrNative,
     RtlTcp,
     SoapySdr,
+    UhdNative,
     BladeRfNative,
-    HackRfNative
+    HackRfNative,
+    VirtualSignal
 };
 
 struct ReceiverBackendDeviceInfo {
@@ -86,6 +88,11 @@ struct ReceiverStreamDescriptor {
     quint16 rtlTcpPort = 1234;
     int rtlSdrNativeDeviceIndex = 0;
     int soapySdrDeviceIndex = 0;
+    int uhdNativeDeviceIndex = 0;
+    int uhdRxChannel = 0;
+    double uhdRxGainDb = 30.0;
+    QString uhdRxAntenna;
+    QString uhdFpgaImagePath;
     int bladeRfNativeDeviceIndex = 0;
     int hackRfNativeDeviceIndex = 0;
     int hackRfLnaGainDb = 16;
@@ -108,6 +115,11 @@ struct ReceiverStreamDescriptor {
     int hackRfOperaCakePortB = 4;
     QString hackRfOperaCakeRangesJson = QStringLiteral("[]");
     QString hackRfOperaCakeDwellsJson = QStringLiteral("[]");
+    bool virtualSignalUseTcp = false;
+    QString virtualSignalLocalName = QStringLiteral("obrii-virtual-iq");
+    QString virtualSignalListenAddress = QStringLiteral("127.0.0.1");
+    quint16 virtualSignalPort = 17661;
+    bool virtualSignalFollowMetadata = true;
     int rtlTcpTunerGainTenthsDb = -1;
     bool rtlTcpAgc = true;
     bool syncReader = false;

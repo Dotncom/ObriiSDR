@@ -18,6 +18,10 @@ bool isHackRfNativeComboValue(int value);
 int hackRfNativeIndexFromComboValue(int value);
 bool isKnownHackRfSampleRate(double value);
 
+int uhdNativeComboValue(int nativeIndex);
+bool isUhdNativeComboValue(int value);
+int uhdNativeIndexFromComboValue(int value);
+
 int remoteReceiverComboValue(int serverDeviceIndex);
 bool isRemoteReceiverComboValue(int value);
 int remoteReceiverDeviceIndexFromComboValue(int value);

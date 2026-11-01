@@ -548,7 +548,8 @@ void packedSessionTests() {
     const auto settings = radioSettings(4096, FFT_WINDOW_HANN);
     const auto iq = makeIq(settings.fftLength);
     const auto reference = directLevels(settings, iq);
-    for (const auto format : {DspIqFormat::Cs16Le, DspIqFormat::BlockFloat16Le}) {
+    for (const auto format : {DspIqFormat::Cs16Le, DspIqFormat::BlockFloat16Le,
+                              DspIqFormat::BlockFloat8}) {
         Session session;
         auto begin = session.beginRequest(settings);
         begin["iqFormat"] = DspIqCodec::id(format);
@@ -566,12 +567,13 @@ void packedSessionTests() {
         require(levels.size() == reference.size(), "packed main FFT result length differs");
         for (std::size_t i = 0; i < levels.size(); ++i) {
             require(std::isfinite(levels[i]), "packed main FFT produced non-finite output");
-            if (reference[i] > -80.0f)
-                require(std::abs(levels[i] - reference[i]) < 0.05f,
+            if (reference[i] > (format == DspIqFormat::BlockFloat8 ? -25.0f : -80.0f))
+                require(std::abs(levels[i] - reference[i]) <
+                            (format == DspIqFormat::BlockFloat8 ? 0.5f : 0.05f),
                         "packed main FFT changed an in-band level beyond its quantization bound");
         }
     }
-    std::cout << "CS16/BFP16 main FFT session quantization and framing passed\n";
+    std::cout << "CS16/BFP16/BFP8 main FFT session quantization and framing passed\n";
 }
 
 void requestRemote(RemoteSpectrumWorker &worker, const RadioSettings &settings,

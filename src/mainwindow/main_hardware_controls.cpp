@@ -132,6 +132,16 @@ void YourClassName::updateReceiverSpecificControls() {
         hackRfSettingsButton->setEnabled(hackRf &&
                                          (isIdle() || runState == RadioRunState::Running));
     }
+    if (uhdSettingsButton) {
+        const bool selected = isUhdNativeSelected();
+        uhdSettingsButton->setVisible(selected);
+        uhdSettingsButton->setEnabled(selected && isIdle());
+    }
+    if (virtualSignalSettingsButton) {
+        const bool selected = isVirtualSignalSelected();
+        virtualSignalSettingsButton->setVisible(selected);
+        virtualSignalSettingsButton->setEnabled(selected && isIdle());
+    }
 }
 
 void YourClassName::onDirectSamplingChanged(int index) {
