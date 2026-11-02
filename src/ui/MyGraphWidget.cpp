@@ -77,6 +77,11 @@ void MyGraphWidget::resizeGL(int w, int h) {
 
 void MyGraphWidget::setData(const std::vector<float> &xData, const std::vector<float> &yData, double xMin, double xMax, int fftLength, bool colorf, bool displayOrdered, bool preserveFrequencyGaps) {
     if (displayPaused) return;
+    if (this->xMin != xMin || this->xMax != xMax || this->fftLength != fftLength ||
+        dataDisplayOrdered != displayOrdered || preserveDataFrequencyGaps != preserveFrequencyGaps) {
+        persistence.clear();
+        persistenceClock.invalidate();
+    }
     this->xData = xData;
     this->yData = yData;
     this->xMin = xMin;
@@ -85,7 +90,41 @@ void MyGraphWidget::setData(const std::vector<float> &xData, const std::vector<f
     this->colorf = colorf;
     this->dataDisplayOrdered = displayOrdered;
     this->preserveDataFrequencyGaps = preserveFrequencyGaps;
+    if (persistenceEnabled) accumulatePersistence();
     update();
+}
+
+void MyGraphWidget::setPersistenceEnabled(bool enabled) {
+    if (persistenceEnabled == enabled) return;
+    persistenceEnabled = enabled;
+    persistence.clear();
+    persistenceClock.invalidate();
+    update();
+}
+
+void MyGraphWidget::setPersistenceParameters(double seconds, int intensityPercent, int thresholdPercent, int smoothingMs) {
+    persistence.setParameters(seconds, intensityPercent, thresholdPercent, smoothingMs);
+    update();
+}
+
+void MyGraphWidget::accumulatePersistence() {
+    const int columns = (std::clamp)(width(), 1, SpectrumPersistence::MaxColumns);
+    const double elapsed = persistenceClock.isValid() ? persistenceClock.restart() / 1000.0 : 0.04;
+    if (!persistenceClock.isValid()) persistenceClock.start();
+    const int count = (std::min)({fftLength, static_cast<int>(xData.size()), static_cast<int>(yData.size())});
+    std::vector<float> levels(static_cast<std::size_t>(columns), -std::numeric_limits<float>::infinity());
+    if (xMax <= xMin || yMax <= yMin) return;
+    for (int i = 0; i < count; ++i) {
+        const double frequency = displayFrequencyAt(i, count);
+        const float level = displayLevelAt(yData, i, count, dataDisplayOrdered);
+        if (!std::isfinite(frequency) || !std::isfinite(level) || frequency < xMin || frequency > xMax) continue;
+        const int x = (std::clamp)(static_cast<int>((frequency - xMin) / (xMax - xMin) * (columns - 1)), 0, columns - 1);
+        levels[x] = (std::max)(levels[x], level);
+    }
+    for (float &level : levels) {
+        if (std::isfinite(level)) level = normalizedLevel(level);
+    }
+    persistence.append(levels, elapsed, preserveDataFrequencyGaps);
 }
 
 void MyGraphWidget::setPauseControlVisible(bool visible) {
@@ -95,6 +134,7 @@ void MyGraphWidget::setPauseControlVisible(bool visible) {
 }
 
 void MyGraphWidget::setDisplayPaused(bool paused) {
+    if (displayPaused != paused) persistenceClock.invalidate();
     displayPaused = paused;
     if (pauseControl && pauseControl->isChecked() != paused) {
         pauseControl->blockSignals(true);
@@ -124,6 +164,10 @@ void MyGraphWidget::setOverlayData(const std::vector<float> &yData, bool enabled
 void MyGraphWidget::setLevelRange(float minLevel, float maxLevel) {
     if (!std::isfinite(minLevel) || !std::isfinite(maxLevel) || maxLevel <= minLevel) {
         return;
+    }
+    if (yMin != minLevel || yMax != maxLevel) {
+        persistence.clear();
+        persistenceClock.invalidate();
     }
     yMin = minLevel;
     yMax = maxLevel;
@@ -262,6 +306,8 @@ void MyGraphWidget::setScienceAnalysisData(const std::vector<float> &maxHold,
 }
 
 void MyGraphWidget::clearData() {
+    persistence.clear();
+    persistenceClock.invalidate();
     xData.clear();
     yData.clear();
     overlayYData.clear();
@@ -277,6 +323,13 @@ void MyGraphWidget::paintGL() {
     QPainter painter(this);
     painter.beginNativePainting();
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    if (persistenceEnabled && !persistence.image().isNull()) {
+        painter.endNativePainting();
+        painter.drawImage(QRect(GRAPH_LEFT_MARGIN, GRAPH_TOP_MARGIN,
+                               (std::max)(1, width() - GRAPH_LEFT_MARGIN - GRAPH_RIGHT_MARGIN),
+                               (std::max)(1, height() - GRAPH_TOP_MARGIN - bottomMargin())), persistence.image());
+        painter.beginNativePainting();
+    }
     const bool canDrawData = !xData.empty() && !yData.empty() && fftLength > 0 &&
                              !qFuzzyCompare(xMin, xMax) && !qFuzzyCompare(yMin, yMax);
     if (canDrawData) {
@@ -293,7 +346,9 @@ void MyGraphWidget::paintGL() {
         const int dataCount = std::min({fftLength, static_cast<int>(xData.size()), static_cast<int>(yData.size())});
         const int pixelCount = (std::max)(1, static_cast<int>(std::ceil(plotWidth)));
         const bool compressForRender = dataCount > pixelCount * 2;
-        if (compressForRender) {
+        if (persistenceEnabled) {
+            // The accumulated raster is composed above, before measurement overlays.
+        } else if (compressForRender) {
             renderFrequencyScratch.assign(static_cast<std::size_t>(pixelCount),
                                           std::numeric_limits<float>::quiet_NaN());
             renderLevelScratch.assign(static_cast<std::size_t>(pixelCount),

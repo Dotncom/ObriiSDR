@@ -4,6 +4,7 @@
 
 #include "analyzerspectrumwidget.h"
 #include "spectrummarkerpairsdialog.h"
+#include "apphelp.h"
 
 #include <QAbstractButton>
 #include <QCheckBox>
@@ -25,6 +26,7 @@
 #include <QJsonObject>
 #include <QLocale>
 #include <QMessageBox>
+#include <QMenuBar>
 #include <QPushButton>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -310,6 +312,15 @@ void AnalyzerMainWindow::translateStaticUi() {
 
 void AnalyzerMainWindow::buildUi() {
     setWindowTitle(QStringLiteral("Obrii Analyzer"));
+    auto *helpMenu = menuBar()->addMenu(ukrainianUi ? QStringLiteral("Довідка")
+                                                   : QStringLiteral("Help"));
+    auto *helpAction = helpMenu->addAction(ukrainianUi ? QStringLiteral("Довідка Analyzer")
+                                                      : QStringLiteral("Analyzer help"));
+    helpAction->setShortcut(QKeySequence::HelpContents);
+    connect(helpAction, &QAction::triggered, this, [this]() {
+        showApplicationHelpDialog(this, ukrainianUi ? QStringLiteral("uk") : QStringLiteral("en"),
+                                  QStringLiteral("Obrii Analyzer"));
+    });
     resize(1320, 780);
     setMinimumSize(900, 560);
     setStyleSheet(QStringLiteral(

@@ -89,12 +89,42 @@ EOF
     exit 2
 fi
 
+if [ "${BUILD_TARGET:-}" = ObriiCli ]; then
+    # Full packages use the same project/cache/output as the GUI. The reduced
+    # developer diagnostic archive retains a fallback entry point, not a fork.
+    CMAKE_SOURCE="${WORKSPACE}"
+    if [ ! -f "${CMAKE_SOURCE}/CMakeLists.txt" ]; then
+        CMAKE_SOURCE="${WORKSPACE}/src/cli"
+    fi
+    cmake -S "${CMAKE_SOURCE}" -B "${BUILD_DIR}" \
+        -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
+        -DFOBOS_STANDARD_ROOT="${FOBOS_STANDARD_ROOT}" \
+        -DFOBOS_AGILE_ROOT="${FOBOS_AGILE_ROOT}" \
+        -DFFTW_ROOT="${FFTW_ROOT}" \
+        "${cmake_options[@]}"
+    if [ "${BUILD_CLI_VIEW:-0}" = 1 ]; then
+        cmake --build "${BUILD_DIR}" --target ObriiCli ObriiCliModule ObriiCliGnssModule ObriiCliPacketModule ObriiCliImageModule ObriiCliSpectrumModule ObriiCliM17Module ObriiCliTxModule ObriiCliView -j "${JOBS}"
+        echo "Visual companion: ${BUILD_DIR}/ObriiCliView"
+    else
+        cmake --build "${BUILD_DIR}" --target ObriiCli ObriiCliModule ObriiCliGnssModule ObriiCliPacketModule ObriiCliImageModule ObriiCliSpectrumModule ObriiCliM17Module ObriiCliTxModule -j "${JOBS}"
+    fi
+    echo "Build complete: ${BUILD_DIR}/ObriiCli and on-demand modules"
+    exit 0
+fi
+
 cmake -S "${WORKSPACE}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
     -DFOBOS_STANDARD_ROOT="${FOBOS_STANDARD_ROOT}" \
     -DFOBOS_AGILE_ROOT="${FOBOS_AGILE_ROOT}" \
     -DFFTW_ROOT="${FFTW_ROOT}" \
     "${cmake_options[@]}"
+
+if [ -n "${BUILD_TARGET:-}" ]; then
+    cmake --build "${BUILD_DIR}" --target "${BUILD_TARGET}" -j "${JOBS}"
+    echo
+    echo "Build complete: ${BUILD_DIR}/${BUILD_TARGET}"
+    exit 0
+fi
 
 cmake --build "${BUILD_DIR}" -j "${JOBS}"
 
@@ -116,5 +146,6 @@ echo "Build complete:"
 echo "  ${BUILD_DIR}/ObriiSDR"
 echo "  ${BUILD_DIR}/ObriiAnalyzer"
 echo "  ${BUILD_DIR}/ObriiIqHub"
+echo "  ${BUILD_DIR}/ObriiCli"
 mkdir -p "${BUILD_DIR}/wireless"
 cp "${WORKSPACE}/tools/wifi_phy_decoder.py" "${BUILD_DIR}/wireless/"

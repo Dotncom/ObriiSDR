@@ -1,6 +1,10 @@
 #include "remotevfoservice.h"
 #include "remotewebserver.h"
 #include "iqbuffer.h"
+#include "networkcontroller.h"
+#include <QFile>
+#include <QTimer>
+#include <QJsonDocument>
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -45,6 +49,87 @@ QJsonObject lastSession(const QList<QJsonObject> &frames, const QString &owner) 
     }
     return {};
 }
+}
+
+// Local-only synthetic source for repeatable Android/network smoke tests.
+// It uses the production transport, DDC broker, spectrum and PCM path, never RF hardware.
+int runRemoteVfoSmokeServer(QCoreApplication &app) {
+    NetworkController network;
+    RemoteVfoService service;
+    RadioSettings settings;
+    settings.centerFrequency = settings.listeningFrequency = 100000000.0;
+    settings.sampleRate = 2000000.0;
+    bool running = true;
+    quint64 samples = 0;
+    const quint16 port = 21092;
+    service.setSourceState(settings, running);
+    IqBuffer::clear(9001);
+    IqBuffer::setSampleRateEstimate(settings.sampleRate);
+    QObject::connect(&network, &NetworkController::peerDisconnected,
+                     [&service](const QString &id, const QString &) { service.closeEndpoint(id); });
+    QObject::connect(&network, &NetworkController::controlCommandReceived,
+                     [&](const QJsonObject &command) {
+        const QString peer = command.value(QStringLiteral("_networkPeerId")).toString();
+        if (command.value(QStringLiteral("type")).toString() != QStringLiteral("remoteVfo")) return;
+        network.setPeerStreamProfile(peer, QStringLiteral("remote-vfo"));
+        std::cout << QJsonDocument(QJsonObject{{QStringLiteral("action"), command.value(QStringLiteral("action"))},
+                                               {QStringLiteral("vfoId"), command.value(QStringLiteral("vfoId"))}})
+                         .toJson(QJsonDocument::Compact).constData() << '\n' << std::flush;
+        service.handleCommand(peer, command);
+    });
+    QObject::connect(&service, &RemoteVfoService::jsonFrameReady,
+                     [&](const QString &owner, const QJsonObject &frame) {
+        network.sendControlCommandToPeer(owner, frame);
+    });
+    QObject::connect(&service, &RemoteVfoService::binaryFrameReady,
+                     [&](const QString &owner, const QJsonObject &frame, const QByteArray &pcm) {
+        network.sendBinaryCommandToPeer(owner, frame, pcm);
+    });
+    network.startServer(QStringLiteral("127.0.0.1"), port);
+    if (!network.listeningPort()) return 1;
+    std::vector<float> iq(80000);
+    QTimer source;
+    source.setInterval(20);
+    QObject::connect(&source, &QTimer::timeout, [&]() {
+        const QString controlPath = qEnvironmentVariable("OBRII_REMOTE_VFO_SMOKE_CONTROL");
+        if (!controlPath.isEmpty()) {
+            QFile control(controlPath);
+            if (control.open(QIODevice::ReadOnly)) {
+                const QByteArray action = control.readAll().trimmed();
+                control.close();
+                control.remove();
+                if (action == "drop") {
+                    network.stop();
+                    QTimer::singleShot(500, &network, [&network, port]() {
+                        network.startServer(QStringLiteral("127.0.0.1"), port);
+                    });
+                } else if (action == "stop" || action == "start") {
+                    running = action == "start";
+                    service.setSourceState(settings, running);
+                }
+            }
+        }
+        if (!running) return;
+        constexpr double tau = 6.283185307179586;
+        for (std::size_t i = 0; i < iq.size() / 2; ++i) {
+            const double t = static_cast<double>(samples++) / settings.sampleRate;
+            const double a = tau * 100000.0 * t + std::sin(tau * 440.0 * t);
+            const double b = tau * 200000.0 * t + std::sin(tau * 660.0 * t);
+            iq[i * 2] = static_cast<float>(0.3 * std::cos(a) + 0.3 * std::cos(b));
+            iq[i * 2 + 1] = static_cast<float>(0.3 * std::sin(a) + 0.3 * std::sin(b));
+        }
+        IqBuffer::BlockMetadata metadata;
+        metadata.valid = true;
+        metadata.centerFrequencyHz = settings.centerFrequency;
+        IqBuffer::publish(iq.data(), iq.size(), false, true, 9001, &metadata);
+    });
+    source.start();
+    QTimer::singleShot(600000, &app, &QCoreApplication::quit);
+    std::cout << "Synthetic RemoteVfoService listening on 127.0.0.1:21092\n" << std::flush;
+    const int result = app.exec();
+    network.stop();
+    IqBuffer::clear();
+    return result;
 }
 
 bool runRemoteVfoServiceTests() {

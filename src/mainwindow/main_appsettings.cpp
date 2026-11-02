@@ -93,6 +93,35 @@ void storeInterfaceLayoutProfiles(const QVector<InterfaceLayoutProfile> &profile
 
 } // namespace
 
+void YourClassName::syncSpectrumPersistenceControls() {
+    if (!std::isfinite(spectrumPersistenceSeconds)) spectrumPersistenceSeconds = 1.6;
+    spectrumPersistenceSeconds = (std::clamp)(spectrumPersistenceSeconds, 0.1, 30.0);
+    spectrumPersistenceIntensity = (std::clamp)(spectrumPersistenceIntensity, 10, 400);
+    spectrumPersistenceThreshold = (std::clamp)(spectrumPersistenceThreshold, 0, 90);
+    spectrumPersistenceSmoothingMs = (std::clamp)(spectrumPersistenceSmoothingMs, 0, 2000);
+    if (spectrumPersistenceTimeSpin) {
+        const QSignalBlocker blocker(spectrumPersistenceTimeSpin);
+        spectrumPersistenceTimeSpin->setValue(spectrumPersistenceSeconds);
+        spectrumPersistenceTimeSpin->setEnabled(spectrumDisplayMode == 1);
+    }
+    if (spectrumPersistenceIntensitySpin) {
+        const QSignalBlocker blocker(spectrumPersistenceIntensitySpin);
+        spectrumPersistenceIntensitySpin->setValue(spectrumPersistenceIntensity);
+        spectrumPersistenceIntensitySpin->setEnabled(spectrumDisplayMode == 1);
+    }
+    if (spectrumPersistenceThresholdSpin) {
+        const QSignalBlocker blocker(spectrumPersistenceThresholdSpin);
+        spectrumPersistenceThresholdSpin->setValue(spectrumPersistenceThreshold);
+        spectrumPersistenceThresholdSpin->setEnabled(spectrumDisplayMode == 1);
+    }
+    if (spectrumPersistenceSmoothingSpin) {
+        const QSignalBlocker blocker(spectrumPersistenceSmoothingSpin);
+        spectrumPersistenceSmoothingSpin->setValue(spectrumPersistenceSmoothingMs);
+        spectrumPersistenceSmoothingSpin->setEnabled(spectrumDisplayMode == 1);
+    }
+    if (graphWidget) graphWidget->setPersistenceParameters(spectrumPersistenceSeconds, spectrumPersistenceIntensity, spectrumPersistenceThreshold, spectrumPersistenceSmoothingMs);
+}
+
 void YourClassName::showConfiguredInterface() {
     if (alternativeInterfaceMode) {
         applyAlternativeInterfaceMode();
@@ -223,26 +252,7 @@ void YourClassName::applyAlternativeInterfaceMode() {
 
 void YourClassName::openApplicationHelp() {
     QWidget *parentWidget = QApplication::activeWindow();
-    QDialog dialog(parentWidget ? parentWidget : static_cast<QWidget*>(this));
-    dialog.setWindowTitle(uiText(QStringLiteral("program_help_title"),
-                                 QStringLiteral("Obrii SDR feature guide")));
-    dialog.resize(760, 640);
-
-    QVBoxLayout *rootLayout = new QVBoxLayout(&dialog);
-    QPlainTextEdit *helpText = new QPlainTextEdit(&dialog);
-    helpText->setReadOnly(true);
-    helpText->setLineWrapMode(QPlainTextEdit::WidgetWidth);
-    helpText->setPlainText(applicationHelpText(uiLanguage));
-    rootLayout->addWidget(helpText, 1);
-
-    QDialogButtonBox *buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
-    if (QPushButton *closeButton = buttonBox->button(QDialogButtonBox::Close)) {
-        closeButton->setText(uiText(QStringLiteral("close"), QStringLiteral("Close")));
-    }
-    rootLayout->addWidget(buttonBox);
-    connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-
-    dialog.exec();
+    showApplicationHelpDialog(parentWidget ? parentWidget : static_cast<QWidget*>(this), uiLanguage);
 }
 
 void YourClassName::openApplicationSettings() {

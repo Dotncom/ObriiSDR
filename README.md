@@ -4,7 +4,13 @@ Obrii SDR is a wideband SDR receiver and research workstation, optimized first
 for RigExpert Fobos SDR hardware while also supporting additional receiver
 backends.
 The current packaged release is Windows-first, with active Linux/Raspberry Pi
-support and a separately maintained Android USB/network client. Version 7.0.0
+support and a separately maintained Android USB/network client. Version 8.0.0
+adds the standalone ObriiCli, shared GUI/CLI receiver/FFT/recording cores,
+an embedded command console, an optional authenticated local agent API, FT4/M17
+receive workers and an experimental local Mesh Designer. See
+`docs/obrii_cli.md`, `docs/command_console.md`, `docs/ft4_m17_receive.md` and
+`docs/mesh_designer.md`. These are not claims of full GUI/CLI parity, RF
+qualification or completed mesh routing. Version 7.0.0
 adds a separate FPGA laboratory, a bounded virtual IQ hub, experimental open
 amateur-radio framing, and display-only network spectrum reduction. It also
 repairs client/server processing-mode control and Raspberry server UI updates.
@@ -33,8 +39,9 @@ of a running Obrii SDR instance without taking ownership of the receiver. See
 `docs/obrii_analyzer.md`.
 The separate `ObriiFpgaLab` application can open/edit a local Vivado HDL project,
 save a graphical FPGA experiment plan, inspect a finished `.bin`, and launch
-an installed Vivado for a project build without stopping Obrii SDR. The graph
-does not yet generate RTL or modify the running receiver. An openXC7 tab now
+an installed Vivado for a project build without stopping Obrii SDR. It can
+generate standalone RTL experiment blocks, but does not automatically integrate
+them into the vendor image or modify the running receiver. An openXC7 tab now
 checks project portability and can run the open-source toolchain through
 Linux/WSL for standalone RTL modules or compatible pure-Verilog designs; the
 clone's full image still has vendor IP and netlist blockers. See `docs/fpga_lab.md`.
@@ -82,7 +89,7 @@ The add-on contains the portable GNU Radio
 Wi-Fi and Wireshark tools; to enable them, run `Install-Wireless-AddOn.ps1` beside
 `ObriiSDR.exe` or extract the add-on into that same folder. See
 `docs/wireless_addon.md`. Npcap is not bundled.
-Extract the Linux source with `tar -xzf ObriiSDR-v7.0.0-raspberry-source.tar.gz`;
+Extract the Linux source with `tar -xzf ObriiSDR-v8.0.0-raspberry-source.tar.gz`;
 the build/run shell scripts have executable permissions. Android packages are
 maintained and released separately.
 

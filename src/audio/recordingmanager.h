@@ -8,6 +8,7 @@
 #include <QString>
 
 #include "radiosettings.h"
+#include "recordingformatcore.h"
 
 class RecordingManager : public QObject {
     Q_OBJECT
@@ -37,10 +38,9 @@ signals:
 
 private:
     bool openWaveFile(int sampleRate, int channels, int bitsPerSample, QString *errorMessage = nullptr);
-    void writeWaveHeader(int sampleRate, int channels, int bitsPerSample);
     QJsonObject makeMetadataObject() const;
     QByteArray makeMetadataChunk() const;
-    void patchWaveHeader();
+    bool patchWaveHeader(QString *errorMessage);
     bool writeSidecarMetadata(const QString &finishedFile, quint64 finishedBytes);
     QString makeRecordingPath(const QString &suffix) const;
     void updateStatus(const QString &status);
@@ -56,7 +56,7 @@ private:
     int waveSampleRate = 0;
     int waveChannels = 0;
     int waveBitsPerSample = 0;
-    qint64 dataSizeFieldOffset = -1;
+    RecordingFormatCore::WaveLayout waveLayout;
     quint64 waveHeaderBytes = 0;
     double displayScalePercent = 100.0;
     quint64 dataBytesWritten = 0;

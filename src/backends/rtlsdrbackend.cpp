@@ -37,6 +37,7 @@ struct RtlSdrApi {
     int (*set_tuner_gain)(rtlsdr_dev_t *dev, int gain) = nullptr;
     int (*set_agc_mode)(rtlsdr_dev_t *dev, int on) = nullptr;
     int (*reset_buffer)(rtlsdr_dev_t *dev) = nullptr;
+    int (*read_sync)(rtlsdr_dev_t *dev, void *buffer, int bytes, int *bytesRead) = nullptr;
     int (*read_async)(rtlsdr_dev_t *dev,
                       rtlsdr_read_async_cb_t cb,
                       void *ctx,
@@ -140,6 +141,8 @@ bool ensureLoadedLocked() {
             reinterpret_cast<decltype(rtl.set_direct_sampling)>(rtl.library.resolve("rtlsdr_set_direct_sampling"));
         rtl.set_freq_correction =
             reinterpret_cast<decltype(rtl.set_freq_correction)>(rtl.library.resolve("rtlsdr_set_freq_correction"));
+        rtl.read_sync =
+            reinterpret_cast<decltype(rtl.read_sync)>(rtl.library.resolve("rtlsdr_read_sync"));
 
         qDebug() << "[RTL-SDR] loaded librtlsdr" << rtl.loadedPath;
         return true;
@@ -299,6 +302,19 @@ int resetRtlSdrBufferSafely(void *dev) {
     return withApi([dev](RtlSdrApi &rtl) {
         return rtl.reset_buffer(static_cast<rtlsdr_dev_t*>(dev));
     });
+}
+
+int readRtlSdrSyncSafely(void *dev, void *buffer, int bytes, int *bytesRead) {
+    if (!dev || !buffer || bytes <= 0 || !bytesRead) return RTLSDR_ERR_NOT_OPEN;
+    *bytesRead = 0;
+    decltype(RtlSdrApi::read_sync) readSync = nullptr;
+    {
+        QMutexLocker locker(&apiMutex());
+        if (!ensureLoadedLocked()) return RTLSDR_ERR_NOT_LOADED;
+        readSync = api().read_sync;
+    }
+    if (!readSync) return RTLSDR_ERR_NOT_LOADED;
+    return readSync(static_cast<rtlsdr_dev_t *>(dev), buffer, bytes, bytesRead);
 }
 
 int readRtlSdrAsyncSafely(void *dev,

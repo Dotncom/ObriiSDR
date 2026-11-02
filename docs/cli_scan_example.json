@@ -1,0 +1,7 @@
+{
+  "centerHz": [144500000, 145500000],
+  "dwellMs": 600,
+  "holdMs": 0,
+  "thresholdDbfs": -65,
+  "minSnrDb": 12
+}

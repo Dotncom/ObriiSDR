@@ -43,7 +43,8 @@ public:
                double displayScalePercent,
                int targetBins,
                qint64 firstFrameUtcMs = 0,
-               QString *errorMessage = nullptr);
+               QString *errorMessage = nullptr,
+               const QString &explicitPath = {});
     void stop();
     bool isRecording() const;
     QString currentFilePath() const;

@@ -85,6 +85,24 @@ int main(int argc, char **argv) {
     live.stop();
     if (!check(liveRecovered == ax25, "Live AX.25 decoder did not recover the AFSK frame")) return 8;
 
+    QByteArray shortPcm((4800 + afsk.size()) * 2, '\0');
+    for (int i = 0; i < afsk.size(); ++i) {
+        const qint16 value = static_cast<qint16>(std::lround(afsk[i] * 32767.0f));
+        qToLittleEndian<qint16>(value,
+            reinterpret_cast<uchar *>(shortPcm.data() + (4800 + i) * 2));
+    }
+    Ax25LiveDecoder shortLive;
+    QByteArray shortRecovered;
+    QEventLoop shortWait;
+    QObject::connect(&shortLive, &Ax25LiveDecoder::frameDecoded, &application,
+                     [&](const QByteArray &data) { shortRecovered = data; shortWait.quit(); });
+    QTimer::singleShot(5000, &shortWait, &QEventLoop::quit);
+    shortLive.start();
+    shortLive.submitPcm16(shortPcm, 48000);
+    shortWait.exec();
+    shortLive.stop();
+    if (!check(shortRecovered == ax25, "Short live AX.25 frame was not recovered")) return 8;
+
     const QByteArray kiss = KissCodec::encode({3, 0, ax25}, &error);
     KissStreamDecoder stream;
     const QList<KissFrame> first = stream.push(kiss.left(kiss.size() / 2));

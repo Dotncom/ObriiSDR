@@ -1031,6 +1031,12 @@ void YourClassName::updateSpectrum() {
         lastSpectrumFftLength = spectrumSettings.fftLength;
     }
     ++spectrumCalibrationFrameSerial;
+    commandSpectrumCenterHz = spectrumSettings.centerFrequency;
+    commandSpectrumRateHz = spectrumSettings.sampleRate;
+    commandSpectrumEpoch = fftBlockMetadata.epoch;
+    commandSpectrumSerial = spectrumCalibrationFrameSerial;
+    commandSpectrumInput = scanVisualSource == QStringLiteral("none") ? spectrumSettings.inputMode : -1;
+    commandSpectrumCorrected = calibrationTableEnabled || std::abs(amplitudeCalibrationOffsetDb) > 0.000001;
 
     const bool profileDisplayFrame = verboseLogging &&
                                      spectrumSettings.fftLength >= 524288;

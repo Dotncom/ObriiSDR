@@ -14,6 +14,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <vector>
 
@@ -141,6 +142,7 @@ bool exercise(VirtualSignalTransportMode mode, QString *error) {
     }
     VirtualTransmitterBackend transmitter;
     transmitter.setEndpoint(endpoint);
+    transmitter.setNodeId(QStringLiteral("lab-tx-a"));
     TxConfiguration config;
     config.frequencyHz = 145500000.0;
     config.sampleRate = 48000;
@@ -164,6 +166,7 @@ bool exercise(VirtualSignalTransportMode mode, QString *error) {
     if (!virtualSignalDecodeComplexFloat32(frame.payload, &floats, error) ||
         frame.sampleRate != 48000 || frame.centerFrequencyHz != 145500000 ||
         frame.sequence != 0 || floats.size() != 4 ||
+        frame.metadata.value(QStringLiteral("hubNodeId")).toString() != QStringLiteral("lab-tx-a") ||
         std::abs(floats[0] - 0.25f) > 1e-6f ||
         std::abs(floats[1] + 0.5f) > 1e-6f ||
         std::abs(floats[2] + 0.125f) > 1e-6f ||
@@ -171,12 +174,20 @@ bool exercise(VirtualSignalTransportMode mode, QString *error) {
         *error = QStringLiteral("Virtual IQ payload or metadata mismatch");
         return false;
     }
+    const qint64 firstTimestampNs = frame.timestampNs;
+    if (!transmitter.writeIq(samples, 2, error) ||
+        !transmitter.drain(1000, error) ||
+        !receiveFrame(socket, &parser, &frame, error) ||
+        std::llabs(frame.timestampNs - firstTimestampNs - 41667LL) > 1) {
+        *error = QStringLiteral("Virtual IQ timestamps must advance by sample count");
+        return false;
+    }
     transmitter.setOutputEnabled(false, error);
     transmitter.setOutputEnabled(true, error);
     if (!transmitter.writeIq(samples, 2, error)) return false;
     if (!transmitter.drain(1000, error)) return false;
     if (!receiveFrame(socket, &parser, &frame, error) || !frame.discontinuity ||
-        frame.sequence != 1) {
+        frame.sequence != 2) {
         *error = QStringLiteral("Virtual IQ discontinuity or sequence mismatch");
         return false;
     }
@@ -187,7 +198,7 @@ bool exercise(VirtualSignalTransportMode mode, QString *error) {
     }
     if (!transmitter.writeIq(largeSamples.data(), static_cast<int>(largeSamples.size()), error) ||
         !transmitter.drain(1000, error) || !receiveFrame(socket, &parser, &frame, error) ||
-        frame.sequence != 2 || frame.payload.size() != 16384 * 2 * static_cast<int>(sizeof(float))) {
+        frame.sequence != 3 || frame.payload.size() != 16384 * 2 * static_cast<int>(sizeof(float))) {
         *error = QStringLiteral("Large virtual IQ frame did not arrive intact: %1").arg(*error);
         return false;
     }
@@ -431,6 +442,10 @@ bool exerciseHeartbeatAcknowledgement(QString *error) {
 
 int main(int argc, char **argv) {
     QCoreApplication application(argc, argv);
+    if (!virtualSignalValidNodeId(QStringLiteral("lab-tx-a")) ||
+        virtualSignalValidNodeId(QStringLiteral("tx1")) ||
+        virtualSignalValidNodeId(QStringLiteral("bad space")) ||
+        virtualSignalValidNodeId(QString())) return 3;
     QString error;
     VirtualSignalFrame fixture;
     fixture.streamId = QStringLiteral("fragmentation-test");

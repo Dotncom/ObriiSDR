@@ -1,0 +1,13 @@
+{
+  "format": "obrii-mesh-project", "version": 1,
+  "centerHz": 145500000, "sampleRate": 48000, "mixIq": true,
+  "nodes": [
+    { "id": "node1", "name": "SDR A", "preset": "local", "x": 0, "y": 0, "listeningHz": 145500000, "bandwidthHz": 12500, "txLevel": 0.3, "mode": "nfm" },
+    { "id": "node2", "name": "SDR B", "preset": "local", "x": 250, "y": 110, "listeningHz": 145500000, "bandwidthHz": 12500, "txLevel": 0.3, "mode": "nfm" },
+    { "id": "node3", "name": "SDR C", "preset": "local", "x": 500, "y": 0, "listeningHz": 145500000, "bandwidthHz": 12500, "txLevel": 0.3, "mode": "nfm" }
+  ],
+  "links": [
+    { "tx": "node1", "rx": "node2", "gainDb": -6, "delayMs": 10, "enabled": true },
+    { "tx": "node2", "rx": "node3", "gainDb": -12, "delayMs": 20, "enabled": true }
+  ]
+}

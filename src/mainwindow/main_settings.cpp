@@ -935,6 +935,17 @@ void YourClassName::loadPersistentSettings() {
     if (waterfallWidget) {
         waterfallWidget->setRowsPerFrame(waterfallRowsPerFrame);
     }
+    spectrumDisplayMode = (std::clamp)(settings.value("ui/spectrumDisplayMode", 0).toInt(), 0, 1);
+    spectrumPersistenceSeconds = settings.value("ui/spectrumPersistenceSeconds", 1.6).toDouble();
+    spectrumPersistenceIntensity = settings.value("ui/spectrumPersistenceIntensity", 100).toInt();
+    spectrumPersistenceThreshold = settings.value("ui/spectrumPersistenceThreshold", 0).toInt();
+    spectrumPersistenceSmoothingMs = settings.value("ui/spectrumPersistenceSmoothingMs", 0).toInt();
+    syncSpectrumPersistenceControls();
+    if (spectrumDisplayModeCombo) {
+        const QSignalBlocker blocker(spectrumDisplayModeCombo);
+        spectrumDisplayModeCombo->setCurrentIndex(spectrumDisplayMode);
+    }
+    if (graphWidget) graphWidget->setPersistenceEnabled(spectrumDisplayMode == 1);
     waterfallDisplayMode =
         (std::clamp)(settings.value("ui/waterfallDisplayMode", waterfallDisplayMode).toInt(), 0, 2);
     multiSdrViewMode =
@@ -1968,6 +1979,11 @@ void YourClassName::savePersistentSettings() {
     }
     settings.endArray();
     settings.setValue("ui/waterfallRowsPerFrame", waterfallRowsPerFrame);
+    settings.setValue("ui/spectrumDisplayMode", spectrumDisplayMode);
+    settings.setValue("ui/spectrumPersistenceSeconds", spectrumPersistenceSeconds);
+    settings.setValue("ui/spectrumPersistenceIntensity", spectrumPersistenceIntensity);
+    settings.setValue("ui/spectrumPersistenceThreshold", spectrumPersistenceThreshold);
+    settings.setValue("ui/spectrumPersistenceSmoothingMs", spectrumPersistenceSmoothingMs);
     settings.setValue("ui/waterfallDisplayMode", waterfallDisplayMode);
     settings.setValue("ui/multiSdrViewMode", multiSdrViewMode);
     settings.setValue("ui/waterfall3DResolutionDivisor", waterfall3DResolutionDivisor);

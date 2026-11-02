@@ -55,6 +55,40 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final RadioSettings settings = new RadioSettings();
+    private final RadioSettings serverSettings = new RadioSettings();
+    private final RxIndicator rxIndicator = new RxIndicator();
+    private volatile FobosNetworkClient.SpectrumFrame latestSpectrum;
+    private final java.util.concurrent.atomic.AtomicBoolean spectrumQueued =
+            new java.util.concurrent.atomic.AtomicBoolean();
+    private CheckBox reconnectCheck;
+    private CheckBox independentVfoCheck;
+    private Spinner remoteVfoSpinner;
+    private TextView vfoRangeLabel;
+    private final Runnable rxIndicatorTick = new Runnable() {
+        @Override public void run() {
+            if (spectrumView != null) {
+                RxIndicator.State state = rxIndicator.state(SystemClock.uptimeMillis());
+                String text = state == RxIndicator.State.RX ? "RX" :
+                        state == RxIndicator.State.STALE ? "No data" :
+                        state == RxIndicator.State.RETRY ? "Retry" :
+                        state == RxIndicator.State.ERROR ? "Error" :
+                        state == RxIndicator.State.STOP ? "Stop" :
+                        state == RxIndicator.State.WAIT ? "Wait" : "Off";
+                if (isIndependentVfo()) text = client.selectedVfo().optString("vfoId", "A") + " " + text;
+                int color = state == RxIndicator.State.RX ? 0xff57d68d :
+                        state == RxIndicator.State.ERROR ? 0xffff7373 :
+                        state == RxIndicator.State.RETRY || state == RxIndicator.State.STALE ||
+                                state == RxIndicator.State.WAIT ? 0xffe8c96b : 0xff87949e;
+                spectrumView.setRxStatus(text, color);
+            }
+            mainHandler.postDelayed(this, 1000);
+        }
+    };
+    private boolean hasServerSettings;
+    private int serverProcessingMode = RadioSettings.PROCESSING_SERVER_SIDE;
+    private final Runnable serverStateRecovery = () -> {
+        if (this.client != null && !isOtgMode()) this.client.requestServerState();
+    };
     private final Runnable deferredSettingsApply = () -> sendControlNow("settings", false, true);
     private final Runnable deferredUsbPreviewApply = () -> applyUsbOtgPreviewSettings(false);
     private final Runnable deferredPanRetune = () -> {
@@ -216,6 +250,7 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
         appendUsbLogIfNotEmpty(usbSandbox.handleLaunchIntent(getIntent()));
         loadPrefs();
         updateButtons();
+        mainHandler.post(rxIndicatorTick);
     }
 
     @Override
@@ -226,6 +261,8 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
         mainHandler.removeCallbacks(reliableSettingsRepeat);
         mainHandler.removeCallbacks(deferredUsbPreviewApply);
         mainHandler.removeCallbacks(deferredPanRetune);
+        mainHandler.removeCallbacks(serverStateRecovery);
+        mainHandler.removeCallbacks(rxIndicatorTick);
         if (client != null) {
             client.shutdown();
         }
@@ -255,6 +292,7 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
     @Override
     public void onStatus(String status) {
         runOnMain(() -> {
+            if ("Control channel ready".equals(status)) rxIndicator.connection(true, false);
             statusText.setText(status);
             appendLog(status);
             updateButtons();
@@ -263,7 +301,10 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
 
     @Override
     public void onDisconnected(String reason) {
+        cancelPendingNetworkEdits();
+        latestSpectrum = null;
         runOnMain(() -> {
+            rxIndicator.connection(false, client.isActive());
             statusText.setText(reason);
             appendLog(reason);
             if (audioPlayer != null) {
@@ -285,7 +326,16 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
 
     @Override
     public void onSpectrum(FobosNetworkClient.SpectrumFrame frame) {
-        runOnMain(() -> {
+        if (frame.localUsb) rxIndicator.connection(true, false);
+        rxIndicator.frame(SystemClock.uptimeMillis());
+        latestSpectrum = frame;
+        if (spectrumQueued.compareAndSet(false, true)) mainHandler.post(this::renderPendingSpectrum);
+    }
+
+    private void renderPendingSpectrum() {
+        FobosNetworkClient.SpectrumFrame frame = latestSpectrum;
+        spectrumQueued.set(false);
+        if (frame == null) return;
             boolean waitingForLocalSettingsEcho =
                     SystemClock.uptimeMillis() < localSettingsGuardUntilMs;
             if (!waitingForLocalSettingsEcho) {
@@ -304,7 +354,8 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
                 if (isFinite(frame.listeningFrequency)) {
                     settings.listeningFrequency = frame.listeningFrequency;
                 }
-                settings.sampleRate = frame.sampleRate > 0.0 ? frame.sampleRate : settings.sampleRate;
+                if (!isIndependentVfo())
+                    settings.sampleRate = frame.sampleRate > 0.0 ? frame.sampleRate : settings.sampleRate;
                 if (frame.requestedFftLength > 0) {
                     settings.fftLength = frame.requestedFftLength;
                 }
@@ -323,14 +374,18 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
                     settings.modulationType);
             applyStoredZoomToSpectrum();
             updateFineTuneControl();
-        });
     }
 
     @Override
     public void onAudio(byte[] pcmData) {
+        rxIndicator.frame(SystemClock.uptimeMillis());
         if (audioPlayer != null && audioPlaybackEnabled) {
             audioPlayer.playPcm(pcmData);
         }
+    }
+
+    @Override public void onAudioReset() {
+        if (audioPlayer != null) audioPlayer.stop();
     }
 
     private void onUsbTelemetry(String message) {
@@ -346,8 +401,45 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
 
     @Override
     public void onControlMessage(JSONObject command) {
+        if ("remoteVfo".equals(command.optString("type"))) {
+            runOnMain(() -> applyRemoteVfoState(command));
+            return;
+        }
         String action = command.optString("action");
-        if ("priorityRequest".equals(action)) {
+        if ("serverState".equals(action) || "settingsAck".equals(action)) {
+            runOnMain(() -> {
+                if (isOtgMode()) return;
+                mainHandler.removeCallbacks(serverStateRecovery);
+                mainHandler.removeCallbacks(reliableSettingsRepeat);
+                pendingReliableSettingsRepeats = 0;
+                localSettingsGuardUntilMs = 0;
+                settings.updateFromJson(command.optJSONObject("settings"));
+                serverSettings.updateFromJson(command.optJSONObject("settings"));
+                hasServerSettings = true;
+                serverProcessingMode = command.optInt("processingMode", serverProcessingMode);
+                if (command.has("receiverRunning")) rxIndicator.receiver(command.optBoolean("receiverRunning"));
+                suppressUiCallbacks = true;
+                refreshSampleRateOptions(true);
+                replaceSpinnerOptions(fftSpinner, fftLengthLabels());
+                replaceSpinnerOptions(modulationSpinner, modulationLabels());
+                suppressServerCheck.setChecked(command.optBoolean(
+                        "serverDisableLocalVisualAudio", suppressServerCheck.isChecked()));
+                fullResolutionSpectrumFrames = command.optBoolean(
+                        "fullResolutionSpectrumFrames", fullResolutionSpectrumFrames);
+                fullResolutionSpectrumCheck.setChecked(fullResolutionSpectrumFrames);
+                audioCheck.setChecked(settings.audioEnabled);
+                audioPlaybackEnabled = settings.audioEnabled;
+                if (Math.abs(settings.centerFrequency - settings.listeningFrequency) > 0.5) {
+                    bindListeningToCenter = false;
+                    bindTuningToCenterCheck.setChecked(false);
+                }
+                suppressUiCallbacks = false;
+                updateControlsFromSettings(true);
+                if (!command.optBoolean("ok", true))
+                    appendLog("Server rejected settings: " + command.optString("reason", "Unknown reason"));
+                updateButtons();
+            });
+        } else if ("priorityRequest".equals(action)) {
             runOnMain(() -> showPriorityRequest(command));
         } else if ("priorityDenied".equals(action) || "controlRejected".equals(action)) {
             runOnMain(() -> appendLog(command.optString("reason", "Control request denied")));
@@ -356,6 +448,18 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
 
     private void buildUi() {
         rootLayout = new LinearLayout(this);
+        rootLayout.setOnApplyWindowInsetsListener((view, insets) -> {
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets safe = insets.getInsets(
+                        android.view.WindowInsets.Type.systemBars() |
+                                android.view.WindowInsets.Type.displayCutout());
+                view.setPadding(safe.left, safe.top, safe.right, safe.bottom);
+            } else {
+                view.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
+                        insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
+            }
+            return insets;
+        });
         rootLayout.setBackgroundColor(0xff101418);
         commandPanel = new LinearLayout(this);
         commandPanel.setGravity(Gravity.CENTER);
@@ -422,6 +526,51 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
         connectionRow.addView(fieldWithLabel("Port", portEdit), new LinearLayout.LayoutParams(0, dp(62), 0.7f));
         connectionActionRow.addView(connectButton, new LinearLayout.LayoutParams(0, dp(44), 0.8f));
         connectionActionRow.addView(requestControlButton, new LinearLayout.LayoutParams(0, dp(44), 1.2f));
+
+        LinearLayout networkOptions = row();
+        reconnectCheck = new CheckBox(this);
+        reconnectCheck.setText("Auto reconnect");
+        reconnectCheck.setTextColor(0xffe7edf2);
+        reconnectCheck.setChecked(true);
+        reconnectCheck.setOnCheckedChangeListener((view, checked) -> {
+            if (!suppressUiCallbacks) { client.setAutoReconnect(checked); updateButtons(); }
+        });
+        independentVfoCheck = new CheckBox(this);
+        independentVfoCheck.setText("Independent VFO");
+        independentVfoCheck.setTextColor(0xffe7edf2);
+        independentVfoCheck.setOnCheckedChangeListener((view, checked) -> {
+            if (suppressUiCallbacks) return;
+            client.setRemoteVfoMode(checked);
+            cancelPendingNetworkEdits();
+            latestSpectrum = null;
+            localSettingsGuardUntilMs = 0;
+            suppressUiCallbacks = true;
+            replaceSpinnerOptions(modulationSpinner, modulationLabels());
+            replaceSpinnerOptions(fftSpinner, fftLengthLabels());
+            suppressUiCallbacks = false;
+            updateControlsFromSettings(true);
+            updateButtons();
+        });
+        remoteVfoSpinner = spinner(new String[]{"A", "B"});
+        remoteVfoSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            public void onNothingSelected(AdapterView<?> parent) { }
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (suppressUiCallbacks || !isIndependentVfo()) return;
+                mainHandler.removeCallbacks(deferredSettingsApply);
+                mainHandler.removeCallbacks(reliableSettingsRepeat);
+                pendingReliableSettingsRepeats = 0;
+                localSettingsGuardUntilMs = 0;
+                client.selectVfo(position == 0 ? "A" : "B");
+                latestSpectrum = null;
+                rxIndicator.connection(client.isConnected(), false);
+                applyRemoteVfoState(null);
+            }
+        });
+        networkOptions.addView(reconnectCheck, new LinearLayout.LayoutParams(0, dp(44), 1.0f));
+        networkOptions.addView(independentVfoCheck, new LinearLayout.LayoutParams(0, dp(44), 1.2f));
+        networkOptions.addView(remoteVfoSpinner, new LinearLayout.LayoutParams(0, dp(44), 0.8f));
+        vfoRangeLabel = label("");
+        vfoRangeLabel.setTextSize(11);
 
         LinearLayout usbPrimaryRow = row();
         usbToolsRow = row();
@@ -511,7 +660,12 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
         suppressServerCheck.setText("Disable server local output");
         suppressServerCheck.setTextColor(0xffe7edf2);
         suppressServerCheck.setChecked(true);
-        suppressServerCheck.setOnCheckedChangeListener((buttonView, isChecked) -> scheduleSettingsApply(FAST_APPLY_DELAY_MS));
+        suppressServerCheck.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            if (!suppressUiCallbacks && !isOtgMode() && client != null && client.isConnected()) {
+                client.sendControl("setServerLocalOutput", settings, isChecked,
+                        fullResolutionSpectrumFrames, null);
+            }
+        });
         bindTuningToCenterCheck = new CheckBox(this);
         bindTuningToCenterCheck.setText("Center=tune");
         bindTuningToCenterCheck.setTextColor(0xffe7edf2);
@@ -583,6 +737,8 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
 
         settingsPanel.addView(connectionRow);
         settingsPanel.addView(connectionActionRow);
+        settingsPanel.addView(networkOptions);
+        settingsPanel.addView(vfoRangeLabel);
         settingsPanel.addView(usbPrimaryRow);
         settingsPanel.addView(usbToolsRow);
         settingsPanel.addView(usbSessionRow);
@@ -630,6 +786,9 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
     private void toggleConnection() {
         if (client.isActive()) {
             client.disconnect();
+            cancelPendingNetworkEdits();
+            latestSpectrum = null;
+            rxIndicator.connection(false, false);
             if (audioPlayer != null) {
                 audioPlayer.stop();
             }
@@ -649,6 +808,56 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
         return receiverMode == RECEIVER_MODE_OTG;
     }
 
+    private boolean isIndependentVfo() {
+        return !isOtgMode() && client != null && client.isRemoteVfoMode();
+    }
+
+    private void applyRemoteVfoState(JSONObject message) {
+        if (!isIndependentVfo()) return;
+        if (message != null && "audioReset".equals(message.optString("action"))) return;
+        JSONObject caps = client.vfoCapabilities();
+        JSONObject vfo = client.selectedVfo();
+        settings.sampleRate = caps.optDouble("sampleRate", settings.sampleRate);
+        refreshSampleRateOptions(true);
+        boolean failed = false;
+        if (message != null && ("error".equals(message.optString("action")) ||
+                "branchStatus".equals(message.optString("action")))) {
+            String error = message.optString("message", message.optString("error"));
+            if (!error.isEmpty()) { failed = true; rxIndicator.error(); appendLog("VFO: " + error); }
+        }
+        if (vfo.has("frequencyHz")) {
+            settings.inputMode = RadioSettings.INPUT_RF;
+            settings.centerFrequency = vfo.optDouble("frequencyHz");
+            settings.actualFrequency = settings.centerFrequency;
+            settings.listeningFrequency = settings.centerFrequency;
+            settings.bandwidth = vfo.optDouble("bandwidthHz", 12500);
+            settings.modulationType = vfo.optInt("modulationType", RadioSettings.MOD_NFM);
+            settings.fftLength = vfo.optInt("fftLength", 2048);
+            settings.audioEnabled = vfo.optBoolean("audioEnabled", true);
+        }
+        bindListeningToCenter = false;
+        localSettingsGuardUntilMs = 0;
+        suppressUiCallbacks = true;
+        audioCheck.setChecked(settings.audioEnabled);
+        bindTuningToCenterCheck.setChecked(false);
+        suppressUiCallbacks = false;
+        if (caps.has("receiverRunning") && !failed)
+            rxIndicator.receiver(caps.optBoolean("receiverRunning") && vfo.optBoolean("active"));
+        vfoRangeLabel.setText(caps.has("minFrequency") ? String.format(Locale.US,
+                "Server span %.6f – %.6f MHz · VFO %s", caps.optDouble("minFrequency") / 1e6,
+                caps.optDouble("maxFrequency") / 1e6, vfo.optString("vfoId", "A")) : "Waiting for VFO session");
+        updateControlsFromSettings(true);
+        updateButtons();
+    }
+
+    private double minimumRfCenterHz() {
+        return isOtgMode() ? RF_MIN_CENTER_FREQUENCY : 1.0;
+    }
+
+    private double minimumRfListeningHz() {
+        return isOtgMode() ? RF_MIN_LISTENING_FREQUENCY : 1.0;
+    }
+
     private void toggleReceiverMode() {
         if (isOtgMode()) {
             if (isUsbOtgPreviewRunning()) {
@@ -663,6 +872,13 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
             }
             statusText.setText("OTG mode");
         }
+        suppressUiCallbacks = true;
+        refreshSampleRateOptions(true);
+        replaceSpinnerOptions(fftSpinner, fftLengthLabels());
+        replaceSpinnerOptions(modulationSpinner, modulationLabels());
+        suppressUiCallbacks = false;
+        updateControlsFromSettings(true);
+        if (!isOtgMode() && client != null) client.requestServerState();
         savePrefs();
         updateButtons();
     }
@@ -944,6 +1160,7 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
     }
 
     private void stopUsbOtgPreview() {
+        rxIndicator.receiver(false);
         Log.d(USB_LOG_TAG, "OTG preview stop requested");
         if (usbSandbox == null) {
             appendLog("[USB] sandbox is not ready");
@@ -1005,8 +1222,29 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
         return sendControlNow(action, logExplicitly, true);
     }
 
+    private void cancelPendingNetworkEdits() {
+        mainHandler.removeCallbacks(deferredSettingsApply);
+        mainHandler.removeCallbacks(reliableSettingsRepeat);
+        mainHandler.removeCallbacks(deferredPanRetune);
+        mainHandler.removeCallbacks(serverStateRecovery);
+        pendingReliableSettingsRepeats = 0;
+        localSettingsGuardUntilMs = 0;
+    }
+
     private boolean sendControlNow(String action, boolean logExplicitly, boolean guardLocalSettings) {
-        collectSettingsFromUi();
+        boolean carriesSettings = NetworkControlProtocol.carriesSettings(action);
+        if (carriesSettings) collectSettingsFromUi();
+        if (carriesSettings && !isIndependentVfo() && serverProcessingMode != RadioSettings.PROCESSING_SERVER_SIDE) {
+            try {
+                JSONObject mode = new JSONObject();
+                mode.put("processingMode", RadioSettings.PROCESSING_SERVER_SIDE);
+                if (!client.sendControl("setProcessingMode", settings,
+                        suppressServerCheck.isChecked(), fullResolutionSpectrumFrames, mode)) return false;
+            } catch (JSONException e) {
+                appendLog("Processing mode command failed: " + e.getMessage());
+                return false;
+            }
+        }
         if (guardLocalSettings && ("settings".equals(action) || "start".equals(action))) {
             localSettingsGuardUntilMs = SystemClock.uptimeMillis() + REMOTE_ECHO_GUARD_MS;
         }
@@ -1018,6 +1256,10 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
                 null);
         if (sent && logExplicitly) {
             appendLog("Sent: " + action);
+        }
+        if (sent && carriesSettings && !isIndependentVfo()) {
+            mainHandler.removeCallbacks(serverStateRecovery);
+            mainHandler.postDelayed(serverStateRecovery, REMOTE_ECHO_GUARD_MS + 1000);
         }
         return sent;
     }
@@ -1080,6 +1322,21 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
     }
 
     private void collectSettingsFromUi() {
+        if (isIndependentVfo()) {
+            settings.listeningFrequency = safeDouble(listenEdit.getText().toString(),
+                    settings.listeningFrequency / 1e6) * 1e6;
+            settings.centerFrequency = settings.listeningFrequency;
+            settings.bandwidth = safeDouble(bandwidthEdit.getText().toString(), settings.bandwidth / 1000) * 1000;
+            int[] modes = activeModulationIds();
+            int mode = modulationSpinner.getSelectedItemPosition();
+            if (mode >= 0 && mode < modes.length) settings.modulationType = modes[mode];
+            int[] fft = activeFftLengths();
+            int index = fftSpinner.getSelectedItemPosition();
+            if (index >= 0 && index < fft.length) settings.fftLength = fft[index];
+            settings.audioEnabled = audioCheck.isChecked();
+            audioPlaybackEnabled = settings.audioEnabled;
+            return;
+        }
         if (isRtlUsbTarget()) {
             settings.inputMode = RadioSettings.INPUT_RF;
         }
@@ -1089,8 +1346,9 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
             settings.sampleRate = rates[sampleIndex];
         }
         int fftIndex = fftSpinner.getSelectedItemPosition();
-        if (fftIndex >= 0 && fftIndex < fftLengths.length) {
-            settings.fftLength = fftLengths[fftIndex];
+        int[] fftOptions = activeFftLengths();
+        if (fftIndex >= 0 && fftIndex < fftOptions.length) {
+            settings.fftLength = fftOptions[fftIndex];
         }
         settings.inputMode = isRtlUsbTarget()
                 ? RadioSettings.INPUT_RF
@@ -1109,16 +1367,17 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
             settings.centerFrequency =
                     safeDouble(centerEdit.getText().toString(), settings.centerFrequency / 1_000_000.0) *
                             1_000_000.0;
-            settings.centerFrequency = Math.max(RF_MIN_CENTER_FREQUENCY,
+            settings.centerFrequency = Math.max(minimumRfCenterHz(),
                     Math.min(RF_EXPERIMENTAL_MAX_FREQUENCY, settings.centerFrequency));
             settings.actualFrequency = settings.centerFrequency;
-            settings.listeningFrequency = Math.max(RF_MIN_LISTENING_FREQUENCY,
+            settings.listeningFrequency = Math.max(minimumRfListeningHz(),
                     Math.min(RF_EXPERIMENTAL_MAX_FREQUENCY, requestedListening));
         }
         settings.bandwidth = safeDouble(bandwidthEdit.getText().toString(), settings.bandwidth / 1_000.0) * 1_000.0;
         int modulationIndex = modulationSpinner.getSelectedItemPosition();
-        if (modulationIndex >= 0 && modulationIndex < modulationIds.length) {
-            settings.modulationType = modulationIds[modulationIndex];
+        int[] modeOptions = activeModulationIds();
+        if (modulationIndex >= 0 && modulationIndex < modeOptions.length) {
+            settings.modulationType = modeOptions[modulationIndex];
         }
         enforceListeningCenterBinding();
         settings.audioEnabled = audioCheck.isChecked();
@@ -1129,7 +1388,7 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
         if (!bindListeningToCenter || RadioSettings.isDirectInput(settings.inputMode)) {
             return;
         }
-        settings.centerFrequency = Math.max(RF_MIN_CENTER_FREQUENCY,
+        settings.centerFrequency = Math.max(minimumRfCenterHz(),
                 Math.min(RF_EXPERIMENTAL_MAX_FREQUENCY, settings.centerFrequency));
         settings.actualFrequency = settings.centerFrequency;
         settings.listeningFrequency = settings.centerFrequency;
@@ -1148,10 +1407,27 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
         stopButton.setEnabled(otgMode ? otgPreviewRunning : canControl);
         settingsButton.setEnabled(otgMode ? usbSandbox != null : canControl);
         requestControlButton.setEnabled(!otgMode && connected && !client.canControl());
+        independentVfoCheck.setEnabled(!active && !otgMode);
+        remoteVfoSpinner.setEnabled(isIndependentVfo());
+        reconnectCheck.setEnabled(!otgMode);
+        boolean vfo = isIndependentVfo();
+        requestControlButton.setVisibility(vfo ? View.GONE : View.VISIBLE);
+        remoteVfoSpinner.setVisibility(vfo ? View.VISIBLE : View.GONE);
+        vfoRangeLabel.setVisibility(vfo ? View.VISIBLE : View.GONE);
+        suppressServerCheck.setEnabled(!vfo);
+        fullResolutionSpectrumCheck.setEnabled(!vfo);
+        bindTuningToCenterCheck.setEnabled(!vfo);
+        sampleRateSpinner.setEnabled(!vfo);
+        inputSpinner.setEnabled(!vfo && !isRtlUsbTarget());
+        centerEdit.setEnabled(!vfo && !RadioSettings.isDirectInput(settings.inputMode));
+        if (vfo) receiverModeButton.setText("VFO");
     }
 
     private void loadPrefs() {
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        client.setAutoReconnect(prefs.getBoolean("autoReconnect", true));
+        client.setRemoteVfoMode(prefs.getBoolean("independentVfo", false));
+        client.selectVfo(prefs.getInt("remoteVfoSlot", 0) == 0 ? "A" : "B");
         hostEdit.setText(prefs.getString("host", "127.0.0.1"));
         portEdit.setText(String.valueOf(prefs.getInt("port", DEFAULT_PORT)));
         settings.centerFrequency = Double.longBitsToDouble(prefs.getLong("center", Double.doubleToLongBits(settings.centerFrequency)));
@@ -1199,6 +1475,11 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
         updateLevelControls();
         applyStoredZoomToSpectrum();
         suppressUiCallbacks = true;
+        reconnectCheck.setChecked(prefs.getBoolean("autoReconnect", true));
+        independentVfoCheck.setChecked(client.isRemoteVfoMode());
+        replaceSpinnerOptions(modulationSpinner, modulationLabels());
+        replaceSpinnerOptions(fftSpinner, fftLengthLabels());
+        remoteVfoSpinner.setSelection(prefs.getInt("remoteVfoSlot", 0));
         audioCheck.setChecked(settings.audioEnabled);
         audioPlaybackEnabled = settings.audioEnabled;
         bindTuningToCenterCheck.setChecked(bindListeningToCenter);
@@ -1213,6 +1494,7 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
         updateFineTuneModeButton();
         updateBandMarkerVisibility();
         suppressUiCallbacks = false;
+        updateControlsFromSettings(true);
     }
 
     private void savePrefs() {
@@ -1222,6 +1504,9 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
         collectSettingsFromUi();
         getSharedPreferences(PREFS, MODE_PRIVATE)
                 .edit()
+                .putBoolean("autoReconnect", reconnectCheck.isChecked())
+                .putBoolean("independentVfo", client.isRemoteVfoMode())
+                .putInt("remoteVfoSlot", remoteVfoSpinner.getSelectedItemPosition())
                 .putString("host", hostEdit.getText().toString().trim())
                 .putInt("port", safeInt(portEdit.getText().toString(), DEFAULT_PORT))
                 .putLong("center", Double.doubleToLongBits(settings.centerFrequency))
@@ -1252,10 +1537,12 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
     }
 
     private void updateControlsFromSettings(boolean force) {
-        normalizeSettingsForCurrentInput();
-        normalizeSettingsForReceiverTarget();
+        if (isOtgMode()) {
+            normalizeSettingsForCurrentInput();
+            normalizeSettingsForReceiverTarget();
+        }
         refreshSampleRateOptions(false);
-        enforceListeningCenterBinding();
+        if (isOtgMode()) enforceListeningCenterBinding();
         suppressUiCallbacks = true;
         setTextIfNotFocused(centerEdit, formatMhz(settings.centerFrequency), force);
         setTextIfNotFocused(listenEdit, formatMhz(settings.listeningFrequency), force);
@@ -1270,6 +1557,7 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
         centerEdit.setAlpha(directInput ? 0.55f : 1.0f);
         suppressUiCallbacks = false;
         updateFineTuneControl();
+        if (isIndependentVfo()) updateButtons();
     }
 
     private void normalizeSettingsForCurrentInput() {
@@ -1290,7 +1578,7 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
             if (!isFinite(settings.centerFrequency) || settings.centerFrequency < RF_MIN_CENTER_FREQUENCY) {
                 settings.centerFrequency = 100_000_000.0;
             }
-            settings.centerFrequency = Math.max(RF_MIN_CENTER_FREQUENCY,
+            settings.centerFrequency = Math.max(minimumRfCenterHz(),
                     Math.min(RF_EXPERIMENTAL_MAX_FREQUENCY, settings.centerFrequency));
             settings.actualFrequency = settings.centerFrequency;
             if (!isFinite(settings.listeningFrequency) ||
@@ -1707,21 +1995,21 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
                     settings.sampleRate,
                     settings.listeningFrequency);
         } else {
-            settings.listeningFrequency = Math.max(RF_MIN_LISTENING_FREQUENCY,
+            settings.listeningFrequency = Math.max(minimumRfListeningHz(),
                     Math.min(RF_EXPERIMENTAL_MAX_FREQUENCY, settings.listeningFrequency));
             if (bindListeningToCenter) {
-                settings.centerFrequency = Math.max(RF_MIN_CENTER_FREQUENCY,
+                settings.centerFrequency = Math.max(minimumRfCenterHz(),
                         Math.min(RF_EXPERIMENTAL_MAX_FREQUENCY, settings.listeningFrequency));
                 settings.actualFrequency = settings.centerFrequency;
                 settings.listeningFrequency = settings.centerFrequency;
             } else {
                 double halfRate = Math.max(1.0, settings.sampleRate * 0.5);
                 if (settings.listeningFrequency < settings.centerFrequency - halfRate) {
-                    settings.centerFrequency = Math.max(RF_MIN_CENTER_FREQUENCY,
+                    settings.centerFrequency = Math.max(minimumRfCenterHz(),
                             Math.min(RF_EXPERIMENTAL_MAX_FREQUENCY, settings.listeningFrequency + halfRate));
                     settings.actualFrequency = settings.centerFrequency;
                 } else if (settings.listeningFrequency > settings.centerFrequency + halfRate) {
-                    settings.centerFrequency = Math.max(RF_MIN_CENTER_FREQUENCY,
+                    settings.centerFrequency = Math.max(minimumRfCenterHz(),
                             Math.min(RF_EXPERIMENTAL_MAX_FREQUENCY, settings.listeningFrequency - halfRate));
                     settings.actualFrequency = settings.centerFrequency;
                 }
@@ -1735,6 +2023,14 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
         if (!isFinite(frequencyHz)) {
             return;
         }
+        if (isIndependentVfo()) {
+            collectSettingsFromUi();
+            settings.listeningFrequency = frequencyHz;
+            settings.centerFrequency = frequencyHz;
+            setFrequencyTextsFromSettings(true);
+            if (immediate) sendReliableSettingsNow(); else scheduleSettingsApply(FAST_APPLY_DELAY_MS);
+            return;
+        }
         double beforeCenter = settings.centerFrequency;
         double beforeListen = settings.listeningFrequency;
         collectSettingsFromUi();
@@ -1746,10 +2042,10 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
                     settings.sampleRate,
                     frequencyHz);
         } else {
-            double clamped = Math.max(RF_MIN_LISTENING_FREQUENCY,
+            double clamped = Math.max(minimumRfListeningHz(),
                     Math.min(RF_EXPERIMENTAL_MAX_FREQUENCY, frequencyHz));
             if (bindListeningToCenter) {
-                settings.centerFrequency = Math.max(RF_MIN_CENTER_FREQUENCY,
+                settings.centerFrequency = Math.max(minimumRfCenterHz(),
                         Math.min(RF_EXPERIMENTAL_MAX_FREQUENCY, clamped));
                 settings.actualFrequency = settings.centerFrequency;
                 settings.listeningFrequency = settings.centerFrequency;
@@ -1778,6 +2074,7 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
     }
 
     private void centerToFrequency(double frequencyHz, boolean immediate) {
+        if (isIndependentVfo()) { tuneToFrequency(frequencyHz, immediate); return; }
         if (!isFinite(frequencyHz)) {
             return;
         }
@@ -1788,7 +2085,7 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
             return;
         }
         double oldCenter = settings.centerFrequency;
-        settings.centerFrequency = Math.max(RF_MIN_CENTER_FREQUENCY,
+        settings.centerFrequency = Math.max(minimumRfCenterHz(),
                 Math.min(RF_EXPERIMENTAL_MAX_FREQUENCY, frequencyHz));
         settings.actualFrequency = settings.centerFrequency;
         double appliedDelta = settings.centerFrequency - oldCenter;
@@ -1818,6 +2115,10 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
     }
 
     private void applySpectrumPanDelta(double deltaHz) {
+        if (isIndependentVfo()) {
+            tuneToFrequency(settings.listeningFrequency + deltaHz, true);
+            return;
+        }
         if (!isFinite(deltaHz) || Math.abs(deltaHz) < 1.0) {
             return;
         }
@@ -1832,7 +2133,7 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
             appliedDelta = 0.0;
         } else {
             double oldCenter = settings.centerFrequency;
-            settings.centerFrequency = Math.max(RF_MIN_CENTER_FREQUENCY,
+            settings.centerFrequency = Math.max(minimumRfCenterHz(),
                     Math.min(RF_EXPERIMENTAL_MAX_FREQUENCY, settings.centerFrequency + deltaHz));
             appliedDelta = settings.centerFrequency - oldCenter;
             settings.actualFrequency = settings.centerFrequency;
@@ -1891,11 +2192,11 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
         }
         double halfRate = Math.max(1.0, settings.sampleRate * 0.5);
         if (settings.listeningFrequency < settings.centerFrequency - halfRate) {
-            settings.centerFrequency = Math.max(RF_MIN_CENTER_FREQUENCY,
+            settings.centerFrequency = Math.max(minimumRfCenterHz(),
                     Math.min(RF_EXPERIMENTAL_MAX_FREQUENCY, settings.listeningFrequency + halfRate));
             settings.actualFrequency = settings.centerFrequency;
         } else if (settings.listeningFrequency > settings.centerFrequency + halfRate) {
-            settings.centerFrequency = Math.max(RF_MIN_CENTER_FREQUENCY,
+            settings.centerFrequency = Math.max(minimumRfCenterHz(),
                     Math.min(RF_EXPERIMENTAL_MAX_FREQUENCY, settings.listeningFrequency - halfRate));
             settings.actualFrequency = settings.centerFrequency;
         }
@@ -1943,8 +2244,22 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
                 if (suppressUiCallbacks) {
                     return;
                 }
-                if (modePreset && position >= 0 && position < modulationIds.length) {
-                    settings.modulationType = modulationIds[position];
+                if (parent == sampleRateSpinner) {
+                    double[] rates = activeSampleRates();
+                    if (position >= 0 && position < rates.length &&
+                            Math.abs(rates[position] - settings.sampleRate) < 0.5) return;
+                } else if (parent == fftSpinner) {
+                    int[] lengths = activeFftLengths();
+                    if (position >= 0 && position < lengths.length &&
+                            lengths[position] == settings.fftLength) return;
+                } else if (parent == modulationSpinner) {
+                    int[] modes = activeModulationIds();
+                    if (position >= 0 && position < modes.length &&
+                            modes[position] == settings.modulationType) return;
+                }
+                int[] modes = activeModulationIds();
+                if (modePreset && position >= 0 && position < modes.length) {
+                    settings.modulationType = modes[position];
                     bandwidthEdit.setText(formatKhz(RadioSettings.defaultBandwidthForModulation(settings.modulationType)));
                 }
                 sendReliableSettingsNow();
@@ -1965,6 +2280,7 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
                 }
                 int nextMode = Math.max(RadioSettings.INPUT_RF,
                         Math.min(RadioSettings.INPUT_HF_NOISE_CANCEL, position));
+                if (settings.inputMode == nextMode) return;
                 if (settings.inputMode != nextMode) {
                     settings.inputMode = nextMode;
                     int sampleIndex = sampleRateSpinner.getSelectedItemPosition();
@@ -2062,7 +2378,39 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
     }
 
     private double[] activeSampleRates() {
-        return effectiveUsbReceiverTarget() == UsbSandbox.USB_TARGET_RTL_SDR ? rtlSampleRates : fobosSampleRates;
+        if (isIndependentVfo()) return new double[]{settings.sampleRate};
+        double[] rates = effectiveUsbReceiverTarget() == UsbSandbox.USB_TARGET_RTL_SDR ? rtlSampleRates : fobosSampleRates;
+        if (isOtgMode() || !hasServerSettings || !isFinite(serverSettings.sampleRate) ||
+                serverSettings.sampleRate <= 0.0) return rates;
+        for (double rate : rates) if (Math.abs(rate - serverSettings.sampleRate) < 0.5) return rates;
+        double[] result = java.util.Arrays.copyOf(rates, rates.length + 1);
+        result[rates.length] = serverSettings.sampleRate;
+        return result;
+    }
+
+    private int[] activeFftLengths() {
+        if (isIndependentVfo()) return new int[]{512, 1024, 2048, 4096, 8192, 16384, 32768, 65536};
+        return withServerOption(fftLengths, serverSettings.fftLength);
+    }
+
+    private int[] activeModulationIds() {
+        if (isIndependentVfo()) return new int[]{0, 1, 2, 3, 4, 5, 6, 7};
+        return withServerOption(modulationIds, serverSettings.modulationType);
+    }
+
+    private int[] withServerOption(int[] values, int serverValue) {
+        if (isOtgMode() || !hasServerSettings || serverValue < 0) return values;
+        for (int value : values) if (value == serverValue) return values;
+        int[] result = java.util.Arrays.copyOf(values, values.length + 1);
+        result[values.length] = serverValue;
+        return result;
+    }
+
+    private void replaceSpinnerOptions(Spinner spinner, String[] labels) {
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, labels);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinner.setAdapter(adapter);
     }
 
     private void refreshSampleRateOptions(boolean force) {
@@ -2112,17 +2460,20 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
     }
 
     private String[] fftLengthLabels() {
-        String[] labels = new String[fftLengths.length];
-        for (int i = 0; i < fftLengths.length; ++i) {
-            labels[i] = String.format(Locale.US, "%d", fftLengths[i]);
+        int[] values = activeFftLengths();
+        String[] labels = new String[values.length];
+        for (int i = 0; i < values.length; ++i) {
+            labels[i] = String.format(Locale.US, "%d", values[i]);
         }
         return labels;
     }
 
     private String[] modulationLabels() {
-        String[] labels = new String[modulationIds.length];
-        for (int i = 0; i < modulationIds.length; ++i) {
-            labels[i] = RadioSettings.modulationLabel(modulationIds[i]);
+        int[] values = activeModulationIds();
+        String[] labels = new String[values.length];
+        for (int i = 0; i < values.length; ++i) {
+            labels[i] = i < modulationIds.length ? RadioSettings.modulationLabel(values[i])
+                    : "Server mode " + values[i];
         }
         return labels;
     }
@@ -2142,10 +2493,11 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
     }
 
     private int indexOfFftLength(int value) {
+        int[] values = activeFftLengths();
         int best = 0;
         int bestDelta = Integer.MAX_VALUE;
-        for (int i = 0; i < fftLengths.length; ++i) {
-            int delta = Math.abs(fftLengths[i] - value);
+        for (int i = 0; i < values.length; ++i) {
+            int delta = Math.abs(values[i] - value);
             if (delta < bestDelta) {
                 bestDelta = delta;
                 best = i;
@@ -2155,8 +2507,9 @@ public final class MainActivity extends Activity implements FobosNetworkClient.L
     }
 
     private int indexOfModulation(int value) {
-        for (int i = 0; i < modulationIds.length; ++i) {
-            if (modulationIds[i] == value) {
+        int[] values = activeModulationIds();
+        for (int i = 0; i < values.length; ++i) {
+            if (values[i] == value) {
                 return i;
             }
         }

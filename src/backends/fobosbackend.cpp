@@ -1,4 +1,5 @@
 #include "fobosbackend.h"
+#include "../core/fobosreceivercore.h"
 
 #include <QDebug>
 
@@ -772,64 +773,29 @@ int readFobosAgileAsyncSafely(fobos_sdr_dev_t *dev,
 }
 
 int setActiveClockSourceSafely(int value) {
-    if (activeFobosApiKind == FobosApiKind::Agile) {
-        return setFobosAgileClockSourceSafely(agileDevice, value);
-    }
-    return setFobosClockSourceSafely(device, static_cast<unsigned int>(value));
+    return FobosReceiverCore(activeFobosDevice(), activeFobosApiKind).clockSource(value);
 }
 
 int setActiveDirectSamplingSafely(unsigned int enabled) {
-    if (activeFobosApiKind == FobosApiKind::Agile) {
-        return setFobosAgileDirectSamplingSafely(agileDevice, enabled);
-    }
-    return setFobosDirectSamplingSafely(device, enabled);
+    return FobosReceiverCore(activeFobosDevice(), activeFobosApiKind).directSampling(enabled);
 }
 
 int setActiveSampleRateSafely(double value, double *actual) {
-    if (activeFobosApiKind == FobosApiKind::Agile) {
-        if (!agileDevice) {
-            return FOBOS_ERR_NOT_OPEN;
-        }
-        const int result = setFobosAgileSampleRateSafely(agileDevice, value);
-        if (actual) {
-            *actual = value;
-        }
-        return result;
-    }
-    return setFobosSampleRateSafely(device, value, actual);
+    return FobosReceiverCore(activeFobosDevice(), activeFobosApiKind).sampleRate(value, actual);
 }
 
 int setActiveFrequencySafely(double value, double *actual) {
-    if (activeFobosApiKind == FobosApiKind::Agile) {
-        if (!agileDevice) {
-            return FOBOS_ERR_NOT_OPEN;
-        }
-        const int result = setFobosAgileFrequencySafely(agileDevice, value);
-        if (actual) {
-            *actual = value;
-        }
-        return result;
-    }
-    return setFobosFrequencySafely(device, value, actual);
+    return FobosReceiverCore(activeFobosDevice(), activeFobosApiKind).frequency(value, actual);
 }
 
 int setActiveLnaGainSafely(unsigned int value) {
-    if (activeFobosApiKind == FobosApiKind::Agile) {
-        return setFobosAgileLnaGainSafely(agileDevice, value);
-    }
-    return setFobosLnaGainSafely(device, value);
+    return FobosReceiverCore(activeFobosDevice(), activeFobosApiKind).lna(value);
 }
 
 int setActiveVgaGainSafely(unsigned int value) {
-    if (activeFobosApiKind == FobosApiKind::Agile) {
-        return setFobosAgileVgaGainSafely(agileDevice, value);
-    }
-    return setFobosVgaGainSafely(device, value);
+    return FobosReceiverCore(activeFobosDevice(), activeFobosApiKind).vga(value);
 }
 
 int setActiveGpoSafely(uint8_t value) {
-    if (activeFobosApiKind == FobosApiKind::Agile) {
-        return setFobosAgileGpoSafely(agileDevice, value);
-    }
-    return setFobosGpoSafely(device, value);
+    return FobosReceiverCore(activeFobosDevice(), activeFobosApiKind).gpo(value);
 }

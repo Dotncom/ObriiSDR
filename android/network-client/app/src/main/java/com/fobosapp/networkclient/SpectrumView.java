@@ -103,6 +103,15 @@ public final class SpectrumView extends View {
     };
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private String rxStatus = "Off";
+    private int rxStatusColor = Color.GRAY;
+
+    void setRxStatus(String text, int color) {
+        if (rxStatus.equals(text) && rxStatusColor == color) return;
+        rxStatus = text;
+        rxStatusColor = color;
+        postInvalidate();
+    }
     private double[] frequencies = new double[0];
     private float[] magnitudes = new float[0];
     private double minFrequency = 0.0;
@@ -283,6 +292,15 @@ public final class SpectrumView extends View {
         drawFrequencyScale(canvas, width, spectrumHeight, scaleHeight);
         drawWaterfall(canvas, width, waterfallTop, Math.max(1, height - waterfallTop));
         drawTuning(canvas, width, height);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setTextSize(26.0f);
+        float badgeWidth = paint.measureText(rxStatus) + 44;
+        float left = width - badgeWidth - 8;
+        paint.setColor(Color.argb(220, 10, 14, 18));
+        canvas.drawRoundRect(left, 4, width - 6, 42, 8, 8, paint);
+        paint.setColor(rxStatusColor);
+        canvas.drawCircle(left + 12, 23, 5, paint);
+        canvas.drawText(rxStatus, left + 24, 32, paint);
     }
 
     @Override

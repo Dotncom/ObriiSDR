@@ -869,7 +869,7 @@ void testComputeDialog() {
     require(mode && backend && iqFormat && upload && fallback && apply && status && memory, "Main FFT controls are incomplete");
     require(controls->options() == SpectrumComputeOptions{} && !upload->isEnabled() && !fallback->isEnabled(),
             "Local defaults unexpectedly arm remote FFT controls");
-    require(mode->count() == 3 && backend->count() == 3 && iqFormat->count() == 4 && upload->minimum() == 1 && upload->maximum() == 2000 &&
+    require(mode->count() == 3 && backend->count() == 3 && iqFormat->count() == 5 && upload->minimum() == 1 && upload->maximum() == 2000 &&
             memory->minimum() == 64 && memory->maximum() == 8192 && memory->value() == 512 && memory->isEnabled(),
             "Main FFT control ranges/defaults changed");
     int applySignals = 0, optionSignals = 0, endpointSignals = 0;
@@ -944,7 +944,7 @@ void testComputeDialog() {
     require(dialog.endpoint() == savedEndpoint && dialog.spectrumComputeOptions() == savedOptions && endpointSignals == 0 && optionSignals == 1,
             "Connection test applied drafts or enabled real IQ transfer");
     require(dialog.findChild<QLabel *>("dspProbeTarget")->text().contains("loopback") &&
-            dialog.findChild<QLabel *>("dspProbeEstimate")->text().contains("400.00"), "Probe result lacks loopback warning or traffic estimate");
+            dialog.findChild<QLabel *>("dspProbeEstimate")->text().contains("200.00"), "Probe result lacks loopback warning or traffic estimate");
     auto *tabs = dialog.findChild<QTabWidget *>();
     auto *probeTab = dialog.findChild<QScrollArea *>("dspConnectionProbeTab");
     require(probeTab && tabs->indexOf(probeTab) >= 0, "Connection test tab missing");
@@ -1077,13 +1077,28 @@ void testResearch3D() {
 }
 
 bool runRemoteVfoServiceTests();
+int runRemoteVfoSmokeServer(QCoreApplication &app);
 
 int main(int argc, char **argv) {
 #ifdef _MSC_VER
     SetUnhandledExceptionFilter(reportCrash);
 #endif
-    if (qEnvironmentVariableIsSet("OBRII_REMOTE_VFO_SELFTEST"))
-        std::cerr << "Remote VFO self-test: initializing Qt\n" << std::flush;
+    if (qEnvironmentVariableIsSet("OBRII_REMOTE_VFO_SELFTEST")) {
+        // The VFO broker also serves headless clients; it must not need a GUI,
+        // a display driver or the platform font database to validate its protocol.
+        QCoreApplication core(argc, argv);
+        QStandardPaths::setTestModeEnabled(true);
+        try {
+            if (qEnvironmentVariableIsSet("OBRII_REMOTE_VFO_SMOKE_SERVER"))
+                return runRemoteVfoSmokeServer(core);
+            require(runRemoteVfoServiceTests(), "Remote VFO session tests failed");
+            std::cout << "Remote VFO session isolation and quota tests passed\n";
+            return 0;
+        } catch (const std::exception &error) {
+            std::cerr << error.what() << '\n';
+            return 1;
+        }
+    }
     if (qEnvironmentVariableIsSet("OBRII_DSP_BOARD_SETTINGS"))
         std::cerr << "Saved DSP board: initializing Qt\n" << std::flush;
     QApplication app(argc, argv);
@@ -1114,12 +1129,6 @@ int main(int argc, char **argv) {
                 QThread::msleep(10);
             }
             std::cout << "Saved DSP board opened successfully\n";
-            return 0;
-        }
-        if (qEnvironmentVariableIsSet("OBRII_REMOTE_VFO_SELFTEST")) {
-            std::cerr << "Remote VFO self-test: running protocol checks\n" << std::flush;
-            require(runRemoteVfoServiceTests(), "Remote VFO session tests failed");
-            std::cout << "Remote VFO session isolation and quota tests passed\n";
             return 0;
         }
         testBoardHistory();

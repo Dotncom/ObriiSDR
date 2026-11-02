@@ -6,6 +6,7 @@
 #include <QString>
 
 #include "radiosettings.h"
+#include "recordingformatcore.h"
 
 class SpectrumIqEventRecorder {
 public:
@@ -33,7 +34,6 @@ public:
 private:
     bool openChannelWav(QString *errorMessage);
     bool openFullIqRaw(QString *errorMessage);
-    void writeWavHeader();
     void patchWavHeader();
     bool writeSidecar() const;
     bool writeSigMfMetadata() const;
@@ -55,8 +55,7 @@ private:
     qint64 writeNsSum = 0;
     qint64 writeNsMax = 0;
     qint64 flushNs = 0;
-    qint64 dataSizeFieldOffset = -1;
-    quint64 waveHeaderBytes = 0;
+    RecordingFormatCore::WaveLayout waveLayout;
     bool active = false;
 };
 

@@ -1,4 +1,5 @@
 #include "spectrumframerecorder.h"
+#include "recordingformatcore.h"
 
 #include <QCoreApplication>
 #include <QDataStream>
@@ -21,7 +22,8 @@ bool SpectrumFrameRecorder::start(const RadioSettings &settings,
                                   double displayScalePercent,
                                   int targetBins,
                                   qint64 firstFrameUtcMs,
-                                  QString *errorMessage) {
+                                  QString *errorMessage,
+                                  const QString &explicitPath) {
     stop();
 
     recordingSettings = settings;
@@ -32,7 +34,7 @@ bool SpectrumFrameRecorder::start(const RadioSettings &settings,
     startedAtUtc = QDateTime::currentDateTimeUtc();
     firstUtcMs = firstFrameUtcMs > 0 ? firstFrameUtcMs : startedAtUtc.toMSecsSinceEpoch();
     framesWritten = 0;
-    filePath = makeRecordingPath();
+    filePath = explicitPath.isEmpty() ? makeRecordingPath() : explicitPath;
 
     QDir dir = QFileInfo(filePath).absoluteDir();
     if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
@@ -116,19 +118,10 @@ bool SpectrumFrameRecorder::appendFrameRecord(const SpectrumFrameRecord &frame) 
         return false;
     }
 
-    QDataStream stream(&outputFile);
-    stream.setByteOrder(QDataStream::LittleEndian);
-    stream.setVersion(QDataStream::Qt_5_15);
-    stream << kFrameMagic;
-    stream << static_cast<qint64>(frame.utcMs - firstUtcMs);
-    stream << static_cast<qint64>(frame.utcMs);
-    stream << frame.centerFrequency;
-    stream << frame.minFrequency;
-    stream << frame.maxFrequency;
-    stream << static_cast<qint32>(frame.fftLength);
-    stream << static_cast<qint32>(frame.magnitudes.size());
-    const qint64 bytes = static_cast<qint64>(frame.magnitudes.size() * sizeof(float));
-    if (outputFile.write(reinterpret_cast<const char *>(frame.magnitudes.data()), bytes) != bytes) {
+    const RecordingFormatCore::SpectrumFrameView view{frame.utcMs - firstUtcMs, frame.utcMs,
+        frame.centerFrequency, frame.minFrequency, frame.maxFrequency, frame.fftLength,
+        frame.magnitudes.data(), frame.magnitudes.size()};
+    if (!RecordingFormatCore::appendSpectrum(outputFile, view)) {
         active = false;
         return false;
     }
@@ -339,24 +332,5 @@ QJsonObject SpectrumFrameRecorder::makeMetadataObject() const {
 }
 
 bool SpectrumFrameRecorder::writeHeader(QString *errorMessage) {
-    outputFile.write(kSpectrumMagic, 8);
-    const QByteArray metadata = QJsonDocument(makeMetadataObject()).toJson(QJsonDocument::Compact);
-    if (metadata.isEmpty()) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("cannot create spectrum recording metadata");
-        }
-        return false;
-    }
-
-    QDataStream stream(&outputFile);
-    stream.setByteOrder(QDataStream::LittleEndian);
-    stream.setVersion(QDataStream::Qt_5_15);
-    stream << static_cast<quint32>(metadata.size());
-    if (outputFile.write(metadata) != metadata.size()) {
-        if (errorMessage) {
-            *errorMessage = outputFile.errorString();
-        }
-        return false;
-    }
-    return true;
+    return RecordingFormatCore::beginSpectrum(outputFile, makeMetadataObject(), errorMessage);
 }

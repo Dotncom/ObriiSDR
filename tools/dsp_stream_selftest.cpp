@@ -147,6 +147,20 @@ void sourceRegistryAndBudgetTests() {
             "Coherent timing or native ADC metadata was lost");
     require(!registry.snapshotSince(source, snapshot.epoch, snapshot.endFloatCount, 1024, snapshot),
             "Auxiliary source repeated an already consumed block");
+    std::vector<float> fullHistory(2U * 1024U * 1024U, 0.25f);
+    timing.firstComplexSample = 1236;
+    require(registry.publish(source, fullHistory.data(), fullHistory.size(), 2.0e6, 100.0e6, false, &timing),
+            "Auxiliary history fill failed");
+    require(registry.snapshotSince(source, snapshot.epoch, snapshot.endFloatCount, 1024, snapshot) && snapshot.gap,
+            "Truncated auxiliary history was not marked as a gap");
+    const auto endAfterFill = snapshot.endFloatCount;
+    const auto epochAfterFill = snapshot.epoch;
+    timing.firstComplexSample += fullHistory.size() / 2U;
+    require(registry.publish(source, iq.data(), iq.size(), 2.0e6, 100.0e6, false, &timing),
+            "Auxiliary IQ after ring eviction was rejected");
+    require(registry.snapshotSince(source, epochAfterFill, endAfterFill, 1024, snapshot) &&
+                snapshot.iq == iq && !snapshot.gap,
+            "Normal ring eviction falsely reset continuous auxiliary IQ");
     registry.removeSubscriptions(&owner);
     require(registry.stats().bufferedSources == 0, "Unsubscribed auxiliary history was retained");
 

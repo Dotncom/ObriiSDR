@@ -91,7 +91,10 @@ void RemoteVfoService::setSourceState(const RadioSettings &settings, bool receiv
         sourceSettings_.simplifiedAudioChannelizer != settings.simplifiedAudioChannelizer;
     sourceSettings_ = settings;
     receiverRunning_ = receiverRunning;
-    if (changed) rebuildPlan();
+    if (changed) {
+        rebuildPlan();
+        for (const Session &session : sessions_) sendSessionState(session, QStringLiteral("status"));
+    }
 }
 
 void RemoteVfoService::setExternalEndpoint(const DspStreamEndpoint &endpoint) {

@@ -27,6 +27,7 @@ int setRtlSdrTunerGainModeSafely(void *dev, int manual);
 int setRtlSdrTunerGainSafely(void *dev, int gainTenthsDb);
 int setRtlSdrAgcModeSafely(void *dev, int enabled);
 int resetRtlSdrBufferSafely(void *dev);
+int readRtlSdrSyncSafely(void *dev, void *buffer, int bytes, int *bytesRead);
 int readRtlSdrAsyncSafely(void *dev,
                           RtlSdrAsyncCallback callback,
                           void *ctx,

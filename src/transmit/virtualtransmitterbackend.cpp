@@ -7,6 +7,7 @@
 #include <QTcpSocket>
 
 #include <algorithm>
+#include <cmath>
 
 namespace {
 constexpr int MaximumSamplesPerFrame = 16384;
@@ -24,6 +25,10 @@ void VirtualTransmitterBackend::setEndpoint(const VirtualSignalEndpoint &endpoin
     currentEndpoint = endpoint;
 }
 
+void VirtualTransmitterBackend::setNodeId(const QString &id) {
+    nodeId = id.trimmed();
+}
+
 VirtualSignalEndpoint VirtualTransmitterBackend::endpoint() const {
     return currentEndpoint;
 }
@@ -34,8 +39,14 @@ bool VirtualTransmitterBackend::isRfCapable() const { return false; }
 
 bool VirtualTransmitterBackend::start(const TxConfiguration &configuration, QString *error) {
     stop();
+    if (!nodeId.isEmpty() && !virtualSignalValidNodeId(nodeId)) {
+        setError(error, QStringLiteral("Virtual node ID must be 1-64 ASCII letters, digits, dot, dash or underscore; txN is reserved"));
+        return false;
+    }
     currentConfiguration = configuration;
     sequence = 0;
+    sampleEpochNs = 0;
+    sampleCursor = 0;
     outputEnabled = true;
     nextDiscontinuity = false;
     lastConnectAttemptMs = 0;
@@ -88,17 +99,24 @@ bool VirtualTransmitterBackend::writeIq(const std::complex<float> *samples, int 
     int offset = 0;
     while (offset < count) {
         const int frameSamples = (std::min)(MaximumSamplesPerFrame, count - offset);
+        const quint32 sampleRate = static_cast<quint32>((std::max)(1, currentConfiguration.sampleRate));
+        if (!sampleEpochNs || nextDiscontinuity) {
+            sampleEpochNs = QDateTime::currentMSecsSinceEpoch() * 1000000LL;
+            sampleCursor = 0;
+        }
         VirtualSignalFrame frame;
         frame.sequence = sequence++;
-        frame.timestampNs = QDateTime::currentMSecsSinceEpoch() * 1000000LL;
+        frame.timestampNs = sampleEpochNs + static_cast<qint64>(
+            std::llround(static_cast<long double>(sampleCursor) * 1000000000.0L / sampleRate));
         frame.streamId = QStringLiteral("obrii-tx");
         frame.protocolId = QStringLiteral("raw-iq");
         frame.payloadType = VirtualSignalPayloadType::ComplexFloat32;
-        frame.sampleRate = static_cast<quint32>((std::max)(1, currentConfiguration.sampleRate));
+        frame.sampleRate = sampleRate;
         frame.centerFrequencyHz = static_cast<qint64>(currentConfiguration.frequencyHz);
         frame.discontinuity = nextDiscontinuity;
         frame.metadata.insert(QStringLiteral("sampleFormat"), QStringLiteral("cf32le"));
         frame.metadata.insert(QStringLiteral("complexSamples"), frameSamples);
+        if (!nodeId.isEmpty()) frame.metadata.insert(QStringLiteral("hubNodeId"), nodeId);
         frame.payload = virtualSignalComplexFloat32Payload(samples + offset, frameSamples);
         nextDiscontinuity = false;
         if (!writeFrame(frame, error)) {
@@ -110,6 +128,7 @@ bool VirtualTransmitterBackend::writeIq(const std::complex<float> *samples, int 
             }
             return false;
         }
+        sampleCursor += frameSamples;
         offset += frameSamples;
     }
     if (error) error->clear();
@@ -153,6 +172,7 @@ void VirtualTransmitterBackend::stop() {
         frame.sampleRate = static_cast<quint32>((std::max)(1, currentConfiguration.sampleRate));
         frame.centerFrequencyHz = static_cast<qint64>(currentConfiguration.frequencyHz);
         frame.endOfStream = true;
+        if (!nodeId.isEmpty()) frame.metadata.insert(QStringLiteral("hubNodeId"), nodeId);
         QString ignored;
         writeFrame(frame, &ignored);
         drain(250, &ignored);
@@ -189,6 +209,7 @@ bool VirtualTransmitterBackend::pollConnection() {
             heartbeat.streamId = QStringLiteral("obrii-tx");
             heartbeat.protocolId = QStringLiteral("keepalive");
             heartbeat.payloadType = VirtualSignalPayloadType::ProtocolFrame;
+            if (!nodeId.isEmpty()) heartbeat.metadata.insert(QStringLiteral("hubNodeId"), nodeId);
             QString error;
             if (!writeFrame(heartbeat, &error)) {
                 resetConnection();

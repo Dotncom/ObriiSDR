@@ -71,6 +71,14 @@ broadcast and from its back-pressure calculation. A slow browser or listener
 therefore drops its own queued output instead of blocking local audio or other
 clients.
 
+The legacy server-processing client now negotiates binary PCM16 audio frames;
+older clients retain base64-in-JSON audio for protocol compatibility. The
+receiver's audio prebuffer is bounded, and visual frames are shed under socket
+back-pressure. Audio and legacy spectrum still share one TCP connection, so a
+congested link can delay audio behind already queued visual bytes. The binary
+format reduces serialization overhead; it is not a separate real-time audio
+transport or a guarantee against dropouts over VPN.
+
 When a native external-compute endpoint is enabled in the DSP stream manager,
 remote VFO branches may use it. Local acquisition and the established main
 audio path remain independent of network waits. This is isolation rather than

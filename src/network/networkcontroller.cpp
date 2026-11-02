@@ -227,6 +227,10 @@ bool NetworkController::peerSupportsCompactSpectrum(const QString &peerIdValue) 
     return compactSpectrumPeers.contains(peerForId(peerIdValue));
 }
 
+bool NetworkController::peerSupportsBinaryAudio(const QString &peerIdValue) const {
+    return binaryAudioPeers.contains(peerForId(peerIdValue));
+}
+
 void NetworkController::stop() {
     handshakeTimer->stop();
     stopHeartbeat();
@@ -511,6 +515,7 @@ void NetworkController::closePeerSocket(QTcpSocket *socket) {
         peerPriorityKeys.remove(peer);
         peerStreamProfiles.remove(peer);
         compactSpectrumPeers.remove(peer);
+        binaryAudioPeers.remove(peer);
         peerLastMessageTimers.remove(peer);
         processingPeerReads.remove(peer);
         peerSockets.removeAll(peer);
@@ -544,6 +549,7 @@ void NetworkController::closePeerSocket(QTcpSocket *socket) {
     peerPriorityKeys.clear();
     peerStreamProfiles.clear();
     compactSpectrumPeers.clear();
+    binaryAudioPeers.clear();
     peerLastMessageTimers.clear();
     processingPeerReads.clear();
     peerSocket = nullptr;
@@ -866,6 +872,7 @@ void NetworkController::processLine(QTcpSocket *socket, const QByteArray &line) 
             QJsonObject capabilities;
             capabilities[QStringLiteral("type")] = QStringLiteral("capabilities");
             capabilities[QStringLiteral("compactSpectrumS16")] = true;
+            capabilities[QStringLiteral("binaryAudioPcmS16")] = true;
             sendJsonToSocket(socket, capabilities);
             const QString message = QString("Control channel ready: %1:%2")
                                         .arg(clientSocket->peerAddress().toString())
@@ -901,6 +908,10 @@ void NetworkController::processLine(QTcpSocket *socket, const QByteArray &line) 
             compactSpectrumPeers.insert(socket);
         else
             compactSpectrumPeers.remove(socket);
+        if (command.value(QStringLiteral("binaryAudioPcmS16")).toBool(false))
+            binaryAudioPeers.insert(socket);
+        else
+            binaryAudioPeers.remove(socket);
         return;
     }
     if (command.contains("payloadBytes")) {

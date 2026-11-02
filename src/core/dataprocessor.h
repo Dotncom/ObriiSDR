@@ -23,6 +23,7 @@
 #include <cstdint>
 #include "radiosettings.h"
 #include "iqchannelizer.h"
+#include "iqframequeuebudget.h"
 #include "receiverbackend.h"
 
 class ZoomSpectrumProcessor;
@@ -70,6 +71,7 @@ public:
     void updateNetworkIqSettings(const RadioSettings &settings, bool channelizeFrames);
     void configureNetworkIqStreaming(const RadioSettings &settings, bool emitFrames, bool channelizeFrames);
     void setWifiIqStreamingEnabled(bool enabled);
+    std::shared_ptr<IqFrameQueueBudget> iqFrameQueueBudget() const { return iqFrameBudget; }
     std::shared_ptr<ZoomSpectrumProcessor> zoomSpectrumProcessor() const { return zoomProcessor; }
 signals:
     void iqFrameReady(const QByteArray &iqData, double sampleRate, int sampleCount,
@@ -86,6 +88,7 @@ private:
     void emitFullIqFrame(const float *samples, std::size_t floatCount);
     void emitWifiIqFrame(const float *samples, std::size_t floatCount);
     void emitChannelIqFrame(const float *samples, std::size_t floatCount, const RadioSettings &settings);
+    void emitBufferedChannelIqFrame(double sampleRate);
     void resetNetworkIqState();
     void resetStreamDiagnostics();
     void updateStreamDiagnostics(const float *samples, uint32_t sampleCount, const char *readerMode);
@@ -145,6 +148,7 @@ private:
     std::complex<float> networkHfNoiseCancelCoeff = {0.0f, 0.0f};
     std::complex<float> networkHfNoiseCancelRefDecimationSum = {0.0f, 0.0f};
     QByteArray networkIqFrameBuffer;
+    std::shared_ptr<IqFrameQueueBudget> iqFrameBudget = std::make_shared<IqFrameQueueBudget>();
     double networkIqFrameSampleRate = 0.0;
     QElapsedTimer asyncRateTimer;
     QElapsedTimer streamDiagnosticTimer;

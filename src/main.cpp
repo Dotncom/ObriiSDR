@@ -1,4 +1,7 @@
 #include "main.h"
+#include "commanddispatcher.h"
+#include "commandconsoledialog.h"
+#include "commandcontrolserver.h"
 #include "appconstants.h"
 #include "appruntimeutils.h"
 #include "appsettingsutils.h"
@@ -401,10 +404,12 @@ YourClassName::YourClassName(QWidget *parent)
     markTranslatable(digitalModeLabel, QStringLiteral("mode"), QStringLiteral("Mode:"));
     digitalModeLayout->addWidget(digitalModeLabel);
     addModulationRadioButton(digitalWidget, digitalModeLayout, "FT8", MOD_FT8, "FT8 weak-signal decoder");
+    addModulationRadioButton(digitalWidget, digitalModeLayout, "FT4", MOD_FT4, "FT4 7.5-second weak-signal receiver (USB, 3 kHz)");
     addModulationRadioButton(digitalWidget, digitalModeLayout, "RTTY", MOD_RTTY, "AFSK RTTY decoder");
     addModulationRadioButton(digitalWidget, digitalModeLayout, "FSK", MOD_FSK, "Frequency-shift keying decoder");
     addModulationRadioButton(digitalWidget, digitalModeLayout, "BPSK31", MOD_PSK, "BPSK31 audio decoder");
     addModulationRadioButton(digitalWidget, digitalModeLayout, "DMR", MOD_DMR, "DMR 4FSK sync monitor");
+    addModulationRadioButton(digitalWidget, digitalModeLayout, "M17", MOD_M17, "M17 4FSK packet and unencrypted Codec2 voice receiver");
     digitalModeLayout->addStretch();
     cwDecoderControlsWidget = new QWidget(digitalWidget);
     QGridLayout *cwDecoderLayout = new QGridLayout(cwDecoderControlsWidget);
@@ -1051,7 +1056,87 @@ YourClassName::YourClassName(QWidget *parent)
     waterfallDisplayModeLayout->setContentsMargins(0, 0, 0, 0);
     waterfallDisplayModeLayout->addWidget(waterfallDisplayModeLabel);
     waterfallDisplayModeLayout->addWidget(waterfallDisplayModeCombo);
+    spectrumDisplayModeCombo = new QComboBox(this);
+    spectrumDisplayModeCombo->addItem(uiText(QStringLiteral("spectrum_display_line"), QStringLiteral("Line spectrum")), 0);
+    spectrumDisplayModeCombo->addItem(uiText(QStringLiteral("spectrum_display_persistence"), QStringLiteral("Spectrum persistence")), 1);
+    spectrumDisplayModeCombo->setCurrentIndex(spectrumDisplayMode);
+    graphWidget->setPersistenceEnabled(spectrumDisplayMode == 1);
+    spectrumDisplayModeCombo->setToolTip(uiText(QStringLiteral("spectrum_persistence_tooltip"), QStringLiteral("Accumulate fading spectrum traces. Frequent levels become warm colors; the waterfall stays unchanged.")));
+    spectrumDisplayModeCombo->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    spectrumDisplayModeCombo->setMaximumWidth(260);
+    auto *spectrumDisplayModeLayout = new QHBoxLayout();
+    spectrumDisplayModeLayout->setContentsMargins(0, 0, 0, 0);
+    auto *spectrumDisplayModeLabel = new QLabel(this);
+    markTranslatable(spectrumDisplayModeLabel, QStringLiteral("spectrum_display_mode"), QStringLiteral("Spectrum:"));
+    spectrumDisplayModeLayout->addWidget(spectrumDisplayModeLabel);
+    spectrumDisplayModeLayout->addWidget(spectrumDisplayModeCombo);
+    spectrumDisplayModeLayout->addStretch(1);
+    connect(spectrumDisplayModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        spectrumDisplayMode = spectrumDisplayModeCombo->itemData(index).toInt();
+        graphWidget->setPersistenceEnabled(spectrumDisplayMode == 1);
+        syncSpectrumPersistenceControls();
+        savePersistentSettings();
+    });
     waterfallDisplayModeLayout->addStretch(1);
+
+    auto *persistenceControlsLayout = new QFormLayout();
+    persistenceControlsLayout->setContentsMargins(0, 0, 0, 0);
+    auto *persistenceTimeLabel = new QLabel(this);
+    markTranslatable(persistenceTimeLabel, QStringLiteral("spectrum_persistence_time"), QStringLiteral("Afterglow (s):"));
+    spectrumPersistenceTimeSpin = new QDoubleSpinBox(this);
+    spectrumPersistenceTimeSpin->setRange(0.1, 30.0);
+    spectrumPersistenceTimeSpin->setDecimals(1);
+    spectrumPersistenceTimeSpin->setSingleStep(0.1);
+    spectrumPersistenceTimeSpin->setKeyboardTracking(false);
+    auto *persistenceIntensityLabel = new QLabel(this);
+    markTranslatable(persistenceIntensityLabel, QStringLiteral("spectrum_persistence_intensity"), QStringLiteral("Intensity:"));
+    spectrumPersistenceIntensitySpin = new QSpinBox(this);
+    spectrumPersistenceIntensitySpin->setRange(10, 400);
+    spectrumPersistenceIntensitySpin->setSuffix(QStringLiteral("%"));
+    spectrumPersistenceIntensitySpin->setSingleStep(10);
+    spectrumPersistenceIntensitySpin->setKeyboardTracking(false);
+    persistenceControlsLayout->addRow(persistenceTimeLabel, spectrumPersistenceTimeSpin);
+    persistenceControlsLayout->addRow(persistenceIntensityLabel, spectrumPersistenceIntensitySpin);
+    auto *persistenceThresholdLabel = new QLabel(this);
+    markTranslatable(persistenceThresholdLabel, QStringLiteral("spectrum_persistence_threshold"), QStringLiteral("Clutter threshold:"));
+    spectrumPersistenceThresholdSpin = new QSpinBox(this);
+    spectrumPersistenceThresholdSpin->setRange(0, 90);
+    spectrumPersistenceThresholdSpin->setSuffix(QStringLiteral("%"));
+    spectrumPersistenceThresholdSpin->setSingleStep(5);
+    spectrumPersistenceThresholdSpin->setKeyboardTracking(false);
+    spectrumPersistenceThresholdSpin->setToolTip(uiText(QStringLiteral("spectrum_persistence_threshold_tooltip"),
+        QStringLiteral("Higher values hide rare points before intensity is applied. 0% shows all traces. Short signals may also be hidden.")));
+    persistenceControlsLayout->addRow(persistenceThresholdLabel, spectrumPersistenceThresholdSpin);
+    auto *persistenceSmoothingLabel = new QLabel(this);
+    markTranslatable(persistenceSmoothingLabel, QStringLiteral("spectrum_persistence_smoothing"), QStringLiteral("Amplitude smoothing (ms):"));
+    spectrumPersistenceSmoothingSpin = new QSpinBox(this);
+    spectrumPersistenceSmoothingSpin->setRange(0, 2000);
+    spectrumPersistenceSmoothingSpin->setSingleStep(10);
+    spectrumPersistenceSmoothingSpin->setKeyboardTracking(false);
+    spectrumPersistenceSmoothingSpin->setToolTip(uiText(QStringLiteral("spectrum_persistence_smoothing_tooltip"),
+        QStringLiteral("Smooth amplitude over time before accumulation. 0 disables smoothing. Higher values reduce scatter but slow the response to short signals.")));
+    persistenceControlsLayout->addRow(persistenceSmoothingLabel, spectrumPersistenceSmoothingSpin);
+    connect(spectrumPersistenceSmoothingSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+        spectrumPersistenceSmoothingMs = value;
+        syncSpectrumPersistenceControls();
+        savePersistentSettings();
+    });
+    connect(spectrumPersistenceThresholdSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+        spectrumPersistenceThreshold = value;
+        syncSpectrumPersistenceControls();
+        savePersistentSettings();
+    });
+    syncSpectrumPersistenceControls();
+    connect(spectrumPersistenceTimeSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double value) {
+        spectrumPersistenceSeconds = value;
+        syncSpectrumPersistenceControls();
+        savePersistentSettings();
+    });
+    connect(spectrumPersistenceIntensitySpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+        spectrumPersistenceIntensity = value;
+        syncSpectrumPersistenceControls();
+        savePersistentSettings();
+    });
 
     QLabel *multiSdrViewModeLabel = new QLabel(QStringLiteral("Multi-SDR scale:"), this);
     markTranslatable(multiSdrViewModeLabel,
@@ -1448,6 +1533,12 @@ YourClassName::YourClassName(QWidget *parent)
         QStringLiteral("Configure local IPC or TCP input for generated IQ signals")));
     virtualSignalSettingsButton->hide();
     appSettingsButton = new QPushButton("Settings...", this);
+    commandConsoleButton = new QPushButton(QStringLiteral(">_"), this);
+    commandConsoleButton->setToolTip(uiText(QStringLiteral("command_console"), QStringLiteral("Console")));
+    commandConsoleButton->setAccessibleName(commandConsoleButton->toolTip());
+    commandConsoleButton->setFixedWidth(32);
+    commandConsoleButton->setObjectName(QStringLiteral("commandConsoleButton"));
+    connect(commandConsoleButton, &QPushButton::clicked, this, &YourClassName::showCommandConsole);
     markTranslatable(appSettingsButton, QStringLiteral("settings"), QStringLiteral("Settings..."));
     dspPathButton = new QPushButton("DSP", this);
     markTranslatable(dspPathButton, QStringLiteral("dsp_path_short"), QStringLiteral("DSP"));
@@ -3258,6 +3349,7 @@ YourClassName::YourClassName(QWidget *parent)
     prepareCompactPanelButton(fobosButton);
     prepareCompactPanelButton(networkButton);
     prepareCompactPanelButton(appSettingsButton);
+    prepareCompactPanelButton(commandConsoleButton);
 
     QHBoxLayout *deviceButtonLayout = new QHBoxLayout();
     deviceButtonLayout->setContentsMargins(0, 0, 0, 0);
@@ -3265,6 +3357,7 @@ YourClassName::YourClassName(QWidget *parent)
     deviceButtonLayout->addWidget(refreshButton, 1);
     deviceButtonLayout->addWidget(networkButton, 1);
     deviceButtonLayout->addWidget(appSettingsButton, 1);
+    deviceButtonLayout->addWidget(commandConsoleButton);
 
     QHBoxLayout *gainLabelLayout = new QHBoxLayout();
     lnaGainLabel->setAlignment(Qt::AlignCenter);
@@ -3787,6 +3880,8 @@ YourClassName::YourClassName(QWidget *parent)
         QStringLiteral("Waterfall visualization"),
         false);
     waterfall3DSection.contentLayout->addLayout(waterfallDisplayModeLayout);
+    waterfall3DSection.contentLayout->addLayout(spectrumDisplayModeLayout);
+    waterfall3DSection.contentLayout->addLayout(persistenceControlsLayout);
     waterfall3DSection.contentLayout->addLayout(multiSdrViewModeLayout);
     waterfall3DSection.contentLayout->addLayout(waterfall3DResolutionLayout);
     waterfall3DSection.contentLayout->addLayout(waterfall3DSurfaceLayout);
@@ -4432,6 +4527,9 @@ YourClassName::YourClassName(QWidget *parent)
             receiveNetworkIqFrameBinary(command, payload);
         } else if (type == QStringLiteral("spectrumbin")) {
             displayNetworkSpectrumFrameBinary(command, payload);
+        } else if (type == QStringLiteral("audiobin") &&
+                   !isChannelIqProcessingMode()) {
+            playNetworkAudioPcmFrame(command, payload);
         } else if (type == QStringLiteral("remoteVfoAudio") &&
                    isRemoteVfoProcessingMode() && remoteAudioPlayer) {
             if (command.value(QStringLiteral("reset")).toBool(false)) remoteAudioPlayer->stop();
@@ -5001,8 +5099,10 @@ YourClassName::YourClassName(QWidget *parent)
             [this](const QByteArray &pcmData) {
                 if (pendingSettings.modulationType != MOD_DMR) {
                     processDigitalAudioFrame(pcmData);
-                    sendAudioRelayFrame(pcmData);
-                    sendAudioHttpFrame(pcmData);
+                    if (pendingSettings.modulationType != MOD_M17) {
+                        sendAudioRelayFrame(pcmData);
+                        sendAudioHttpFrame(pcmData);
+                    }
                 }
                 processSstvAudioFrame(pcmData);
                 processAptAudioFrame(pcmData);
@@ -5037,7 +5137,7 @@ YourClassName::YourClassName(QWidget *parent)
                     recordingManager->appendAudioFrame(pcmData);
                 }
                 sendNetworkAudioFrame(pcmData);
-                if (pendingSettings.modulationType == MOD_DMR) {
+                if (pendingSettings.modulationType == MOD_DMR || pendingSettings.modulationType == MOD_M17) {
                     sendAudioRelayFrame(pcmData);
                     sendAudioHttpFrame(pcmData);
                 }
@@ -6239,6 +6339,8 @@ YourClassName::YourClassName(QWidget *parent)
 }
 
 YourClassName::~YourClassName() {
+    if (commandControlServer) commandControlServer->stop();
+    delete commandConsoleDialog.data();
     qApp->removeEventFilter(this);
     if (multiSdrDialog) {
         delete multiSdrDialog;
@@ -7449,14 +7551,16 @@ void YourClassName::connectDataProcessorSignals() {
             },
             Qt::QueuedConnection);
 
+    const auto iqQueueBudget = processor->iqFrameQueueBudget();
     connect(processor,
             &DataProcessor::iqFrameReady,
             this,
-            [this, connectedProcessor, lastReportNs = qint64(0), maxQueueNs = qint64(0),
+            [this, connectedProcessor, iqQueueBudget, lastReportNs = qint64(0), maxQueueNs = qint64(0),
              maxHandlerNs = qint64(0), queueNsSum = qint64(0), frameCount = quint64(0)]
                 (const QByteArray &iqData, double sampleRate, int sampleCount,
                  bool channelizedFrame, qint64 queuedAtNs) mutable {
                 if (connectedProcessor != processor) {
+                    iqQueueBudget->release(iqData.size());
                     return;
                 }
                 const auto nowNs = [] {
@@ -7464,9 +7568,13 @@ void YourClassName::connectDataProcessorSignals() {
                                std::chrono::steady_clock::now().time_since_epoch()).count();
                 };
                 const qint64 startedNs = nowNs();
+                const quint64 droppedFrames = iqQueueBudget->takeDroppedFrames();
+                const quint64 droppedSamples = iqQueueBudget->takeDroppedSamples();
+                if (droppedFrames) handleIqFrameQueueDrops(droppedFrames, droppedSamples);
                 if (!dmrAudioIqProducerNeeded()) {
                     handleLocalIqFrame(iqData, sampleRate, sampleCount, channelizedFrame);
                 }
+                iqQueueBudget->release(iqData.size());
                 const qint64 finishedNs = nowNs();
                 const qint64 queueNs = (std::max)(qint64(0), startedNs - queuedAtNs);
                 maxQueueNs = (std::max)(maxQueueNs, queueNs);
@@ -7900,6 +8008,7 @@ void YourClassName::clearLiveSpectrumSnapshot(bool clearVisualHistory, uint64_t 
 }
 
 void YourClassName::updateUiForRunState() {
+    if (networkMode == NetworkMode::Server) sendServerStateToClients();
     const bool processorRunning = processor && processor->isRunning();
     const bool idle = isIdle() && !processorRunning;
     if (multiSdrDialog) {

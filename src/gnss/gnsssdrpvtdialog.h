@@ -23,6 +23,7 @@ public:
 signals:
     void mapSourceStarted();
     void positionSentence(const QString &line);
+    void gpsTuneRequested();
 protected:
     void closeEvent(QCloseEvent *event) override;
 private:

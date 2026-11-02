@@ -125,3 +125,11 @@ block tails. The standalone synthetic test ran in about 0.25 ms per 262144
 complex-sample block on this PC. A repeat live recording is needed to confirm
 that the entire RX path now sustains 50 MS/s. ARM currently retains the scalar
 fallback until a native Raspberry build and benchmark are available.
+
+The queued full/channel-IQ handoff to the GUI now has a 32 MiB byte budget.
+Full-IQ frames are rejected before IQ8 encoding when that budget is exhausted;
+channel-IQ frames are rejected after channelization. Drops are counted, network
+IQ sequence numbers show the gap, and affected IQ recordings stop with an
+explicit overrun status rather than silently becoming incomplete. This bounds
+GUI-queue memory but does not make a saturated receiver lossless. Recheck live
+capture continuity and CPU cost on Raspberry before changing the budget.

@@ -24,6 +24,7 @@ double defaultBandwidthForModulation(int modulationType) {
     case MOD_WFM:
         return 200000.0;
     case MOD_FT8:
+    case MOD_FT4:
         return 3000.0;
     case MOD_RTTY:
         return 2700.0;
@@ -32,6 +33,7 @@ double defaultBandwidthForModulation(int modulationType) {
     case MOD_FSK:
         return 12000.0;
     case MOD_DMR:
+    case MOD_M17:
         return 12500.0;
     case MOD_ATV:
         return 5000000.0;

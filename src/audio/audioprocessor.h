@@ -56,6 +56,9 @@ public:
     // Thread-confined offline use of the same demodulator; never opens RX/audio devices.
     bool processIndependentIq(const std::vector<float> &iq, const RadioSettings &settings,
                               bool discontinuity, std::vector<short> &pcm);
+    bool processIndependentDmrIq(const std::vector<float> &iq, double sampleRate,
+                                 bool discontinuity, std::vector<short> &baseband,
+                                 int &basebandRate);
 
 
 public slots:

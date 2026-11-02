@@ -19,7 +19,7 @@ public:
     static bool setDeviceLevel(const QString &requestedDevice, float level,
                                QString *error = nullptr, QString *details = nullptr);
     bool start(const QString &requestedDevice, int sampleRate, float inputLevel,
-               QString *error = nullptr);
+               QString *error = nullptr, bool adjustEndpoint = true);
     void stop();
     bool isRunning() const;
     QString backendName() const;

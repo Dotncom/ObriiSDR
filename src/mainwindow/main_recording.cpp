@@ -39,6 +39,8 @@ QString recordingModulationName(int modulationType) {
     case MOD_CW: return QStringLiteral("CW");
     case MOD_WFM: return QStringLiteral("WFM");
     case MOD_FT8: return QStringLiteral("FT8");
+    case MOD_FT4: return QStringLiteral("FT4");
+    case MOD_M17: return QStringLiteral("M17");
     case MOD_RTTY: return QStringLiteral("RTTY");
     case MOD_FSK: return QStringLiteral("FSK");
     case MOD_PSK: return QStringLiteral("PSK");
@@ -352,6 +354,28 @@ void YourClassName::handleLocalIqFrame(const QByteArray &iqData, double sampleRa
     if (channelized) processVideoIqFrame(iqData, sampleRate, sampleCount);
     if (channelized == isChannelIqProcessingMode()) {
         sendNetworkIqFrame(iqData, sampleRate, sampleCount);
+    }
+}
+
+void YourClassName::handleIqFrameQueueDrops(quint64 frames, quint64 samples) {
+    networkIqFrameSequence += frames;
+    networkIqFramesDropped += frames;
+    spectrumIqPrebuffer.clear();
+    if (isChannelIqRecordingActive()) {
+        stopRecording(false);
+        updateRecordingStatus(QStringLiteral("IQ recording stopped: capture queue overrun"));
+    }
+    if (spectrumFrameRecorder.isRecording() && spectrumEventCaptureMode > 0) {
+        stopSpectrumFrameRecording();
+        updateSpectrumFrameRecordingStatus(
+            QStringLiteral("Spectrum event recording stopped: IQ capture queue overrun"));
+    }
+    static qint64 lastWarningMs = 0;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (nowMs - lastWarningMs >= 5000) {
+        qWarning() << "[IQ GUI queue] dropped" << frames << "frames /" << samples
+                   << "samples; capture cannot be treated as continuous";
+        lastWarningMs = nowMs;
     }
 }
 

@@ -169,6 +169,10 @@ struct SpectrumEventIqFrame {
     qint64 utcMs = 0;
 };
 
+class CommandDispatcher;
+class CommandControlServer;
+class CommandConsoleDialog;
+
 class YourClassName : public QMainWindow {
     Q_OBJECT
 
@@ -263,6 +267,20 @@ protected:
     void closeEvent(QCloseEvent *event) override;
 
 private:
+    void ensureCommandDispatcher();
+    void showCommandConsole();
+    QJsonObject commandStatus(bool metrics) const;
+    QJsonObject commandTrace(const QJsonObject &arguments) const;
+    std::unique_ptr<CommandDispatcher> commandDispatcher;
+    CommandControlServer *commandControlServer = nullptr;
+    QPointer<CommandConsoleDialog> commandConsoleDialog;
+    QPushButton *commandConsoleButton = nullptr;
+    double commandSpectrumCenterHz = 0;
+    double commandSpectrumRateHz = 0;
+    std::uint64_t commandSpectrumEpoch = 0;
+    std::uint64_t commandSpectrumSerial = 0;
+    int commandSpectrumInput = -1;
+    bool commandSpectrumCorrected = false;
     double effectiveScalePercent() const;
     QWidget *centralWidget;
     QStringList getFobosDevices();
@@ -608,6 +626,7 @@ private:
     void displayNetworkSpectrumFrameBinary(const QJsonObject &frame, const QByteArray &payload);
     void sendNetworkAudioFrame(const QByteArray &pcmData);
     void playNetworkAudioFrame(const QJsonObject &frame);
+    void playNetworkAudioPcmFrame(const QJsonObject &frame, const QByteArray &pcmData);
     void updateAudioRelaySocket();
     void sendAudioRelayFrame(const QByteArray &pcmData);
     void receiveAudioRelayDatagrams();
@@ -616,6 +635,7 @@ private:
     void removeAudioHttpClient(QTcpSocket *client);
     void sendAudioHttpFrame(const QByteArray &pcmData);
     void sendNetworkIqFrame(const QByteArray &iqData, double sampleRate, int sampleCount);
+    void handleIqFrameQueueDrops(quint64 frames, quint64 samples);
     void receiveNetworkIqFrame(const QJsonObject &frame);
     void receiveNetworkIqFrameBinary(const QJsonObject &frame, const QByteArray &iqData);
     void handleNetworkIqPayload(const QJsonObject &frame, QByteArray iqBytes);
@@ -673,6 +693,17 @@ private:
     QCheckBox *fftBinWidthModeCheckbox = nullptr;
     QDoubleSpinBox *fftBinWidthSpin = nullptr;
     QComboBox *waterfallDisplayModeCombo = nullptr;
+    QComboBox *spectrumDisplayModeCombo = nullptr;
+    int spectrumDisplayMode = 0;
+    QDoubleSpinBox *spectrumPersistenceTimeSpin = nullptr;
+    QSpinBox *spectrumPersistenceIntensitySpin = nullptr;
+    double spectrumPersistenceSeconds = 1.6;
+    int spectrumPersistenceIntensity = 100;
+    QSpinBox *spectrumPersistenceThresholdSpin = nullptr;
+    int spectrumPersistenceThreshold = 0;
+    QSpinBox *spectrumPersistenceSmoothingSpin = nullptr;
+    int spectrumPersistenceSmoothingMs = 0;
+    void syncSpectrumPersistenceControls();
     QComboBox *multiSdrViewModeCombo = nullptr;
     QCheckBox *alternativeSpectrumGradientCheckbox = nullptr;
     QComboBox *waterfall3DResolutionCombo = nullptr;

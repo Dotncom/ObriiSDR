@@ -11,36 +11,6 @@
 #include <algorithm>
 #include <cmath>
 
-namespace {
-
-void appendFourCc(QByteArray &data, const char *text) {
-    data.append(text, 4);
-}
-
-void appendLe16(QByteArray &data, quint16 value) {
-    data.append(static_cast<char>(value & 0xff));
-    data.append(static_cast<char>((value >> 8) & 0xff));
-}
-
-void appendLe32(QByteArray &data, quint32 value) {
-    data.append(static_cast<char>(value & 0xff));
-    data.append(static_cast<char>((value >> 8) & 0xff));
-    data.append(static_cast<char>((value >> 16) & 0xff));
-    data.append(static_cast<char>((value >> 24) & 0xff));
-}
-
-QByteArray le32Bytes(quint32 value) {
-    QByteArray data;
-    appendLe32(data, value);
-    return data;
-}
-
-quint32 wavSizeField(quint64 value) {
-    return value > 0xffffffffULL ? 0xffffffffU : static_cast<quint32>(value);
-}
-
-} // namespace
-
 RecordingManager::RecordingManager(QObject *parent)
     : QObject(parent) {
 }
@@ -62,7 +32,7 @@ bool RecordingManager::start(Mode mode, const RadioSettings &settings, QString *
     waveSampleRate = 0;
     waveChannels = 0;
     waveBitsPerSample = 0;
-    dataSizeFieldOffset = -1;
+    waveLayout = {};
     waveHeaderBytes = 0;
     recording = true;
 
@@ -89,7 +59,8 @@ void RecordingManager::stop() {
         return;
     }
 
-    patchWaveHeader();
+    QString errorMessage;
+    const bool finalized = patchWaveHeader(&errorMessage);
     if (outputFile.isOpen()) {
         outputFile.close();
     }
@@ -102,11 +73,13 @@ void RecordingManager::stop() {
 
     if (!finishedFile.isEmpty() && finishedBytes > 0) {
         const bool sidecarWritten = writeSidecarMetadata(finishedFile, finishedBytes);
-        updateStatus(QStringLiteral("Recording saved: %1%2")
+        updateStatus(!finalized ? QStringLiteral("Recording failed: %1").arg(errorMessage)
+                               : QStringLiteral("Recording saved: %1%2")
                          .arg(QFileInfo(finishedFile).fileName(),
                               sidecarWritten ? QStringLiteral(" + JSON") : QString()));
     } else {
-        updateStatus(QStringLiteral("Recording stopped: no data"));
+        updateStatus(finalized ? QStringLiteral("Recording stopped: no data")
+                               : QStringLiteral("Recording failed: %1").arg(errorMessage));
     }
 }
 
@@ -136,9 +109,11 @@ void RecordingManager::appendAudioFrame(const QByteArray &pcmData) {
     if (!recording || activeMode != Mode::AudioWav || !waveOpen || pcmData.isEmpty()) {
         return;
     }
-    const qint64 written = outputFile.write(pcmData);
-    if (written > 0) {
-        dataBytesWritten += static_cast<quint64>(written);
+    QString errorMessage;
+    if (!RecordingFormatCore::appendWave(outputFile, waveLayout, dataBytesWritten,
+                                         pcmData.constData(), pcmData.size(), &errorMessage)) {
+        stop();
+        updateStatus(QStringLiteral("Recording failed: %1").arg(errorMessage));
     }
 }
 
@@ -168,9 +143,11 @@ void RecordingManager::appendIqFrame(const QByteArray &iqData, double sampleRate
         updateStatus(QStringLiteral("Recording channel IQ: %1").arg(QFileInfo(filePath).fileName()));
     }
 
-    const qint64 written = outputFile.write(iqData);
-    if (written > 0) {
-        dataBytesWritten += static_cast<quint64>(written);
+    QString errorMessage;
+    if (!RecordingFormatCore::appendWave(outputFile, waveLayout, dataBytesWritten,
+                                         iqData.constData(), iqData.size(), &errorMessage)) {
+        stop();
+        updateStatus(QStringLiteral("IQ recording failed: %1").arg(errorMessage));
     }
 }
 
@@ -201,43 +178,15 @@ bool RecordingManager::openWaveFile(int sampleRate, int channels, int bitsPerSam
     waveSampleRate = sampleRate;
     waveChannels = channels;
     waveBitsPerSample = bitsPerSample;
-    writeWaveHeader(sampleRate, channels, bitsPerSample);
+    if (!RecordingFormatCore::beginWave(outputFile, static_cast<quint32>(sampleRate),
+                                        static_cast<quint16>(channels), static_cast<quint16>(bitsPerSample),
+                                        makeMetadataChunk(), waveLayout, errorMessage)) {
+        outputFile.close();
+        return false;
+    }
+    waveHeaderBytes = waveLayout.headerBytes;
     waveOpen = true;
     return true;
-}
-
-void RecordingManager::writeWaveHeader(int sampleRate, int channels, int bitsPerSample) {
-    const quint16 blockAlign = static_cast<quint16>(channels * bitsPerSample / 8);
-    const quint32 byteRate = static_cast<quint32>(static_cast<quint64>(sampleRate) * blockAlign);
-
-    QByteArray header;
-    appendFourCc(header, "RIFF");
-    appendLe32(header, 0);
-    appendFourCc(header, "WAVE");
-    appendFourCc(header, "fmt ");
-    appendLe32(header, 16);
-    appendLe16(header, 1);
-    appendLe16(header, static_cast<quint16>(channels));
-    appendLe32(header, static_cast<quint32>(sampleRate));
-    appendLe32(header, byteRate);
-    appendLe16(header, blockAlign);
-    appendLe16(header, static_cast<quint16>(bitsPerSample));
-
-    const QByteArray metadata = makeMetadataChunk();
-    if (!metadata.isEmpty()) {
-        appendFourCc(header, "fbos");
-        appendLe32(header, static_cast<quint32>(metadata.size()));
-        header.append(metadata);
-        if ((metadata.size() & 1) != 0) {
-            header.append('\0');
-        }
-    }
-
-    appendFourCc(header, "data");
-    dataSizeFieldOffset = header.size();
-    appendLe32(header, 0);
-    waveHeaderBytes = static_cast<quint64>(header.size());
-    outputFile.write(header);
 }
 
 QJsonObject RecordingManager::makeMetadataObject() const {
@@ -278,22 +227,11 @@ QByteArray RecordingManager::makeMetadataChunk() const {
     return QJsonDocument(root).toJson(QJsonDocument::Compact);
 }
 
-void RecordingManager::patchWaveHeader() {
+bool RecordingManager::patchWaveHeader(QString *errorMessage) {
     if (!waveOpen || !outputFile.isOpen()) {
-        return;
+        return true;
     }
-
-    const quint32 dataSize = wavSizeField(dataBytesWritten);
-    const quint32 riffSize = wavSizeField(dataBytesWritten + (waveHeaderBytes > 8 ? waveHeaderBytes - 8 : 0));
-
-    outputFile.flush();
-    outputFile.seek(4);
-    outputFile.write(le32Bytes(riffSize));
-    if (dataSizeFieldOffset >= 0) {
-        outputFile.seek(dataSizeFieldOffset);
-        outputFile.write(le32Bytes(dataSize));
-    }
-    outputFile.flush();
+    return RecordingFormatCore::finalizeWave(outputFile, waveLayout, dataBytesWritten, errorMessage);
 }
 
 bool RecordingManager::writeSidecarMetadata(const QString &finishedFile, quint64 finishedBytes) {
@@ -324,7 +262,11 @@ bool RecordingManager::writeSidecarMetadata(const QString &finishedFile, quint64
         return false;
     }
 
-    jsonFile.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    if (!RecordingFormatCore::checkedAppend(jsonFile, bytes.constData(), bytes.size()) || !jsonFile.flush()) {
+        qDebug() << "[Recording] failed to finish sidecar metadata" << jsonPath << jsonFile.errorString();
+        return false;
+    }
     jsonFile.close();
     qDebug() << "[Recording] sidecar metadata saved" << jsonPath;
     return true;

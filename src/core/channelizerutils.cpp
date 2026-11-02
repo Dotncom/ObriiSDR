@@ -22,6 +22,7 @@ double channelizerTargetRate(const RadioSettings &settings) {
                            384000.0,
                            768000.0);
     case MOD_NFM:
+    case MOD_M17:
     case MOD_RTTY:
     case MOD_FSK:
         return clampDouble((std::max)(240000.0, settings.bandwidth * 4.0),
@@ -35,6 +36,7 @@ double channelizerTargetRate(const RadioSettings &settings) {
     case MOD_USB:
     case MOD_LSB:
     case MOD_FT8:
+    case MOD_FT4:
     case MOD_PSK:
     case MOD_AM:
     case MOD_SAM:
@@ -66,6 +68,7 @@ double channelizerCutoff(const RadioSettings &settings, double outputRate) {
         requestedCutoff = (std::max)(120000.0, settings.bandwidth * 0.6);
         break;
     case MOD_NFM:
+    case MOD_M17:
     case MOD_RTTY:
     case MOD_FSK:
         requestedCutoff = (std::max)(12000.0, settings.bandwidth * 0.6);
@@ -76,6 +79,7 @@ double channelizerCutoff(const RadioSettings &settings, double outputRate) {
     case MOD_USB:
     case MOD_LSB:
     case MOD_FT8:
+    case MOD_FT4:
     case MOD_PSK:
         requestedCutoff = (std::max)(3600.0, settings.bandwidth);
         break;

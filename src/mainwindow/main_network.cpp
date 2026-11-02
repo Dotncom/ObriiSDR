@@ -236,6 +236,7 @@ void YourClassName::sendSettingsAckToPeer(const QString &peerId,
     }
     appendNetworkState(ack);
     ack["settings"] = settingsToJson();
+    ack["receiverRunning"] = runState == RadioRunState::Running;
     ack["receiverDevices"] = receiverDeviceListToJson();
     networkController->sendControlCommandToPeer(peerId, ack);
 }
@@ -281,6 +282,7 @@ void YourClassName::sendServerStateToClients() {
     state["action"] = "serverState";
     appendNetworkState(state);
     state["settings"] = settingsToJson();
+    state["receiverRunning"] = runState == RadioRunState::Running;
     state["receiverDevices"] = receiverDeviceListToJson();
     networkController->sendControlCommand(state);
 }

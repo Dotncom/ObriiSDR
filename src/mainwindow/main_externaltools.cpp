@@ -22,6 +22,8 @@ void YourClassName::showGnssSdrPvt() {
             gnssNmeaSatellites.clear(); gnssNmeaSatelliteEnabled.clear();
             gnssSerialSentenceCount = 0; gnssSerialFixCount = 0;
         });
+        connect(gnssSdrPvtDialog, &GnssSdrPvtDialog::gpsTuneRequested,
+                this, &YourClassName::tuneGnssL1Preset);
         connect(gnssSdrPvtDialog, &GnssSdrPvtDialog::positionSentence, this, [this](const QString &line) {
             if (!gnssSerialPort || !gnssSerialPort->isOpen()) processGnssNmeaLine(line, false, true);
         });

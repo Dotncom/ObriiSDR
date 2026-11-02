@@ -12,6 +12,7 @@
 #include <QPainter>
 #include <QMouseEvent>
 #include <QPoint>
+#include "spectrumpersistence.h"
 #include "scanvisualassembler.h"
 #include "spectrumoverlaytypes.h"
 
@@ -25,6 +26,8 @@ public:
     void setData(const std::vector<float> &xData, const std::vector<float> &yData, double xMin, double xMax, int fftLength, bool colorf, bool displayOrdered = false, bool preserveFrequencyGaps = false);
     void setOverlayData(const std::vector<float> &yData, bool enabled, bool displayOrdered = false);
     void setLevelRange(float minLevel, float maxLevel);
+    void setPersistenceEnabled(bool enabled);
+    void setPersistenceParameters(double seconds, int intensityPercent, int thresholdPercent = 0, int smoothingMs = 0);
     void setBandMarkersEnabled(bool generalEnabled, bool amateurEnabled);
     void setBandMarkersCompact(bool compact);
     void setBandMarkers(const QVector<GraphBandMarker> &markers);
@@ -82,6 +85,10 @@ protected:
     void leaveEvent(QEvent *event) override;
 
 private:
+    void accumulatePersistence();
+    bool persistenceEnabled = false;
+    SpectrumPersistence persistence;
+    QElapsedTimer persistenceClock;
     void updatePauseControl();
     struct CursorPeak {
         bool valid = false;

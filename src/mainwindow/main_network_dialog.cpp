@@ -1,5 +1,6 @@
 #include "main.h"
 #include "appsettingsutils.h"
+#include "clilaunchscript.h"
 #include "diagnosticlogging.h"
 #include "remotevfoservice.h"
 #include "remotewebserver.h"
@@ -8,7 +9,9 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QDoubleSpinBox>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHeaderView>
@@ -17,7 +20,9 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QPushButton>
+#include <QSaveFile>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -269,6 +274,19 @@ void YourClassName::openNetworkSettingsDialog() {
     QPushButton *testButton = new QPushButton(uiText(QStringLiteral("apply_test_channel"), QStringLiteral("Apply / Test Channel")), &dialog);
     QPushButton *requestControlButton = new QPushButton(uiText(QStringLiteral("request_control"), QStringLiteral("Request Control")), &dialog);
     QPushButton *stopButton = new QPushButton(uiText(QStringLiteral("stop_network"), QStringLiteral("Stop Network")), &dialog);
+    QComboBox *cliScriptPlatform = new QComboBox(&dialog);
+    cliScriptPlatform->addItem(QStringLiteral("Linux / Raspberry (.sh)"),
+                               static_cast<int>(CliScriptPlatform::Bash));
+    cliScriptPlatform->addItem(QStringLiteral("Windows (.ps1)"),
+                               static_cast<int>(CliScriptPlatform::PowerShell));
+#ifdef Q_OS_WIN
+    cliScriptPlatform->setCurrentIndex(1);
+#endif
+    QPushButton *exportCliButton = new QPushButton(
+        uiText(QStringLiteral("network_export_cli"), QStringLiteral("Export CLI launch script")), &dialog);
+    QHBoxLayout *exportCliLayout = new QHBoxLayout();
+    exportCliLayout->addWidget(cliScriptPlatform);
+    exportCliLayout->addWidget(exportCliButton);
     QDialogButtonBox *buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
     if (QPushButton *closeButton = buttonBox->button(QDialogButtonBox::Close)) {
         closeButton->setText(uiText(QStringLiteral("close"), QStringLiteral("Close")));
@@ -282,6 +300,7 @@ void YourClassName::openNetworkSettingsDialog() {
     rootLayout->addLayout(formLayout);
     rootLayout->addWidget(presetGroup);
     rootLayout->addWidget(statusLabel);
+    rootLayout->addLayout(exportCliLayout);
     rootLayout->addLayout(actionLayout);
     rootLayout->addWidget(buttonBox);
 
@@ -370,6 +389,73 @@ void YourClassName::openNetworkSettingsDialog() {
     });
     connect(presetTable, &QTableWidget::itemChanged, &dialog, [presetsFromTable]() {
         storeNetworkClientPresets(presetsFromTable());
+    });
+
+    connect(exportCliButton, &QPushButton::clicked, &dialog, [=, &dialog]() {
+        if (modeCombo->currentData().toInt() == static_cast<int>(NetworkMode::Client) ||
+            isExternalReceiverBackendSelected()) {
+            QMessageBox::warning(&dialog, dialog.windowTitle(),
+                uiText(QStringLiteral("network_cli_fobos_only"),
+                       QStringLiteral("Choose a local Fobos RF receiver, not a network client.")));
+            return;
+        }
+        const FobosDeviceInfo deviceInfo = selectedFobosDeviceInfo();
+        if (!deviceInfo.present) {
+            QMessageBox::warning(&dialog, dialog.windowTitle(),
+                uiText(QStringLiteral("network_cli_device_missing"),
+                       QStringLiteral("Select a detected local Fobos receiver before exporting.")));
+            return;
+        }
+        CliLaunchSettings launch;
+        launch.api = deviceInfo.apiKind == FobosApiKind::Agile
+                         ? QStringLiteral("agile") : QStringLiteral("standard");
+        launch.deviceIndex = deviceInfo.nativeIndex;
+        launch.inputMode = pendingSettings.inputMode;
+        launch.centerHz = pendingSettings.centerFrequency;
+        launch.listeningHz = pendingSettings.listeningFrequency;
+        launch.sampleRateHz = pendingSettings.sampleRate;
+        launch.bandwidthHz = pendingSettings.bandwidth;
+        launch.fftLength = pendingSettings.fftLength;
+        launch.audioEnabled = pendingSettings.audioEnabled;
+        launch.lna = pendingSettings.lnaGain;
+        launch.vga = pendingSettings.vgaGain;
+        launch.bindAddress = bindAddressEdit->text().trimmed();
+        launch.networkPort = portSpin->value();
+        switch (pendingSettings.modulationType) {
+        case MOD_AM: launch.modulation = QStringLiteral("am"); break;
+        case MOD_NFM: launch.modulation = QStringLiteral("nfm"); break;
+        case MOD_WFM: launch.modulation = QStringLiteral("wfm"); break;
+        case MOD_USB: launch.modulation = QStringLiteral("usb"); break;
+        case MOD_LSB: launch.modulation = QStringLiteral("lsb"); break;
+        case MOD_CW: launch.modulation = QStringLiteral("cw"); break;
+        default: break;
+        }
+        QString error;
+        if (!validateCliLaunchSettings(launch, &error)) {
+            QMessageBox::warning(&dialog, dialog.windowTitle(), error);
+            return;
+        }
+        const auto platform = static_cast<CliScriptPlatform>(cliScriptPlatform->currentData().toInt());
+        const QString extension = platform == CliScriptPlatform::Bash
+                                      ? QStringLiteral(".sh") : QStringLiteral(".ps1");
+        const QString filename = QFileDialog::getSaveFileName(
+            &dialog, uiText(QStringLiteral("network_export_cli"),
+                            QStringLiteral("Export CLI launch script")),
+            QDir::home().filePath(QStringLiteral("obrii-cli-server") + extension),
+            platform == CliScriptPlatform::Bash
+                ? QStringLiteral("Shell script (*.sh)") : QStringLiteral("PowerShell script (*.ps1)"));
+        if (filename.isEmpty()) return;
+        const QString path = filename.endsWith(extension, Qt::CaseInsensitive)
+                                 ? filename : filename + extension;
+        QSaveFile file(path);
+        const QByteArray contents = buildCliLaunchScript(launch, platform).toUtf8();
+        if (!file.open(QIODevice::WriteOnly) || file.write(contents) != contents.size() || !file.commit()) {
+            QMessageBox::warning(&dialog, dialog.windowTitle(), file.errorString());
+            return;
+        }
+        QMessageBox::information(&dialog, dialog.windowTitle(),
+            uiText(QStringLiteral("network_cli_exported"),
+                   QStringLiteral("CLI server script saved. Copy it beside ObriiCli and connect from an Obrii GUI client. Only Fobos RF and basic audio settings are included.")));
     });
 
     QMetaObject::Connection statusConnection;

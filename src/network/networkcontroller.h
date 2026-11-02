@@ -44,6 +44,7 @@ public:
     QString peerLabelForId(const QString &peerId) const;
     qint64 pendingBytesForPeer(const QString &peerId) const;
     bool peerSupportsCompactSpectrum(const QString &peerId) const;
+    bool peerSupportsBinaryAudio(const QString &peerId) const;
 
     void stop();
     void startServer(const QString &bindAddress, quint16 port);
@@ -108,6 +109,7 @@ private:
     QHash<QTcpSocket*, QString> peerPriorityKeys;
     QHash<QTcpSocket*, QString> peerStreamProfiles;
     QSet<QTcpSocket*> compactSpectrumPeers;
+    QSet<QTcpSocket*> binaryAudioPeers;
     QSet<QString> blockedPriorityRequesterKeys;
     QTimer *handshakeTimer = nullptr;
     QTimer *heartbeatTimer = nullptr;

@@ -144,7 +144,6 @@ bool DspIqSourceRegistry::publish(const DspSourceIdentity &source,
     while (buffer.history.size() > MaximumSourceFloats) {
         buffer.history.pop_front();
         ++state.statistics.droppedFloats;
-        buffer.pendingGap = true;
     }
     ++state.statistics.publishedBlocks;
     state.statistics.bufferedSources = state.sources.size();

@@ -37,7 +37,9 @@ enum ModulationMode {
     MOD_APT = 14,
     MOD_WEFAX = 15,
     MOD_LRPT = 16,
-    MOD_DMR = 17
+    MOD_DMR = 17,
+    MOD_FT4 = 18,
+    MOD_M17 = 19
 };
 
 enum SstvDemodulationMode {
@@ -106,6 +108,7 @@ inline bool isSinglePositiveHfInputMode(int inputMode) {
 inline bool isUpperSidebandMode(int modulationType) {
     return modulationType == MOD_USB ||
            modulationType == MOD_FT8 ||
+           modulationType == MOD_FT4 ||
            modulationType == MOD_RTTY ||
            modulationType == MOD_PSK ||
            modulationType == MOD_SSTV ||
@@ -122,7 +125,7 @@ inline bool isFrequencyDiscriminatorMode(int modulationType) {
            modulationType == MOD_FSK ||
            modulationType == MOD_ATV ||
            modulationType == MOD_APT ||
-           modulationType == MOD_DMR;
+           modulationType == MOD_DMR || modulationType == MOD_M17;
 }
 
 constexpr int DMR_DEFAULT_BASEBAND_SAMPLE_RATE = 192000;

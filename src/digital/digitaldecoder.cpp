@@ -168,6 +168,9 @@ constexpr std::array<std::array<int, FT8_LDPC_MAX_CHECK_DEGREE>, FT8_LDPC_CHECK_
 }};
 
 bool isSupportedDecoderMode(int modulationType) {
+#ifdef OBRII_HAS_EXTRA_RECEIVE_MODES
+    if (modulationType == MOD_FT4 || modulationType == MOD_M17) return true;
+#endif
     return modulationType == MOD_CW ||
            modulationType == MOD_PSK ||
            modulationType == MOD_FT8 ||
@@ -1043,6 +1046,10 @@ void DigitalDecoder::reset() {
     spaceI = 0.0;
     spaceQ = 0.0;
     resetFt8State();
+#ifdef OBRII_HAS_EXTRA_RECEIVE_MODES
+    ft4Decoder.reset();
+    m17Decoder.reset();
+#endif
     dmrDecoder.reset();
     dmrPrivacy.reset();
     dmrVocoder.reset();
@@ -1171,6 +1178,14 @@ void DigitalDecoder::processPcmFrame(const QByteArray &pcmData, const RadioSetti
         return;
     }
 
+#ifdef OBRII_HAS_EXTRA_RECEIVE_MODES
+    if ((settings.modulationType == MOD_FT4 || settings.modulationType == MOD_M17) &&
+        (std::abs(currentSettings.listeningFrequency - settings.listeningFrequency) > 0.5 ||
+         std::abs(currentSettings.centerFrequency - settings.centerFrequency) > 0.5 ||
+         currentSettings.inputMode != settings.inputMode)) {
+        ft4Decoder.reset(); m17Decoder.reset();
+    }
+#endif
     currentSettings = settings;
     dmrDecoder.setLabHints(settings.dmrLabEnabled,
                            settings.dmrLabColorCode,
@@ -1196,6 +1211,19 @@ void DigitalDecoder::processPcmFrame(const QByteArray &pcmData, const RadioSetti
     QString decodedText;
     const int sampleCount = pcmData.size() / static_cast<int>(sizeof(qint16));
     const char *raw = pcmData.constData();
+#ifdef OBRII_HAS_EXTRA_RECEIVE_MODES
+    if (settings.modulationType == MOD_FT4) {
+        const auto messages = ft4Decoder.process(pcmData, sampleRate);
+        for (const auto &message : messages) emit textDecoded(message + QLatin1Char('\n'));
+        return;
+    }
+    if (settings.modulationType == MOD_M17) {
+        const auto result = m17Decoder.process(pcmData, sampleRate);
+        for (const auto &message : result.text) emit textDecoded(message + QLatin1Char('\n'));
+        if (!result.voicePcm.isEmpty()) emit voicePcmReady(result.voicePcm);
+        return;
+    }
+#endif
 
     if (settings.modulationType == MOD_PSK) {
         pskDecoder.configure(sampleRate, settings.pskDecoderToneHz, settings.pskDecoderSquelchPercent, settings.pskDecoderAfc);
@@ -1854,6 +1882,14 @@ void DigitalDecoder::configureForMode(int modulationType, int sampleRate) {
         updateStatus(QStringLiteral("RTTY decoder: Baudot 45.45 baud, 170 Hz shift, mark 2125 Hz"));
     } else if (modulationType == MOD_FSK) {
         updateStatus(QStringLiteral("FSK decoder: Baudot 45.45 baud from discriminator"));
+    } else if (modulationType == MOD_FT4) {
+        updateStatus(QStringLiteral("FT4 receiver: USB 3 kHz, rolling 7.5 s decode, CRC/LDPC validation"));
+    } else if (modulationType == MOD_M17) {
+#ifdef OBRII_HAS_EXTRA_RECEIVE_MODES
+        updateStatus(m17Decoder.voiceAvailable()
+            ? QStringLiteral("M17 receiver: 4800 baud 4FSK, packet and Codec2 voice ready")
+            : QStringLiteral("M17 receiver: packet ready; install libcodec2 for voice"));
+#endif
     } else if (modulationType == MOD_FT8) {
         updateStatus(QStringLiteral("FT8 detector: waiting for a 15 s frame"));
     } else if (modulationType == MOD_DMR) {

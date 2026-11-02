@@ -6,6 +6,7 @@
 #include <QHash>
 #include <QList>
 #include <QQueue>
+#include <QSet>
 #include <QString>
 
 #include <random>
@@ -18,6 +19,13 @@ struct VirtualIqHubSettings {
     int collisionWindowMs = 0;
     float noiseSigma = 0.0f;
     quint32 randomSeed = 1;
+    bool defaultRoute = true;
+};
+
+struct VirtualIqLinkSettings {
+    bool enabled = true;
+    int delayMs = 0;
+    float gainDb = 0.0f;
 };
 
 struct VirtualIqHubCounters {
@@ -25,6 +33,7 @@ struct VirtualIqHubCounters {
     quint64 deliveredFrames = 0;
     quint64 droppedFrames = 0;
     quint64 collisionFrames = 0;
+    quint64 filteredFrames = 0;
     quint64 deliveredBytes = 0;
     qint64 queuedBytes = 0;
     qint64 queuedFrames = 0;
@@ -37,6 +46,8 @@ public:
     explicit VirtualIqHub(const VirtualIqHubSettings &settings = {});
 
     bool addSubscriber(const QString &id);
+    bool setLink(const QString &sourceId, const QString &subscriberId,
+                 const VirtualIqLinkSettings &settings);
     void removeSubscriber(const QString &id);
     QStringList subscriberIds() const;
     bool publish(const QString &sourceId, const VirtualSignalFrame &frame,
@@ -50,6 +61,7 @@ public:
 private:
     struct QueuedFrame {
         VirtualSignalFrame frame;
+        QString sourceId;
         qint64 arrivedMs = 0;
         qint64 dueMs = 0;
         quint64 eventId = 0;
@@ -60,21 +72,25 @@ private:
         VirtualIqHubCounters counters;
         quint32 nextSequence = 0;
         bool discontinuity = true;
+        QString lastSource;
+        QString deliveredSource;
+        qint64 lastArrivalMs = -1;
+        qint64 collisionUntilMs = -1;
+        quint64 lastEventId = 0;
+        bool lastEventCollided = false;
     };
 
-    void dropEvent(quint64 eventId);
+    void dropEvent(Subscriber *subscriber, quint64 eventId);
     void dropOldest(Subscriber *subscriber, bool collision);
+    void refreshGainSources();
 
     VirtualIqHubSettings settings_;
     QHash<QString, Subscriber> subscribers_;
+    QHash<QString, QHash<QString, VirtualIqLinkSettings>> links_;
     VirtualIqHubCounters total_;
     std::mt19937 random_;
+    QSet<QString> gainSources_;
     quint64 nextEventId_ = 0;
-    quint64 lastEventId_ = 0;
-    qint64 lastArrivalMs_ = -1;
-    qint64 collisionUntilMs_ = -1;
-    QString lastSource_;
-    bool lastEventCollided_ = false;
 };
 
 #endif // VIRTUALIQHUB_H

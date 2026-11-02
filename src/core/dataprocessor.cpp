@@ -1,4 +1,5 @@
 #include "dataprocessor.h"
+#include "fobosreceivercore.h"
 #include "iqbuffer.h"
 #include "iq8quantizer.h"
 #include "dspiqsourceregistry.h"
@@ -397,6 +398,7 @@ void DataProcessor::run() {
     }
     void *readerDevice = activeDevice.load();
     const FobosApiKind readerApiKind = activeApiKind.load();
+    const FobosReceiverCore fobos(readerDevice, readerApiKind);
     const ReceiverBackendStreamKind readerStreamKind = activeStreamKind;
     const QString readerBackendId = activeBackendId;
     const QString readerBackendName = activeBackendName;
@@ -507,29 +509,13 @@ void DataProcessor::run() {
         asyncMeasuredSamples = 0;
         asyncCallbackCounter = 0;
         asyncRateTimer.restart();
-        int ret = FOBOS_ERR_NOT_OPEN;
-        if (readerApiKind == FobosApiKind::Agile) {
-            ret = readFobosAgileAsyncSafely(static_cast<fobos_sdr_dev_t*>(readerDevice),
-                                            [](float *buf, uint32_t buf_length, fobos_sdr_dev_t *dev, void *ctx) {
-                                                auto *processor = static_cast<DataProcessor*>(ctx);
-                                                const int scanIndex = processor->wantsAgileScanMetadata()
-                                                                          ? getFobosAgileScanIndexSafely(dev)
-                                                                          : -1;
-                                                processor->handleData(buf, buf_length, scanIndex);
-                                            },
-                                            this,
-                                            asyncBufferCount,
-                                            readBlockSamples);
-        } else {
-            ret = readFobosAsyncSafely(static_cast<fobos_dev_t*>(readerDevice),
-                                       [](float *buf, uint32_t buf_length, void *ctx) {
-                                           auto *processor = static_cast<DataProcessor*>(ctx);
-                                           processor->handleData(buf, buf_length);
-                                       },
-                                       this,
-                                       asyncBufferCount,
-                                       readBlockSamples);
-        }
+        const int ret = fobos.readAsync(
+            [](float *buf, uint32_t length, void *dev, void *ctx) {
+                auto *processor = static_cast<DataProcessor *>(ctx);
+                const int scanIndex = processor->wantsAgileScanMetadata()
+                    ? getFobosAgileScanIndexSafely(static_cast<fobos_sdr_dev_t *>(dev)) : -1;
+                processor->handleData(buf, length, scanIndex);
+            }, this, asyncBufferCount, readBlockSamples);
         const bool stoppedByRequest = !running.load();
         if (!stoppedByRequest || fobosVerboseLoggingEnabled()) {
             qDebug() << "[DataProcessor] fobos_rx_read_async end"
@@ -557,9 +543,7 @@ void DataProcessor::run() {
                      << "device" << readerDevice
                      << "blockSamples" << readBlockSamples;
         }
-        int ret = readerApiKind == FobosApiKind::Agile
-                      ? startFobosAgileSyncSafely(static_cast<fobos_sdr_dev_t*>(readerDevice), readBlockSamples)
-                      : startFobosSyncSafely(static_cast<fobos_dev_t*>(readerDevice), readBlockSamples);
+        int ret = fobos.startSync(readBlockSamples);
         qDebug() << "[DataProcessor] fobos_rx_start_sync end" << "result" << ret;
         if (ret != FOBOS_ERR_OK) {
             const bool stoppedByRequest = !running.load();
@@ -590,9 +574,7 @@ void DataProcessor::run() {
             }
             QElapsedTimer readTimer;
             readTimer.start();
-            ret = readerApiKind == FobosApiKind::Agile
-                      ? readFobosAgileSyncSafely(static_cast<fobos_sdr_dev_t*>(readerDevice), syncBuffer.data(), &actual_buf_length)
-                      : readFobosSyncSafely(static_cast<fobos_dev_t*>(readerDevice), syncBuffer.data(), &actual_buf_length);
+            ret = fobos.readSync(syncBuffer.data(), &actual_buf_length);
             accumulatedReadMs += readTimer.elapsed();
             if ((logRead && fobosVerboseLoggingEnabled()) || ret != FOBOS_ERR_OK) {
                 qDebug() << "[DataProcessor] fobos_rx_read_sync end"
@@ -2205,11 +2187,22 @@ void DataProcessor::emitFullIqFrame(const float *samples, std::size_t floatCount
     if (requestedWifiIqFrames.load(std::memory_order_acquire))
         emitWifiIqFrame(samples, floatCount);
     if (requestedEmitIqFrames.load(std::memory_order_acquire)) {
+        if (!iqFrameBudget->reserve(static_cast<std::int64_t>(floatCount),
+                                    static_cast<std::uint64_t>(count))) return;
         QByteArray quantized(static_cast<int>(floatCount), Qt::Uninitialized);
         char *dst = quantized.data();
         ObriiIq8Quantizer::quantize(samples, dst, floatCount);
         emit iqFrameReady(quantized, rate, count, false, monotonicNowNs());
     }
+}
+
+void DataProcessor::emitBufferedChannelIqFrame(double sampleRate) {
+    const int count = networkIqFrameBuffer.size() /
+        (FLOATS_PER_IQ_SAMPLE * static_cast<int>(sizeof(qint16)));
+    if (iqFrameBudget->reserve(networkIqFrameBuffer.size(), static_cast<std::uint64_t>(count))) {
+        emit iqFrameReady(networkIqFrameBuffer, sampleRate, count, true, monotonicNowNs());
+    }
+    networkIqFrameBuffer.clear();
 }
 
 void DataProcessor::emitWifiIqFrame(const float *samples, std::size_t floatCount) {
@@ -2327,12 +2320,7 @@ void DataProcessor::emitChannelIqFrame(const float *samples,
             appendInt16Le(networkIqFrameBuffer, networkIqChannelizerOutput[i + 1U] * outputGain);
             if (networkIqFrameBuffer.size() >=
                 frameSamples * FLOATS_PER_IQ_SAMPLE * static_cast<int>(sizeof(qint16))) {
-                emit iqFrameReady(networkIqFrameBuffer,
-                                  result.outputRate,
-                                  networkIqFrameBuffer.size() /
-                                      (FLOATS_PER_IQ_SAMPLE * static_cast<int>(sizeof(qint16))),
-                                  true, monotonicNowNs());
-                networkIqFrameBuffer.clear();
+                emitBufferedChannelIqFrame(result.outputRate);
             }
         }
         return;
@@ -2541,11 +2529,7 @@ void DataProcessor::emitChannelIqFrame(const float *samples,
         appendInt16Le(networkIqFrameBuffer, std::imag(lowPass) * gain);
 
         if (networkIqFrameBuffer.size() >= frameSamples * FLOATS_PER_IQ_SAMPLE * static_cast<int>(sizeof(qint16))) {
-            emit iqFrameReady(networkIqFrameBuffer,
-                              outputRate,
-                              networkIqFrameBuffer.size() / (FLOATS_PER_IQ_SAMPLE * static_cast<int>(sizeof(qint16))),
-                              true, monotonicNowNs());
-            networkIqFrameBuffer.clear();
+            emitBufferedChannelIqFrame(outputRate);
         }
     }
 
@@ -3094,9 +3078,7 @@ void DataProcessor::requestStop() {
                             if (streamKind == ReceiverBackendStreamKind::RtlSdrNative) {
                                 ret = cancelRtlSdrAsyncSafely(readerDevice);
                             } else {
-                                ret = apiKind == FobosApiKind::Agile
-                                          ? cancelFobosAgileAsyncSafely(static_cast<fobos_sdr_dev_t*>(readerDevice))
-                                          : cancelFobosAsyncSafely(static_cast<fobos_dev_t*>(readerDevice));
+                                ret = FobosReceiverCore(readerDevice, apiKind).cancelAsync();
                             }
                             if (fobosVerboseLoggingEnabled() || ret != FOBOS_ERR_OK) {
                                 qDebug() << "[DataProcessor] async cancel worker finished"
@@ -3114,9 +3096,7 @@ void DataProcessor::requestStop() {
                 if (fobosVerboseLoggingEnabled()) {
                     qDebug() << "[DataProcessor] fobos_rx_stop_sync begin" << readerDevice;
                 }
-                const int ret = activeApiKind.load() == FobosApiKind::Agile
-                                    ? stopFobosAgileSyncSafely(static_cast<fobos_sdr_dev_t*>(readerDevice))
-                                    : stopFobosSyncSafely(static_cast<fobos_dev_t*>(readerDevice));
+                const int ret = FobosReceiverCore(readerDevice, activeApiKind.load()).stopSync();
                 if (fobosVerboseLoggingEnabled() || ret != FOBOS_ERR_OK) {
                     qDebug() << "[DataProcessor] fobos_rx_stop_sync end" << "result" << ret;
                 }

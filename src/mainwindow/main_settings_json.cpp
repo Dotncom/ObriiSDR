@@ -217,6 +217,11 @@ QJsonObject YourClassName::settingsToJson() const {
     }
     settings["calibrationTable"] = calibrationPointsJson;
     settings["waterfallRowsPerFrame"] = waterfallRowsPerFrame;
+    settings["spectrumDisplayMode"] = spectrumDisplayMode;
+    settings["spectrumPersistenceSeconds"] = spectrumPersistenceSeconds;
+    settings["spectrumPersistenceIntensity"] = spectrumPersistenceIntensity;
+    settings["spectrumPersistenceThreshold"] = spectrumPersistenceThreshold;
+    settings["spectrumPersistenceSmoothingMs"] = spectrumPersistenceSmoothingMs;
     settings["waterfallDisplayMode"] = waterfallDisplayMode;
     settings["multiSdrViewMode"] = multiSdrViewMode;
     settings["waterfall3DResolutionDivisor"] = waterfall3DResolutionDivisor;
@@ -697,6 +702,17 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
     if (waterfallWidget) {
         waterfallWidget->setRowsPerFrame(waterfallRowsPerFrame);
     }
+    spectrumDisplayMode = (std::clamp)(readInt("spectrumDisplayMode", spectrumDisplayMode), 0, 1);
+    spectrumPersistenceSeconds = readDouble("spectrumPersistenceSeconds", spectrumPersistenceSeconds);
+    spectrumPersistenceIntensity = readInt("spectrumPersistenceIntensity", spectrumPersistenceIntensity);
+    spectrumPersistenceThreshold = readInt("spectrumPersistenceThreshold", spectrumPersistenceThreshold);
+    spectrumPersistenceSmoothingMs = readInt("spectrumPersistenceSmoothingMs", spectrumPersistenceSmoothingMs);
+    syncSpectrumPersistenceControls();
+    if (spectrumDisplayModeCombo) {
+        const QSignalBlocker blocker(spectrumDisplayModeCombo);
+        spectrumDisplayModeCombo->setCurrentIndex(spectrumDisplayMode);
+    }
+    if (graphWidget) graphWidget->setPersistenceEnabled(spectrumDisplayMode == 1);
     waterfallDisplayMode = (std::clamp)(readInt("waterfallDisplayMode", waterfallDisplayMode), 0, 2);
     multiSdrViewMode = (std::clamp)(readInt("multiSdrViewMode", multiSdrViewMode), 0, 1);
     if (multiSdrViewModeCombo) {

@@ -128,6 +128,7 @@ private:
     QComboBox *virtualTransportCombo = nullptr;
     QLineEdit *virtualLocalNameEdit = nullptr;
     QLineEdit *virtualHostEdit = nullptr;
+    QLineEdit *virtualNodeIdEdit = nullptr;
     QSpinBox *virtualPortSpin = nullptr;
     QComboBox *modulationCombo = nullptr;
     QComboBox *sourceCombo = nullptr;
@@ -183,6 +184,7 @@ private:
     QLabel *virtualEndpointLabel = nullptr;
     QLabel *virtualHostLabel = nullptr;
     QLabel *virtualPortLabel = nullptr;
+    QLabel *virtualNodeIdLabel = nullptr;
     QLabel *basebandLabel = nullptr;
     QLabel *deviceRateLabel = nullptr;
     QLabel *bandwidthLabel = nullptr;

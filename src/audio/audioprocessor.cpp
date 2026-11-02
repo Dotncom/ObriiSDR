@@ -105,6 +105,7 @@ double channelCutoffForMode(int modulationType, double bandwidth) {
     case MOD_WFM:
         return (std::min)(140000.0, (std::max)(80000.0, bandwidth * 0.55));
     case MOD_NFM:
+    case MOD_M17:
         return (std::min)(25000.0, (std::max)(6000.0, bandwidth * 0.55));
     case MOD_DMR:
         return (std::min)(9500.0, (std::max)(6000.0, bandwidth * 0.75));
@@ -115,6 +116,7 @@ double channelCutoffForMode(int modulationType, double bandwidth) {
     case MOD_USB:
     case MOD_LSB:
     case MOD_FT8:
+    case MOD_FT4:
     case MOD_RTTY:
     case MOD_PSK:
     case MOD_SSTV:
@@ -139,6 +141,8 @@ double demodAudioCutoffForMode(int modulationType, double bandwidth) {
         return 15000.0;
     case MOD_NFM:
         return 3000.0;
+    case MOD_M17:
+        return 6000.0;
     case MOD_DMR:
         return 6000.0;
     case MOD_APT:
@@ -148,6 +152,7 @@ double demodAudioCutoffForMode(int modulationType, double bandwidth) {
     case MOD_USB:
     case MOD_LSB:
     case MOD_FT8:
+    case MOD_FT4:
     case MOD_RTTY:
     case MOD_PSK:
     case MOD_SSTV:
@@ -177,7 +182,7 @@ double targetChannelRate(int modulationType, double bandwidth) {
     if (modulationType == MOD_DMR) {
         return 192000.0;
     }
-    if (modulationType == MOD_NFM || modulationType == MOD_FSK) {
+    if (modulationType == MOD_NFM || modulationType == MOD_FSK || modulationType == MOD_M17) {
         return clampDouble((std::max)(FM_MIN_CHANNEL_RATE, bandwidth * 4.0),
                            FM_MIN_CHANNEL_RATE,
                            384000.0);
@@ -186,7 +191,7 @@ double targetChannelRate(int modulationType, double bandwidth) {
 }
 
 bool isDigitalAudioMode(int modulationType) {
-    return modulationType == MOD_FT8 ||
+    return modulationType == MOD_FT8 || modulationType == MOD_FT4 || modulationType == MOD_M17 ||
            modulationType == MOD_RTTY ||
            modulationType == MOD_FSK ||
            modulationType == MOD_PSK ||
@@ -244,6 +249,7 @@ bool AudioProcessor::processIndependentIq(const std::vector<float> &iq,
     pcm.clear();
     const bool supportedModulation =
         (settings.modulationType >= MOD_AM && settings.modulationType <= MOD_WFM) ||
+        settings.modulationType == MOD_FT4 || settings.modulationType == MOD_M17 ||
         settings.modulationType == MOD_SSTV;
     if (running.load() || settings.inputMode != INPUT_RF ||
         !std::isfinite(settings.sampleRate) || settings.sampleRate < 48000.0 ||
@@ -259,6 +265,28 @@ bool AudioProcessor::processIndependentIq(const std::vector<float> &iq,
     processDemodulatorBlock(iq, pcm, unused, unusedRate, settings);
     audioFilterChain.process(pcm);
     return true;
+}
+
+bool AudioProcessor::processIndependentDmrIq(const std::vector<float> &iq,
+                                              double sampleRate,
+                                              bool discontinuity,
+                                              std::vector<short> &baseband,
+                                              int &basebandRate) {
+    baseband.clear();
+    basebandRate = 0;
+    if (running.load() || !std::isfinite(sampleRate) || sampleRate < 48000.0 ||
+        sampleRate > 2000000.0 || iq.size() % 2 || iq.size() > 262144U)
+        return false;
+    if (discontinuity) resetDemodulatorState();
+    RadioSettings settings;
+    settings.inputMode = INPUT_RF;
+    settings.modulationType = MOD_DMR;
+    settings.sampleRate = sampleRate;
+    settings.centerFrequency = 0.0;
+    settings.listeningFrequency = 0.0;
+    settings.bandwidth = 12500.0;
+    processDmrIqDemodulatorBlock(iq, baseband, basebandRate, settings);
+    return basebandRate > 0;
 }
 
 void AudioProcessor::configure(const RadioSettings &settings) {
@@ -371,7 +399,8 @@ void AudioProcessor::setLocalPlaybackEnabled(bool enabled) {
     if (wasEnabled == enabled) {
         return;
     }
-    qDebug() << "[Audio] local playback" << (enabled ? "enabled" : "disabled");
+    if (fobosVerboseLoggingEnabled())
+        qDebug() << "[Audio] local playback" << (enabled ? "enabled" : "disabled");
     if (!enabled) {
         closeAudioDevice();
     }
@@ -1388,6 +1417,7 @@ void AudioProcessor::processDemodulatorBlock(const std::vector<float>& iqBlock,
         case MOD_APT:
         case MOD_WFM:
         case MOD_FSK:
+        case MOD_M17:
         case MOD_DMR: {
             float limitedI = lowPassI;
             float limitedQ = lowPassQ;
@@ -1408,7 +1438,7 @@ void AudioProcessor::processDemodulatorBlock(const std::vector<float>& iqBlock,
             fmPrevI = limitedI;
             fmPrevQ = limitedQ;
             fmPreviousValid = true;
-            if (demodulationType == MOD_FSK || demodulationType == MOD_DMR) {
+            if (demodulationType == MOD_FSK || demodulationType == MOD_DMR || demodulationType == MOD_M17) {
                 demodulatedSample *= 10.0f;
             } else if (sstvNfm) {
                 // SSTV tones encode their value directly as audio frequency.
@@ -1430,6 +1460,7 @@ void AudioProcessor::processDemodulatorBlock(const std::vector<float>& iqBlock,
         }
         case MOD_USB:
         case MOD_FT8:
+        case MOD_FT4:
         case MOD_RTTY:
         case MOD_PSK:
         case MOD_SSTV:
@@ -1769,7 +1800,7 @@ void AudioProcessor::SDRThread() {
                                        static_cast<int>(audioSamples.size() * sizeof(short)));
         emit demodulatorFrameReady(demodPcmFrame);
 
-        if (settings.modulationType == MOD_DMR) {
+        if (settings.modulationType == MOD_DMR || settings.modulationType == MOD_M17) {
             continue;
         }
 

@@ -1,5 +1,20 @@
 # Changelog
 
+## 8.0.0 - 2026-11-02
+- Added ObriiCli: standalone headless RX/server/client, recording, optional
+  decoder/TX workers, measurements, DSP graphs and experiment restoration.
+- Shared Fobos operations, CPU FFT and recording formats between GUI and CLI.
+- Added the GUI command console and opt-in authenticated loopback command API.
+- Added shared FT4 and live M17 receivers, including optional Codec2 voice,
+  with isolated CLI workers and synthetic PCM/IQ interoperability tests.
+- Added an experimental Mesh Designer for local virtual-radio scenarios and
+  device profiles. Automatic routing and remote SSH launch are not implemented.
+- Expanded GNSS streaming diagnostics, bounded IQ handling, virtual RF mixing
+  and software regression coverage; updated Android network-client sources.
+- Full/Lite Windows and Raspberry source packages, plus an Android preview APK.
+  The Wireless add-on is not republished. Hardware and real-RF qualification
+  remain separate.
+
 ## 7.0.0 - 2026-11-01
 - Added the standalone Obrii FPGA Lab for editing HDL projects and generating
   validated, standalone IQ-pipeline RTL. Vendor-image integration remains pending.

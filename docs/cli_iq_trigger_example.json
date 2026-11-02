@@ -1,0 +1,11 @@
+{
+  "outputPrefix": "trigger_capture",
+  "bandStartHz": 100000000,
+  "bandEndHz": 100100000,
+  "thresholdDbfs": -60,
+  "hysteresisDb": 3,
+  "edge": "rising",
+  "preMs": 100,
+  "postMs": 200,
+  "autoRearm": false
+}

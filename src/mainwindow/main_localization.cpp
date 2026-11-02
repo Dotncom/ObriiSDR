@@ -168,6 +168,10 @@ void YourClassName::setComboItemText(QComboBox *combo,
 }
 
 void YourClassName::applyUiLanguage() {
+    if (commandConsoleButton) {
+        commandConsoleButton->setToolTip(uiText(QStringLiteral("command_console"), QStringLiteral("Console")));
+        commandConsoleButton->setAccessibleName(commandConsoleButton->toolTip());
+    }
     const auto widgets = findChildren<QWidget*>();
     for (QWidget *widget : widgets) {
         const QString key = widget->property("i18nKey").toString();
@@ -202,6 +206,17 @@ void YourClassName::applyUiLanguage() {
 
     syncFftResolutionControls();
 
+    setComboItemText(spectrumDisplayModeCombo, 0, QStringLiteral("spectrum_display_line"), QStringLiteral("Line spectrum"));
+    if (spectrumPersistenceSmoothingSpin) spectrumPersistenceSmoothingSpin->setToolTip(uiText(
+        QStringLiteral("spectrum_persistence_smoothing_tooltip"),
+        QStringLiteral("Smooth amplitude over time before accumulation. 0 disables smoothing. Higher values reduce scatter but slow the response to short signals.")));
+    if (spectrumPersistenceThresholdSpin) spectrumPersistenceThresholdSpin->setToolTip(uiText(
+        QStringLiteral("spectrum_persistence_threshold_tooltip"),
+        QStringLiteral("Higher values hide rare points before intensity is applied. 0% shows all traces. Short signals may also be hidden.")));
+    setComboItemText(spectrumDisplayModeCombo, 1, QStringLiteral("spectrum_display_persistence"), QStringLiteral("Spectrum persistence"));
+    if (spectrumDisplayModeCombo) spectrumDisplayModeCombo->setToolTip(uiText(
+        QStringLiteral("spectrum_persistence_tooltip"),
+        QStringLiteral("Accumulate fading spectrum traces. Frequent levels become warm colors; the waterfall stays unchanged.")));
     setComboItemText(clkBox, 0, QStringLiteral("internal"), QStringLiteral("Internal"));
     setComboItemText(clkBox, 1, QStringLiteral("external"), QStringLiteral("External"));
     setComboItemText(waterfallDisplayModeCombo,

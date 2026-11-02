@@ -19,6 +19,8 @@ public:
     explicit FrequencyControl(QWidget *parent = nullptr);
 
     double valueHz() const;
+    double minimumHz() const { return minimumValueHz; }
+    double maximumHz() const { return maximumValueHz; }
     void setValueHz(double valueHz);
     void commitPendingValue();
     void setRangeHz(double minimumHz, double maximumHz);

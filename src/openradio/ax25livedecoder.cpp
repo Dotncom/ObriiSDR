@@ -29,7 +29,7 @@ void Ax25LiveDecoder::submitPcm16(const QByteArray &pcm, int sampleRate) {
     const int maximumBytes = rate * 3 * 2;
     if (bufferedPcm.size() > maximumBytes)
         bufferedPcm.remove(0, (bufferedPcm.size() - maximumBytes) & ~1);
-    if (bufferedPcm.size() >= rate * 2 && totalSamples - processedSamples >= rate / 2)
+    if (bufferedPcm.size() >= rate && totalSamples - processedSamples >= rate / 10)
         ready.wakeOne();
 }
 
@@ -48,8 +48,8 @@ void Ax25LiveDecoder::run() {
         int sampleRate = 0;
         {
             QMutexLocker lock(&mutex);
-            while (!stopping && (bufferedPcm.size() < rate * 2 ||
-                                  totalSamples - processedSamples < rate / 2))
+            while (!stopping && (bufferedPcm.size() < rate ||
+                                  totalSamples - processedSamples < rate / 10))
                 ready.wait(&mutex);
             if (stopping) return;
             sampleRate = rate;

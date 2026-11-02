@@ -122,7 +122,8 @@ foreach ($file in $files) {
         continue
     }
     if (-not $normalized.Contains("/") -and
-        ([System.IO.Path]::GetExtension($normalized) -in @(".bmp", ".png", ".jpg", ".jpeg"))) {
+        ([System.IO.Path]::GetExtension($normalized).ToLowerInvariant() -in @(
+            ".bmp", ".png", ".jpg", ".jpeg", ".avif", ".webp", ".gif", ".heic", ".tif", ".tiff"))) {
         continue
     }
     if (-not $normalized.Contains("/") -and

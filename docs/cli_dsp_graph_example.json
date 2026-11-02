@@ -1,0 +1,27 @@
+{
+  "version": 8,
+  "blocks": [
+    {"id": "rx", "type": "receiver_source"},
+    {"id": "ddc1", "type": "ddc_channelizer", "settings": {
+      "enabled": true, "frequencyHz": 100000000, "bandwidthHz": 12500,
+      "outputRateHz": 192000, "decimation": 0, "firTaps": 32
+    }},
+    {"id": "fft1", "type": "branch_fft", "settings": {
+      "fftLength": 2048, "refreshMs": 100, "window": 1
+    }},
+    {"id": "spectrum1", "type": "branch_spectrum"},
+    {"id": "demod1", "type": "branch_demodulator", "settings": {
+      "modulation": 1, "bandwidthHz": 12500, "lowPassHz": 3000
+    }},
+    {"id": "audio1", "type": "branch_audio_output", "settings": {
+      "enabled": true, "volume": 0.5
+    }}
+  ],
+  "connections": [
+    {"source": "rx", "target": "ddc1"},
+    {"source": "ddc1", "target": "fft1"},
+    {"source": "fft1", "target": "spectrum1"},
+    {"source": "ddc1", "target": "demod1"},
+    {"source": "demod1", "target": "audio1"}
+  ]
+}

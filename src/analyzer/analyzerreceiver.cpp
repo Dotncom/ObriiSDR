@@ -1,4 +1,5 @@
 #include "analyzerreceiver.h"
+#include "../core/fobosreceivercore.h"
 #include "computebudgetmanager.h"
 #include "dspiqsourceregistry.h"
 
@@ -195,61 +196,36 @@ struct AnalyzerReceiver::Impl {
     }
 
     bool configureFobos(bool agile) {
-        int result = 0;
-        if (agile) {
-            result = openFobosAgileDeviceSafely(&fobosAgileDevice,
-                                                static_cast<uint32_t>(settings.nativeIndex));
-        } else {
-            result = openFobosDeviceSafely(&fobosDevice,
-                                           static_cast<uint32_t>(settings.nativeIndex));
-        }
+        FobosReceiverCore receiver;
+        int result = receiver.open(agile ? FobosApiKind::Agile : FobosApiKind::Standard,
+                                   static_cast<uint32_t>(settings.nativeIndex));
+        if (agile) fobosAgileDevice = static_cast<fobos_sdr_dev_t *>(receiver.native());
+        else fobosDevice = static_cast<fobos_dev_t *>(receiver.native());
         if (result != 0) { reportError(receiverErrorText(QStringLiteral("Open Fobos"), result)); return false; }
-        if (agile)
-            result = setFobosAgileClockSourceSafely(fobosAgileDevice,
-                                                    settings.clockRole == 2 ? 1 : 0);
-        else
-            result = setFobosClockSourceSafely(fobosDevice,
-                                               settings.clockRole == 2 ? 1U : 0U);
+        result = receiver.clockSource(settings.clockRole == 2 ? 1 : 0);
         // libfobos exposes source selection but no lock detector. Correlation
         // calibration therefore remains the authority for a Fobos clock group.
         clockLocked = false;
         double actualRate = settings.sampleRateHz;
-        if (result == 0 && agile) {
-            result = setFobosAgileDirectSamplingSafely(fobosAgileDevice,
-                                                       settings.directSampling ? 1U : 0U);
-            if (result == 0)
-                result = setFobosAgileSampleRateSafely(fobosAgileDevice, settings.sampleRateHz);
-        } else if (result == 0) {
-            result = setFobosDirectSamplingSafely(fobosDevice,
-                                                  settings.directSampling ? 1U : 0U);
-            if (result == 0)
-                result = setFobosSampleRateSafely(fobosDevice, settings.sampleRateHz, &actualRate);
+        if (result == 0) {
+            result = receiver.directSampling(settings.directSampling ? 1U : 0U);
+            if (result == 0) result = receiver.sampleRate(settings.sampleRateHz, &actualRate);
         }
         if (result == 0 && !settings.directSampling) {
             double actualCenter = settings.centerHz;
-            result = agile
-                         ? setFobosAgileFrequencySafely(fobosAgileDevice, settings.centerHz)
-                         : setFobosFrequencySafely(fobosDevice, settings.centerHz, &actualCenter);
+            result = receiver.frequency(settings.centerHz, &actualCenter);
             if (result == 0 && agile) {
                 double kickCenter = settings.centerHz + 1.0;
-                result = setFobosAgileFrequencySafely(fobosAgileDevice, kickCenter);
+                result = receiver.frequency(kickCenter, nullptr);
                 if (result == 0)
-                    result = setFobosAgileFrequencySafely(fobosAgileDevice, settings.centerHz);
+                    result = receiver.frequency(settings.centerHz, nullptr);
             }
         }
         if (result == 0) {
-            result = agile
-                         ? setFobosAgileLnaGainSafely(fobosAgileDevice,
-                               static_cast<unsigned int>(std::max(0, settings.lnaGainDb)))
-                         : setFobosLnaGainSafely(fobosDevice,
-                               static_cast<unsigned int>(std::max(0, settings.lnaGainDb)));
+            result = receiver.lna(static_cast<unsigned int>(std::max(0, settings.lnaGainDb)));
         }
         if (result == 0) {
-            result = agile
-                         ? setFobosAgileVgaGainSafely(fobosAgileDevice,
-                               static_cast<unsigned int>(std::max(0, settings.vgaGainDb)))
-                         : setFobosVgaGainSafely(fobosDevice,
-                               static_cast<unsigned int>(std::max(0, settings.vgaGainDb)));
+            result = receiver.vga(static_cast<unsigned int>(std::max(0, settings.vgaGainDb)));
         }
         if (result == 0 && agile && settings.agileScanFrequenciesHz.size() >= 2) {
             result = startFobosAgileScanSafely(

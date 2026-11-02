@@ -37,6 +37,7 @@ private:
 };
 
 QByteArray virtualSignalComplexFloat32Payload(const std::complex<float> *samples, int count);
+bool virtualSignalValidNodeId(const QString &id);
 bool virtualSignalDecodeComplexFloat32(const QByteArray &payload, QVector<float> *interleaved,
                                        QString *error = nullptr);
 

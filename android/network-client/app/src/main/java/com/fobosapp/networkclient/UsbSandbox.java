@@ -352,6 +352,8 @@ final class UsbSandbox {
         };
     }
 
+    // API 33+ uses NOT_EXPORTED below; older Android releases need the legacy overload.
+    @android.annotation.SuppressLint("UnspecifiedRegisterReceiverFlag")
     void start() {
         if (receiverRegistered) {
             return;

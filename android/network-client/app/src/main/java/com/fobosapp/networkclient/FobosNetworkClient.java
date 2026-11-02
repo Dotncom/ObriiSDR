@@ -14,12 +14,13 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 final class FobosNetworkClient {
     interface Listener {
@@ -29,6 +30,7 @@ final class FobosNetworkClient {
         void onSpectrum(SpectrumFrame frame);
         void onAudio(byte[] pcmData);
         void onControlMessage(JSONObject command);
+        default void onAudioReset() { }
     }
 
     static final class SpectrumFrame {
@@ -96,16 +98,34 @@ final class FobosNetworkClient {
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final ExecutorService writerExecutor = Executors.newSingleThreadExecutor();
+    private final ScheduledExecutorService retryExecutor = Executors.newSingleThreadScheduledExecutor();
     private final Object writeLock = new Object();
     private final Listener listener;
-    private Socket socket;
+    private final NetworkControlProtocol controlProtocol = new NetworkControlProtocol();
+    private final RemoteVfoProtocol remoteProtocol = new RemoteVfoProtocol();
+    private volatile Socket socket;
     private OutputStream outputStream;
     private volatile boolean running;
     private volatile boolean controlReady;
-    private volatile boolean localClientHasControl = true;
+    private volatile boolean localClientHasControl;
+    private volatile boolean connectionRequested;
+    private volatile boolean autoReconnect = true;
+    private volatile boolean remoteVfoMode;
+    private volatile long generation;
+    private ScheduledFuture<?> retry;
+    private ScheduledFuture<?> vfoDeadline;
+    private int retryCount;
+    private final int retryBaseMs;
+    private String host;
+    private int port;
 
     FobosNetworkClient(Listener listener) {
+        this(listener, 1000);
+    }
+
+    FobosNetworkClient(Listener listener, int retryBaseMs) {
         this.listener = listener;
+        this.retryBaseMs = Math.max(20, retryBaseMs);
     }
 
     boolean isConnected() {
@@ -114,35 +134,51 @@ final class FobosNetworkClient {
     }
 
     boolean isActive() {
-        Socket current = socket;
-        return running || (current != null && current.isConnected() && !current.isClosed());
+        return connectionRequested;
     }
 
     boolean canControl() {
-        return localClientHasControl;
+        return remoteVfoMode ? remoteProtocol.isReady() : localClientHasControl;
     }
+
+    boolean isRemoteVfoMode() { return remoteVfoMode; }
+    void setRemoteVfoMode(boolean enabled) {
+        if (isActive()) throw new IllegalStateException("Disconnect before changing network mode");
+        remoteVfoMode = enabled;
+    }
+    void setAutoReconnect(boolean enabled) {
+        autoReconnect = enabled;
+        synchronized (writeLock) {
+            if (!enabled && retry != null) disconnect();
+        }
+    }
+    void selectVfo(String id) { remoteProtocol.select(id); listener.onAudioReset(); }
+    JSONObject selectedVfo() { return remoteProtocol.selectedState(); }
+    JSONObject vfoCapabilities() { return remoteProtocol.capabilities(); }
 
     void connect(String host, int port) {
         disconnect();
-        running = true;
-        controlReady = false;
-        localClientHasControl = true;
-        executor.execute(() -> runConnection(host, port));
+        if (host == null || host.trim().isEmpty() || port < 1 || port > 65535) {
+            notifyStatus("Enter a server address and port between 1 and 65535");
+            return;
+        }
+        synchronized (writeLock) {
+            this.host = host;
+            this.port = port;
+            connectionRequested = true;
+            retryCount = 0;
+            startAttemptLocked();
+        }
     }
 
     void disconnect() {
-        running = false;
-        controlReady = false;
         synchronized (writeLock) {
-            if (socket != null) {
-                try {
-                    socket.close();
-                } catch (IOException ignored) {
-                    // Socket is being intentionally torn down.
-                }
-            }
-            socket = null;
-            outputStream = null;
+            ++generation;
+            connectionRequested = false;
+            if (retry != null) retry.cancel(false);
+            retry = null;
+            closeTransportLocked();
+            remoteProtocol.stopRestoring();
         }
     }
 
@@ -150,6 +186,7 @@ final class FobosNetworkClient {
         disconnect();
         executor.shutdownNow();
         writerExecutor.shutdownNow();
+        retryExecutor.shutdownNow();
     }
 
     boolean sendControl(String action,
@@ -157,66 +194,105 @@ final class FobosNetworkClient {
                         boolean serverDisableLocalVisualAudio,
                         boolean fullResolutionSpectrumFrames,
                         JSONObject extra) {
+        final long token = generation;
         if (!isConnected()) {
             notifyStatus("Control channel is not ready");
             return false;
         }
-        if (!localClientHasControl &&
-                !"requestPriority".equals(action) &&
-                !"priorityResponse".equals(action)) {
+        if (remoteVfoMode) {
+            try {
+                return queueJson(remoteProtocol.command(action, settings), token);
+            } catch (JSONException | IllegalArgumentException | IllegalStateException e) {
+                notifyStatus(e.getMessage());
+                return false;
+            }
+        }
+        if (!localClientHasControl && !NetworkControlProtocol.allowedForObserver(action)) {
             notifyStatus("This Android client is observer. Request control first.");
             return false;
         }
+        if (NetworkControlProtocol.carriesSettings(action) && !controlProtocol.hasConfirmedState()) {
+            requestServerState();
+            notifyStatus("Waiting for current server settings; try again after synchronization");
+            return false;
+        }
         try {
-            JSONObject command = new JSONObject();
-            command.put("type", "control");
-            command.put("action", action);
-            command.put("processingMode", RadioSettings.PROCESSING_SERVER_SIDE);
-            command.put("serverDisableLocalVisualAudio", serverDisableLocalVisualAudio);
-            command.put("fullResolutionSpectrumFrames", fullResolutionSpectrumFrames);
-            command.put("settings", settings.toJson());
-            if (extra != null) {
-                JSONArray keys = extra.names();
-                if (keys != null) {
-                    for (int i = 0; i < keys.length(); ++i) {
-                        String key = keys.getString(i);
-                        command.put(key, extra.get(key));
-                    }
-                }
-            }
-            return queueJson(command);
+            return queueJson(controlProtocol.command(action, settings,
+                    serverDisableLocalVisualAudio, fullResolutionSpectrumFrames, extra), token);
         } catch (JSONException e) {
             notifyStatus("Could not build command: " + e.getMessage());
             return false;
         }
     }
 
-    private void runConnection(String host, int port) {
+    void requestServerState() {
+        if (!isConnected()) return;
+        try {
+            queueJson(remoteVfoMode ? remoteProtocol.open() :
+                    controlProtocol.command("requestServerState", null, false, false, null));
+        } catch (JSONException e) {
+            notifyStatus("Could not request server state: " + e.getMessage());
+        }
+    }
+
+    private void startAttemptLocked() {
+        retry = null;
+        running = true;
+        final long token = ++generation;
+        executor.execute(() -> runConnection(host, port, token));
+    }
+
+    private void runConnection(String host, int port, long token) {
         Socket nextSocket = null;
+        String failure = "Server closed connection";
         try {
             notifyStatus("Connecting to " + host + ":" + port);
             nextSocket = new Socket();
             nextSocket.setTcpNoDelay(true);
+            nextSocket.setSoTimeout(15000);
+            synchronized (writeLock) {
+                if (token != generation || !connectionRequested) { nextSocket.close(); return; }
+                socket = nextSocket;
+            }
             nextSocket.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
             synchronized (writeLock) {
-                socket = nextSocket;
+                if (token != generation || !connectionRequested) return;
                 outputStream = nextSocket.getOutputStream();
             }
-            sendProtocolLine(HELLO);
+            sendProtocolLine(HELLO, token);
             notifyStatus("Connected, waiting for server handshake");
-            readLoop(new BufferedInputStream(nextSocket.getInputStream(), 64 * 1024));
+            readLoop(new BufferedInputStream(nextSocket.getInputStream(), 64 * 1024), token);
         } catch (IOException e) {
-            if (running) {
-                notifyDisconnected("Connection failed: " + e.getMessage());
-            }
+            failure = "Connection failed: " + e.getMessage();
         } finally {
-            closeSocketIfCurrent(nextSocket);
+            boolean notify = false;
+            int delay = 0;
+            synchronized (writeLock) {
+                if (token == generation && connectionRequested) {
+                    closeTransportLocked();
+                    notify = true;
+                    if (autoReconnect && !retryExecutor.isShutdown()) {
+                        delay = (int) Math.min(15000L, (long) retryBaseMs << Math.min(retryCount++, 4));
+                        retry = retryExecutor.schedule(() -> {
+                            synchronized (writeLock) {
+                                if (token == generation && connectionRequested) startAttemptLocked();
+                            }
+                        }, delay, TimeUnit.MILLISECONDS);
+                    } else connectionRequested = false;
+                }
+            }
+            if (nextSocket != null) try { nextSocket.close(); } catch (IOException ignored) { }
+            if (notify) {
+                listener.onDisconnected(failure);
+                if (delay > 0) notifyStatus("Reconnecting in " + delay / 1000.0 + " s");
+            }
         }
     }
 
-    private void readLoop(InputStream inputStream) throws IOException {
-        while (running) {
+    private void readLoop(InputStream inputStream, long token) throws IOException {
+        while (running && token == generation) {
             String line = readLine(inputStream);
+            if (token != generation || !running) return;
             if (line == null) {
                 throw new EOFException("Server closed connection");
             }
@@ -224,12 +300,32 @@ final class FobosNetworkClient {
                 continue;
             }
             if (OK.equals(line)) {
-                controlReady = true;
+                synchronized (writeLock) {
+                    if (token != generation) return;
+                    controlReady = true;
+                    retryCount = 0;
+                }
+                requestServerState();
+                if (remoteVfoMode) {
+                    synchronized (writeLock) {
+                        vfoDeadline = retryExecutor.schedule(() -> {
+                            boolean unsupported = false;
+                            synchronized (writeLock) {
+                                if (token == generation && connectionRequested && !remoteProtocol.isReady()) {
+                                    connectionRequested = false;
+                                    closeTransportLocked();
+                                    unsupported = true;
+                                }
+                            }
+                            if (unsupported) listener.onDisconnected("Server did not provide a remote VFO session");
+                        }, 8, TimeUnit.SECONDS);
+                    }
+                }
                 notifyStatus("Control channel ready");
                 continue;
             }
             if (PING.equals(line)) {
-                sendProtocolLine(PONG);
+                sendProtocolLine(PONG, token);
                 continue;
             }
             if (PONG.equals(line) || HELLO.equals(line)) {
@@ -251,10 +347,24 @@ final class FobosNetworkClient {
                     throw new IOException("Invalid binary payload header");
                 }
                 if ("spectrumbin".equals(command.optString("type"))) {
-                    byte[] payload = readFully(inputStream, bytes);
-                    SpectrumFrame frame = parseBinarySpectrum(command, payload);
-                    if (frame != null) {
-                        listener.onSpectrum(frame);
+                    SpectrumFrameDecoder.validateBinaryHeader(command, bytes);
+                    if (!remoteVfoMode || remoteProtocol.acceptsFrame(command)) {
+                        byte[] payload = readFully(inputStream, bytes);
+                        SpectrumFrame frame = parseBinarySpectrum(command, payload);
+                        if (frame != null && token == generation) {
+                            listener.onSpectrum(frame);
+                        }
+                    } else {
+                        skipFully(inputStream, bytes);
+                    }
+                } else if ("remoteVfoAudio".equals(command.optString("type")) && remoteVfoMode) {
+                    if (bytes > 1024 * 1024) throw new IOException("Remote audio frame too large");
+                    byte[] pcm = readFully(inputStream, bytes);
+                    if (token == generation && remoteProtocol.acceptsFrame(command) &&
+                            command.optInt("sampleRate") == 48000 && command.optInt("channels") == 1 &&
+                            "pcm_s16le".equals(command.optString("sampleFormat")) && (pcm.length & 1) == 0) {
+                        if (command.optBoolean("reset")) listener.onAudioReset();
+                        listener.onAudio(pcm);
                     }
                 } else {
                     skipFully(inputStream, bytes);
@@ -262,13 +372,23 @@ final class FobosNetworkClient {
                 continue;
             }
 
-            handleJson(command);
+            handleJson(command, token);
         }
     }
 
-    private void handleJson(JSONObject command) {
+    private void handleJson(JSONObject command, long token) {
+        if (token != generation) return;
         String type = command.optString("type");
+        if ("remoteVfo".equals(type) && remoteVfoMode) {
+            try {
+                for (JSONObject restore : remoteProtocol.acceptState(command)) queueJson(restore, token);
+                if ("audioReset".equals(command.optString("action"))) listener.onAudioReset();
+                listener.onControlMessage(command);
+            } catch (JSONException e) { notifyStatus("Invalid VFO state: " + e.getMessage()); }
+            return;
+        }
         if ("spectrum".equals(type)) {
+            if (remoteVfoMode && !remoteProtocol.acceptsFrame(command)) return;
             SpectrumFrame frame = parseSpectrum(command);
             if (frame != null) {
                 listener.onSpectrum(frame);
@@ -276,6 +396,7 @@ final class FobosNetworkClient {
             return;
         }
         if ("audio".equals(type)) {
+            if (remoteVfoMode) return;
             if (command.optInt("sampleRate", 48_000) != 48_000 ||
                     command.optInt("channels", 1) != 1 ||
                     !"pcm_s16le".equals(command.optString("sampleFormat", "pcm_s16le"))) {
@@ -293,7 +414,10 @@ final class FobosNetworkClient {
             return;
         }
         if ("control".equals(type)) {
+            if (remoteVfoMode) return;
             String action = command.optString("action");
+            if (("serverState".equals(action) || "settingsAck".equals(action)) &&
+                    !controlProtocol.acceptState(command)) return;
             if ("role".equals(action)) {
                 localClientHasControl = command.optBoolean("canControl", localClientHasControl);
                 listener.onRole(
@@ -307,22 +431,24 @@ final class FobosNetworkClient {
     }
 
     private SpectrumFrame parseSpectrum(JSONObject command) {
+        final int count;
+        try {
+            count = SpectrumFrameDecoder.validateJsonCount(command);
+        } catch (IOException invalid) {
+            notifyStatus(invalid.getMessage());
+            return null;
+        }
         JSONArray frequencyArray = command.optJSONArray("frequencies");
         JSONArray magnitudeArray = command.optJSONArray("magnitudes");
-        if (frequencyArray == null || magnitudeArray == null) {
-            return null;
-        }
-        int count = Math.min(frequencyArray.length(), magnitudeArray.length());
-        if (count <= 0) {
-            return null;
-        }
+        boolean ascending = SpectrumFrameDecoder.isAscending(command);
         double[] frequencies = new double[count];
         float[] magnitudes = new float[count];
         for (int i = 0; i < count; ++i) {
             frequencies[i] = frequencyArray.optDouble(i, 0.0);
-            magnitudes[i] = (float) magnitudeArray.optDouble(i, -160.0);
+            float value = (float) magnitudeArray.optDouble(
+                    SpectrumFrameDecoder.sourceIndex(i, count, ascending), -160.0);
+            magnitudes[i] = Float.isFinite(value) ? value : -160.0f;
         }
-        swapSpectrumHalves(magnitudes);
         return new SpectrumFrame(
                 frequencies,
                 magnitudes,
@@ -337,21 +463,14 @@ final class FobosNetworkClient {
     }
 
     private SpectrumFrame parseBinarySpectrum(JSONObject command, byte[] payload) {
-        if (!"f32le".equals(command.optString("binFormat", "f32le"))) {
-            notifyStatus("Unsupported spectrum binary format");
+        final float[] magnitudes;
+        try {
+            magnitudes = SpectrumFrameDecoder.decodeBinary(command, payload);
+        } catch (IOException invalid) {
+            notifyStatus(invalid.getMessage());
             return null;
         }
-        boolean hasReference = command.optBoolean("hasReferenceMagnitudes", false);
-        int count = command.optInt("fftLength", 0);
-        int minimumBytes = Math.max(0, count) * Float.BYTES * (hasReference ? 2 : 1);
-        if (count <= 0) {
-            count = payload.length / Float.BYTES / (hasReference ? 2 : 1);
-            minimumBytes = count * Float.BYTES * (hasReference ? 2 : 1);
-        }
-        if (count <= 0 || payload.length < minimumBytes) {
-            notifyStatus("Ignoring incomplete spectrum binary payload");
-            return null;
-        }
+        int count = magnitudes.length;
 
         double minFrequency = command.optDouble("minFrequency", 0.0);
         double maxFrequency = command.optDouble("maxFrequency", minFrequency + Math.max(1, count - 1));
@@ -360,15 +479,10 @@ final class FobosNetworkClient {
         }
 
         double[] frequencies = new double[count];
-        float[] magnitudes = new float[count];
-        ByteBuffer buffer = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN);
         for (int i = 0; i < count; ++i) {
             double fraction = count <= 1 ? 0.0 : i / (double) (count - 1);
             frequencies[i] = minFrequency + fraction * (maxFrequency - minFrequency);
-            float value = buffer.getFloat();
-            magnitudes[i] = Float.isFinite(value) ? value : -160.0f;
         }
-        swapSpectrumHalves(magnitudes);
 
         return new SpectrumFrame(
                 frequencies,
@@ -381,19 +495,6 @@ final class FobosNetworkClient {
                 command.optDouble("bandwidth", 0.0),
                 command.optInt("modulationType", RadioSettings.MOD_AM),
                 command.has("inputMode") ? command.optInt("inputMode", -1) : -1);
-    }
-
-    private static void swapSpectrumHalves(float[] magnitudes) {
-        int count = magnitudes != null ? magnitudes.length : 0;
-        if (count < 2 || (count & 1) != 0) {
-            return;
-        }
-        int half = count / 2;
-        for (int i = 0; i < half; ++i) {
-            float left = magnitudes[i];
-            magnitudes[i] = magnitudes[i + half];
-            magnitudes[i + half] = left;
-        }
     }
 
     private static double optionalDouble(JSONObject command, String key) {
@@ -464,9 +565,14 @@ final class FobosNetworkClient {
     }
 
     private boolean queueJson(JSONObject command) {
+        return queueJson(command, generation);
+    }
+
+    private boolean queueJson(JSONObject command, long token) {
+        if (token != generation || !controlReady) return false;
         final String line = command.toString();
         try {
-            writerExecutor.execute(() -> sendProtocolLine(line));
+            writerExecutor.execute(() -> sendProtocolLine(line, token));
             return true;
         } catch (RejectedExecutionException e) {
             notifyStatus("Network writer is not available");
@@ -474,9 +580,9 @@ final class FobosNetworkClient {
         }
     }
 
-    private boolean sendProtocolLine(String line) {
+    private boolean sendProtocolLine(String line, long token) {
         synchronized (writeLock) {
-            if (outputStream == null) {
+            if (outputStream == null || token != generation) {
                 return false;
             }
             try {
@@ -484,37 +590,28 @@ final class FobosNetworkClient {
                 outputStream.flush();
                 return true;
             } catch (IOException e) {
-                notifyDisconnected("Control write failed: " + e.getMessage());
-                disconnect();
+                // Wake the reader; its finally block owns retry and notification.
+                try { if (socket != null) socket.close(); } catch (IOException ignored) { }
                 return false;
             }
         }
     }
 
-    private void closeSocketIfCurrent(Socket closingSocket) {
-        synchronized (writeLock) {
-            if (closingSocket == null || socket != closingSocket) {
-                return;
-            }
-            running = false;
-            controlReady = false;
-            try {
-                closingSocket.close();
-            } catch (IOException ignored) {
-                // Socket is already closed.
-            }
-            socket = null;
-            outputStream = null;
-        }
+    private void closeTransportLocked() {
+        if (vfoDeadline != null) vfoDeadline.cancel(false);
+        vfoDeadline = null;
+        running = false;
+        controlReady = false;
+        localClientHasControl = false;
+        controlProtocol.reset();
+        remoteProtocol.resetConnection();
+        if (socket != null) try { socket.close(); } catch (IOException ignored) { }
+        socket = null;
+        outputStream = null;
     }
 
     private void notifyStatus(String status) {
         listener.onStatus(status);
     }
 
-    private void notifyDisconnected(String reason) {
-        running = false;
-        controlReady = false;
-        listener.onDisconnected(reason);
-    }
 }

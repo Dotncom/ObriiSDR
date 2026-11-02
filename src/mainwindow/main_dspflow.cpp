@@ -383,6 +383,7 @@ AudioFilterKind filterKindForBlock(const QString &type, bool *ok = nullptr) {
 void YourClassName::ensureDspFlowPanel() {
     if (dspFlowPanel) return;
     dspFlowPanel = new DspFlowPanel(nullptr);
+    connect(dspFlowPanel, &DspFlowPanel::commandConsoleRequested, this, &YourClassName::showCommandConsole);
     dspFlowPanel->setAttribute(Qt::WA_DeleteOnClose, false);
     dspFlowPanel->setLanguage(normalizedUiLanguage(uiLanguage) == QStringLiteral("uk"));
     dspFlowPanel->setAnalogPeakMeterEnabled(showSpectrumPeakMeter);

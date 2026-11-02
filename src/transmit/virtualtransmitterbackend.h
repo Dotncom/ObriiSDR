@@ -15,6 +15,7 @@ public:
     VirtualTransmitterBackend();
     ~VirtualTransmitterBackend() override;
     void setEndpoint(const VirtualSignalEndpoint &endpoint);
+    void setNodeId(const QString &id);
     VirtualSignalEndpoint endpoint() const;
 
     QString id() const override;
@@ -35,10 +36,13 @@ private:
     void resetConnection();
 
     VirtualSignalEndpoint currentEndpoint;
+    QString nodeId;
     TxConfiguration currentConfiguration;
     std::unique_ptr<QLocalSocket> localSocket;
     std::unique_ptr<QTcpSocket> tcpSocket;
     quint32 sequence = 0;
+    qint64 sampleEpochNs = 0;
+    qint64 sampleCursor = 0;
     bool running = false;
     bool outputEnabled = true;
     bool nextDiscontinuity = false;

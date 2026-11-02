@@ -336,11 +336,14 @@ void TransmitDialog::buildUi() {
     virtualEndpointLabel = new QLabel(hardwareBox);
     virtualHostLabel = new QLabel(hardwareBox);
     virtualPortLabel = new QLabel(hardwareBox);
+    virtualNodeIdLabel = new QLabel(hardwareBox);
     virtualTransportCombo = new QComboBox(hardwareBox);
     virtualTransportCombo->addItem(QStringLiteral("Local IPC"), 0);
     virtualTransportCombo->addItem(QStringLiteral("TCP/IP"), 1);
     virtualLocalNameEdit = new QLineEdit(hardwareBox);
     virtualHostEdit = new QLineEdit(hardwareBox);
+    virtualNodeIdEdit = new QLineEdit(hardwareBox);
+    virtualNodeIdEdit->setMaxLength(64);
     virtualPortSpin = new QSpinBox(hardwareBox);
     virtualPortSpin->setRange(1, 65535);
     rfLabel = new QLabel(hardwareBox);
@@ -374,7 +377,9 @@ void TransmitDialog::buildUi() {
     hardware->addWidget(virtualHostEdit, 5, 1);
     hardware->addWidget(virtualPortLabel, 5, 2);
     hardware->addWidget(virtualPortSpin, 5, 3);
-    hardware->addWidget(rfLockLabel, 6, 0, 1, 4);
+    hardware->addWidget(virtualNodeIdLabel, 6, 0);
+    hardware->addWidget(virtualNodeIdEdit, 6, 1, 1, 3);
+    hardware->addWidget(rfLockLabel, 7, 0, 1, 4);
     hardware->setColumnStretch(1, 1);
     hardware->setColumnStretch(3, 1);
 
@@ -1123,6 +1128,8 @@ void TransmitDialog::updateTexts() {
                                    QString::fromUtf8(u8"IP приймача:")));
     virtualPortLabel->setText(text(QStringLiteral("Port:"),
                                    QString::fromUtf8(u8"Порт:")));
+    virtualNodeIdLabel->setText(text(QStringLiteral("Node ID:"),
+                                     QString::fromUtf8(u8"ID вузла:")));
     const auto setSourceText = [this](const QString &id, const QString &english, const QString &ukrainian) {
         const int index = sourceCombo->findData(id);
         if (index >= 0) sourceCombo->setItemText(index, text(english, ukrainian));
@@ -1220,6 +1227,7 @@ void TransmitDialog::applyVirtualSignalEndpoint() {
                                     : QStringLiteral("127.0.0.1");
     endpoint.port = virtualPortSpin ? static_cast<quint16>(virtualPortSpin->value()) : 17661;
     virtualSignal.setEndpoint(endpoint);
+    virtualSignal.setNodeId(virtualNodeIdEdit ? virtualNodeIdEdit->text() : QString());
 }
 
 bool TransmitDialog::selectedHackRfBusyForReception() const {
@@ -1671,10 +1679,13 @@ void TransmitDialog::updateModeUi() {
     virtualHostEdit->setVisible(virtualOutput && virtualTcp);
     virtualPortLabel->setVisible(virtualOutput && virtualTcp);
     virtualPortSpin->setVisible(virtualOutput && virtualTcp);
+    virtualNodeIdLabel->setVisible(virtualOutput);
+    virtualNodeIdEdit->setVisible(virtualOutput);
     virtualTransportCombo->setEnabled(virtualOutput && !(activeBackend && activeBackend->isRunning()));
     virtualLocalNameEdit->setEnabled(virtualOutput && !(activeBackend && activeBackend->isRunning()));
     virtualHostEdit->setEnabled(virtualOutput && !(activeBackend && activeBackend->isRunning()));
     virtualPortSpin->setEnabled(virtualOutput && !(activeBackend && activeBackend->isRunning()));
+    virtualNodeIdEdit->setEnabled(virtualOutput && !(activeBackend && activeBackend->isRunning()));
     frequencySpin->setMaximum(hardware ? 6000.0 : 7250.0);
     updateTexts();
 }
@@ -3120,6 +3131,7 @@ void TransmitDialog::loadSettings() {
     virtualHostEdit->setText(settings.value(QStringLiteral("transmit/virtualHost"),
                                             QStringLiteral("127.0.0.1")).toString());
     virtualPortSpin->setValue(settings.value(QStringLiteral("transmit/virtualPort"), 17661).toInt());
+    virtualNodeIdEdit->setText(settings.value(QStringLiteral("transmit/virtualNodeId")).toString());
     const int deviceIndex = settings.value(QStringLiteral("transmit/hackRfDeviceIndex"), 0).toInt();
     const int deviceComboIndex = deviceCombo->findData(deviceIndex);
     if (deviceComboIndex >= 0) deviceCombo->setCurrentIndex(deviceComboIndex);
@@ -3181,6 +3193,7 @@ void TransmitDialog::saveSettings() const {
     settings.setValue(QStringLiteral("transmit/virtualLocalName"), virtualLocalNameEdit->text().trimmed());
     settings.setValue(QStringLiteral("transmit/virtualHost"), virtualHostEdit->text().trimmed());
     settings.setValue(QStringLiteral("transmit/virtualPort"), virtualPortSpin->value());
+    settings.setValue(QStringLiteral("transmit/virtualNodeId"), virtualNodeIdEdit->text().trimmed());
     settings.setValue(QStringLiteral("transmit/hackRfDeviceIndex"), deviceCombo->currentData().toInt());
     settings.setValue(QStringLiteral("transmit/deviceSampleRate"), deviceSampleRateCombo->currentData().toInt());
     settings.setValue(QStringLiteral("transmit/bandwidthHz"), bandwidthCombo->currentData().toUInt());

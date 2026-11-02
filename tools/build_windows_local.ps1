@@ -74,7 +74,7 @@ $ConfigureArgs = @(
 $BuildArgs = @(
     "--build", $BuildPath,
     "--config", $Config,
-    "--target", "ObriiSDR", "ObriiAnalyzer"
+    "--target", "ObriiSDR", "ObriiAnalyzer", "ObriiFpgaLab", "ObriiIqHub", "ObriiCli", "ObriiCliView", "ObriiCliModule", "ObriiCliGnssModule", "ObriiCliPacketModule", "ObriiCliImageModule", "ObriiCliSpectrumModule", "ObriiCliM17Module", "ObriiCliTxModule"
 )
 
 function ConvertTo-CmdArgList {

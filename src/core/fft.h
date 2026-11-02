@@ -16,6 +16,7 @@
 #include <QtConcurrent/QtConcurrent>
 #include "iqbuffer.h"
 #include "radiosettings.h"
+#include "ffttransformcore.h"
 
 class GpuFftBackend;
 
@@ -97,19 +98,12 @@ private:
                                  bool profileFrame,
                                  qint64 snapshotNs);
     bool ensurePlan(int length);
-    void ensureWindow(int length, int windowType);
-    float windowCoefficient(int index) const;
-    double windowAmplitudeSumForSamples(int sampleCount) const;
+    void ensureWindow(int windowType);
     void executeTransform(int length);
     void releasePlan();
     fftwf_complex *fftIn;
     fftwf_complex *fftOut;
-    fftwf_plan plan;
-    int planLength;
-    int windowLength = 0;
-    int windowType = FFT_WINDOW_RECTANGULAR;
-    double windowAmplitudeSum = 0.0;
-    std::vector<float> windowCoefficients;
+    FftTransformCore cpuTransform;
     bool optimizeLargePlans;
     int profileLength = 0;
     int profileFrames = 0;

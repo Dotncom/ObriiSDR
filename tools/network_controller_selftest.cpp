@@ -82,6 +82,8 @@ int main(int argc, char **argv) {
         require(!firstId.isEmpty(), "First client did not become initial controller");
         require(!server.peerSupportsCompactSpectrum(firstId),
                 "Legacy peer was incorrectly given compact spectrum frames");
+        require(!server.peerSupportsBinaryAudio(firstId),
+                "Legacy peer was incorrectly given binary audio frames");
         require(spinUntil([&]() { return hasRole(first, firstInput, true); }),
                 "First client did not receive controller role");
 
@@ -141,8 +143,30 @@ int main(int argc, char **argv) {
         require(spinUntil([&]() {
             const QStringList peers = capabilityServer.readyPeerIds();
             return capabilityClient.isControlReady() && peers.size() == 1 &&
-                   capabilityServer.peerSupportsCompactSpectrum(peers.first());
-        }), "Compact display capability was not negotiated");
+                   capabilityServer.peerSupportsCompactSpectrum(peers.first()) &&
+                   capabilityServer.peerSupportsBinaryAudio(peers.first());
+        }), "Compact display and binary audio capabilities were not negotiated");
+
+        QJsonObject receivedHeader;
+        QByteArray receivedPcm;
+        QObject::connect(&capabilityClient, &NetworkController::binaryCommandReceived,
+                         [&](const QJsonObject &header, const QByteArray &payload) {
+                             if (header.value(QStringLiteral("type")).toString() ==
+                                 QStringLiteral("audiobin")) {
+                                 receivedHeader = header;
+                                 receivedPcm = payload;
+                             }
+                         });
+        QJsonObject audioHeader;
+        audioHeader[QStringLiteral("type")] = QStringLiteral("audiobin");
+        audioHeader[QStringLiteral("sampleRate")] = 48000;
+        const QByteArray pcm("\x01\x00\xff\x7f", 4);
+        require(capabilityServer.sendBinaryCommandToPeer(
+                    capabilityServer.readyPeerIds().first(), audioHeader, pcm),
+                "Binary audio frame was not sent");
+        require(spinUntil([&]() { return receivedPcm == pcm; }) &&
+                receivedHeader.value(QStringLiteral("sampleRate")).toInt() == 48000,
+                "Binary audio frame was not delivered intact");
 
         std::cout << "Network controller self-test passed\n";
         return 0;

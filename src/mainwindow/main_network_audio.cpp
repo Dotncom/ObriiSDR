@@ -43,22 +43,31 @@ void YourClassName::sendNetworkAudioFrame(const QByteArray &pcmData) {
     }
 
     QJsonObject frame;
-    frame["type"] = "audio";
+    frame["type"] = "audiobin";
     frame["sampleRate"] = 48000;
     frame["channels"] = 1;
     frame["sampleFormat"] = "pcm_s16le";
-    frame["pcm"] = QString::fromLatin1(pcmData.toBase64());
     static quint64 sentAudioFrames = 0;
     frame["sequence"] = QString::number(++sentAudioFrames);
     frame["sourceTimeMs"] = QString::number(QDateTime::currentMSecsSinceEpoch());
     quint64 slowPeers = 0;
+    QJsonObject legacyFrame;
     for (const QString &peerId : networkController->readyPeerIds()) {
         if (networkController->peerStreamProfile(peerId) == QStringLiteral("remote-vfo")) continue;
         if (networkController->pendingBytesForPeer(peerId) > 256 * 1024) {
             ++slowPeers;
             continue;
         }
-        networkController->sendControlCommandToPeer(peerId, frame);
+        if (networkController->peerSupportsBinaryAudio(peerId)) {
+            networkController->sendBinaryCommandToPeer(peerId, frame, pcmData);
+        } else {
+            if (legacyFrame.isEmpty()) {
+                legacyFrame = frame;
+                legacyFrame["type"] = "audio";
+                legacyFrame["pcm"] = QString::fromLatin1(pcmData.toBase64());
+            }
+            networkController->sendControlCommandToPeer(peerId, legacyFrame);
+        }
     }
     if (fobosVerboseLoggingEnabled() && sentAudioFrames % 200 == 1) {
         qDebug() << "[NetworkAudio] sent PCM frame"
@@ -69,6 +78,12 @@ void YourClassName::sendNetworkAudioFrame(const QByteArray &pcmData) {
 }
 
 void YourClassName::playNetworkAudioFrame(const QJsonObject &frame) {
+    playNetworkAudioPcmFrame(frame,
+        QByteArray::fromBase64(frame.value("pcm").toString().toLatin1()));
+}
+
+void YourClassName::playNetworkAudioPcmFrame(const QJsonObject &frame,
+                                             const QByteArray &pcmData) {
     if (networkMode != NetworkMode::Client || !remoteAudioPlayer) {
         return;
     }
@@ -83,7 +98,6 @@ void YourClassName::playNetworkAudioFrame(const QJsonObject &frame) {
         return;
     }
 
-    const QByteArray pcmData = QByteArray::fromBase64(frame.value("pcm").toString().toLatin1());
     if (pcmData.isEmpty() || pcmData.size() % int(sizeof(qint16)) != 0) return;
     static quint64 receivedAudioFrames = 0;
     static quint64 expectedSequence = 0;

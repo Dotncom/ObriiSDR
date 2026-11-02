@@ -1,6 +1,7 @@
 #include "fpgalabwindow.h"
 #include "fpgalogicblock.h"
 #include "fpgalogiceditor.h"
+#include "apphelp.h"
 
 #include <QAction>
 #include <QApplication>
@@ -148,6 +149,12 @@ FpgaLabWindow::FpgaLabWindow(QWidget *parent) : QMainWindow(parent) {
     savePipelineAction_ = savePipelineAction;
     toolbar->addSeparator();
     auto *vivadoMenu = menuBar()->addMenu(QStringLiteral("Vivado (необов'язково)"));
+    auto *helpMenu = menuBar()->addMenu(QStringLiteral("Довідка"));
+    auto *helpAction = helpMenu->addAction(QStringLiteral("Довідка FPGA Lab"));
+    helpAction->setShortcut(QKeySequence::HelpContents);
+    connect(helpAction, &QAction::triggered, this, [this]() {
+        showApplicationHelpDialog(this, QStringLiteral("uk"), QStringLiteral("Obrii FPGA Lab"));
+    });
     auto *buildAction = vivadoMenu->addAction(QStringLiteral("Зібрати у Vivado"));
     vivadoBuildAction_ = buildAction;
     auto *stopAction = toolbar->addAction(QStringLiteral("Зупинити збірку"));

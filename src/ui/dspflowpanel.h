@@ -94,6 +94,7 @@ public:
     bool branchRecordingRequested(const QString &id) const;
 
 signals:
+    void commandConsoleRequested();
     void externalEndpointChanged();
     void spectrumComputeOptionsChanged();
     void spectrumComputeStatusChanged(const QString &status);

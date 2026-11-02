@@ -92,6 +92,27 @@ QByteArray virtualSignalComplexFloat32Payload(const std::complex<float> *samples
     return payload;
 }
 
+bool virtualSignalValidNodeId(const QString &id) {
+    if (id.isEmpty() || id.size() > 64) return false;
+    for (int index = 0; index < id.size(); ++index) {
+        const ushort c = id.at(index).unicode();
+        const bool alphanumeric = (c >= 'a' && c <= 'z') ||
+                                  (c >= 'A' && c <= 'Z') ||
+                                  (c >= '0' && c <= '9');
+        if (!alphanumeric && (index == 0 || (c != '-' && c != '_' && c != '.')))
+            return false;
+    }
+    if (id.startsWith(QStringLiteral("tx")) && id.size() > 2) {
+        bool reserved = true;
+        for (int index = 2; index < id.size(); ++index) {
+            const ushort c = id.at(index).unicode();
+            if (c < '0' || c > '9') { reserved = false; break; }
+        }
+        if (reserved) return false;
+    }
+    return true;
+}
+
 bool virtualSignalDecodeComplexFloat32(const QByteArray &payload, QVector<float> *interleaved,
                                        QString *error) {
     if (!interleaved || payload.isEmpty() || payload.size() % (2 * static_cast<int>(sizeof(float))) != 0) {

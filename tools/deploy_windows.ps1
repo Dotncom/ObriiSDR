@@ -54,6 +54,15 @@ $RootFiles = @(
     @{ Source = Join-Path $BuildPath "ObriiAnalyzer.exe"; Name = "ObriiAnalyzer.exe" },
     @{ Source = Join-Path $BuildPath "ObriiFpgaLab.exe"; Name = "ObriiFpgaLab.exe" },
     @{ Source = Join-Path $BuildPath "ObriiIqHub.exe"; Name = "ObriiIqHub.exe" },
+    @{ Source = Join-Path $BuildPath "ObriiCli.exe"; Name = "ObriiCli.exe" },
+    @{ Source = Join-Path $BuildPath "ObriiCliModule.exe"; Name = "ObriiCliModule.exe" },
+    @{ Source = Join-Path $BuildPath "ObriiCliGnssModule.exe"; Name = "ObriiCliGnssModule.exe" },
+    @{ Source = Join-Path $BuildPath "ObriiCliPacketModule.exe"; Name = "ObriiCliPacketModule.exe" },
+    @{ Source = Join-Path $BuildPath "ObriiCliImageModule.exe"; Name = "ObriiCliImageModule.exe" },
+    @{ Source = Join-Path $BuildPath "ObriiCliSpectrumModule.exe"; Name = "ObriiCliSpectrumModule.exe" },
+    @{ Source = Join-Path $BuildPath "ObriiCliM17Module.exe"; Name = "ObriiCliM17Module.exe" },
+    @{ Source = Join-Path $BuildPath "ObriiCliTxModule.exe"; Name = "ObriiCliTxModule.exe" },
+    @{ Source = Join-Path $BuildPath "ObriiCliView.exe"; Name = "ObriiCliView.exe" },
     @{ Source = Join-Path $Workspace "fobos\fobos.dll"; Name = "fobos.dll" },
     @{ Source = Join-Path $Workspace "fobos_agile\fobos_sdr.dll"; Name = "fobos_sdr.dll" },
     @{ Source = Join-Path $Workspace "fftw-3.3.5-dll64\libfftw3f-3.dll"; Name = "libfftw3f-3.dll" },
@@ -70,6 +79,20 @@ $RootFiles = @(
     @{ Source = Join-Path $VcRedistDir "VCRUNTIME140.dll"; Name = "VCRUNTIME140.dll" },
     @{ Source = Join-Path $VcRedistDir "VCRUNTIME140_1.dll"; Name = "VCRUNTIME140_1.dll" }
 )
+
+foreach ($CodecDll in @('libcodec2.dll', 'libgcc_s_seh-1.dll', 'libwinpthread-1.dll')) {
+    $CodecPath = Join-Path $BuildPath $CodecDll
+    if (Test-Path -LiteralPath $CodecPath) { $RootFiles += @{ Source = $CodecPath; Name = $CodecDll } }
+}
+if ([IO.Path]::GetFullPath($BuildPath) -ne [IO.Path]::GetFullPath($DeployPath)) {
+    foreach ($Component in @('codec2', 'libgcc', 'winpthreads')) {
+        $CodecNotices = Join-Path $BuildPath ('licenses/' + $Component)
+        if (Test-Path -LiteralPath $CodecNotices) {
+            New-Item -ItemType Directory -Force (Join-Path $DeployPath 'licenses') | Out-Null
+            Copy-Item -LiteralPath $CodecNotices -Destination (Join-Path $DeployPath 'licenses') -Recurse -Force
+        }
+    }
+}
 
 $RtlSdrRuntimeCandidates = @(
     @{ Source = Join-Path $Workspace "rtlsdr\rtlsdr.dll"; Name = "rtlsdr.dll" },
@@ -176,6 +199,7 @@ if (Test-Path -LiteralPath $DeployDocsPath) {
 }
 
 $ReleaseDocFiles = @(
+    'docs\ft4_m17_receive.md',
     "docs\hackrf_native_beta.md",
     "docs\dmr_external_backend.md",
     "docs\gnss_preflight_4.1.md",
@@ -195,11 +219,38 @@ $ReleaseDocFiles = @(
     "docs\dsp_stream_manager.md",
     "docs\network_multi_user.md",
     "docs\open_amateur_radio.md",
+    "docs\virtual_iq_link_scenario.json",
     "docs\gnu_radio_bridge_usage.md",
     "docs\pfb_channelizer.md",
     "docs\dsp_board_coverage.md",
     "docs\experiment_bundle.md",
     "docs\obrii_analyzer.md",
+    "docs\obrii_cli.md",
+    "docs\mesh_designer.md",
+    "docs\mesh_devices_example.json",
+    "docs\mesh_project_example.json",
+    "docs\cli_calibration.md",
+    "docs\cli_digital_profiles.md",
+    "docs\cli_remote_dsp.md",
+    "docs\cli_web_service.md",
+    "docs\cli_gnss.md",
+    "docs\cli_live_tx.md",
+    "docs\cli_research_tools.md",
+    "docs\cli_doctor.md",
+    "docs\cli_runtime_recording.md",
+    "docs\cli_parity.md",
+    "docs\shared_runtime_core.md",
+    "docs\command_dispatcher.md",
+    "docs\command_console.md",
+    "docs\command_control_api.md",
+    "docs\shared_fft_core.md",
+    "docs\shared_recording_core.md",
+    "docs\cli_dsp_graph_example.json",
+    "docs\cli_multisdr_graph_example.json",
+    "docs\cli_signal_lab_ofdm.json",
+    "docs\cli_spectrum_monitor.json",
+    "docs\cli_scan_example.json",
+    "docs\cli_iq_trigger_example.json",
     "docs\multi_sdr_architecture.md",
     "docs\usrp_b210_plan.md"
 )

@@ -1,15 +1,23 @@
 #include "virtualiqhub.h"
+#include "virtualiqmedium.h"
 #include "virtualsignaltransport.h"
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QElapsedTimer>
+#include <QFile>
 #include <QHash>
 #include <QHostAddress>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QPointer>
+#include <QSet>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
+#include <QUuid>
 
 #include <cstdio>
 
@@ -45,18 +53,28 @@ bool nonnegative(const QString &text, int limit, int *result) {
     *result = value;
     return true;
 }
+
+bool legacySourceId(const QString &id) {
+    if (!id.startsWith(QStringLiteral("tx"))) return false;
+    bool ok = false;
+    const int number = id.mid(2).toInt(&ok);
+    return ok && number >= 1 && number <= 16 &&
+           id == QStringLiteral("tx%1").arg(number);
+}
 }
 
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("ObriiIqHub"));
     QCommandLineParser arguments;
-    arguments.setApplicationDescription(QStringLiteral("Bounded virtual-IQ fan-out and packet collision laboratory"));
+    arguments.setApplicationDescription(QStringLiteral("Bounded virtual-IQ fan-out or sample-aligned RF medium"));
     arguments.addHelpOption();
     arguments.addOption({QStringLiteral("listen"), QStringLiteral("Publisher bind address:port (default 127.0.0.1:17662)"),
                          QStringLiteral("endpoint"), QStringLiteral("127.0.0.1:17662")});
-    arguments.addOption({QStringLiteral("rx"), QStringLiteral("Receiver listen address:port; repeat for each receiver"),
+    arguments.addOption({QStringLiteral("rx"), QStringLiteral("Receiver [node-id@]listen-address:port; repeat for each receiver"),
                          QStringLiteral("endpoint")});
+    arguments.addOption({QStringLiteral("scenario"), QStringLiteral("Static TX-to-RX link scenario JSON"),
+                         QStringLiteral("file")});
     arguments.addOption({QStringLiteral("delay-ms"), QStringLiteral("Fixed frame delay, 0..60000 ms"),
                          QStringLiteral("value"), QStringLiteral("0")});
     arguments.addOption({QStringLiteral("collision-ms"), QStringLiteral("Drop frames from overlapping TX sources, 0..1000 ms"),
@@ -69,6 +87,16 @@ int main(int argc, char **argv) {
                          QStringLiteral("value"), QStringLiteral("32")});
     arguments.addOption({QStringLiteral("queue-mib"), QStringLiteral("Per-receiver queue bytes, 1..64 MiB"),
                          QStringLiteral("value"), QStringLiteral("8")});
+    arguments.addOption({QStringLiteral("mix-rate"), QStringLiteral("Enable sample-aligned IQ mixing at this rate, 8000..2000000 S/s"),
+                         QStringLiteral("sps")});
+    arguments.addOption({QStringLiteral("mix-center"), QStringLiteral("Required exact center frequency for IQ mixing, Hz"),
+                         QStringLiteral("hz")});
+    arguments.addOption({QStringLiteral("mix-block-samples"), QStringLiteral("Mixed output block size, 128..4096 samples"),
+                         QStringLiteral("count"), QStringLiteral("1024")});
+    arguments.addOption({QStringLiteral("mix-latency-ms"), QStringLiteral("Playout wait for other TX streams, 10..5000 ms"),
+                         QStringLiteral("ms"), QStringLiteral("100")});
+    arguments.addOption({QStringLiteral("mix-max-blocks"), QStringLiteral("Per-RX IQ block capacity, 4..256"),
+                         QStringLiteral("count"), QStringLiteral("256")});
     arguments.process(app);
 
     QString listenHost;
@@ -91,26 +119,140 @@ int main(int argc, char **argv) {
     if (!ok || settings.noiseSigma < 0 || settings.noiseSigma > 10) return 2;
     settings.randomSeed = arguments.value("seed").toUInt(&ok);
     if (!ok) return 2;
+    const bool mixing = arguments.isSet(QStringLiteral("mix-rate"));
+    VirtualIqMediumSettings mediumSettings;
+    if (mixing) {
+        int rate = 0;
+        if (!nonnegative(arguments.value("mix-rate"), 2000000, &rate) || rate < 8000 ||
+            !arguments.isSet(QStringLiteral("mix-center")) ||
+            settings.collisionWindowMs != 0) {
+            std::fprintf(stderr, "Mix mode needs --mix-rate 8000..2000000 and --mix-center Hz; --collision-ms is packet-only\n");
+            return 2;
+        }
+        mediumSettings.sampleRate = static_cast<quint32>(rate);
+        mediumSettings.centerFrequencyHz = arguments.value("mix-center").toLongLong(&ok);
+        if (!ok || mediumSettings.centerFrequencyHz < 0 ||
+            !nonnegative(arguments.value("mix-block-samples"), 4096, &mediumSettings.blockSamples) ||
+            mediumSettings.blockSamples < 128 ||
+            !nonnegative(arguments.value("mix-latency-ms"), 5000, &mediumSettings.playoutDelayMs) ||
+            mediumSettings.playoutDelayMs < 10 ||
+            !nonnegative(arguments.value("mix-max-blocks"), 256, &mediumSettings.maximumBufferedBlocks) ||
+            mediumSettings.maximumBufferedBlocks < 4) return 2;
+        mediumSettings.fixedDelayMs = settings.fixedDelayMs;
+        mediumSettings.noiseSigma = settings.noiseSigma;
+        mediumSettings.randomSeed = settings.randomSeed;
+        const qint64 capacity = static_cast<qint64>(mediumSettings.maximumBufferedBlocks) *
+            mediumSettings.blockSamples;
+        const qint64 required =
+            (static_cast<qint64>(mediumSettings.playoutDelayMs + mediumSettings.fixedDelayMs) *
+             mediumSettings.sampleRate + 999) / 1000 + mediumSettings.blockSamples;
+        if (capacity < required) {
+            std::fprintf(stderr, "Mix block capacity is shorter than playout + fixed delay; raise --mix-max-blocks or --mix-block-samples, or lower latency/rate\n");
+            return 2;
+        }
+        if (static_cast<qint64>(mediumSettings.blockSamples) * 2000 <
+            mediumSettings.sampleRate) {
+            std::fprintf(stderr, "Mix block is too small for the 5-ms output pump; increase --mix-block-samples\n");
+            return 2;
+        }
+    } else if (arguments.isSet(QStringLiteral("mix-center"))) {
+        std::fprintf(stderr, "--mix-center requires --mix-rate\n");
+        return 2;
+    }
+
+    QJsonObject scenario;
+    if (arguments.isSet(QStringLiteral("scenario"))) {
+        QFile file(arguments.value(QStringLiteral("scenario")));
+        if (!file.open(QIODevice::ReadOnly) || file.size() > 1024 * 1024) {
+            std::fprintf(stderr, "Cannot read IQ hub scenario (maximum 1 MiB)\n");
+            return 2;
+        }
+        QJsonParseError parseError;
+        const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+        if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+            std::fprintf(stderr, "Invalid IQ hub scenario JSON\n");
+            return 2;
+        }
+        scenario = document.object();
+        if (scenario.value(QStringLiteral("version")).toInt(-1) != 1 ||
+            !scenario.value(QStringLiteral("links")).isArray() ||
+            (scenario.contains(QStringLiteral("defaultRoute")) &&
+             !scenario.value(QStringLiteral("defaultRoute")).isBool())) {
+            std::fprintf(stderr, "IQ hub scenario needs version 1, links array and boolean defaultRoute\n");
+            return 2;
+        }
+        settings.defaultRoute = scenario.value(QStringLiteral("defaultRoute")).toBool(true);
+    }
 
     VirtualIqHub hub(settings);
+    mediumSettings.defaultRoute = settings.defaultRoute;
+    VirtualIqMedium medium(mediumSettings);
     QList<Receiver> receivers;
     for (const QString &value : arguments.values("rx")) {
         Receiver receiver;
-        receiver.id = QStringLiteral("rx%1").arg(receivers.size() + 1);
-        if (!endpoint(value, &receiver.host, &receiver.port) || !hub.addSubscriber(receiver.id)) {
+        const int separator = value.indexOf(QLatin1Char('@'));
+        const bool named = separator >= 0;
+        receiver.id = named ? value.left(separator)
+                            : QStringLiteral("rx%1").arg(receivers.size() + 1);
+        const QString address = named ? value.mid(separator + 1) : value;
+        if ((named && !virtualSignalValidNodeId(receiver.id)) ||
+            !endpoint(address, &receiver.host, &receiver.port) ||
+            !hub.addSubscriber(receiver.id) || (mixing && !medium.addSubscriber(receiver.id))) {
             std::fprintf(stderr, "Invalid or excess RX endpoint\n");
             return 2;
         }
         receivers.append(receiver);
     }
+    if (mixing && receivers.size() > 8) {
+        std::fprintf(stderr, "Mix mode supports up to 8 RX nodes\n");
+        return 2;
+    }
+    QSet<QString> seenLinks;
+    for (const QJsonValue &entry : scenario.value(QStringLiteral("links")).toArray()) {
+        if (!entry.isObject()) {
+            std::fprintf(stderr, "IQ hub link must be an object\n");
+            return 2;
+        }
+        const QJsonObject link = entry.toObject();
+        const QString source = link.value(QStringLiteral("tx")).toString();
+        const QString target = link.value(QStringLiteral("rx")).toString();
+        const QString pair = source + QLatin1Char('\n') + target;
+        const QJsonValue enabled = link.value(QStringLiteral("enabled"));
+        const QJsonValue delay = link.value(QStringLiteral("delayMs"));
+        const QJsonValue gain = link.value(QStringLiteral("gainDb"));
+        if ((!legacySourceId(source) && !virtualSignalValidNodeId(source)) ||
+            !hub.subscriberIds().contains(target) || seenLinks.contains(pair) ||
+            (!enabled.isUndefined() && !enabled.isBool()) ||
+            (!delay.isUndefined() && (!delay.isDouble() || delay.toDouble() != delay.toInt(-1))) ||
+            (!gain.isUndefined() && !gain.isDouble())) {
+            std::fprintf(stderr, "Invalid or duplicate IQ hub link (tx/rx/enabled/delayMs/gainDb)\n");
+            return 2;
+        }
+        VirtualIqLinkSettings linkSettings;
+        linkSettings.enabled = enabled.toBool(true);
+        linkSettings.delayMs = delay.toInt(0);
+        linkSettings.gainDb = static_cast<float>(gain.toDouble(0.0));
+        if (!hub.setLink(source, target, linkSettings) ||
+            (mixing && !medium.setLink(source, target, linkSettings))) {
+            std::fprintf(stderr, "IQ hub link exceeds delay/gain limits or mix buffer cannot hold its delay\n");
+            return 2;
+        }
+        seenLinks.insert(pair);
+    }
 
     QTcpServer server;
+    QElapsedTimer mediumClock;
+    mediumClock.start();
     if (!server.listen(QHostAddress(listenHost), listenPort)) {
         std::fprintf(stderr, "IQ hub listen failed: %s\n", qPrintable(server.errorString()));
         return 1;
     }
     QHash<QTcpSocket *, VirtualSignalStreamParser> publishers;
+    QHash<QTcpSocket *, QString> fallbackIds;
     QHash<QTcpSocket *, QString> sourceIds;
+    QHash<QTcpSocket *, QString> sessionIds;
+    QHash<QString, QTcpSocket *> activeNodeIds;
+    QSet<QTcpSocket *> firstData;
     quint64 nextSourceId = 0;
     QObject::connect(&server, &QTcpServer::newConnection, &app, [&] {
         while (QTcpSocket *socket = server.nextPendingConnection()) {
@@ -120,7 +262,9 @@ int main(int argc, char **argv) {
             }
             socket->setSocketOption(QAbstractSocket::LowDelayOption, 1);
             publishers.insert(socket, VirtualSignalStreamParser{});
-            sourceIds.insert(socket, QStringLiteral("tx%1").arg(++nextSourceId));
+            fallbackIds.insert(socket, QStringLiteral("tx%1").arg(++nextSourceId));
+            sessionIds.insert(socket, QUuid::createUuid().toString(QUuid::WithoutBraces));
+            firstData.insert(socket);
             auto *pump = new QTimer(socket);
             pump->setInterval(0);
             QObject::connect(socket, &QTcpSocket::readyRead, pump, [pump] { pump->start(); });
@@ -136,6 +280,30 @@ int main(int argc, char **argv) {
                     VirtualSignalFrame frame;
                     QString error;
                     while (parser->takeFrame(&frame, &error)) {
+                        const QJsonValue declaredId = frame.metadata.value(QStringLiteral("hubNodeId"));
+                        if (!declaredId.isUndefined() &&
+                            (!declaredId.isString() ||
+                             !virtualSignalValidNodeId(declaredId.toString()))) {
+                            error = QStringLiteral("Invalid virtual IQ node ID");
+                            break;
+                        }
+                        const QString declaredName = declaredId.toString();
+                        if (!sourceIds.contains(socket)) {
+                            const QString name = declaredName.isEmpty()
+                                ? fallbackIds.value(socket) : declaredName;
+                            if (activeNodeIds.contains(name)) {
+                                error = QStringLiteral("Virtual IQ node ID is already connected");
+                                break;
+                            }
+                            sourceIds.insert(socket, name);
+                            activeNodeIds.insert(name, socket);
+                            std::fprintf(stdout, "hub node=%s session=%s connected\n",
+                                         qPrintable(name), qPrintable(sessionIds.value(socket)));
+                            std::fflush(stdout);
+                        } else if (!declaredName.isEmpty() && declaredName != sourceIds.value(socket)) {
+                            error = QStringLiteral("Virtual IQ node ID changed during session");
+                            break;
+                        }
                         if (frame.protocolId == QStringLiteral("keepalive")) {
                             VirtualSignalFrame ack;
                             ack.sequence = frame.sequence;
@@ -143,16 +311,24 @@ int main(int argc, char **argv) {
                             ack.streamId = frame.streamId;
                             ack.protocolId = QStringLiteral("keepalive-ack");
                             ack.payloadType = VirtualSignalPayloadType::ProtocolFrame;
+                            ack.metadata.insert(QStringLiteral("hubNodeId"), sourceIds.value(socket));
+                            ack.metadata.insert(QStringLiteral("hubSessionId"), sessionIds.value(socket));
                             const QByteArray wire = VirtualSignalStreamParser::wrap(ack);
                             if (socket->bytesToWrite() < 65536) socket->write(wire);
                         } else if (frame.payloadType == VirtualSignalPayloadType::ComplexFloat32 &&
-                                   !frame.endOfStream &&
-                                   !hub.publish(sourceIds.value(socket), frame,
-                                                QDateTime::currentMSecsSinceEpoch(), &error)) {
-                            break;
+                                   !frame.endOfStream) {
+                            frame.metadata.insert(QStringLiteral("hubSessionId"), sessionIds.value(socket));
+                            frame.discontinuity |= firstData.remove(socket);
+                            const qint64 nowNs = mixing ? mediumClock.nsecsElapsed()
+                                                       : QDateTime::currentMSecsSinceEpoch() * 1000000LL;
+                            if (!(mixing ? medium.publish(sourceIds.value(socket), frame, nowNs, &error)
+                                         : hub.publish(sourceIds.value(socket), frame, nowNs / 1000000LL, &error)))
+                                break;
                         }
                     }
                     if (!error.isEmpty() || parser->bufferedBytes() > 2 * 1024 * 1024) {
+                        if (!error.isEmpty())
+                            std::fprintf(stderr, "IQ hub publisher rejected: %s\n", qPrintable(error));
                         pump->stop();
                         socket->disconnectFromHost();
                         return;
@@ -162,7 +338,12 @@ int main(int argc, char **argv) {
             });
             QObject::connect(socket, &QTcpSocket::disconnected, &app, [&, socket] {
                 publishers.remove(socket);
+                const QString name = sourceIds.value(socket);
+                if (activeNodeIds.value(name) == socket) activeNodeIds.remove(name);
+                fallbackIds.remove(socket);
                 sourceIds.remove(socket);
+                sessionIds.remove(socket);
+                firstData.remove(socket);
                 socket->deleteLater();
             });
         }
@@ -193,7 +374,10 @@ int main(int argc, char **argv) {
             }
             if (receiver.socket->state() != QAbstractSocket::ConnectedState) continue;
             if (receiver.socket->bytesToWrite() > 2 * 1024 * 1024) continue;
-            for (VirtualSignalFrame frame : hub.takeDue(receiver.id, nowMs, 16)) {
+            const auto frames = mixing
+                ? medium.takeReady(receiver.id, mediumClock.nsecsElapsed(), 16)
+                : hub.takeDue(receiver.id, nowMs, 16);
+            for (VirtualSignalFrame frame : frames) {
                 frame.discontinuity |= receiver.discontinuity;
                 receiver.discontinuity = false;
                 QString error;
@@ -212,23 +396,50 @@ int main(int argc, char **argv) {
     QTimer statistics;
     statistics.setInterval(5000);
     QObject::connect(&statistics, &QTimer::timeout, &app, [&] {
+        if (mixing) {
+            const auto total = medium.totalCounters();
+            std::fprintf(stdout, "medium tx=%d in=%llu out=%llu overlapSamples=%llu gaps=%llu late=%llu bufferDrops=%llu clipped=%llu bufferedBlocks=%d\n",
+                         publishers.size(), static_cast<unsigned long long>(total.receivedFrames),
+                         static_cast<unsigned long long>(total.emittedFrames),
+                         static_cast<unsigned long long>(total.overlapSamples),
+                         static_cast<unsigned long long>(total.gapSamples),
+                         static_cast<unsigned long long>(total.lateSamples),
+                         static_cast<unsigned long long>(total.bufferDrops),
+                         static_cast<unsigned long long>(total.clippedComponents), total.bufferedBlocks);
+            for (const Receiver &receiver : receivers) {
+                const auto count = medium.counters(receiver.id);
+                std::fprintf(stdout, "  %s connected=%d out=%llu overlap=%llu gaps=%llu late=%llu drop=%llu transportDrop=%llu buffered=%d\n",
+                             qPrintable(receiver.id),
+                             receiver.socket && receiver.socket->state() == QAbstractSocket::ConnectedState,
+                             static_cast<unsigned long long>(count.emittedFrames),
+                             static_cast<unsigned long long>(count.overlapSamples),
+                             static_cast<unsigned long long>(count.gapSamples),
+                             static_cast<unsigned long long>(count.lateSamples),
+                             static_cast<unsigned long long>(count.bufferDrops),
+                             static_cast<unsigned long long>(receiver.transportDrops), count.bufferedBlocks);
+            }
+            std::fflush(stdout);
+            return;
+        }
         const auto total = hub.totalCounters();
-        std::fprintf(stdout, "hub tx=%d in=%llu out=%llu drop=%llu collision=%llu queuedBytes=%lld queuedFrames=%lld avgDelayMs=%.1f\n",
+        std::fprintf(stdout, "hub tx=%d in=%llu out=%llu drop=%llu collision=%llu filtered=%llu queuedBytes=%lld queuedFrames=%lld avgDelayMs=%.1f\n",
                      publishers.size(), static_cast<unsigned long long>(total.receivedFrames),
                      static_cast<unsigned long long>(total.deliveredFrames),
                      static_cast<unsigned long long>(total.droppedFrames),
                      static_cast<unsigned long long>(total.collisionFrames),
+                     static_cast<unsigned long long>(total.filteredFrames),
                      static_cast<long long>(total.queuedBytes),
                      static_cast<long long>(total.queuedFrames),
                      total.deliveredFrames ? static_cast<double>(total.accumulatedDelayMs) / total.deliveredFrames : 0.0);
         for (const Receiver &receiver : receivers) {
             const auto count = hub.counters(receiver.id);
-            std::fprintf(stdout, "  %s %s:%u connected=%d delivered=%llu drop=%llu collision=%llu transportDrop=%llu queued=%lld avgDelayMs=%.1f maxDelayMs=%lld\n",
+            std::fprintf(stdout, "  %s %s:%u connected=%d delivered=%llu drop=%llu collision=%llu filtered=%llu transportDrop=%llu queued=%lld avgDelayMs=%.1f maxDelayMs=%lld\n",
                          qPrintable(receiver.id), qPrintable(receiver.host), receiver.port,
                          receiver.socket && receiver.socket->state() == QAbstractSocket::ConnectedState,
                          static_cast<unsigned long long>(count.deliveredFrames),
                          static_cast<unsigned long long>(count.droppedFrames),
                          static_cast<unsigned long long>(count.collisionFrames),
+                         static_cast<unsigned long long>(count.filteredFrames),
                          static_cast<unsigned long long>(receiver.transportDrops),
                          static_cast<long long>(count.queuedFrames),
                          count.deliveredFrames ? static_cast<double>(count.accumulatedDelayMs) / count.deliveredFrames : 0.0,
@@ -237,7 +448,8 @@ int main(int argc, char **argv) {
         std::fflush(stdout);
     });
     statistics.start();
-    std::fprintf(stdout, "Obrii IQ hub listening on %s:%u\n", qPrintable(listenHost), listenPort);
+    std::fprintf(stdout, "Obrii IQ hub listening on %s:%u mode=%s\n", qPrintable(listenHost), listenPort,
+                 mixing ? "sample-mix" : "packet-fanout");
     std::fflush(stdout);
     return app.exec();
 }

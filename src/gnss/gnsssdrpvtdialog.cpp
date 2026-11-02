@@ -35,7 +35,7 @@ GnssSdrPvtDialog::GnssSdrPvtDialog(const Translator &translate, QWidget *parent)
     form->addRow(text("file", "File"), fileRow);
     format = new QComboBox(this); format->addItems({"cf32", "cs16", "cs8"});
     form->addRow(text("iq_format", "IQ format (I+jQ, little endian)"), format);
-    sampleRate = new QDoubleSpinBox(this); sampleRate->setRange(2.046, 32); sampleRate->setDecimals(6); sampleRate->setSuffix(" MS/s"); sampleRate->setValue(4);
+    sampleRate = new QDoubleSpinBox(this); sampleRate->setRange(2.046, 250); sampleRate->setDecimals(6); sampleRate->setSuffix(" MS/s"); sampleRate->setValue(4);
     center = new QDoubleSpinBox(this); center->setRange(1000, 1700); center->setDecimals(6); center->setSuffix(" MHz"); center->setValue(1575.42);
     form->addRow(text("sample_rate", "Sample rate"), sampleRate);
     form->addRow(text("center_frequency", "Center frequency"), center);
@@ -49,9 +49,10 @@ GnssSdrPvtDialog::GnssSdrPvtDialog(const Translator &translate, QWidget *parent)
     map->setChecked(true); form->addRow(map);
     layout->addLayout(form);
     auto *buttons = new QHBoxLayout;
+    auto *tuneGpsButton = new QPushButton(text("gnss_pvt_tune_gps", "Tune RX to GPS L1"), this);
     startButton = new QPushButton(text("start", "Start"), this);
     stopButton = new QPushButton(text("stop", "Stop"), this); stopButton->setEnabled(false);
-    buttons->addWidget(startButton); buttons->addWidget(stopButton); layout->addLayout(buttons);
+    buttons->addWidget(tuneGpsButton); buttons->addWidget(startButton); buttons->addWidget(stopButton); layout->addLayout(buttons);
     status = new QLabel(text("gnss_pvt_ready", "Ready. No automatic background tracking."), this); status->setWordWrap(true); layout->addWidget(status);
     log = new QPlainTextEdit(this); log->setReadOnly(true); log->setMaximumBlockCount(150); layout->addWidget(log, 1);
     process = new QProcess(this); process->setProcessChannelMode(QProcess::MergedChannels);
@@ -88,6 +89,9 @@ GnssSdrPvtDialog::GnssSdrPvtDialog(const Translator &translate, QWidget *parent)
         path->setEnabled(index == 1); format->setEnabled(index == 1); sampleRate->setEnabled(index == 1); center->setEnabled(index == 1);
         if (index == 0) setReceiverContext(receiverRunning, receiverAllowed, receiverRate, receiverCenter);
     });
+    connect(source, QOverload<int>::of(&QComboBox::currentIndexChanged), tuneGpsButton,
+            [tuneGpsButton](int index) { tuneGpsButton->setEnabled(index == 0); });
+    connect(tuneGpsButton, &QPushButton::clicked, this, &GnssSdrPvtDialog::gpsTuneRequested);
     connect(startButton, &QPushButton::clicked, this, &GnssSdrPvtDialog::start);
     connect(stopButton, &QPushButton::clicked, this, &GnssSdrPvtDialog::stop);
     path->setEnabled(false); format->setEnabled(false); sampleRate->setEnabled(false); center->setEnabled(false);
@@ -120,22 +124,28 @@ void GnssSdrPvtDialog::start() {
     if (!QFileInfo::exists(executable)) executable = QStandardPaths::findExecutable("pocket_trk");
     if (executable.isEmpty()) { status->setText(text("gnss_pvt_missing", "PocketSDR runtime is missing. See THIRD_PARTY_LICENSES / backend setup.")); return; }
     QStringList selected; for (auto *check : systems) if (check->isChecked()) selected << check->text();
+    if (!GnssSdr::configureTrackingRate(activeInput, selected, &error)) { status->setText(error); return; }
     GnssSdr::trackingArguments(activeInput, selected, 1, 2, &error);
     if (!error.isEmpty()) { status->setText(error); return; }
     const QString working = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/gnss-pvt";
     if (!QDir().mkpath(working)) { status->setText(text("private_directory_error", "Cannot create private backend working directory.")); return; }
     process->setWorkingDirectory(working);
+    if (activeInput.decimation > 1)
+        appendLog(QStringLiteral("GNSS IQ: %1 -> %2 MS/s (x%3)")
+                      .arg(activeInput.sampleRateHz / 1e6, 0, 'g', 8)
+                      .arg(activeInput.sampleRateHz / activeInput.decimation / 1e6, 0, 'g', 8)
+                      .arg(activeInput.decimation));
     if (map->isChecked() && receiverAllowed) emit mapSourceStarted();
     stream = new GnssSdrStream(activeInput, this);
     const int run = generation;
-    connect(stream, &GnssSdrStream::listening, this, [this, selected, executable, run](quint16 iq, quint16 nmea) {
+    connect(stream, &GnssSdrStream::listening, this, [this, selected, executable, run](const QString &iq, quint16 nmea) {
         if (!stream || generation != run) return;
         QString error; const QStringList args = GnssSdr::trackingArguments(activeInput, selected, iq, nmea, &error);
         stoppingProcess = false;
         process->start(executable, args);
     });
     connect(stream, &GnssSdrStream::nmeaLine, this, [this, run](const QString &line) { if (generation != run) return; appendLog(line); if (map->isChecked() && receiverAllowed) emit positionSentence(line); });
-    connect(stream, &GnssSdrStream::samplesSent, this, [this, run](quint64 count) { if (generation != run) return; status->setText(text("gnss_pvt_tracking", "Tracking: %1 s of IQ supplied; waiting for navigation data and a valid fix.").arg(count / activeInput.sampleRateHz, 0, 'f', 1)); });
+    connect(stream, &GnssSdrStream::samplesSent, this, [this, run](quint64 count) { if (generation != run) return; status->setText(text("gnss_pvt_tracking", "Tracking: %1 s of IQ supplied; waiting for navigation data and a valid fix.").arg(count * activeInput.decimation / activeInput.sampleRateHz, 0, 'f', 1)); });
     connect(stream, &GnssSdrStream::streamError, this, [this, run](const QString &message) { if (generation != run) return; appendLog(message); stop(); status->setText(message); });
     startButton->setEnabled(false); stopButton->setEnabled(true);
     status->setText(text("gnss_pvt_starting", "Starting PocketSDR...")); stream->start(QThread::NormalPriority);

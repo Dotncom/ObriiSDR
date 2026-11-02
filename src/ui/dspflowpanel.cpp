@@ -6537,6 +6537,12 @@ DspFlowPanel::DspFlowPanel(QWidget *parent) : QDialog(parent, Qt::Window) {
     computeButton->setToolTip(QStringLiteral("DSP stream manager / Менеджер потоків DSP"));
     toolbar->addWidget(computeButton);
     connect(computeButton, &QToolButton::clicked, this, &DspFlowPanel::showComputeDialog);
+    auto *consoleButton = new QToolButton(this);
+    consoleButton->setObjectName(QStringLiteral("dspCommandConsole"));
+    consoleButton->setText(QStringLiteral(">_"));
+    consoleButton->setToolTip(QStringLiteral("Console / Консоль"));
+    connect(consoleButton, &QToolButton::clicked, this, &DspFlowPanel::commandConsoleRequested);
+    toolbar->addWidget(consoleButton);
     toolbar->addWidget(openButton_);
     toolbar->addWidget(renameButton_);
     toolbar->addWidget(deleteButton_);

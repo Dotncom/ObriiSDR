@@ -24,7 +24,7 @@ extern double minFrequency;
 extern double maxFrequency;
 
 namespace {
-constexpr float FFT_MAGNITUDE_FLOOR_DB = -160.0f;
+constexpr float FFT_MAGNITUDE_FLOOR_DB = FftTransformCore::FloorDb;
 constexpr float HF_NOISE_CANCEL_MAX_COEFF = 2.5f;
 constexpr int FFT_THREADED_PLAN_MIN_LENGTH = 524288;
 constexpr int FFT_PARALLEL_POSTPROCESS_MIN_LENGTH = 1048576;
@@ -146,8 +146,6 @@ FFTResult::FFTResult(bool optimizeLargePlans, QObject *parent)
     : QObject(parent),
       fftIn(nullptr),
       fftOut(nullptr),
-      plan(nullptr),
-      planLength(0),
       optimizeLargePlans(optimizeLargePlans) {
 }
 
@@ -181,20 +179,8 @@ void FFTResult::releasePlan() {
     if (gpuBackend) {
         gpuBackend->releasePlan();
     }
-    if (plan) {
-        std::lock_guard<std::mutex> plannerLock(fftwPlannerGlobalMutex());
-        fftwf_destroy_plan(plan);
-        plan = nullptr;
-    }
-    if (fftIn) {
-        fftwf_free(fftIn);
-        fftIn = nullptr;
-    }
-    if (fftOut) {
-        fftwf_free(fftOut);
-        fftOut = nullptr;
-    }
-    planLength = 0;
+    cpuTransform.releasePlan();
+    fftIn = fftOut = nullptr;
     autoBackendDecisionLength = 0;
     autoBackendDecision = -1;
 }
@@ -212,7 +198,7 @@ void FFTResult::executeTransform(int length) {
         autoBackendDecision = -1;
     }
     if (automaticGpuCandidate && autoBackendDecision == 0) {
-        fftwf_execute(plan);
+        cpuTransform.execute();
         return;
     }
     if (gpuRequested && GpuFftBackend::isCompiled()) {
@@ -235,10 +221,10 @@ void FFTResult::executeTransform(int length) {
                 const bool measuredGpu = executeGpu();
                 const qint64 gpuNs = gpuTimer.nsecsElapsed();
 
-                fftwf_execute(plan);
+                cpuTransform.execute();
                 QElapsedTimer cpuTimer;
                 cpuTimer.start();
-                fftwf_execute(plan);
+                cpuTransform.execute();
                 const qint64 cpuNs = cpuTimer.nsecsElapsed();
 
                 autoBackendDecision = measuredGpu && gpuNs < cpuNs - cpuNs / 10 ? 1 : 0;
@@ -281,7 +267,7 @@ void FFTResult::executeTransform(int length) {
         loggedGpuFailureLength = length;
         qWarning() << "[FFT] GPU backend requested but this build has no VkFFT; using FFTW";
     }
-    fftwf_execute(plan);
+    cpuTransform.execute();
 }
 
 bool FFTResult::ensurePlan(int length) {
@@ -290,18 +276,18 @@ bool FFTResult::ensurePlan(int length) {
         return false;
     }
 
-    if (plan && fftIn && fftOut && planLength == length) {
+    if (cpuTransform.ready() && cpuTransform.length() == length) {
         return true;
     }
 
     releasePlan();
-    fftIn = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * length);
-    fftOut = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * length);
-    if (!fftIn || !fftOut) {
+    if (!cpuTransform.allocateBuffers(length, FftTransformCore::Storage::OutOfPlace)) {
         qDebug() << "Failed to allocate FFT buffers for length" << length;
         releasePlan();
         return false;
     }
+    fftIn = cpuTransform.input();
+    fftOut = cpuTransform.output();
 
     {
         std::lock_guard<std::mutex> plannerLock(fftwPlannerGlobalMutex());
@@ -323,7 +309,7 @@ bool FFTResult::ensurePlan(int length) {
             fftwf_plan_with_nthreads(planThreads);
         }
 #endif
-        plan = fftwf_plan_dft_1d(length, fftIn, fftOut, FFTW_FORWARD, FFTW_ESTIMATE);
+        cpuTransform.createPlanLocked();
         if (fobosVerboseLoggingEnabled()) {
             qInfo() << "[FFT] adaptive plan selected"
                     << "length" << length
@@ -336,92 +322,20 @@ bool FFTResult::ensurePlan(int length) {
         }
 #endif
     }
-    if (!plan) {
+    if (!cpuTransform.ready()) {
         qDebug() << "Failed to create FFTW plan for length" << length;
         releasePlan();
         return false;
     }
 
-    planLength = length;
     return true;
 }
 
-void FFTResult::ensureWindow(int length, int requestedWindowType) {
-    const int normalizedType = normalizedFftWindowType(requestedWindowType);
-    if (windowLength == length && windowType == normalizedType) {
-        return;
-    }
-
-    windowLength = length;
-    windowType = normalizedType;
-    windowAmplitudeSum = 0.0;
-    windowCoefficients.clear();
-    if (length <= 0 || normalizedType == FFT_WINDOW_RECTANGULAR) {
-        windowAmplitudeSum = (std::max)(0, length);
-        return;
-    }
-
-    windowCoefficients.resize(static_cast<std::size_t>(length), 1.0f);
-    constexpr double TwoPi = 6.28318530717958647692;
-    const double denominator = static_cast<double>((std::max)(1, length - 1));
-    parallelForBins(length, [&](int begin, int end) {
-        for (int index = begin; index < end; ++index) {
-            const double phase = TwoPi * static_cast<double>(index) / denominator;
-            double coefficient = 1.0;
-            switch (normalizedType) {
-            case FFT_WINDOW_HANN:
-                coefficient = 0.5 - 0.5 * std::cos(phase);
-                break;
-            case FFT_WINDOW_HAMMING:
-                coefficient = 0.54 - 0.46 * std::cos(phase);
-                break;
-            case FFT_WINDOW_BLACKMAN_HARRIS:
-                coefficient = 0.35875 - 0.48829 * std::cos(phase) +
-                              0.14128 * std::cos(2.0 * phase) -
-                              0.01168 * std::cos(3.0 * phase);
-                break;
-            case FFT_WINDOW_FLAT_TOP:
-                coefficient = 0.21557895 - 0.41663158 * std::cos(phase) +
-                              0.277263158 * std::cos(2.0 * phase) -
-                              0.083578947 * std::cos(3.0 * phase) +
-                              0.006947368 * std::cos(4.0 * phase);
-                break;
-            case FFT_WINDOW_RECTANGULAR:
-            default:
-                coefficient = 1.0;
-                break;
-            }
-            windowCoefficients[static_cast<std::size_t>(index)] =
-                static_cast<float>(coefficient);
-        }
+void FFTResult::ensureWindow(int requestedWindowType) {
+    cpuTransform.ensureWindow(requestedWindowType, [](int count, auto range) {
+        parallelForBins(count, range);
     });
-    for (float coefficient : windowCoefficients) {
-        windowAmplitudeSum += coefficient;
-    }
 }
-
-float FFTResult::windowCoefficient(int index) const {
-    if (windowCoefficients.empty() || index < 0 || index >= windowLength) {
-        return 1.0f;
-    }
-    return windowCoefficients[static_cast<std::size_t>(index)];
-}
-
-double FFTResult::windowAmplitudeSumForSamples(int sampleCount) const {
-    const int clampedCount = (std::clamp)(sampleCount, 0, windowLength);
-    if (windowCoefficients.empty()) {
-        return static_cast<double>(clampedCount);
-    }
-    if (clampedCount == windowLength) {
-        return windowAmplitudeSum;
-    }
-    double sum = 0.0;
-    for (int index = 0; index < clampedCount; ++index) {
-        sum += windowCoefficients[static_cast<std::size_t>(index)];
-    }
-    return sum;
-}
-
 
 void FFTResult::performFFTInThread() {
     QtConcurrent::run(this, &FFTResult::storeFFTResults);
@@ -439,7 +353,7 @@ bool FFTResult::prepareSnapshotComputation(const RadioSettings &settings,
         return false;
     }
 
-    const bool planWasReady = plan && planLength == currentFftLength;
+    const bool planWasReady = cpuTransform.ready() && cpuTransform.length() == currentFftLength;
     if (!ensurePlan(currentFftLength)) {
         outMagnitudes.clear();
         outFrequencies.clear();
@@ -551,20 +465,14 @@ bool FFTResult::computePreparedSnapshot(const RadioSettings &settings,
     const int samplesToCopy = static_cast<int>((std::min)(
         static_cast<std::size_t>(currentFftLength), availableIqSamples));
     const std::size_t sourceStart = availableIqSamples - samplesToCopy;
-    ensureWindow(currentFftLength, settings.fftWindowType);
+    const float *source = interleavedIq.data() + sourceStart * 2;
+    ensureWindow(settings.fftWindowType);
 
     const float normalizationDb =
         20.0f * std::log10(static_cast<float>((std::max)(1.0,
-                                                          windowAmplitudeSumForSamples(samplesToCopy))));
+                                                          cpuTransform.windowAmplitudeSum(samplesToCopy))));
     auto magnitudeDb = [this, normalizationDb](int index) {
-        const float re = std::isfinite(fftOut[index][0]) ? fftOut[index][0] : 0.0f;
-        const float im = std::isfinite(fftOut[index][1]) ? fftOut[index][1] : 0.0f;
-        const float power = re * re + im * im;
-        if (std::isfinite(power) && power > 0.0f) {
-            return (std::max)(FFT_MAGNITUDE_FLOOR_DB,
-                              10.0f * std::log10(power) - normalizationDb);
-        }
-        return FFT_MAGNITUDE_FLOOR_DB;
+        return FftTransformCore::magnitudeDb(fftOut[index][0], fftOut[index][1], normalizationDb);
     };
 
     if (inputMode == INPUT_HF_COMBINED) {
@@ -573,29 +481,15 @@ bool FFTResult::computePreparedSnapshot(const RadioSettings &settings,
         std::vector<float> hf2Positive(halfLength + 1, FFT_MAGNITUDE_FLOOR_DB);
         std::vector<float> shiftedMagnitude(currentFftLength, FFT_MAGNITUDE_FLOOR_DB);
 
-        for (int i = 0; i < currentFftLength; ++i) {
-            fftIn[i][0] = 0.0f;
-            fftIn[i][1] = 0.0f;
-        }
-        for (int i = 0; i < samplesToCopy; ++i) {
-            const std::size_t sourceIndex = sourceStart + i;
-            const float iValue = interleavedIq[2 * sourceIndex];
-            fftIn[i][0] = std::isfinite(iValue) ? iValue * windowCoefficient(i) : 0.0f;
-        }
+        cpuTransform.stageInputRange(source, 0, samplesToCopy, FftTransformCore::Input::IReal);
+        cpuTransform.zeroInputTail(samplesToCopy);
         executeTransform(currentFftLength);
         for (int k = 0; k <= halfLength; ++k) {
             hf1Positive[k] = magnitudeDb(k);
         }
 
-        for (int i = 0; i < currentFftLength; ++i) {
-            fftIn[i][0] = 0.0f;
-            fftIn[i][1] = 0.0f;
-        }
-        for (int i = 0; i < samplesToCopy; ++i) {
-            const std::size_t sourceIndex = sourceStart + i;
-            const float qValue = interleavedIq[2 * sourceIndex + 1];
-            fftIn[i][0] = std::isfinite(qValue) ? qValue * windowCoefficient(i) : 0.0f;
-        }
+        cpuTransform.stageInputRange(source, 0, samplesToCopy, FftTransformCore::Input::QReal);
+        cpuTransform.zeroInputTail(samplesToCopy);
         executeTransform(currentFftLength);
         for (int k = 0; k <= halfLength; ++k) {
             hf2Positive[k] = magnitudeDb(k);
@@ -620,30 +514,16 @@ bool FFTResult::computePreparedSnapshot(const RadioSettings &settings,
         std::vector<std::complex<float>> mainSpectrum(currentFftLength);
         std::vector<std::complex<float>> refSpectrum(currentFftLength);
 
-        for (int i = 0; i < currentFftLength; ++i) {
-            fftIn[i][0] = 0.0f;
-            fftIn[i][1] = 0.0f;
-        }
-        for (int i = 0; i < samplesToCopy; ++i) {
-            const std::size_t sourceIndex = sourceStart + i;
-            const float iValue = interleavedIq[2 * sourceIndex];
-            fftIn[i][0] = std::isfinite(iValue) ? iValue * windowCoefficient(i) : 0.0f;
-        }
+        cpuTransform.stageInputRange(source, 0, samplesToCopy, FftTransformCore::Input::IReal);
+        cpuTransform.zeroInputTail(samplesToCopy);
         executeTransform(currentFftLength);
         for (int i = 0; i < currentFftLength; ++i) {
             mainSpectrum[i] = std::complex<float>(std::isfinite(fftOut[i][0]) ? fftOut[i][0] : 0.0f,
                                                   std::isfinite(fftOut[i][1]) ? fftOut[i][1] : 0.0f);
         }
 
-        for (int i = 0; i < currentFftLength; ++i) {
-            fftIn[i][0] = 0.0f;
-            fftIn[i][1] = 0.0f;
-        }
-        for (int i = 0; i < samplesToCopy; ++i) {
-            const std::size_t sourceIndex = sourceStart + i;
-            const float qValue = interleavedIq[2 * sourceIndex + 1];
-            fftIn[i][0] = std::isfinite(qValue) ? qValue * windowCoefficient(i) : 0.0f;
-        }
+        cpuTransform.stageInputRange(source, 0, samplesToCopy, FftTransformCore::Input::QReal);
+        cpuTransform.zeroInputTail(samplesToCopy);
         executeTransform(currentFftLength);
         for (int i = 0; i < currentFftLength; ++i) {
             refSpectrum[i] = std::complex<float>(std::isfinite(fftOut[i][0]) ? fftOut[i][0] : 0.0f,
@@ -744,30 +624,12 @@ bool FFTResult::computePreparedSnapshot(const RadioSettings &settings,
     if (profileFrame) {
         profileTimer.restart();
     }
+    const auto selectedInput = inputMode == INPUT_HF1 ? FftTransformCore::Input::IReal :
+        inputMode == INPUT_HF2 ? FftTransformCore::Input::QImaginary : FftTransformCore::Input::Complex;
     processBins(samplesToCopy, [&](int begin, int end) {
-        for (int i = begin; i < end; ++i) {
-            const std::size_t sourceIndex = sourceStart + i;
-            const float coefficient = windowCoefficient(i);
-            if (inputMode == INPUT_HF1) {
-                const float iValue = interleavedIq[2 * sourceIndex];
-                fftIn[i][0] = std::isfinite(iValue) ? iValue * coefficient : 0.0f;
-                fftIn[i][1] = 0.0f;
-            } else if (inputMode == INPUT_HF2) {
-                const float qValue = interleavedIq[2 * sourceIndex + 1];
-                fftIn[i][0] = 0.0f;
-                fftIn[i][1] = std::isfinite(qValue) ? qValue * coefficient : 0.0f;
-            } else {
-                const float iValue = interleavedIq[2 * sourceIndex];
-                const float qValue = interleavedIq[2 * sourceIndex + 1];
-                fftIn[i][0] = std::isfinite(iValue) ? iValue * coefficient : 0.0f;
-                fftIn[i][1] = std::isfinite(qValue) ? qValue * coefficient : 0.0f;
-            }
-        }
+        cpuTransform.stageInputRange(source, begin, end, selectedInput);
     });
-    for (int i = samplesToCopy; i < currentFftLength; ++i) {
-        fftIn[i][0] = 0.0f;
-        fftIn[i][1] = 0.0f;
-    }
+    cpuTransform.zeroInputTail(samplesToCopy);
     const qint64 inputNs = profileFrame ? profileTimer.nsecsElapsed() : 0;
 
     if (profileFrame) {
@@ -779,11 +641,8 @@ bool FFTResult::computePreparedSnapshot(const RadioSettings &settings,
         profileTimer.restart();
     }
     processBins(currentFftLength, [&](int begin, int end) {
-        for (int i = begin; i < end; ++i) {
-            outMagnitudes[i] = magnitudeDb(i);
-            outFrequencies[i] =
-                (i - currentFftLength / 2) * (sampleRate / currentFftLength) + centerFrequency;
-        }
+        cpuTransform.writeMagnitudes(outMagnitudes.data(), begin, end, normalizationDb,
+                                     outFrequencies.data(), sampleRate, centerFrequency);
     });
     if (profileFrame) {
         const qint64 outputNs = profileTimer.nsecsElapsed();

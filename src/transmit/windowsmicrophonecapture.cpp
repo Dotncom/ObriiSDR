@@ -633,14 +633,14 @@ bool WindowsMicrophoneCapture::setDeviceLevel(const QString &requestedDevice, fl
 
 bool WindowsMicrophoneCapture::start(const QString &requestedDevice, int sampleRate,
                                      float inputLevel,
-                                     QString *error) {
+                                     QString *error, bool adjustEndpoint) {
     stop();
 #ifdef _WIN32
     QString wasapiError;
     if (impl->startWasapi(requestedDevice, sampleRate, &wasapiError)) {
         QString endpointError;
         QString endpointDetails;
-        const bool endpointAdjusted = setDeviceLevel(requestedDevice, inputLevel,
+        const bool endpointAdjusted = !adjustEndpoint || setDeviceLevel(requestedDevice, inputLevel,
                                                      &endpointError, &endpointDetails);
         qInfo().noquote() << "[TX audio] Windows capture endpoint"
                           << endpointDetails;
@@ -711,7 +711,7 @@ bool WindowsMicrophoneCapture::start(const QString &requestedDevice, int sampleR
 
     QString endpointError;
     QString endpointDetails;
-    const bool endpointAdjusted = setDeviceLevel(requestedDevice, inputLevel,
+    const bool endpointAdjusted = !adjustEndpoint || setDeviceLevel(requestedDevice, inputLevel,
                                                  &endpointError, &endpointDetails);
     qInfo().noquote() << "[TX audio] Windows capture endpoint"
                       << endpointDetails;
@@ -724,6 +724,7 @@ bool WindowsMicrophoneCapture::start(const QString &requestedDevice, int sampleR
     Q_UNUSED(requestedDevice)
     Q_UNUSED(sampleRate)
     Q_UNUSED(inputLevel)
+    Q_UNUSED(adjustEndpoint)
     if (error) *error = QStringLiteral("Native Windows microphone capture is unavailable");
     return false;
 #endif

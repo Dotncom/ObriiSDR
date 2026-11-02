@@ -15,6 +15,10 @@
 #include "dmrprivacyutils.h"
 #include "cwaudiodecoder.h"
 #include "psk31audiodecoder.h"
+#ifdef OBRII_HAS_EXTRA_RECEIVE_MODES
+#include "ft4audiodecoder.h"
+#include "m17audiodecoder.h"
+#endif
 #include <QTextCodec>
 #include "radiosettings.h"
 
@@ -93,6 +97,10 @@ private:
     void configureDmrPrivacy(const RadioSettings &settings);
 
     bool decoderEnabled = true;
+#ifdef OBRII_HAS_EXTRA_RECEIVE_MODES
+    Ft4AudioDecoder ft4Decoder;
+    M17AudioDecoder m17Decoder;
+#endif
     int activeMode = -1;
     int activeSampleRate = 48000;
 

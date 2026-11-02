@@ -44,7 +44,7 @@ if (Test-Path -LiteralPath $output) {
 New-Item -ItemType Directory -Path $output -Force | Out-Null
 
 $files = @(
-    'ObriiSDR.exe', 'translations.json', 'LICENSE', 'THIRD_PARTY_LICENSES.txt',
+    'ObriiSDR.exe', 'ObriiCli.exe', 'ObriiCliView.exe', 'translations.json', 'LICENSE', 'THIRD_PARTY_LICENSES.txt',
     'fobos.dll', 'fobos_sdr.dll', 'libfftw3f-3.dll', 'libusb-1.0.dll',
     'Qt5Core.dll', 'Qt5Concurrent.dll', 'Qt5Gui.dll', 'Qt5Widgets.dll',
     'Qt5Network.dll', 'Qt5SerialPort.dll', 'Qt5Multimedia.dll',
@@ -74,6 +74,19 @@ foreach ($relative in $files + $optional) {
     }
 }
 Copy-Item -LiteralPath (Join-Path $Workspace 'docs/lite_windows_package.md') -Destination (Join-Path $output 'README-LITE.md')
+$publicDocs = @('obrii_cli.md', 'cli_parity.md', 'shared_runtime_core.md',
+    'shared_fft_core.md', 'shared_recording_core.md', 'command_dispatcher.md',
+    'command_console.md', 'command_control_api.md', 'cli_doctor.md',
+    'cli_runtime_recording.md', 'cli_calibration.md', 'cli_digital_profiles.md',
+    'cli_remote_dsp.md', 'cli_web_service.md', 'cli_gnss.md', 'cli_live_tx.md',
+    'cli_research_tools.md', 'cli_dsp_graph_example.json', 'cli_multisdr_graph_example.json',
+    'cli_signal_lab_ofdm.json', 'cli_spectrum_monitor.json', 'cli_scan_example.json',
+    'cli_iq_trigger_example.json', 'virtual_iq_link_scenario.json')
+New-Item -ItemType Directory -Path (Join-Path $output 'docs') -Force | Out-Null
+foreach ($document in $publicDocs) {
+    Copy-Item -LiteralPath (Join-Path $Workspace ('docs/' + $document)) `
+        -Destination (Join-Path $output ('docs/' + $document)) -Force
+}
 if (Test-Path -LiteralPath (Join-Path $Workspace 'third_party/libm17/LICENSE')) {
     $noticeDir = Join-Path $output 'licenses/libm17'
     New-Item -ItemType Directory -Path $noticeDir -Force | Out-Null
