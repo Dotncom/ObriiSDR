@@ -4,6 +4,7 @@
 #include <QTimer>
 #include <QTemporaryDir>
 #include <QProcess>
+#include <QQueue>
 #include <memory>
 #include <vector>
 class QTcpSocket;
@@ -17,6 +18,7 @@ public:
     explicit Runtime(QObject *parent=nullptr);
     ~Runtime() override;
     bool start(const Project &,const QVector<HostPreset> &,QString *error);
+    bool addNode(const Node &,const QVector<HostPreset> &,QString *error);
     void stop();
     State state() const { return state_; }
     bool apply(const Node &,QString *error);
@@ -25,6 +27,7 @@ public:
     bool testSignal(const QString &nodeId,QString *error);
     bool stopSignal(const QString &nodeId,QString *error);
     bool setNodeRunning(const QString &nodeId,bool running,QString *error);
+    bool setNodeEnabled(const QString &nodeId,bool enabled,QString *error);
     void inspectNode(const QString &nodeId);
     QJsonObject snapshot(const QString &nodeId) const;
     int ownedProcessCount() const;
@@ -39,13 +42,19 @@ private:
     Entry *entry(const QString &id) const;
     void poll();
     void startHub();
+    void startRx(Entry *);
+    bool restartRx(Entry *,QString *error);
+    bool retryRegistration(Entry *,QString *error);
+    void cancelNodeRequest(Entry *);
+    void stopNode(Entry *,const QString &phase,const QString &detail);
+    void nodeFailure(Entry *,const QString &);
     void pump(Entry *);
     void enqueue(Entry *,const QString &,const QJsonObject &);
     void checkStopped();
     void failure(const QString &);
     void readLog(QProcess *,const QString &);
     void hubRequest(const QString &,const QJsonObject &args={});
-    void sendQueuedLink();
+    void sendQueuedHubChange();
     void cancelHubRequest();
     State state_=Idle;
     Project project;
@@ -58,6 +67,7 @@ private:
     QJsonObject hubState;
     Link queuedLink;
     bool hasQueuedLink=false,linkChangePending=false;
+    QQueue<QString> receiverRegistrations;
     QString cliPath;
     QString inspectedNode;
     QTimer polling,killDeadline;

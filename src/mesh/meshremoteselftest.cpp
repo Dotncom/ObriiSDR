@@ -49,7 +49,7 @@ Mesh::Project project(){
     Mesh::Link second;second.tx="B";second.rx="C";second.gainDb=0;result.links.append(second);return result;
 }
 bool isState(Mesh::RemoteDialog &dialog,const char *state){return dialog.property("remoteState").toString()==QLatin1String(state);}
-void click(Mesh::RemoteDialog &dialog,const char *name){if(auto button=dialog.findChild<QPushButton *>(name))button->click();}
+void click(Mesh::RemoteDialog &dialog,const char *name){if(auto button=dialog.findChild<QPushButton *>(name)){waitFor([&]{return button->isEnabled();});button->click();}}
 void initialize(Mesh::RemoteDialog &dialog,const QVector<QJsonObject> &services){
     dialog.setAttribute(Qt::WA_DeleteOnClose,false);dialog.setAttribute(Qt::WA_DontShowOnScreen);
     const auto nodes=dialog.endpointConfiguration().value("nodes").toArray();
@@ -87,6 +87,7 @@ bool omitsSecrets(const QByteArray &document,const QStringList &secrets){
 class DelayedService : public QObject {
 public:
     QTcpServer server;
+    quint64 revision=0;
     QString token="test-only-token-never-export",instance=QUuid::createUuid().toString(QUuid::WithoutBraces),session,key,node,transport;
     int configures=0,releases=0,statuses=0,delay=250,version=1;
     bool oversized=false,silent=false;
@@ -125,9 +126,13 @@ public:
                     ++configures;configuredTopology=request.value("topology").toObject();const QPointer<QTcpSocket> guard(socket);
                     QTimer::singleShot(delay,this,[this,guard,request]{
                         if(!session.isEmpty()){if(guard)respond(guard,request,{{"ok",false},{"error","active"}});return;}
-                        session=request.value("session").toString();key=request.value("key").toString();node=request.value("nodeId").toString();transport=request.value("transport").toString();
+                        session=request.value("session").toString();key=request.value("key").toString();node=request.value("nodeId").toString();transport=request.value("transport").toString();revision=1;
                         if(guard)respond(guard,request,status());
                     });return;
+                }
+                if(operation=="updateTopology"){
+                    if(!advertiseOptions||request.value("session")!=session||request.value("expectedRevision").toString()!=QString::number(revision)){respond(socket,request,{{"ok",false},{"error","invalid topology ownership/revision"}});return;}
+                    configuredTopology=request.value("topology").toObject();++revision;respond(socket,request,status());return;
                 }
                 if(operation=="protocol"){
                     ++protocolCommands;lastProtocolArgs=request.value("args").toObject();auto reply=status();
@@ -147,7 +152,7 @@ private:
     QJsonObject status() const {
         QJsonObject result{{"ok",true},{"protocol","obrii-mesh-node"},{"version",version},{"instanceId",instance},
             {"listening",true},{"active",!session.isEmpty()},{"session",session},{"nodeId",node},{"transport",transport},{"results",mockEvents}};
-        if(advertiseOptions){result["portBindingsVersion"]=1;result["perLinkBearers"]=true;result["nativeProtocols"]=QJsonArray{"lab","meshtastic","reticulum"};result["availableModems"]=modems;result["availableBearers"]=QJsonArray{"data","iq"};}
+        if(advertiseOptions){result["topologyRevision"]=QString::number(revision);result["liveTopologyVersion"]=1;result["portBindingsVersion"]=1;result["perLinkBearers"]=true;result["nativeProtocols"]=QJsonArray{"lab","meshtastic","reticulum"};result["availableModems"]=modems;result["availableBearers"]=QJsonArray{"data","iq"};}
         if(!mockNative.isEmpty())result["nativeProtocol"]=mockNative;if(!mockPorts.isEmpty())result["ports"]=mockPorts;return result;
     }
     static void respond(QTcpSocket *socket,const QJsonObject &request,QJsonObject response){
@@ -264,7 +269,7 @@ int main(int argc,char **argv){
         if(isState(dialog,"attached")){
             const auto ownSession=a.status().value("session").toString();
             Mesh::RemoteDialog contender(project());initialize(contender,services);click(contender,"remoteStart");
-            check(waitFor([&]{return isState(contender,"idle");})&&a.status().value("session")==ownSession&&b.status().value("session")==ownSession&&c.status().value("session")==ownSession,
+            check(waitFor([&]{return isState(contender,"attached")&&!contender.findChild<QLabel *>("remoteErrorLabel")->text().isEmpty();})&&a.status().value("session")==ownSession&&b.status().value("session")==ownSession&&c.status().value("session")==ownSession,
                 "busy endpoints are rejected without stealing or releasing the existing owner");
             auto id=dialog.findChild<QLineEdit *>("remotePacketId");auto input=dialog.findChild<QLineEdit *>("remotePayloadInput");auto ttl=dialog.findChild<QSpinBox *>("remoteTtl");
             id->setText("remote_data");input->setText("REMOTE DATA");click(dialog,"remoteSend");
@@ -305,7 +310,8 @@ int main(int argc,char **argv){
     }
     {
         Mesh::RemoteDialog unauthorized(project());initialize(unauthorized,services);unauthorized.findChild<QLineEdit *>("remoteToken_B")->setText("wrong-token");
-        click(unauthorized,"remoteStart");check(waitFor([&]{return isState(unauthorized,"idle");})&&allInactive(a,b,c)&&!unauthorized.findChild<QLabel *>("remoteErrorLabel")->text().isEmpty(),"authentication socket-close aborts attach without configuring partial topology");
+        click(unauthorized,"remoteStart");check(waitFor([&]{return isState(unauthorized,"attached")&&a.status().value("active").toBool()&&!b.status().value("active").toBool()&&c.status().value("active").toBool();})&&!unauthorized.findChild<QLabel *>("remoteErrorLabel")->text().isEmpty(),"authentication failure isolates only that endpoint while authorized endpoints stay attached");
+        click(unauthorized,"remoteStop");check(waitFor([&]{return isState(unauthorized,"idle")&&allInactive(a,b,c);}),"partial attach releases only its authorized owned endpoints");
     }
     {
         Mesh::RemoteDialog iq(project());initialize(iq,services);iq.findChild<QComboBox *>("remoteBearer")->setCurrentIndex(1);click(iq,"remoteStart");
@@ -329,17 +335,17 @@ int main(int argc,char **argv){
     {
         DelayedService old;auto configured=one;configured.nodes[0].ports=Mesh::defaultNodePorts();configured.nodes[0].protocol={{"type","meshtastic"}};
         Mesh::RemoteDialog unsupported(configured);initialize(unsupported,{old.credentials()});click(unsupported,"remoteStart");
-        check(waitFor([&]{return isState(unsupported,"idle")&&!unsupported.findChild<QLabel *>("remoteErrorLabel")->text().isEmpty();})&&old.configures==0,"legacy service without port/protocol capabilities is rejected before configuring advanced nodes");
+        check(waitFor([&]{return isState(unsupported,"attached")&&!unsupported.findChild<QLabel *>("remoteErrorLabel")->text().isEmpty();})&&old.configures==0,"legacy service without port/protocol capabilities is isolated before configure");
     }
     {
         DelayedService a,b;auto configured=project();configured.nodes.resize(2);configured.links.resize(1);configured.links[0].bearer="iq";configured.links[0].modem={{"type","lora"}};
         Mesh::RemoteDialog unsupported(configured);initialize(unsupported,{a.credentials(),b.credentials()});click(unsupported,"remoteStart");
-        check(waitFor([&]{return isState(unsupported,"idle")&&!unsupported.findChild<QLabel *>("remoteErrorLabel")->text().isEmpty();})&&a.configures==0&&b.configures==0,"per-link overrides cannot be silently ignored by an old v1 service");
+        check(waitFor([&]{return isState(unsupported,"attached")&&!unsupported.findChild<QLabel *>("remoteErrorLabel")->text().isEmpty();})&&a.configures==0&&b.configures==0,"per-link overrides cannot be silently ignored by old services");
     }
     {
         DelayedService a,b;a.advertiseOptions=b.advertiseOptions=true;a.modems=QJsonArray{"afsk1200"};auto configured=project();configured.nodes.resize(2);configured.links.resize(1);configured.links[0].bearer="iq";configured.links[0].modem={{"type","lora"}};
         Mesh::RemoteDialog unsupported(configured);initialize(unsupported,{a.credentials(),b.credentials()});click(unsupported,"remoteStart");
-        check(waitFor([&]{return isState(unsupported,"idle")&&!unsupported.findChild<QLabel *>("remoteErrorLabel")->text().isEmpty();})&&a.configures==0&&b.configures==0,"LoRa requires an explicit supported modem capability at both endpoints");
+        check(waitFor([&]{return isState(unsupported,"attached")&&!unsupported.findChild<QLabel *>("remoteErrorLabel")->text().isEmpty();})&&a.configures==0,"unsupported LoRa endpoint is isolated without forcing the other endpoint to stop");
     }
     {
         DelayedService service;service.advertiseOptions=true;
@@ -357,7 +363,7 @@ int main(int argc,char **argv){
             check(native.findChild<QTableWidget *>("remotePorts")->rowCount()==2&&native.findChild<QLabel *>("remoteNativeState")->text().contains("!00000100"),"native identity and independently reported ports are visible in separate panels");
             bool replied=false,accepted=false;QJsonObject publicReply;QString error;
             QObject::connect(&native,&Mesh::RemoteDialog::protocolCommandFinished,&app,[&](int,bool ok,const QJsonObject &reply,const QString &){replied=true;accepted=ok;publicReply=reply;});
-            check(native.executeProtocolCommand(0,{{"op","send"},{"text","NATIVE COMMAND"},{"privateKey","COMMAND-PRIVATE-KEY"}},&error)&&waitFor([&]{return replied;})&&accepted&&service.lastProtocolArgs.value("text")=="NATIVE COMMAND"&&publicReply.value("protocolReply").toObject().value("pending").toBool(),"protocol panel sends args asynchronously and decodes wrapped pending command replies");
+            check(waitFor([&]{return native.findChild<QPushButton *>("remoteProtocolSend")->isEnabled();})&&native.executeProtocolCommand(0,{{"op","send"},{"text","NATIVE COMMAND"},{"privateKey","COMMAND-PRIVATE-KEY"}},&error)&&waitFor([&]{return replied;})&&accepted&&service.lastProtocolArgs.value("text")=="NATIVE COMMAND"&&publicReply.value("protocolReply").toObject().value("pending").toBool(),"protocol panel sends args asynchronously and decodes wrapped pending command replies");
             check(omitsSecrets(QJsonDocument(publicReply).toJson(),{"MOCK-PEER-KEY","COMMAND-PRIVATE-KEY","C:/private/python.exe"}),"native command replies are explicitly projected without peer keys or host paths");
             native.findChild<QLineEdit *>("remoteNativeDestination")->setText("!00000101");click(native,"remoteSend");
             check(waitFor([&]{return service.lastSend.value("nativeDestination")=="!00000101"&&native.findChild<QPushButton *>("remoteSend")->isEnabled();}),"native source send carries an explicit nativeDestination without altering the lab send contract");
@@ -405,15 +411,28 @@ int main(int argc,char **argv){
     {
         DelayedService service;service.silent=true;Mesh::RemoteDialog timedOut(one);initialize(timedOut,{service.credentials()});
         QTimer heartbeat;int ticks=0;QObject::connect(&heartbeat,&QTimer::timeout,&app,[&]{++ticks;});heartbeat.start(10);click(timedOut,"remoteStart");
-        check(waitFor([&]{return isState(timedOut,"idle")&&!timedOut.findChild<QLabel *>("remoteErrorLabel")->text().isEmpty();})&&ticks>100&&service.configures==0,"RPC times out at three seconds while the GUI event loop stays responsive");
+        check(waitFor([&]{return isState(timedOut,"attached")&&!timedOut.findChild<QLabel *>("remoteErrorLabel")->text().isEmpty();})&&ticks>100&&service.configures==0,"RPC timeout marks the endpoint unavailable while the GUI and session stay responsive");
     }
     {
         DelayedService service;service.oversized=true;Mesh::RemoteDialog large(one);initialize(large,{service.credentials()});click(large,"remoteStart");
-        check(waitFor([&]{return isState(large,"idle")&&large.findChild<QLabel *>("remoteErrorLabel")->text().contains("128");})&&service.configures==0,"RPC replies over 128 KiB are bounded and rejected");
+        check(waitFor([&]{return isState(large,"attached")&&large.findChild<QLabel *>("remoteErrorLabel")->text().contains("128");})&&service.configures==0,"oversized reply is rejected without globally stopping the controller");
     }
     {
         DelayedService service;service.version=2;Mesh::RemoteDialog future(one);initialize(future,{service.credentials()});click(future,"remoteStart");
-        check(waitFor([&]{return isState(future,"idle")&&!future.findChild<QLabel *>("remoteErrorLabel")->text().isEmpty();})&&service.configures==0,"unsupported protocol version is rejected before configure");
+        check(waitFor([&]{return isState(future,"attached")&&!future.findChild<QLabel *>("remoteErrorLabel")->text().isEmpty();})&&service.configures==0,"unsupported endpoint is isolated before configure");
+    }
+    {
+        Mesh::RemoteDialog saved(one);initialize(saved,{});QString problem;
+        const auto empty=saved.routedDiscoveryConfiguration();
+        QJsonObject config{{"version",1},{"endpoints",QJsonArray{QJsonObject{{"enabled",true},{"role","directory"},{"name","Test directory"},{"host","192.0.2.10"},{"port",17690}}}}};
+        check(saved.findChild<QPushButton *>("remoteDiscoverySettings")&&saved.setRoutedDiscoveryConfiguration(config,&problem),"production dialog saves explicit routed discovery addresses");
+        Mesh::RemoteDialog reopened(one);initialize(reopened,{});
+        QSettings settings(QSettings::defaultFormat(),QSettings::UserScope,"Obrii","ObriiMeshDesigner");settings.sync();
+        check(reopened.routedDiscoveryConfiguration()==config&&QJsonDocument::fromJson(settings.value("meshRemote/routedDiscovery").toByteArray()).object()==config,"saved address book survives reopening and is persisted without credentials");
+        auto invalid=config;invalid["token"]="must-not-be-saved";
+        check(!saved.setRoutedDiscoveryConfiguration(invalid,&problem)&&saved.routedDiscoveryConfiguration()==config,"invalid credential-bearing discovery profile leaves saved addresses unchanged");
+        check(!QJsonDocument(saved.endpointConfiguration()).toJson().contains("Test directory")&&!QJsonDocument(saved.experimentResults()).toJson().contains("Test directory"),"search address book is not silently included in public project or result exports");
+        check(saved.setRoutedDiscoveryConfiguration(empty,&problem),"test restores its isolated search preferences");
     }
     check(allInactive(a,b,c)&&allListening(a,b,c),"all tests leave only inactive, listening test-owned services");
     std::cout<<failures<<" failure(s)"<<std::endl;return failures?1:0;

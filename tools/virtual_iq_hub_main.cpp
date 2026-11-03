@@ -22,6 +22,7 @@
 
 #include <cstdio>
 #include <memory>
+#include <list>
 
 namespace {
 struct Receiver {
@@ -191,7 +192,7 @@ int main(int argc, char **argv) {
     VirtualIqHub hub(settings);
     mediumSettings.defaultRoute = settings.defaultRoute;
     VirtualIqMedium medium(mediumSettings);
-    QList<Receiver> receivers;
+    std::list<Receiver> receivers;
     for (const QString &value : arguments.values("rx")) {
         Receiver receiver;
         const int separator = value.indexOf(QLatin1Char('@'));
@@ -205,7 +206,7 @@ int main(int argc, char **argv) {
             std::fprintf(stderr, "Invalid or excess RX endpoint\n");
             return 2;
         }
-        receivers.append(receiver);
+        receivers.push_back(receiver);
     }
     if (mixing && receivers.size() > 8) {
         std::fprintf(stderr, "Mix mode supports up to 8 RX nodes\n");
@@ -259,6 +260,14 @@ int main(int argc, char **argv) {
         const auto key=QJsonDocument::fromJson(file.readAll(),&parse).object().value("token").toString();
         QString error;
         control=std::make_unique<VirtualIqHubControl>(hub,mixing?&medium:nullptr,scenario.value("links").toArray(),settings.defaultRoute);
+        control->setAddReceiverHandler([&](const QString &id,const QString &host,quint16 port){
+            if(receivers.size()>=size_t(mixing?8:32))return false;
+            for(const auto &receiver:receivers)
+                if(receiver.id==id||(receiver.port==port&&QHostAddress(receiver.host)==QHostAddress(host)))return false;
+            Receiver receiver;receiver.id=id;receiver.host=host;receiver.port=port;
+            // List insertion leaves every existing socket callback's Receiver* stable.
+            receivers.push_back(std::move(receiver));return true;
+        });
         if(parse.error!=QJsonParseError::NoError||!control->listen(quint16(port),key,&error)) {
             std::fprintf(stderr,"Cannot start authenticated loopback hub control\n");return 2;
         }
@@ -474,5 +483,10 @@ int main(int argc, char **argv) {
     std::fprintf(stdout, "Obrii IQ hub listening on %s:%u mode=%s\n", qPrintable(listenHost), listenPort,
                  mixing ? "sample-mix" : "packet-fanout");
     std::fflush(stdout);
-    return app.exec();
+    const int result=app.exec();
+    // Receiver sockets belong to app, which outlives this stable endpoint list.
+    for(auto &receiver:receivers)if(receiver.socket) {
+        receiver.socket->disconnect(&app);receiver.socket->abort();delete receiver.socket;receiver.socket=nullptr;
+    }
+    return result;
 }

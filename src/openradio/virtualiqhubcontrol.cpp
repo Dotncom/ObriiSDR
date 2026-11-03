@@ -67,7 +67,7 @@ QJsonObject VirtualIqHubControl::status() const {
     QJsonArray applied,receivers;
     for(const auto &l:links)applied.append(l);
     for(const auto &id:hub.subscriberIds()) {
-        QJsonObject row{{"id",id}};
+        QJsonObject row=receiverEndpoints.value(id,QJsonObject{{"id",id}});
         if(medium) {
             const auto c=medium->counters(id);
             row.insert("emittedFrames",QString::number(c.emittedFrames));
@@ -99,11 +99,46 @@ QJsonObject VirtualIqHubControl::execute(const QJsonObject &request) {
     if(!target.isEmpty()&&target!=instance)return finish(failure("wrong_instance","Hub instance changed"));
     const auto command=request.value("command").toString();
     if(command=="status")return finish(status());
-    if(command!="setLink")return finish(failure("unknown_command","Unknown hub command"));
-    if(target!=instance)return finish(failure("wrong_instance","setLink requires the current hub instance"));
+    if(command=="getReceiver") {
+        if(target!=instance)return finish(failure("wrong_instance","Receiver queries require the current hub instance"));
+        const auto args=request.value("args").toObject();const auto id=args.value("id").toString();
+        if(args.size()!=1||!virtualSignalValidNodeId(id))return finish(failure("invalid_receiver","Expected a valid receiver ID"));
+        const bool registered=hub.subscriberIds().contains(id);
+        return finish({{"ok",true},{"registered",registered},
+            {"receiver",registered?receiverEndpoints.value(id,QJsonObject{{"id",id}}):QJsonObject{}}});
+    }
+    if(command!="setLink"&&command!="addReceiver")return finish(failure("unknown_command","Unknown hub command"));
+    if(target!=instance)return finish(failure("wrong_instance","Changes require the current hub instance"));
     if(request.value("expectedRevision").toString()!=QString::number(revision))
         return finish(failure("revision_conflict","Refresh hub state before applying this change"));
     const auto args=request.value("args").toObject();
+    if(revision==std::numeric_limits<quint64>::max())return finish(failure("revision_limit","Restart the hub to reset revisions"));
+    if(command=="addReceiver") {
+        const auto id=args.value("id").toString(),host=args.value("host").toString();
+        const auto port=args.value("port");const double p=port.toDouble(-1);
+        QHostAddress address;
+        if(args.size()!=3||!virtualSignalValidNodeId(id)||!address.setAddress(host)||!address.isLoopback()||
+           !port.isDouble()||!std::isfinite(p)||p<1||p>65535||std::floor(p)!=p)
+            return finish(failure("invalid_receiver","Expected a valid node ID, numeric loopback host and port 1..65535"));
+        const auto ids=hub.subscriberIds();
+        if(ids.contains(id))return finish(failure("duplicate_receiver","Receiver ID already exists"));
+        if(ids.size()>=(medium?8:32))return finish(failure("receiver_limit","Receiver capacity reached"));
+        if(!addReceiverHandler)return finish(failure("receiver_unavailable","Live receiver registration is not supported by this host"));
+        // Qt detaches subscriber records, not buffered IQ: QQueue frames and QMap
+        // blocks (including QVector samples) stay COW-shared and are never mutated
+        // by this transaction. All staging dies before the next IQ event runs.
+        auto nextHub=hub;
+        if(!nextHub.addSubscriber(id))return finish(failure("receiver_limit","Fan-out receiver capacity reached"));
+        std::unique_ptr<VirtualIqMedium> nextMedium;
+        if(medium) {
+            nextMedium=std::make_unique<VirtualIqMedium>(*medium);
+            if(!nextMedium->addSubscriber(id))return finish(failure("receiver_limit","Mixer receiver capacity reached"));
+        }
+        if(!addReceiverHandler(id,host,quint16(p)))return finish(failure("receiver_rejected","Host rejected the receiver endpoint"));
+        hub=std::move(nextHub);if(medium)*medium=std::move(*nextMedium);
+        receiverEndpoints.insert(id,args);
+        ++revision;return finish({{"ok",true},{"receiver",args},{"appliesTo","future-published-frames"}});
+    }
     const auto tx=args.value("tx").toString(),rx=args.value("rx").toString();
     const auto gain=args.value("gainDb"),delay=args.value("delayMs"),enabled=args.value("enabled");
     const double d=delay.toDouble(-1),g=gain.toDouble();
@@ -113,7 +148,6 @@ QJsonObject VirtualIqHubControl::execute(const QJsonObject &request) {
         return finish(failure("invalid_link","Invalid link parameters"));
     const auto pair=tx+"/"+rx;
     if(!links.contains(pair)&&links.size()>=1024)return finish(failure("link_limit","At most 1024 links are supported"));
-    if(revision==std::numeric_limits<quint64>::max())return finish(failure("revision_limit","Restart the hub to reset revisions"));
     const VirtualIqLinkSettings value{enabled.toBool(),int(d),float(g)};
     // Validate both paths before mutating either; never copy buffered IQ for control.
     if(!hub.canSetLink(tx,rx,value)||(medium&&!medium->canSetLink(tx,rx,value)))

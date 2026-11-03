@@ -3,6 +3,7 @@ param(
     [switch]$NoArchive,
     [switch]$Incremental,
     [switch]$Lite,
+    [string]$SourceDir = "",
     [string]$DeltaPath = ""
 )
 
@@ -23,6 +24,26 @@ if (-not $OutputFullPath.StartsWith($Workspace, [System.StringComparison]::Ordin
 }
 
 $Stage = Join-Path $ReleaseDir $(if ($Lite) { "ObriiSDR-raspberry-lite-source" } else { "ObriiSDR-raspberry-source" })
+$SourceRoot = $Workspace
+if (-not [string]::IsNullOrWhiteSpace($SourceDir)) {
+    $SourceRoot = (Resolve-Path -LiteralPath (Join-Path $Workspace $SourceDir)).Path
+    $Prefix = $Workspace.TrimEnd([char[]]'\/') + [IO.Path]::DirectorySeparatorChar
+    $SourcePrefix = $SourceRoot.TrimEnd([char[]]'\/') + [IO.Path]::DirectorySeparatorChar
+    $StagePrefix = $Stage.TrimEnd([char[]]'\/') + [IO.Path]::DirectorySeparatorChar
+    if (-not $SourceRoot.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase) -or
+        $SourceRoot -eq $Stage -or $SourceRoot.StartsWith($StagePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        $Stage.StartsWith($SourcePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Path -LiteralPath (Join-Path $SourceRoot 'CMakeLists.txt'))) {
+        throw 'SourceDir must be a separate source snapshot inside the workspace.'
+    }
+    $Current = $SourceRoot
+    while ($Current -ne $Workspace) {
+        if ((Get-Item -LiteralPath $Current -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'SourceDir must not follow a reparse point.'
+        }
+        $Current = Split-Path -Parent $Current
+    }
+}
 if (-not [string]::IsNullOrWhiteSpace($DeltaPath)) {
     if (-not $Incremental -or -not $NoArchive) {
         throw "DeltaPath requires -Incremental -NoArchive"
@@ -72,6 +93,9 @@ function Copy-PackageFile {
 
 $files = git -C $Workspace -c core.quotepath=false ls-files --cached --others --exclude-standard
 $excludePrefixes = @(
+    ".agents/",
+    ".codex/",
+    ".qtcreator/",
     "B210_Project_Firmwire/",
     "android/",
     "new/",
@@ -115,6 +139,9 @@ $excludeExactPaths = @(
 foreach ($file in $files) {
     $normalized = $file -replace "\\", "/"
     $normalizedExact = $normalized.TrimEnd("/")
+    if (-not $normalized.Contains("/") -and $normalized -notin @(
+        '.gitignore', '.gitmodules', 'CMakeLists.txt', 'README.md', 'CHANGELOG.md',
+        'LICENSE', 'THIRD_PARTY_LICENSES.txt', 'translations.json')) { continue }
     if (-not $normalized.Contains("/") -and
         $normalized.EndsWith(".txt", [System.StringComparison]::OrdinalIgnoreCase) -and
         $normalized -ne "CMakeLists.txt" -and
@@ -144,7 +171,7 @@ foreach ($file in $files) {
         continue
     }
 
-    $source = Join-Path $Workspace $file
+    $source = Join-Path $SourceRoot $file
     if (-not (Test-Path -LiteralPath $source)) {
         continue
     }
@@ -155,7 +182,7 @@ foreach ($file in $files) {
 # does not enumerate their contents. Include mbelib-neo explicitly to keep the
 # Raspberry source folder buildable without another network checkout. Omit its
 # repository metadata; only source, build files and license material are needed.
-$MbelibSource = Join-Path $Workspace 'third_party/mbelib-neo'
+$MbelibSource = Join-Path $SourceRoot 'third_party/mbelib-neo'
 if (-not $Lite -and (Test-Path -LiteralPath (Join-Path $MbelibSource 'CMakeLists.txt'))) {
     $MbelibDestination = Join-Path $Stage 'third_party/mbelib-neo'
     Get-ChildItem -LiteralPath $MbelibSource -Recurse -File -Force |
@@ -167,7 +194,7 @@ if (-not $Lite -and (Test-Path -LiteralPath (Join-Path $MbelibSource 'CMakeLists
 }
 
 if (-not $Lite) {
-    $SoftDmrSource = Join-Path $Workspace 'third_party/softdmr'
+    $SoftDmrSource = Join-Path $SourceRoot 'third_party/softdmr'
     if (Test-Path -LiteralPath (Join-Path $SoftDmrSource 'LICENSE')) {
         Get-ChildItem -LiteralPath $SoftDmrSource -Recurse -File -Force |
             Where-Object { $_.FullName -notmatch '[\\/]\.git([\\/]|$)' } |

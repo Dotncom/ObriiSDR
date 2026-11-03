@@ -92,6 +92,14 @@ bool LinkSender::submit(const LinkJob &job,QString *error){
 }
 void LinkSender::setStartAuthorization(std::function<QJsonObject(quint64)> f){d->authorize=std::move(f);}
 int LinkSender::pending() const{return d->queue.size()+(d->socket?1:0);}
-void LinkSender::cancel(){d->timer.stop();d->queue.clear();if(d->socket){auto socket=d->socket;d->socket=nullptr;socket->disconnect(this);socket->abort();delete socket;}d->wave.clear();d->modem.reset();}
+void LinkSender::cancel(const QString &reason){
+    d->timer.stop();QList<QPair<quint64,quint64>> cancelled;
+    if(d->socket&&!d->reported)cancelled.append({d->job.ticket,d->sentSamples});
+    while(!d->queue.isEmpty())cancelled.append({d->queue.dequeue().ticket,0});
+    if(d->socket){auto socket=d->socket;d->socket=nullptr;socket->disconnect(this);socket->abort();delete socket;}
+    d->wave.clear();d->modem.reset();
+    // Shutdown is silent; live link cancellation must retire native/lab tickets.
+    if(!reason.isEmpty())for(const auto &job:cancelled)emit completed(job.first,false,reason,job.second);
+}
 QJsonObject LinkSender::status() const{return {{"tx",d->link.tx},{"rx",d->link.rx},{"txPort",d->link.txPort},{"rxPort",d->link.rxPort},{"bearer",d->link.bearer},{"modem",d->link.modem},{"queued",pending()},{"samples",QString::number(d->totalSamples)}};}
 }

@@ -58,6 +58,9 @@ def wire_check(wire, dr, uplink):
         return
     if kind == 1 and not uplink and len(wire) in (17, 33):
         return
+    if kind == 6 and uplink and ((len(wire) == 19 and wire[1] in (0, 2)) or
+                                (len(wire) == 24 and wire[1] == 1)):
+        return
     if kind not in ((2, 4) if uplink else (3, 5)):
         raise ValueError("Wrong LoRaWAN frame direction")
 

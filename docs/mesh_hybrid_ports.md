@@ -200,6 +200,6 @@ opening a HackRF.
 `lab` selection. `ObriiMeshLoRaWanAdapterSelfTest` covers direct LoRaWAN state
 and timing; `ObriiMeshLoRaWanNodeSelfTest` covers ABP/OTAA DATA/IQ services,
 directional PHY, native ACKs, durable reconfiguration and host-only/physical gates.
-`tools/build_mesh_designer.ps1 -Test` builds and runs all 14 mesh suites. The older
+`tools/build_mesh_designer.ps1 -Test` builds and runs all 19 mesh suites. The older
 three-process, GUI, discovery, pairing and ownership suites remain regressions.
 Passing software tests is not physical SDR, cross-host or Raspberry qualification.

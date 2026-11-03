@@ -208,6 +208,25 @@ int main(int argc,char **argv) {
             const bool applied=waitFor([&]{const auto a=runtime.snapshot("node2").value("applied").toObject();return a.value("audioBandwidthHz").toDouble()==8000&&a.value("modulationType").toInt()==0&&a.value("listeningFrequencyHz").toDouble()==n.listeningHz;});
             check(applied,"live changes confirmed by real CLI");
             if(!applied)std::cerr<<QJsonDocument(runtime.snapshot("node2")).toJson().toStdString()<<'\n'<<events.join('\n').toStdString()<<std::endl;
+            check(runtime.stopSignal("node1",&error)&&waitFor([&]{return !runtime.snapshot("node1").value("txRunning").toBool();}),"live membership stimulus drained");
+            const auto firstPid=runtime.snapshot("node1").value("pid"),thirdPid=runtime.snapshot("node3").value("pid");
+            check(runtime.setNodeEnabled("node2",false,&error)&&waitFor([&]{return runtime.snapshot("node2").value("pid").toDouble()==0;}),"disabling a local node terminates only its workers");
+            check(runtime.state()==Mesh::Runtime::Running&&runtime.snapshot("node1").value("pid")==firstPid&&runtime.snapshot("node3").value("pid")==thirdPid&&runtime.hubSnapshot().value("instanceId")==hubInstance,"disabled node does not restart neighbors or hub");
+            check(waitFor([&]{return runtime.setNodeEnabled("node2",true,&error);})&&waitFor([&]{return runtime.snapshot("node2").value("ready").toBool();}),"disabled local RX explicitly rejoins the same medium");
+            const auto failedPid=runtime.snapshot("node2").value("pid").toDouble();bool killed=false;
+            for(auto child:runtime.findChildren<QProcess *>())if(double(child->processId())==failedPid&&failedPid>0){child->kill();killed=true;break;}
+            check(killed&&waitFor([&]{return runtime.snapshot("node2").value("failed").toBool();}),"unexpected owned RX process failure is detected");
+            check(runtime.state()==Mesh::Runtime::Running&&runtime.snapshot("node1").value("pid")==firstPid&&runtime.snapshot("node3").value("pid")==thirdPid,"failed RX does not tear down healthy local branches");
+            check(waitFor([&]{return runtime.setNodeRunning("node2",true,&error);})&&waitFor([&]{return runtime.snapshot("node2").value("ready").toBool();}),"explicit RX restart recovers failed local node without automatic TX");
+            auto fourth=project.nodes.last();fourth.id="node4";fourth.name="Live fourth";
+            check(runtime.addNode(fourth,library,&error)&&waitFor([&]{return runtime.snapshot("node4").value("registered").toBool();}),"new local receiver registers with live authenticated hub");
+            check(!runtime.snapshot("node4").value("enabled").toBool()&&runtime.snapshot("node4").value("pid").toDouble()==0,"new local node starts disabled without implicit RX or TX");
+            check(!runtime.addNode(fourth,library,&error),"duplicate local live node rejected without changing hub");
+            auto fourthLink=project.links.first();fourthLink.rx="node4";
+            check(waitFor([&]{return runtime.applyLink(fourthLink,&error);})&&waitFor([&]{return !runtime.hubSnapshot().value("pending").toBool()&&appliedLink(runtime,"node1","node4").value("enabled").toBool();}),"new local live link acknowledged without restarting hub");
+            check(runtime.setNodeEnabled("node4",true,&error)&&waitFor([&]{return runtime.snapshot("node4").value("ready").toBool();}),"explicit enable starts appended local RX");
+            check(runtime.testSignal("node1",&error)&&waitFor([&]{return runtime.snapshot("node4").value("applied").toObject().value("samples").toDouble()>0;}),"appended receiver gets real IQ over newly added link");
+            check(runtime.hubSnapshot().value("instanceId")==hubInstance&&runtime.snapshot("node1").value("pid")==firstPid&&runtime.snapshot("node3").value("pid")==thirdPid,"live local append preserves unaffected process identities");
             runtime.stop();check(waitFor([&]{return runtime.state()==Mesh::Runtime::Idle;},8000)&&runtime.ownedProcessCount()==0,"stop cleans up all owned processes including TX");
             auto remote=project;remote.nodes[0].presetId="pi5";check(!runtime.start(remote,library,&error)&&runtime.ownedProcessCount()==0,"remote launch explicitly unavailable before creating processes");
             check(runtime.start(project,library,&error)&&waitFor([&]{return runtime.state()==Mesh::Runtime::Running;}),"session can restart with fresh endpoints");

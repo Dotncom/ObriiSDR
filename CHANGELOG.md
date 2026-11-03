@@ -1,5 +1,24 @@
 # Changelog
 
+## 8.2.0 - 2026-11-03
+
+- Include the Debian/Raspberry Codec2 development dependency needed by M17 voice.
+- Add saved routed-discovery endpoints, bounded TCP fallback and an opt-in,
+  metadata-only node directory with authenticated renewal and expiring records.
+  Discovery never enables RF or silently scans arbitrary VPN ranges.
+- Extend modeled EU868 LoRaWAN with 1.1 OTAA/ABP and unicast Class B/C,
+  implicit-header beacons, durable counters/keys, modeled receive scheduling,
+  independent reference vectors and paired DATA/IQ regression scenarios.
+  Physical timing, automatic rejoin/roaming, multicast and FUOTA remain unqualified.
+- Fix GCC/ARM Qt-container overload ambiguity in mesh IQ modulation and explicit
+  64-bit timing comparisons in the LoRaWAN adapter. Verify registered DATA
+  exchange, directed discovery and live link changes across Windows/ARM64 VPN hosts.
+- Keep healthy distributed mesh nodes running when another endpoint fails.
+  Add live node enable/join, append-only nodes, link changes and revision-guarded
+  topology updates without resetting unrelated sessions, counters or queues.
+- Isolate local virtual-node failures and allow bounded live receiver registration
+  with a stable IQ-hub endpoint list; never automatically restart a transmitter.
+
 ## 8.1.0 - 2026-11-03
 - Add opt-in offline FFT plan/thread tuning with machine-specific, checksummed
   wisdom caches, stopped-receiver UI gating and a device-free CLI command.

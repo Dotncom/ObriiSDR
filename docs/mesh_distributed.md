@@ -65,6 +65,10 @@ there is no background mesh DSP while it is stopped.
 
 ### LAN Discovery And Registration
 
+For routed LANs or VPNs, see [saved addresses, TCP fallback and the optional
+node directory](mesh_vpn_discovery.md). These use explicitly configured IPs and
+the existing mesh TCP listener; they do not require broadcast forwarding.
+
 Start the optional node service on each participating GUI/CLI instance first.
 Normal Obrii instances with no mesh service enabled do not advertise or open a
 network-control port automatically. In the distributed window press Search:
@@ -125,14 +129,46 @@ path and exact binary payload.
 Per-node queue, TX/RX, forwarding, delivery/drop and IQ-sample counters distinguish
 transport from application delivery. A hop's transport acceptance is not an
 end-to-end ACK. Failures do not automatically retry or create routes absent from
-the installed graph. Edit/reconnect the experiment to change its static topology.
+the installed graph. Live edits install a revised known graph at each host.
 For native adapters, use the Protocol tab's typed `op` commands and native
 addresses, not laboratory TTL/path semantics. Meshtastic PSK/PKI and RNS proofs
 remain native; LoRaWAN commands address the provisioned device/network session,
 not a mesh destination. Native events do not fabricate visited graph paths.
-The first controller is fail-closed: loss of an attached endpoint aborts and
-releases its run. Independent degraded-node execution, live topology repair and
-resilience experiments without stopping other participants remain future work.
+Loss of one endpoint now marks that node unavailable; it does not release other
+nodes. The controller distributes an effective topology that excludes unavailable
+or explicitly disabled participants. Laboratory routes use the remaining known
+graph; native adapters keep their own protocol routing semantics. Packets are not
+fabricated or automatically replayed after an unconfirmed send.
+
+While attached, the main canvas can append nodes and add links. New nodes are
+disabled until explicitly assigned an address/credential and enabled. The
+connection table has per-node enable checkboxes; the Links tab has per-link
+checkboxes. Host/protocol/RF-port settings of retained nodes remain immutable.
+Disable an unavailable row before editing its endpoint; healthy rows stay locked.
+Disabled rows can be reassigned without editing healthy rows. A changed
+service instance requires a fresh explicit assignment/credential; no owner is
+silently displaced. A temporary connection loss can recover the same owned,
+pinned instance, but cannot auto-configure another process.
+
+Each host advertises `liveTopologyVersion: 1` and returns a decimal-string
+`topologyRevision`. The authenticated owner can send `op: updateTopology` with
+its `instanceId`, `session`, `expectedRevision`, full `topology` and `peers`.
+Wrong ownership, stale revisions, changed local ports/protocol, duplicate peer
+identities or invalid topology are rejected without modifying the active plan.
+Existing node order/IDs must be retained; append up to eight nodes, or disable
+them. This preserves the compact IQ path-index contract. Stop before removing,
+reordering or changing the local PHY/protocol bindings.
+
+Updates are acknowledged per host, not atomically across the LAN. During
+convergence, changed routes can drop traffic. Send controls wait for the source's
+current topology acknowledgment. Only affected sender queues/peer decoders are
+cancelled; unrelated pending work, native identity and cumulative counters survive.
+Deferred native reception has session/link epoch guards against late callbacks.
+An explicit rejoin starts a fresh local protocol session/cursor, while controller
+history remains available. The existing per-node 15-second owner lease still
+applies if the controller itself disappears. RF authorization is never renewed
+remotely; disabling/rejoining a physical-TX node needs the host's normal local
+arming policy. Global Stop/close still releases the whole owned experiment.
 One-second status polls use a per-node result cursor, so unchanged payload history
 is not repeatedly transferred across a slow VPN. Eviction counters remain visible.
 The cursor is session-scoped and resets after reconfiguration. Result localMs
@@ -217,5 +253,9 @@ IQ round trips, dynamic directional PHY, host-only callback rejection,
 physical-port rejection and persistent reconfiguration. The isolated build
 script's `-Test` builds and runs all mesh suites; see
 [build and test](mesh_designer.md#build-and-test-without-disturbing-the-main-build).
-Cross-device Windows/Linux/VPN behavior still requires testing on those devices;
-the Windows process test is not an ARM or real-RF qualification.
+A bounded Windows CLI / Linux ARM64 NodeHost VPN smoke test also verified client
+registration, exact binary DATA exchange in both directions, directed production
+UDP discovery from either host, live link disable/restore and preserved sessions
+and counters. Broadcast discovery did not cross the routed VPN; configured-IP
+probes worked. This is not qualification of high-rate IQ, RF, timing or every
+VPN/firewall configuration. Broader cross-device tests remain necessary.

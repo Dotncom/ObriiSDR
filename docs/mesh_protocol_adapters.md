@@ -370,7 +370,7 @@ RNS uses the local pinned runtime; the shared LoRa modem supplies PHY work.
 The suite uses QCoreApplication, temporary private state and native byte
 loopback, without GUI or RF. Without runtime arguments Meshtastic still runs
 and Reticulum explicitly reports skipped. `tools/build_mesh_designer.ps1 -Test`
-builds/runs all 14 mesh suites and supplies the local Reticulum runtime when
+builds/runs all 19 mesh suites and supplies the local Reticulum runtime when
 present; it does not install RNS or silently replace a missing runtime.
 
 Coverage includes Meshtastic relay/ACK/retry, early ACK and aggregate-completion

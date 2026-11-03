@@ -85,7 +85,7 @@ Iq fm(const QVector<float> &audio) {
     double phase = 0;
     for (const auto sample : audio) {
         phase = std::remainder(phase + 2 * Pi * 3000 * sample / Mesh::IqModem::Rate, 2 * Pi);
-        iq.append({float(0.35 * std::cos(phase)), float(0.35 * std::sin(phase))});
+        iq.append(std::complex<float>(float(0.35 * std::cos(phase)), float(0.35 * std::sin(phase))));
     }
     iq.resize(((int(iq.size()) + Mesh::IqModem::Rate / 3 + 1023) / 1024) * 1024);
     return iq;
@@ -347,6 +347,11 @@ int main(int argc, char **argv) {
         inverted.insert("payloadCrc", false);
         roundtrip(inverted, 137, 48, 0.25f);
         roundtrip(inverted, 1024, 255, 1);
+        auto beacon=fastLoRa();beacon.insert("sf",9);beacon.insert("preamble",10);beacon.insert("syncWord",52);
+        beacon.insert("payloadCrc",false);beacon.insert("explicitHeader",false);beacon.insert("implicitPayloadBytes",17);
+        roundtrip(beacon,137,17,1);
+        QJsonObject ignored;QString beaconError;auto invalidBeacon=beacon;invalidBeacon.insert("explicitHeader",true);
+        check(!WireModem::normalize(invalidBeacon,&ignored,&beaconError),"explicit LoRa rejects an implicit payload length");
         std::printf("CRC-less inverted PHY preserves native bytes but provides no authentication; upper-layer MIC is required\n");
         discontinuityAndFinite({});
         discontinuityAndFinite(fastLoRa());

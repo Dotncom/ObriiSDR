@@ -18,6 +18,7 @@ struct Node {
     QJsonObject json() const;
     QJsonArray ports;
     QJsonObject protocol;
+    bool enabled = true;
 };
 struct Link {
     QString tx, rx;

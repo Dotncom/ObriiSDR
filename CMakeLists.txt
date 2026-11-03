@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 8.1.0)
+project(ObriiSDR VERSION 8.2.0)
 enable_testing()
 
 set(CMAKE_CXX_STANDARD 17)

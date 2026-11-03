@@ -1,5 +1,5 @@
 Obrii SDR third-party components
-Version: 7.0.0
+Version: 8.2.0
 
 Obrii SDR is published as a GPL project. The repository root
 contains the GNU General Public License version 2 text in LICENSE.

@@ -42,7 +42,7 @@ QVector<std::complex<float>> IqModem::modulate(const QByteArray &wire,QString *e
     const auto bytes=Ax25Codec::encodeUiFrame(frame,false,error);if(bytes.isEmpty())return {};
     const auto audio=Ax25Afsk1200::modulate(bytes,Rate,24,error);if(audio.isEmpty())return {};
     QVector<std::complex<float>> iq;iq.reserve(audio.size()+Rate/3+1024);double phase=0;
-    for(float sample:audio){phase=std::remainder(phase+2*Pi*Deviation*sample/Rate,2*Pi);iq.append({float(0.35*std::cos(phase)),float(0.35*std::sin(phase))});}
+    for(float sample:audio){phase=std::remainder(phase+2*Pi*Deviation*sample/Rate,2*Pi);iq.append(std::complex<float>(float(0.35*std::cos(phase)),float(0.35*std::sin(phase))));}
     // A zero-IQ quiet tail lets RX squelch terminate its bounded burst.
     const int count=((iq.size()+Rate/3+1023)/1024)*1024;iq.resize(count);return iq;
 }

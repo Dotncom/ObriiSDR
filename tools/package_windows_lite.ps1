@@ -74,7 +74,7 @@ foreach ($relative in $files + $optional) {
     }
 }
 Copy-Item -LiteralPath (Join-Path $Workspace 'docs/lite_windows_package.md') -Destination (Join-Path $output 'README-LITE.md')
-$publicDocs = @('fft_tuning.md', 'phosphor_contours.md', 'obrii_cli.md', 'cli_parity.md', 'shared_runtime_core.md',
+$publicDocs = @('mesh_vpn_discovery.md', 'fft_tuning.md', 'phosphor_contours.md', 'obrii_cli.md', 'cli_parity.md', 'shared_runtime_core.md',
     'shared_fft_core.md', 'shared_recording_core.md', 'command_dispatcher.md',
     'command_console.md', 'command_control_api.md', 'cli_doctor.md',
     'cli_runtime_recording.md', 'cli_calibration.md', 'cli_digital_profiles.md',

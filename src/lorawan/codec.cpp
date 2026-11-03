@@ -36,15 +36,30 @@ Bytes block0(Direction dir, std::uint32_t address, std::uint32_t counter, std::s
     put(block,address,4); put(block,counter,4); block.push_back(0); block.push_back(std::uint8_t(size));
     return block;
 }
-Bytes crypt(const Bytes &input, const Key &key, Direction dir, std::uint32_t address, std::uint32_t counter) {
+Bytes crypt(const Bytes &input, const Key &key, Direction dir, std::uint32_t address, std::uint32_t counter, unsigned domain=0) {
     Bytes output=input;
     for(std::size_t offset=0; offset<input.size(); offset+=16) {
-        auto ai=block0(dir,address,counter,offset/16+1); ai[0]=1;
+        auto ai=block0(dir,address,counter,offset/16+1); ai[0]=1; ai[4]=std::uint8_t(domain);
         Block block{}; std::copy(ai.begin(),ai.end(),block.begin());
         block=aesEncrypt(key,block);
         for(std::size_t i=0; i<16 && offset+i<input.size(); ++i) output[offset+i]^=block[i];
     }
     return output;
+}
+std::array<std::uint8_t,4> dataMic(const Bytes &wire, const SessionKeys &keys, DataContext context,
+                                  Direction dir, std::uint32_t addr, std::uint32_t counter) {
+    if(keys.version!=Version::V1_0_4 && keys.version!=Version::V1_1) throw Error("Unsupported LoRaWAN version");
+    auto b=block0(dir,addr,counter,wire.size());
+    auto hash=[&](const Key &key, const Bytes &prefix) {
+        auto input=prefix; input.insert(input.end(),wire.begin(),wire.end()); return cmac(key,input);
+    };
+    const auto forwarding=hash(keys.network,b);
+    if(keys.version==Version::V1_0_4) return {forwarding[0],forwarding[1],forwarding[2],forwarding[3]};
+    if(wire[5]&0x20) { b[1]=std::uint8_t(context.confirmedCounter); b[2]=std::uint8_t(context.confirmedCounter>>8); }
+    if(dir==Direction::Uplink) { b[3]=context.txDataRate; b[4]=context.txChannel; }
+    const auto serving=hash(keys.servingIntegrity,b);
+    if(dir==Direction::Downlink) return {serving[0],serving[1],serving[2],serving[3]};
+    return {serving[0],serving[1],forwarding[0],forwarding[1]};
 }
 void validate(const DataFrame &f) {
     const auto dir=direction(f.type);
@@ -79,7 +94,7 @@ JoinRequest decodeJoinRequest(const Bytes &wire, const Key &key) {
     std::reverse_copy(wire.begin()+9,wire.begin()+17,r.devEui.begin()); r.devNonce=std::uint16_t(get(wire,17,2)); return r;
 }
 Bytes encodeJoinAccept(const JoinAccept &a, const Key &key) {
-    if(a.joinNonce>0xffffff || a.netId>0xffffff || !a.devAddr || a.rx1Offset>7 || a.rx2DataRate>15 || a.rxDelay>15)
+    if(a.optNeg || a.joinNonce>0xffffff || a.netId>0xffffff || !a.devAddr || a.rx1Offset>7 || a.rx2DataRate>15 || a.rxDelay>15)
         throw Error("Invalid join accept parameters; LoRaWAN 1.1 OptNeg is not supported");
     Bytes plain{0x20}; put(plain,a.joinNonce,3); put(plain,a.netId,3); put(plain,a.devAddr,4);
     plain.push_back(std::uint8_t(a.rx1Offset<<4|a.rx2DataRate)); plain.push_back(a.rxDelay);
@@ -106,29 +121,37 @@ JoinAccept decodeJoinAccept(const Bytes &wire, const Key &key) {
     if(wire.size()==33) { a.cfList.emplace(); std::copy_n(plain.begin()+13,16,a.cfList->begin()); }
     return a;
 }
-Bytes encodeData(const DataFrame &f, const SessionKeys &keys) {
+Bytes encodeData(const DataFrame &f, const SessionKeys &keys, DataContext context) {
     validate(f); const auto dir=direction(f.type); Bytes wire{std::uint8_t(std::uint8_t(f.type)<<5)};
     put(wire,f.devAddr,4); wire.push_back(std::uint8_t(f.control|f.options.size())); put(wire,f.counter&0xffff,2);
-    wire.insert(wire.end(),f.options.begin(),f.options.end());
+    const bool v11=keys.version==Version::V1_1;
+    const bool appDown=dir==Direction::Downlink && f.port && *f.port>0;
+    const auto options=v11 ? crypt(f.options,keys.networkEncryption,dir,f.devAddr,f.counter,appDown ? 2:1):f.options;
+    wire.insert(wire.end(),options.begin(),options.end());
     if(f.port) {
         wire.push_back(*f.port);
-        const auto payload=crypt(f.payload,*f.port==0 ? keys.network:keys.application,dir,f.devAddr,f.counter);
+        const auto payload=crypt(f.payload,*f.port==0 ? (v11 ? keys.networkEncryption:keys.network):keys.application,dir,f.devAddr,f.counter);
         wire.insert(wire.end(),payload.begin(),payload.end());
     }
-    mic(wire,keys.network,block0(dir,f.devAddr,f.counter,wire.size())); return wire;
+    const auto tag=dataMic(wire,keys,context,dir,f.devAddr,f.counter);
+    wire.insert(wire.end(),tag.begin(),tag.end()); return wire;
 }
-DataFrame decodeData(const Bytes &wire, const SessionKeys &keys, std::uint32_t counter) {
+DataFrame decodeData(const Bytes &wire, const SessionKeys &keys, std::uint32_t counter, DataContext context) {
     const auto type=dataType(wire); header(wire,type,12);
     const auto count=wire[5]&15; const auto end=wire.size()-4;
     if(std::size_t(8+count)>end || get(wire,6,2)!=(counter&0xffff)) throw Error("Truncated FOpts or mismatched FCnt");
     const auto address=get(wire,1,4); const auto dir=direction(type);
-    checkMic(wire,keys.network,block0(dir,address,counter,end));
+    const auto tag=dataMic(Bytes(wire.begin(),wire.end()-4),keys,context,dir,address,counter);
+    std::uint8_t difference=0; for(unsigned i=0;i<4;++i) difference|=tag[i]^wire[end+i];
+    if(difference) throw Error("LoRaWAN MIC mismatch");
     DataFrame f; f.type=type; f.devAddr=address; f.counter=counter; f.control=wire[5]&0xf0;
     f.options.assign(wire.begin()+8,wire.begin()+8+count);
     if(end>std::size_t(8+count)) {
         f.port=wire[8+count]; Bytes body(wire.begin()+9+count,wire.begin()+end);
-        f.payload=crypt(body,*f.port==0 ? keys.network:keys.application,dir,address,counter);
+        f.payload=crypt(body,*f.port==0 ? (keys.version==Version::V1_1 ? keys.networkEncryption:keys.network):keys.application,dir,address,counter);
     }
+    if(keys.version==Version::V1_1)
+        f.options=crypt(f.options,keys.networkEncryption,dir,address,counter,dir==Direction::Downlink && f.port && *f.port>0 ? 2:1);
     validate(f); return f;
 }
 std::uint16_t wireCounter(const Bytes &wire) { const auto type=dataType(wire); header(wire,type,12); return std::uint16_t(get(wire,6,2)); }

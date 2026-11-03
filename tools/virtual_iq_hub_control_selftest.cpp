@@ -34,6 +34,127 @@ VirtualSignalFrame frame(qint64 timestamp) {
     QVector<std::complex<float>> iq(128,{0.25f,-0.25f});
     f.payload=virtualSignalComplexFloat32Payload(iq.constData(),iq.size());return f;
 }
+void receiverRegistrationTest(bool mixing) {
+    VirtualIqHubSettings hs;hs.defaultRoute=false;
+    VirtualIqMediumSettings ms;ms.sampleRate=8000;ms.blockSamples=128;ms.maximumBufferedBlocks=4;
+    ms.playoutDelayMs=10;ms.defaultRoute=false;
+    VirtualIqHub hub(hs);VirtualIqMedium medium(ms);
+    check(hub.addSubscriber("Existing")&&(!mixing||medium.addSubscriber("Existing")),"registration initial receiver");
+    check(hub.setLink("Source","Existing",{})&&(!mixing||medium.setLink("Source","Existing",{})),"registration initial route");
+    const QJsonObject route{{"tx","Source"},{"rx","Existing"},{"enabled",true},{"delayMs",0},{"gainDb",0}};
+    VirtualIqHubControl control(hub,mixing?&medium:nullptr,QJsonArray{route},false);
+    const QString key(64,'b');QString error;
+    check(control.listen(0,key,&error),"registration control starts");
+    QJsonObject envelope{{"version",1},{"id","register"},{"command","status"},{"token",key}};
+    const auto instance=request(control,envelope).value("instanceId");
+    envelope["command"]="addReceiver";envelope["expectedRevision"]="0";
+    QJsonObject endpoint{{"id","New"},{"host","127.0.0.1"},{"port",12001}};
+    auto add=[&](const QJsonObject &args){envelope["args"]=args;return request(control,envelope);};
+    check(add(endpoint).value("errorCode")=="wrong_instance","registration needs explicit current instance");
+    envelope["targetInstanceId"]=instance;
+    check(add(endpoint).value("errorCode")=="receiver_unavailable","registration handler is optional");
+    QMap<QString,QJsonObject> endpoints;endpoints.insert("Existing",{{"host","127.0.0.1"},{"port",12000}});
+    bool reject=true;int calls=0;
+    control.setAddReceiverHandler([&](const QString &id,const QString &host,quint16 port){
+        ++calls;if(reject)return false;
+        for(const auto &value:endpoints)
+            if(value.value("port").toInt()==port&&QHostAddress(value.value("host").toString())==QHostAddress(host))return false;
+        endpoints.insert(id,{{"host",host},{"port",port}});return true;
+    });
+    envelope["token"]="wrong";
+    check(add(endpoint).value("errorCode")=="unauthorized"&&calls==0,"registration stays authenticated");
+    envelope["token"]=key;envelope["expectedRevision"]="9";
+    check(add(endpoint).value("errorCode")=="revision_conflict"&&calls==0,"registration stale revision rejected");
+    envelope["expectedRevision"]="0";
+    for(const auto host:{"localhost","0.0.0.0","192.0.2.1"}) {
+        auto invalid=endpoint;invalid["host"]=host;
+        check(add(invalid).value("errorCode")=="invalid_receiver"&&calls==0,"registration rejects names and non-loopback hosts");
+    }
+    for(const double port:{0.0,65536.0,1.5}) {
+        auto invalid=endpoint;invalid["port"]=port;
+        check(add(invalid).value("errorCode")=="invalid_receiver"&&calls==0,"registration rejects invalid ports");
+    }
+    auto invalid=endpoint;invalid["id"]="tx1";
+    check(add(invalid).value("errorCode")=="invalid_receiver"&&calls==0,"registration rejects reserved source ID");
+    invalid=endpoint;invalid["extra"]=true;
+    check(add(invalid).value("errorCode")=="invalid_receiver"&&calls==0,"registration rejects unknown endpoint fields");
+    auto reply=add(endpoint);
+    check(reply.value("errorCode")=="receiver_rejected"&&reply.value("revision")=="0"&&
+        !hub.subscriberIds().contains("New")&&!medium.canSetLink("Source","New",{}),"host rejection leaves both subscriber models unchanged");
+    if(mixing) {
+        check(medium.addSubscriber("Hidden"),"prepare independent medium rejection");
+        auto hidden=endpoint;hidden["id"]="Hidden";const int before=calls;
+        reply=add(hidden);
+        check(reply.value("errorCode")=="receiver_limit"&&!hub.subscriberIds().contains("Hidden")&&calls==before&&reply.value("revision")=="0","medium rejection cannot partially register fan-out or endpoint");
+    }
+    reject=false;
+    auto duplicateEndpoint=endpoint;duplicateEndpoint["port"]=12000;
+    check(add(duplicateEndpoint).value("errorCode")=="receiver_rejected"&&!hub.subscriberIds().contains("New"),"duplicate endpoint rejected without partial registration");
+    const auto queuedFrame=frame(1000000000LL);const auto payload=queuedFrame.payload.constData();
+    check(hub.publish("Source",queuedFrame,1000)&&(!mixing||medium.publish("Source",queuedFrame,2000000000LL)),"queue existing IQ before receiver registration");
+    reply=add(endpoint);
+    check(reply.value("ok").toBool()&&reply.value("revision")=="1"&&reply.value("instanceId")==instance&&reply.value("receiver").toObject()==endpoint&&endpoints.contains("New"),"receiver registration acknowledged once");
+    const auto queued=hub.takeDue("Existing",1000);
+    check(queued.size()==1&&queued.first().payload.constData()==payload&&(!mixing||medium.takeReady("Existing",2045000000LL).size()==1),"receiver registration preserves queued IQ without copying its payload");
+    envelope["expectedRevision"]="1";const int beforeDuplicate=calls;
+    reply=add(endpoint);
+    check(reply.value("errorCode")=="duplicate_receiver"&&reply.value("revision")=="1"&&calls==beforeDuplicate,"duplicate ID preserves revision and endpoint");
+    envelope["command"]="setLink";auto newRoute=route;newRoute["rx"]="New";envelope["args"]=newRoute;
+    reply=request(control,envelope);
+    check(reply.value("ok").toBool()&&reply.value("revision")=="2","new receiver accepts a new route");
+    check(hub.publish("Source",frame(1016000000LL),1016)&&hub.takeDue("New",1016).size()==1&&
+        (!mixing||(medium.publish("Source",frame(1016000000LL),2016000000LL)&&!medium.takeReady("New",2061000000LL).isEmpty())),"new receiver receives future IQ in active model");
+    envelope["command"]="addReceiver";envelope["expectedRevision"]="2";
+    const int limit=mixing?8:32;
+    for(int i=2;i<limit;++i) {
+        const QJsonObject next{{"id",QString("Live%1").arg(i)},{"host","::1"},{"port",12000+i}};
+        reply=add(next);check(reply.value("ok").toBool(),"numeric IPv6 loopback receiver registered within limit");
+        envelope["expectedRevision"]=reply.value("revision");
+    }
+    auto excess=endpoint;excess["id"]="Excess";excess["port"]=13000;const int beforeLimit=calls;
+    reply=add(excess);
+    check(reply.value("errorCode")=="receiver_limit"&&calls==beforeLimit&&hub.subscriberIds().size()==limit&&reply.value("revision")==envelope.value("expectedRevision"),"mixer/fan-out receiver limit leaves state unchanged");
+}
+void receiverRetryTest() {
+    VirtualIqHub hub;VirtualIqHubControl control(hub,nullptr,{},true);
+    const QString key(64,'c');QString error;
+    check(control.listen(0,key,&error),"retry control starts");
+    QJsonObject envelope{{"version",1},{"id","retry"},{"command","status"},{"token",key}};
+    const auto instance=request(control,envelope).value("instanceId");
+    envelope["targetInstanceId"]=instance;envelope["command"]="getReceiver";envelope["args"]=QJsonObject{{"id","Retry"}};
+    auto reply=request(control,envelope);
+    check(reply.value("ok").toBool()&&!reply.value("registered").toBool()&&reply.value("revision")=="0","retry query proves receiver absent without changing revision");
+    bool reject=true;int calls=0;
+    control.setAddReceiverHandler([&](const QString &,const QString &,quint16){++calls;return !reject;});
+    const QJsonObject endpoint{{"id","Retry"},{"host","127.0.0.1"},{"port",12345}};
+    envelope["command"]="addReceiver";envelope["args"]=endpoint;envelope["expectedRevision"]="0";
+    check(request(control,envelope).value("errorCode")=="receiver_rejected","retry fixture rejects first registration");
+    envelope["command"]="getReceiver";envelope["args"]=QJsonObject{{"id","Retry"}};
+    reply=request(control,envelope);
+    check(reply.value("ok").toBool()&&!reply.value("registered").toBool()&&reply.value("revision")=="0","failed registration can be queried safely before explicit retry");
+    reject=false;envelope["command"]="addReceiver";envelope["args"]=endpoint;
+    // Deliberately discard the acknowledgement after the host accepted the endpoint.
+    {
+        QTcpSocket lost;
+        QObject::connect(&lost,&QTcpSocket::connected,&lost,[&]{lost.write(QJsonDocument(envelope).toJson(QJsonDocument::Compact)+'\n');});
+        lost.connectToHost(QHostAddress::LocalHost,control.port());
+        check(waitFor([&]{return calls==2;}),"explicit retry accepted while its acknowledgement is discarded");lost.abort();
+    }
+    envelope["command"]="getReceiver";envelope["args"]=QJsonObject{{"id","Retry"}};
+    reply=request(control,envelope);
+    check(reply.value("ok").toBool()&&reply.value("registered").toBool()&&reply.value("receiver").toObject()==endpoint&&reply.value("revision")=="1"&&calls==2,"lost registration acknowledgement reconciles exact endpoint without another add");
+    auto other=endpoint;other["port"]=12346;
+    check(reply.value("receiver").toObject()!=other,"reconciliation distinguishes a different endpoint for the same ID");
+    envelope["targetInstanceId"]="obsolete";
+    check(request(control,envelope).value("errorCode")=="wrong_instance","receiver reconciliation rejects stale hub identity");
+    envelope["targetInstanceId"]=instance;envelope["token"]="wrong";reply=request(control,envelope);
+    check(reply.value("errorCode")=="unauthorized"&&!reply.contains("receiver"),"receiver reconciliation cannot expose endpoint without authentication");
+    envelope["token"]=key;envelope["args"]=QJsonObject{{"id","tx1"}};
+    check(request(control,envelope).value("errorCode")=="invalid_receiver","receiver query validates ID");
+    check(hub.addSubscriber("Untracked"),"prepare receiver without verified host endpoint");
+    envelope["args"]=QJsonObject{{"id","Untracked"}};reply=request(control,envelope);
+    check(reply.value("registered").toBool()&&!reply.value("receiver").toObject().contains("host"),"untracked receiver never supplies fabricated endpoint proof");
+}
 }
 int main(int argc,char **argv) {
     QCoreApplication app(argc,argv);
@@ -95,5 +216,7 @@ int main(int argc,char **argv) {
     check(waitFor([&]{return oversized.state()==QAbstractSocket::ConnectedState;}),"oversized client connects");
     oversized.write(QByteArray(65537,'x'));
     check(waitFor([&]{return oversized.state()==QAbstractSocket::UnconnectedState;}),"oversized request bounded");
+    receiverRegistrationTest(true);receiverRegistrationTest(false);
+    receiverRetryTest();
     return 0;
 }

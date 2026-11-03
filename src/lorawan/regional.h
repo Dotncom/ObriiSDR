@@ -25,6 +25,7 @@ struct Eu868 {
     bool repeaterCompatible=false;
     bool adrEnabled=true;
     std::uint32_t adrAckCount=0;
+    std::uint8_t adrAckLimitExp=6,adrAckDelayExp=5;
     Bytes stickyAnswers;
     Eu868();
     void validate() const;

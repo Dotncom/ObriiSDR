@@ -2,6 +2,10 @@
 #include <utility>
 
 namespace obrii::lorawan {
+obrii::lora::Config beaconPhyConfig(int os) {
+    auto c=phyConfig(3,Direction::Uplink,os);c.explicitHeader=false;c.implicitPayloadBytes=17;
+    c.preambleSymbols=10;c.payloadCrc=false;c.validate();return c;
+}
 obrii::lora::Config phyConfig(unsigned rate, Direction dir, int oversampling) {
     if(dir!=Direction::Uplink && dir!=Direction::Downlink) throw Error("Invalid radio direction");
     obrii::lora::Config c;
@@ -15,7 +19,8 @@ LoRaBearer::LoRaBearer(unsigned rate, Direction dir, int os, bool repeater)
 bool LoRaBearer::valid(const Bytes &wire) const {
     if(wire.size()<12 || wire.size()>Eu868::maxMacPayload(rate_,repeater_)+5 || (wire[0]&31)) return false;
     const auto type=wire[0]>>5;
-    if(direction_==Direction::Uplink) return type==0 ? wire.size()==23:type==2 || type==4;
+    if(direction_==Direction::Uplink) return type==0 ? wire.size()==23:type==6 ?
+        ((wire.size()==19 && (wire[1]==0 || wire[1]==2)) || (wire.size()==24 && wire[1]==1)):type==2 || type==4;
     return type==1 ? wire.size()==17 || wire.size()==33:type==3 || type==5;
 }
 obrii::lora::Iq LoRaBearer::modulate(const Bytes &wire, float amplitude) const {

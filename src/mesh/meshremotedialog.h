@@ -16,11 +16,23 @@ public:
     bool setEndpointConfiguration(const QJsonObject &,QString *error=nullptr);
     QJsonObject experimentResults() const;
     bool searchInstances(QString *error=nullptr);
+    QJsonObject routedDiscoveryConfiguration() const;
+    bool setRoutedDiscoveryConfiguration(const QJsonObject &,QString *error=nullptr);
     QList<QJsonObject> discoveredInstances() const;
     bool assignDiscoveredInstance(int row,const QJsonObject &,QString *error=nullptr);
     bool registerDiscoveredInstance(int row,const QJsonObject &,const QString &code,QString *error=nullptr);
     bool executeProtocolCommand(int row,const QJsonObject &args,QString *error=nullptr);
+    bool sessionActive() const;
+    void stopSession();
+    bool canEditTopology() const;
+    QJsonObject nodeState(const QString &) const;
+    bool updateProject(const Project &,QString *error=nullptr);
+    bool setNodeEnabled(const QString &,bool,QString *error=nullptr);
+    bool setLinkEnabled(const QString &,const QString &,bool,QString *error=nullptr);
+    Project currentProject() const;
 signals:
+    void projectChanged();
+    void sessionStateChanged();
     void discoveryFinished();
     void instanceRegistrationFinished(int row,bool ok,const QString &error);
     void protocolCommandFinished(int row,bool ok,const QJsonObject &reply,const QString &error);

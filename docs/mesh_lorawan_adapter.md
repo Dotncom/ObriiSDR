@@ -2,14 +2,14 @@
 
 `src/mesh/meshlorawanadapter.cpp` implements
 `Mesh::makeLoRaWanAdapter(QObject *)` against `ProtocolAdapter`.
-It carries native LoRaWAN 1.0.x PHYPayload bytes directly, with no Obrii,
+It carries native LoRaWAN 1.0.4 / 1.1 PHYPayload bytes directly, with no Obrii,
 Reticulum, Meshtastic, AX.25 or mesh-routing wrapper.
 
 ## Supported Mode
 
 NodeService instantiates this adapter for `protocol.type: "lorawan"`; the
 shared `ObriiMeshNode` target already links `ObriiLoRaWAN`. It supports one
-provisioned EU868 device/network pair, ABP or OTAA, Class A over virtual DATA
+provisioned EU868 device/network pair, ABP or OTAA, unicast Class A/B/C over virtual DATA
 or actual LoRa IQ. This is not mesh routing, a multi-device network server or
 a certified radio MAC. Physical LoRaWAN RX/TX is rejected, even with local RF
 permissions, until qualified timestamped SDR integration exists.
@@ -41,6 +41,8 @@ Common profile fields:
 | --- | --- |
 | `role` | `device` or `network` |
 | `activation` | `abp` or `otaa` |
+| `version` | `1.0.4` (default) or `1.1` |
+| `deviceClass` | `A` (default), `B` or `C`; actual class follows negotiation/clock readiness |
 | `interfaceId` | Optional; defaults to the one host interface, or `radio` without a host list |
 | `initializeState` | Defaults false; explicit `true` is required to provision new state |
 
@@ -48,6 +50,14 @@ ABP requires `devAddr` (8 hexadecimal digits or a nonzero uint32),
 `nwkSKeyHex` and `appSKeyHex` (32 hexadecimal digits each). Optional
 `initialFCntUp`/`initialFCntDown` are 0..65535; restored state always wins.
 Subsequent full 32-bit counter reconstruction/rollover is handled by `Session`.
+
+For **1.1 ABP**, replace `nwkSKeyHex` with explicit `fNwkSIntKeyHex`,
+`sNwkSIntKeyHex`, `nwkSEncKeyHex`; keep `appSKeyHex` and `devAddr`.
+`initialFCntDown` initializes NFCntDown; optional `initialAFCntDown` initializes
+AFCntDown (0..65535, restored state wins). A 1.1 OTAA profile requires
+`nwkKeyHex` **and** `appKeyHex` plus the same EUIs. Root/session key fields
+cannot be mixed. Version is bound into private state identity; changing versions
+does not reuse an old session or reset its counters. Old 1.0.4 state is readable.
 
 OTAA requires `joinEuiHex` and `devEuiHex` (16 hexadecimal digits each), and
 `appKeyHex` (32 hexadecimal digits). The single-device network role additionally
@@ -75,6 +85,12 @@ value establishes physical-radio timing accuracy. Other timing settings are
 `rxContextMaxAgeMs` (1..120000, default 10000) and
 `txCompleteTimeoutMs` (1000..180000, default 120000).
 Unknown fields, wrong types and unsupported combinations are rejected.
+
+Class B settings: `pingPeriodicity` 0..7 (default7), `pingDataRate` 0..6
+(default3), `pingFrequencyHz`/`beaconFrequencyHz` (default869525000), and
+`clockErrorPpm` 0..1000 (default20). The clock tolerance is shared with the
+host capture windows. Beacon PHY is fixed to EU868 SF9/BW125; ping PHY follows
+the configured data rate. Class C RXC uses `rx2FrequencyHz`/`rx2DataRate`.
 
 ## Durable State
 
@@ -123,13 +139,37 @@ All commands use `op`. Errors return `{ "ok": false, "error": "..." }`.
 - `join`: OTAA device only, before activation. Enqueues a native JoinRequest.
 - `send`: Activated device/network; exactly one of `text` or canonical padded
   `payloadBase64`, optional `port` (1..223, default 1), and boolean `confirmed`.
-  Network sends wait for an authenticated uplink's Class A window.
+  Network sends use an authenticated uplink's Class A window, a negotiated
+  Class B ping slot, or the active Class C RXC channel.
 - `repeat`: Activated device only, idle queue/transport, and only while the
-  module permits another NbTrans copy. Reuses exact native ciphertext/FCnt/MIC.
+  module permits another NbTrans copy. Reuses ciphertext/FCnt; 1.1 MIC follows
+  actual DR/channel. For 1.0.4 all native bytes are identical.
 - `send_mac`: Network only, canonical `macBase64`. Currently supports only
-  LinkCheckAns, DevStatusReq and DeviceTimeAns. Regional parameter negotiations
+  LinkCheckAns, DevStatusReq, DeviceTimeAns and (1.1) ADRParamSetupReq. Regional parameter negotiations
   are rejected because network-side negotiation tracking is not implemented.
 - `cancel`: Cancels queued requests, not an already emitted native transmission.
+- `set_class`: Idle activated device/network pair; `class: "A"`, `"B"` or `"C"`.
+  Optional `periodicity` applies only to B. Device B first returns to A and
+  negotiates PingSlotInfo before setting its ClassB uplink flag. For 1.1 A/C,
+  DeviceModeInd repeats until matching DeviceModeConf. On the network role this
+  command is explicit out-of-band peer provisioning, useful for 1.0.4 peers;
+  configure both sides consistently. It cannot create beacon synchronization.
+- `beacon`: Network only; aligned `gpsSeconds` (uint32 divisible by128) and
+  optional `ttlMs`. Enqueues one native EU868 beacon at the next eligible step.
+- `beacons`: Network only; `enabled: true, gpsSeconds: 128` starts a modeled
+  GPS/monotonic mapping at the current host time and sends periodic beacons
+  every 128 seconds; `enabled: false` stops it. Late slots are skipped, not sent
+  under a fresh timestamp. This scheduler and clock mapping are volatile: restart
+  requires explicit clock provisioning. No OS clock/GPS accuracy is implied.
+
+For example, use the Protocol tab on an activated device to send
+`{"op":"set_class","class":"B","periodicity":0}` and enable network beacons
+with `{"op":"beacons","enabled":true,"gpsSeconds":128}`. The device must
+receive PingSlotInfoAns and a beacon, then send an uplink announcing ClassB
+before the network uses ping slots. Status reports `requestedClass`, actual
+`deviceClass`, `beaconLocked`, `pingNegotiated`, `nextPingUs`, `version`, and the
+separate 1.1 application downlink counter. Existing `send` queues work in all
+classes; Class C can send downlinks without a fresh uplink opportunity.
 
 `rx_context` and `tx_started` are **host-only callbacks**, not application
 commands. NodeService explicitly rejects both through remote `op: "protocol"`,
@@ -164,6 +204,16 @@ the adapter:
   "packetEndMs": 1062
 }
 ```
+
+For an EU868 beacon the host adds `"beacon": true` to `rx_context`, uses data
+rate3 and the configured beacon frequency. Its 17-byte payload is handled by
+the beacon codec before any JoinRequest classification. `tx_plan`/`tx_started`
+advertise `frameKind: "beacon"` and the implicit-header modem configuration.
+NodeService validates/preserves these through both DATA and IQ; external
+applications still cannot submit host timing callbacks. Common CRC is checked;
+beacon events explicitly report `authenticated: false`. Monotonic/GPS continuity
+is checked after initial acquisition, including GPS uint32 wrap. A new mapping
+must not be invented after receiving an inconsistent timestamp.
 
 These describe host-asserted preamble start and packet-end times. Physical
 integration would require actual on-air capture timestamps; the current network
@@ -273,11 +323,30 @@ metadata and capture provenance require separate host integration and testing.
 This is a single-provisioned-device EU868 software adapter, not a full LoRaWAN
 network server or certified MAC/radio stack. It uses the actual module Session,
 OTAA, regional MAC, RX-window, duty and state APIs. There is no mesh routing,
-gateway socket protocol, multi-device database, Class B/C, automatic network
+gateway socket protocol, multi-device database, automatic network
 ADR policy, regional negotiation tracking, confirmed retry policy or automatic
 RF backend. Receiving supported external regional MAC commands on a device is
 delegated to `Eu868::processDownlink`; unsupported network policies are not
 simulated as success.
+
+The 1.1 path includes OTAA/ABP, encrypted FOpts with the counter-domain erratum,
+three network keys, separate NFCntDown/AFCntDown, confirmed-counter MIC binding,
+DR/channel-dependent uplink MIC, Reset/Rekey/DeviceMode exchange, and
+ADRParamSetup. Stateless rejoin 0/1/2 air codecs exist in the module; the adapter
+does not expose automatic rejoin, ForceRejoin/RejoinParam policy, roaming, dual
+old/new security contexts, multicast or FUOTA. Such policies are rejected,
+not acknowledged as completed. This is software interoperability support,
+not a certification claim.
+
+Class B negotiates PingSlotInfo, waits for a valid beacon, advertises the uplink
+ClassB flag, and then schedules unicast ping downlinks independently of Class A
+opportunities. Beacons have reserved/guard priority; ppm drift widens detection
+windows during the maximum two-hour holdover. Lost lock/restart falls back to A
+until beacon reacquisition. Device reception supports PingSlotChannelReq and
+BeaconFreqReq; network-side custom regional negotiation is still not exposed.
+Class C listens on RXC outside TX and the higher-priority RX1 interval. Delayed
+start authorization revalidates Class C RX1 priority and Class B beacon guard;
+an expired opportunity never moves into a different slot.
 
 `ObriiMeshLoRaWanAdapterSelfTest` uses two real adapters, private temporary
 roots, local explicit test credentials and native wires. It checks ABP/OTAA,
@@ -305,3 +374,32 @@ Both suites are already registered in `src/mesh/CMakeLists.txt` and are built
 and run by `tools/build_mesh_designer.ps1 -Test`. They use test-owned local
 services/state and no physical RF; software success is not hardware timing,
 interoperability, regulatory or certification evidence.
+
+Additional scenarios cover unicast B/C for 1.0.4 and 1.1, implicit beacon IQ,
+periodic beacon timing, PingSlotInfo and DeviceMode negotiation, spontaneous
+Class C downlink, ping-only Class B downlink, ACKs, class switch/reboot, and
+OTAA 1.1 Rekey. Paired NodeService tests run 1.1 OTAA and B/C on both DATA and
+IQ without RF. The module's `ObriiLoRaWANBC11SelfTest` independently checks
+2076 external 1.1/Class B vectors and published beacon CRC.
+
+For a Linux/ARM validation snapshot (no RF), build the native module tests and
+these three integration targets. Qt5 Core/Network and the existing OpenSSL
+dependency for the shared mesh library are required; Go is not needed:
+
+```sh
+cmake -S src/lorawan -B build/lorawan-check -DCMAKE_BUILD_TYPE=Release \
+  -DOBRII_LORA_BUILD_TESTS=OFF -DOBRII_LORA_BUILD_TOOLS=OFF
+cmake --build build/lorawan-check -j2
+ctest --test-dir build/lorawan-check --output-on-failure
+cmake -S src/mesh -B build/mesh-lorawan-check -DCMAKE_BUILD_TYPE=Release \
+  -DOBRII_MESH_BUILD_UI=OFF -DOBRII_LORA_BUILD_TESTS=OFF -DOBRII_LORA_BUILD_TOOLS=OFF
+cmake --build build/mesh-lorawan-check -j2 --target \
+  ObriiMeshLoRaWanAdapterSelfTest ObriiMeshLoRaWanNodeSelfTest ObriiMeshWireModemSelfTest
+ctest --test-dir build/mesh-lorawan-check --output-on-failure \
+  -R '^(ObriiMeshLoRaWanAdapterSelfTest|ObriiMeshLoRaWanNodeSelfTest|ObriiMeshWireModemSelfTest)$'
+```
+
+The node suite runs all ten paired scenarios without subset flags. It has a
+600-second aggregate CTest timeout to accommodate real modeled airtime/duty
+waits; individual RPC/window deadlines remain bounded. Each suite creates its
+own temporary credentials/state and stops only its own services.

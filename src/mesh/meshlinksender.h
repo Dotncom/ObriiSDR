@@ -22,7 +22,7 @@ public:
     bool submit(const LinkJob &,QString *error);
     void setStartAuthorization(std::function<QJsonObject(quint64)>);
     int pending() const;
-    void cancel();
+    void cancel(const QString &reason={});
     QJsonObject status() const;
 signals:
     void completed(quint64 ticket,bool sent,const QString &reason,quint64 samples);

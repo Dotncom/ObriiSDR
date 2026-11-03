@@ -17,6 +17,8 @@ int runNodeService(QCoreApplication &app,const QStringList &args) {
     parser.addOption({"credentials-file","Private local startup JSON (includes token); otherwise stdout","path"});
     parser.addOption({"seconds","Stop after this many seconds; 0 = until terminated","seconds","0"});
     parser.addOption({"node-options","Private local JSON: radio RX allowlist, protocol profiles and Reticulum runtime","path"});
+    parser.addOption({"directory","Enable the metadata-only node directory on this mesh service (trusted LAN/VPN only)"});
+    parser.addOption({"directory-client-file","Private JSON: directory host, port, dedicated token, optional advertiseHost","path"});
     parser.addOption({"rf-confirm","Explicitly authorize bounded RF TX profiles from --node-options"});
     parser.addOption({"rf-arm-seconds","RF authorization lifetime, 1..3600 seconds; requires --rf-confirm","seconds","60"});
     auto fail=[](const QString &s){QTextStream(stderr)<<s<<Qt::endl;return 1;};
@@ -27,6 +29,13 @@ int runNodeService(QCoreApplication &app,const QStringList &args) {
     double seconds=parser.value("seconds").toDouble(&valid);if(!valid||!std::isfinite(seconds)||seconds<0||seconds>86400)return fail("Invalid duration 0..86400 seconds");
     QJsonObject options;
     if(parser.isSet("node-options"))options["optionsFile"]=parser.value("node-options");
+    if(parser.isSet("directory"))options["directoryEnabled"]=true;
+    if(parser.isSet("directory-client-file")){
+        QFile file(parser.value("directory-client-file"));QJsonParseError error;
+        if(!file.open(QIODevice::ReadOnly)||file.size()>16384)return fail("Cannot read private directory client configuration (limit 16 KiB)");
+        const auto document=QJsonDocument::fromJson(file.readAll(),&error);if(error.error!=QJsonParseError::NoError||!document.isObject())return fail("Directory client configuration must be a JSON object");
+        options["directoryClient"]=document.object();
+    }
     options["operation"]="start";options["bind"]=parser.value("bind");options["port"]=port;
     NodeService service;auto reply=service.command(options);
     if(!reply.value("ok").toBool())return fail(reply.value("error").toString());

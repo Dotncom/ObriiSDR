@@ -34,6 +34,19 @@ int main(int argc,char **argv){
     for(const auto &e:endpoints){bool found=false;for(const auto &entry:scan.instances())if(entry.value("instanceId")==e.value("instanceId")){found=true;const auto bytes=QJsonDocument(entry).toJson();privateData|=bytes.contains(e.value("token").toString().toUtf8())||bytes.contains(e.value("pairingSecret").toString().toUtf8())||entry.contains("directory");}all&=found;}
     check(all,"broadcast finds every same-PC instance, not only the last UDP listener");
     check(!privateData,"discovery advertises addresses/capabilities but no keys or local paths");
+    {
+        const auto dataId=QUuid::createUuid().toString(QUuid::WithoutBraces),invalidId=QUuid::createUuid().toString(QUuid::WithoutBraces);
+        Mesh::DiscoveryResponder dataOnly([&]{return QJsonObject{{"instanceId",dataId},{"bind","127.0.0.1"},{"port",24590},{"name","Data-only fixture"},{"active",false},{"availableBearers",QJsonArray{"data"}}};});
+        Mesh::DiscoveryResponder invalid([&]{return QJsonObject{{"instanceId",invalidId},{"bind","127.0.0.1"},{"port",24591},{"name","Invalid capability fixture"},{"active",false},{"availableBearers",QJsonArray{"bogus"}}};});
+        check(dataOnly.start()&&invalid.start(),"isolated capability responders share the discovery socket");
+        Mesh::DiscoveryClient capabilities;bool complete=false;QObject::connect(&capabilities,&Mesh::DiscoveryClient::finished,&app,[&]{complete=true;});capabilities.start();
+        check(waitFor([&]{return complete;}),"capability validation search remains bounded");
+        bool matched=false,rejected=true;for(const auto &entry:capabilities.instances()){
+            if(entry.value("instanceId")==dataId)matched=entry.value("availableBearers").toArray()==QJsonArray{"data"};
+            if(entry.value("instanceId")==invalidId)rejected=false;
+        }
+        check(matched&&rejected,"UDP preserves actual bearer capabilities and rejects invalid advertised arrays");
+    }
     const auto endpoint=endpoints[0];const auto client=QUuid::createUuid().toString(QUuid::WithoutBraces);
     auto paired=rpc(endpoint,{{"op","pair"},{"clientId",client},{"clientName","controller one"},{"code",endpoint.value("pairingSecret")}});
     check(paired.value("ok").toBool()&&paired.value("token").toString()!=endpoint.value("token").toString(),"local pairing code grants a distinct client registration token");

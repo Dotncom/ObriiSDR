@@ -8,13 +8,15 @@ inline void registerMeshNodeCommands(CommandDispatcher &dispatcher,QObject *owne
     spec.name="mesh.service";spec.description="Start/status/stop optional mesh node service; RF TX needs a separate local authorization";
     spec.access=CommandDispatcher::Access::Files;
     spec.inputSchema={{"type","object"},{"properties",QJsonObject{
-        {"operation",QJsonObject{{"type","string"},{"enum",QJsonArray{"start","status","stop","revoke","registrations"}}}},
+        {"operation",QJsonObject{{"type","string"},{"enum",QJsonArray{"start","status","stop","revoke","registrations","directory-on","directory-off","directory-client"}}}},
         {"clientId",QJsonObject{{"type","string"},{"maxLength",64}}},
         {"allowRadioRx",QJsonObject{{"type","boolean"}}},
         {"radioSources",QJsonObject{{"type","array"},{"maxItems",8}}},
         {"reticulum",QJsonObject{{"type","object"}}},
         {"protocolProfiles",QJsonObject{{"type","object"}}},
         {"radioTxProfiles",QJsonObject{{"type","object"}}},
+        {"directoryEnabled",QJsonObject{{"type","boolean"}}},
+        {"directoryClient",QJsonObject{{"type","object"}}},
         {"optionsFile",QJsonObject{{"type","string"},{"maxLength",4096}}},
         {"protocolStateDirectory",QJsonObject{{"type","string"},{"maxLength",4096}}},
         {"bind",QJsonObject{{"type","string"},{"maxLength",64}}},

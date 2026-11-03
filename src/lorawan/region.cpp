@@ -26,10 +26,12 @@ std::uint64_t multiply(std::uint64_t a, std::uint64_t b) {
 unsigned commandSize(Direction dir, unsigned cid) {
     if(dir==Direction::Uplink) {
         switch(cid) { case 2:return 0; case 3:return 1; case 4:return 0; case 5:return 1;
-            case 6:return 2; case 7:return 1; case 8:return 0; case 9:return 0; case 10:return 1; case 13:return 0; }
+            case 6:return 2; case 7:return 1; case 8:return 0; case 9:return 0; case 10:return 1; case 13:return 0;
+            case 1:case 11:case 15:case 16:case 32:return 1; case 12:case 18:return 0;case 17:case 19:return 1; }
     } else {
         switch(cid) { case 2:return 2; case 3:return 4; case 4:return 1; case 5:return 4;
-            case 6:return 0; case 7:return 5; case 8:return 1; case 9:return 1; case 10:return 4; case 13:return 5; }
+            case 6:return 0; case 7:return 5; case 8:return 1; case 9:return 1; case 10:return 4; case 13:return 5;
+            case 1:case 11:case 12:case 15:case 17:case 32:return 1;case 14:return 2;case 16:return 0;case 18:return 3;case 19:return 3; }
     }
     return 256;
 }
@@ -69,7 +71,7 @@ void Eu868::validate() const {
     (void)maxMacPayload(dataRate,repeaterCompatible); (void)maxMacPayload(rx2DataRate,repeaterCompatible);
     (void)txEirpDbm(txPower);
     if(!nbTrans || nbTrans>15 || dutyExponent>15 || rx1Offset>5 || receiveDelay<1 || receiveDelay>15
-       || !validFrequency(rx2FrequencyHz) || stickyAnswers.size()>242) throw Error("Invalid EU868 settings");
+       || !validFrequency(rx2FrequencyHz) || stickyAnswers.size()>242 || adrAckLimitExp>15 || adrAckDelayExp>15) throw Error("Invalid EU868 settings");
     bool any=false;
     for(const auto &c:channels) {
         if(c.frequencyHz && (!validFrequency(c.frequencyHz) || c.minRate>c.maxRate || c.maxRate>6
@@ -165,6 +167,8 @@ MacResult Eu868::processDownlink(const DataFrame &f, std::uint8_t battery, int s
             answer(result.answers,10,status); answer(next.stickyAnswers,10,status);
         } else if(cid==13) {
             std::array<std::uint8_t,5> time{}; std::copy(p.begin(),p.end(),time.begin()); result.deviceTime=time;
+        } else if(cid==12) {
+            next.adrAckLimitExp=p[0]>>4;next.adrAckDelayExp=p[0]&15;answer(result.answers,12);
         }
     }
     // Answers are small bounded command lists; the host truncates on a command
@@ -187,8 +191,9 @@ std::uint8_t Eu868::onNewUplink() {
     if(!adrEnabled) { adrAckCount=0; return 0; }
     Eu868 next=*this;
     if(next.adrAckCount<std::numeric_limits<std::uint32_t>::max()) ++next.adrAckCount;
-    if(next.adrAckCount>=96) next.txPower=0;
-    if(next.adrAckCount>=128 && (next.adrAckCount-128)%32==0) {
+    const auto limit=1u<<next.adrAckLimitExp,delay=1u<<next.adrAckDelayExp;
+    if(next.adrAckCount>=limit+delay) next.txPower=0;
+    if(next.adrAckCount>=limit+2*delay && (next.adrAckCount-limit-2*delay)%delay==0) {
         if(next.dataRate) --next.dataRate;
         else {
             for(std::size_t i=0; i<3; ++i) next.channels[i].enabled=true;
@@ -199,7 +204,7 @@ std::uint8_t Eu868::onNewUplink() {
         if(!any) for(std::size_t i=0; i<3; ++i) next.channels[i].enabled=true;
     }
     next.validate(); *this=std::move(next);
-    return std::uint8_t(0x80|(adrAckCount>=64 ? 0x40:0));
+    return std::uint8_t(0x80|(adrAckCount>=limit ? 0x40:0));
 }
 std::array<RxWindow,2> receiveWindows(const Eu868 &s, std::uint64_t txEnd, std::uint32_t frequency,
                                     unsigned rate, bool join, std::uint32_t tolerance) {

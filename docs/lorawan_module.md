@@ -1,7 +1,7 @@
 # Окремий модуль LoRaWAN
 
-Версія 0.1.0: **C++17 ядро LoRaWAN 1.0.4**, EU868, функції Class A та адаптер
-LoRa IQ. Підготовлено для майбутніх кінцевих вузлів і мережевої сторони конструктора.
+Версія 0.2.0: **C++17 ядро LoRaWAN 1.0.4 / 1.1**, EU868, unicast Class A/B/C
+та адаптер LoRa IQ. Кінцевий вузол і мережева сторона працюють у конструкторі.
 Додатково є незалежний Python-кодек Semtech UDP v2 для майбутнього gateway-host.
 Модуль можна збирати окремо. Інтеграція в розподілений конструктор Obrii 8.1
 описана в `mesh_lorawan_adapter.md`; Android її не містить. Встановлення,
@@ -22,8 +22,10 @@ LoRa IQ. Підготовлено для майбутніх кінцевих в�
 | Gateway codec | `obrii_lorawan_gateway` | Semtech UDP v2 datagrams, uplink metadata, downlink requests, ACK, uint32 timestamp wrap |
 | Offline tool | `ObriiLoRaWANTool` | Кодування/декодування й ключові тестові операції через stdin без RF/сокетів |
 
-Криптографічні пакети використовують формат LoRaWAN 1.0.x; цільова семантика
-лічильників, повторів і MAC — 1.0.4. Версія 1.1 не підтримується; OptNeg і Rejoin відхиляються.
+Підтримуються LoRaWAN 1.0.4 і явно вибраний 1.1, EU868, unicast Class A/B/C.
+Наявні профілі й збережені blobs 1.0.4 читаються без скидання ключів/лічильників.
+У конструкторі модуль підключений через `src/mesh/meshlorawanadapter.cpp`;
+див. [налаштування адаптера](mesh_lorawan_adapter.md).
 EUI у C++ — 8 байтів у звичайному порядку відображення; на дроті порядок
 перевертається. DevAddr/лічильники/NetID/JoinNonce у структурах — числові значення,
 на дроті — little-endian. Порт 0 шифрується NwkSKey, порти 1..255 — AppSKey.
@@ -224,16 +226,88 @@ UDP ACK повідомляє про transport/scheduling, а не про дос�
 Go cache і build розміщуються лише в `build/lorawan-reference`; глобальне Go-оточення
 не змінюється. Звичайна збірка використовує збережені vectors без Go або мережі.
 
+## LoRaWAN 1.1
+
+`Credentials::version = Version::V1_1` вмикає OTAA з окремими `nwkKey` і
+`appKey`. JoinRequest MIC використовує NwkKey; JoinAccept перевіряє OptNeg,
+JSIntKey, JoinEUI і **саме pending DevNonce**. Downgrade до OptNeg=0 відхиляється:
+для мережі 1.0 слід явно створити профіль 1.0.4. JoinNonce завжди має зростати.
+
+`deriveSessionKeys11` формує FNwkSIntKey (`SessionKeys::network`), SNwkSIntKey
+(`servingIntegrity`), NwkSEncKey (`networkEncryption`) та AppSKey (`application`).
+`deriveJoinServerKeys` формує JSEncKey/JSIntKey. ABP задає всі чотири session keys
+і `SessionKeys::version` явно. Root keys не замінюють session keys.
+
+`encodeData`/`decodeData` приймають `DataContext` з фактичними `txDataRate`,
+`txChannel` і ConfFCnt16. У Session значення ConfFCnt береться зі збереженого
+confirmed-обміну; зовнішній context визначає лише DR/channel. Uplink MIC поєднує
+SNwkSIntKey/FNwkSIntKey; downlink використовує SNwkSIntKey. FOpts шифрується
+NwkSEncKey з окремими доменами NFCntDown/AFCntDown згідно з erratum 2018 року.
+
+Для network role `nextTransmit` — NFCntDown, `nextApplicationTransmit` —
+AFCntDown. Для device role `lastReceived` — NFCntDown, `lastApplicationReceived`
+— AFCntDown; FCntUp лишається окремим у протилежному напрямку. NFCntDown
+використовується без FPort або з FPort=0, AFCntDown — з FPort>0. Обидва домени
+мають незалежні rollover/replay/exhaustion перевірки й зберігаються атомарно.
+`Session::preview` і `inspect` перевіряють кадр без зміни durable state;
+`transmit`/`receive` виконують persistence barrier перед видачею результату.
+
+`repeatUplink(context)` зберігає FCnt і ciphertext, але **перераховує MIC 1.1**
+для фактичного нового DR/channel. Network дедуплікує лише після перевірки MIC
+з цими параметрами й не доставляє MAC/app payload повторно. Для 1.0.4 повтори
+зберігають точні wire bytes. Збережені 1.1 caches містять потрібний MIC context.
+
+`encodeRejoinRequest`/`decodeRejoinRequest` реалізують ефірні типи 0/1/2;
+JoinAccept11 приймає requestType 255/0/1/2 і використовує JSEncKey для rejoin.
+Це низькорівневі функції: **вони не резервують RJcount і не запускають rejoin**.
+Автоматична rejoin/roaming policy та одночасне зберігання старого/нового
+network security context не реалізовані. Адаптер не видає їх за підтримувані.
+
+## Class B і Class C
+
+`classbc.h` містить EU868 beacon codec, `ClassBTracker` і `acceptsClassC`.
+Beacon має 17 bytes, окремі CRC-16 common/gateway частин, GPS seconds modulo
+2^32, крок 128 секунд. Common CRC обов'язкова; пошкоджена gateway CRC не заважає
+стаціонарному вузлу синхронізуватися. **Маяк не має криптографічної автентифікації**.
+
+Ping offset — AES128 з нульовим ключем від GPS time/DevAddr; підтримані всі
+periodicity 0..7 (128..1 ping slots за beacon period). Розклад враховує reserved
+2.120 s, slot quantum 30 ms, guard 3 s, ppm clock drift та двогодинний holdover.
+`allowsTransaction` перевіряє повний TX/RX1/RX2 інтервал; затримана підготовка
+передачі повторно перевіряється хостом. `nextTransaction` знаходить наступний
+інтервал поза beacon reserved/guard. Після restart anchor **не відновлюється**:
+потрібен новий маяк. Після закінчення holdover вузол повертається до Class A.
+
+`beaconPhyConfig` задає SF9/BW125, sync 0x34, preamble10, normal IQ, implicit
+header з фіксованими 17 bytes, без PHY CRC. LoRa IQ modem/Receiver працюють з цим
+профілем. Ping downlink використовує звичайний downlink LoRaWAN PHY, MIC і FCnt.
+
+Class C використовує RX2 frequency/rate як RXC, слухає до/після RX1, але RX1
+має пріоритет. Host виключає TX та накладання прийому/передачі, перевіряє MIC,
+лічильники й зберігає сесію до видачі payload. У конструкторі 1.1 підтримані
+ResetInd/Conf, RekeyInd/Conf, DeviceModeInd/Conf; клас змінюється явною командою.
+Class B використовує PingSlotInfoReq/Ans та uplink ClassB flag; device приймає
+PingSlotChannelReq і BeaconFreqReq. ADRParamSetupReq/Ans підтримані для 1.1.
+
+Додатковий self-test `ObriiLoRaWANBC11SelfTest`: 2076 незалежних Go-векторів
+(1.1 data, FOpts erratum, ACK MIC context, root/session keys, join/rejoin, ping
+offset), опублікований beacon CRC, усі periodicity, holdover/guard, split counters,
+NbTrans з новим каналом, reboot/failure та beacon через implicit LoRa IQ.
+Парні adapter/NodeService self-tests додатково перевіряють робочий scheduler і
+обмін DATA/IQ. [Специфікація 1.1](https://lora-alliance.org/resource_hub/lorawan-specification-v1-1/),
+[FOpts erratum](https://resources.lora-alliance.org/technical-specifications/fopts-encryption-usage-of-fcntdwn-errata-on-the-lorawan-l2-1-1-specification).
+
 ## Межі поточної версії
 
-Це ядро кадрів/сесій і host-driven MAC/PHY helpers. Реальний Class A host повинен
+Це ядро кадрів/сесій і host-driven MAC/PHY helpers. Реальний Class A/B/C host повинен
 з'єднати їх зі сховищем, чергами, hopping, годинником, RX-gating і RF-передачею.
 Автономний scheduler/Network Server service, багатоканальний concentrator,
-роумінг, backend NS/JS/AS, MQTT/Basics Station/TLS, Class B/C, LoRaWAN 1.1,
+роумінг, backend NS/JS/AS, MQTT/Basics Station/TLS,
 мультикаст/FUOTA, FSK/LR-FHSS та інші регіони тут не реалізовані.
 Немає перевірки на фізичному gateway або живій TTN/ChirpStack-мережі.
 Віртуальний обмін та байтова сумісність перевірені; реальний RF і часові допуски
-ще перевіряються після окремого запиту на інтеграцію.
+потребують окремої кваліфікації. Конструктор підтримує модельовані DATA/IQ;
+фізичний LoRaWAN RF залишається вимкненим без перевірених часових міток SDR.
 
 Джерела: [LoRaWAN L2 1.0.4](https://lora-alliance.org/resource_hub/ts001-1-0-4-lorawan-l2-1-0-4-specification/),
 [EU868 Regional Parameters](https://resources.lora-alliance.org/technical-specifications/rp002-1-0-4-regional-parameters),

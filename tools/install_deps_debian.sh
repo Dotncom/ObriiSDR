@@ -19,6 +19,7 @@ sudo apt-get install -y \
     libfftw3-dev \
     libhdf5-dev \
     libssl-dev \
+    libcodec2-dev \
     libusb-1.0-0-dev \
     librtlsdr-dev \
     rtl-sdr \

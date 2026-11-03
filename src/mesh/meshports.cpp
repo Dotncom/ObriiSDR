@@ -50,7 +50,10 @@ bool PortPlan::configure(const QJsonObject &t,const QString &fallback,QString *e
 }
 const LinkBinding *PortPlan::link(const QString &tx,const QString &rx) const {for(const auto &l:links)if(l.tx==tx&&l.rx==rx)return &l;return nullptr;}
 const PortBinding *PortPlan::port(const QString &node,const QString &id,const QString &direction) const {const auto i=bindings.constFind(node);if(i==bindings.cend())return nullptr;for(const auto &p:*i)if(p.id==id&&p.direction==direction)return &p;return nullptr;}
-QVector<LinkBinding> PortPlan::outgoing(const QString &node,const QString &p) const {QVector<LinkBinding> result;for(const auto &l:links)if(l.tx==node&&l.enabled&&(p.isEmpty()||l.txPort==p))result.append(l);return result;}
+QVector<LinkBinding> PortPlan::outgoing(const QString &node,const QString &p) const {
+    QSet<QString> enabled;for(const auto &v:names){const auto n=v.toObject();if(n.value("enabled").toBool(true))enabled.insert(n.value("id").toString());}
+    QVector<LinkBinding> result;for(const auto &l:links)if(l.tx==node&&l.enabled&&enabled.contains(l.tx)&&enabled.contains(l.rx)&&(p.isEmpty()||l.txPort==p))result.append(l);return result;
+}
 QJsonObject PortPlan::routingTopology() const {QJsonArray ls;for(const auto &l:links)ls.append(l.json());return {{"nodes",names},{"links",ls}};}
 QJsonObject PortPlan::topology() const {auto result=routingTopology();QJsonArray ns;for(const auto &v:names){auto n=v.toObject();QJsonArray ps;for(const auto &p:bindings.value(n.value("id").toString()))ps.append(p.json());n["ports"]=ps;n["protocol"]=protocols.value(n.value("id").toString());ns.append(n);}result["nodes"]=ns;return result;}
 }

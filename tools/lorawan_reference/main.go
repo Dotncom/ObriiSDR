@@ -16,6 +16,7 @@ func must(err error) { if err != nil { panic(err) } }
 func text(b []byte) string { if len(b)==0 { return "-" }; return hex.EncodeToString(b) }
 func main() {
     output:=flag.String("output","vectors.tsv","Output test vectors")
+    output11:=flag.String("output11","","Optional LoRaWAN 1.1 vectors")
     flag.Parse()
     file,err:=os.Create(*output); must(err)
     writer:=bufio.NewWriter(file)
@@ -85,4 +86,5 @@ func main() {
     }
     must(writer.Flush()); must(file.Close())
     fmt.Printf("Generated %d independent LoRaWAN vectors\n",count)
+    if *output11!="" { vectors11(*output11) }
 }

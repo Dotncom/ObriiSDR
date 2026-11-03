@@ -510,7 +510,7 @@ server's demodulator to the matching signal first.
 ```bash
 ObriiCli run --backend rtl --device 1 --freq 144.100M --rate 2.048M \
   --decode cw --decode-tone 700 --cw-wpm 18 --cw-selectivity 6 --cw-alphabet both
-ObriiCli client --host 192.168.89.248 --network-port 21090 \
+ObriiCli client --host 192.0.2.10 --network-port 21090 \
   --decode psk31 --decode-tone 1000 --psk-squelch 50 --psk-afc on
 ObriiCli control digital status
 ObriiCli control digital reset
@@ -783,7 +783,7 @@ Alternatively, start the server without a generated script:
 The console client can inspect and control that server without a GUI:
 
 ```bash
-./build/linux-release/ObriiCli client --host 192.168.89.248 --network-port 21090 --spectrum
+./build/linux-release/ObriiCli client --host 192.0.2.10 --network-port 21090 --spectrum
 ./build/linux-release/ObriiCli --control-port 17675 control metrics
 ```
 
@@ -816,7 +816,7 @@ Each window has its own ID, server address, frequency range and dBFS range:
 
 ```bash
 ./build/linux-release/ObriiCli view open both --view-id overview --host 127.0.0.1 --network-port 21090
-./build/linux-release/ObriiCli view open spectrum --view-id narrow --host 192.168.89.248 --network-port 21090 --min-hz 99.8M --max-hz 100.2M --min-db -120 --max-db -20
+./build/linux-release/ObriiCli view open spectrum --view-id narrow --host 192.0.2.10 --network-port 21090 --min-hz 99.8M --max-hz 100.2M --min-db -120 --max-db -20
 ./build/linux-release/ObriiCli view set --view-id narrow --min-hz 99.9M --max-hz 100.1M --paused
 ./build/linux-release/ObriiCli view status --view-id narrow
 ./build/linux-release/ObriiCli view snapshot build/narrow.png --view-id narrow
@@ -1209,7 +1209,18 @@ an isolated local RNS runtime with a default 15-second startup/readiness budget.
 Install private protocol profiles/runtime paths via `--node-options FILE` or
 the local service's `optionsFile`; projects hold only public settings/profile IDs.
 
-LoRaWAN supports one provisioned EU868 device/network pair, ABP/OTAA Class A
+For routed VPNs, Mesh Designer has a saved seed/directory address table, direct
+UDP with bounded TCP fallback and per-instance last-reply/method tooltips.
+`mesh-node --directory` enables an optional metadata-only catalogue. On an
+existing local service use `mesh.service directory-on` / `directory-off`.
+`--directory-client-file PRIVATE.json` enables credentialed 30-second renewal;
+records expire after 90 seconds. The typed `directory-client` operation changes
+this private configuration at runtime; an empty object disables it. No RX/FFT/RF
+is started and directory lookup never grants control. Full configuration and
+security limits: [mesh_vpn_discovery.md](mesh_vpn_discovery.md).
+
+LoRaWAN supports one provisioned EU868 device/network pair, 1.0.4/1.1 ABP/OTAA
+and modeled unicast Class A/B/C. Profiles select `version` and `deviceClass`
 over virtual DATA/IQ. NodeService defaults modeled tolerance to 250 ms and
 reports `timingSource: "simulated-transport"`, `hardwareTimingVerified: false`.
 `rx_context` and `tx_started` are host-only callbacks, rejected as remote

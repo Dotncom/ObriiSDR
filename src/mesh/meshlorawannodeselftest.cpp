@@ -296,9 +296,11 @@ void checkRadioEvents(const QJsonObject &state, const QString &nativeId, bool do
     require(s.value("hardwareTimingVerified").isBool() && !s.value("hardwareTimingVerified").toBool(), "Lab transport claimed qualified hardware timing");
 }
 
-void roundtrip(const QString &bearer, bool otaa) {
+void roundtrip(const QString &bearer, bool otaa,bool v11=false) {
     // ABP omits tolerance to exercise the host default. OTAA explicitly supplies it.
-    Rig rig(profile(false, otaa, otaa ? 250 : -1), profile(true, otaa, otaa ? 250 : -1));
+    auto device=profile(false,otaa,otaa?250:-1),network=profile(true,otaa,otaa?250:-1);
+    if(v11){device.insert("version","1.1");network.insert("version","1.1");device.insert("nwkKeyHex",ApplicationKey);network.insert("nwkKeyHex",ApplicationKey);device.insert("rx2DataRate",4);network.insert("rx2DataRate",4);}
+    Rig rig(device,network);
     rig.configure(topology(bearer));
     const auto blockedStart = rig.protocol(0, {{"op", "tx_started"}, {"ticket", "1"}, {"startMs", 0}});
     const auto blockedContext = rig.protocol(0, {{"op", "rx_context"}, {"frequencyHz", 868100000}, {"dataRate", 5}, {"packetStartMs", 0}, {"packetEndMs", 1}});
@@ -316,6 +318,8 @@ void roundtrip(const QString &bearer, bool otaa) {
                 outcomes(states[0], "activated").size() == 1 && outcomes(states[1], "join_requested").size() == 1;
         }, 20000), "Paired services did not complete native OTAA over the selected link bearer");
     }
+    if(v11)require(rig.await([](const QVector<QJsonObject> &states){return !states[0].value("nativeProtocol").toObject().value("rekeyPending").toBool() &&
+        !states[0].value("nativeProtocol").toObject().value("pending").toBool() && !states[1].value("nativeProtocol").toObject().value("pending").toBool();},20000),"1.1 RekeyInd/RekeyConf handshake before application transfer");
     const QByteArray uplink = QByteArray::fromHex("004c572d5550ff"), downlink = QByteArray::fromHex("ff4c572d444e00");
     const auto queuedDown = rig.protocol(1, {{"op", "send"}, {"port", 11}, {"payloadBase64", QString::fromLatin1(downlink.toBase64())}, {"confirmed", true}, {"ttlMs", 60000}});
     require(queuedDown.value("ok").toBool(), "Queue native network downlink without a mesh destination");
@@ -360,6 +364,38 @@ void roundtrip(const QString &bearer, bool otaa) {
         "ABP endpoint data/ACK/reconfigure preserves native bytes and private state");
 }
 
+QJsonObject profile11(bool network,const char *mode){
+    auto p=profile(network,false);p.remove("nwkSKeyHex");p.insert("version","1.1");p.insert("deviceClass",mode);
+    p.insert("fNwkSIntKeyHex",NetworkKey);p.insert("sNwkSIntKeyHex",ApplicationKey);p.insert("nwkSEncKeyHex",NetworkKey);
+    p.insert("rx2DataRate",5);p.insert("pingDataRate",5);p.insert("pingPeriodicity",0);return p;
+}
+void classBC(const QString &bearer,bool b){
+    Rig rig(profile11(false,b?"B":"C"),profile11(true,b?"B":"C"));rig.configure(topology(bearer));
+    require(rig.await([&](const QVector<QJsonObject> &states){
+        const auto d=states[0].value("nativeProtocol").toObject(),n=states[1].value("nativeProtocol").toObject();
+        return b?(d.value("pingNegotiated").toBool()&&n.value("pingNegotiated").toBool()&&!n.value("pending").toBool()):
+            (d.value("deviceClass")=="C"&&n.value("deviceClass")=="C"&&!n.value("pending").toBool());
+    },20000),"Class negotiation did not cross actual NodeService transports");
+    if(b){
+        require(rig.protocol(1,{{"op","beacons"},{"enabled",true},{"gpsSeconds",128}}).value("ok").toBool(),"Enable periodic modeled network beacons");
+        require(rig.await([](const QVector<QJsonObject> &s){return s[0].value("nativeProtocol").toObject().value("beaconLocked").toBool();},10000),"Native beacon did not acquire over DATA/IQ host path");
+        const auto beaconEvents=outcomes(rig.latest[0],"beacon");require(!beaconEvents.isEmpty()&&!beaconEvents.last().value("authenticated").toBool(),"Beacon incorrectly claims cryptographic authentication");
+        require(rig.protocol(0,{{"op","send"},{"text","B peer ready"}}).value("ok").toBool(),"Announce Class B uplink flag");
+        require(rig.await([](const QVector<QJsonObject> &s){return s[1].value("nativeProtocol").toObject().value("deviceClass")=="B"&&
+            s[1].value("nativeProtocol").toObject().value("windows").toArray().isEmpty();},15000),"Network did not learn Class B or expire Class A windows");
+    }
+    const QByteArray payload=b?"native ping slot":"native continuous RXC";
+    require(rig.protocol(1,{{"op","send"},{"port",23},{"payloadBase64",QString::fromLatin1(payload.toBase64())},{"confirmed",true}}).value("ok").toBool(),"Queue autonomous Class B/C downlink");
+    require(rig.await([&](const QVector<QJsonObject> &s){return messages(s[0],payload,23).size()==1&&!outcomes(s[1],"acknowledged").isEmpty();},20000),"Native Class B/C message or confirmed ACK failed");
+    for(const auto &s:rig.latest){
+        require(s.value("nativeProtocol").toObject().value("version")=="1.1","Protocol version changed at service boundary");
+        if(bearer=="iq")require(count(s.value("iqTxSamples"))>0&&count(s.value("iqRxSamples"))>0,"Class B/C IQ bypassed CF32");
+        require(count(s.value("nativeProtocol").toObject().value("rejected"))==0,"Clean Class B/C host context rejected");
+    }
+    rig.noRf();require(rig.release(),"Release Class B/C test ownership");
+    pass(b?"1.1 Class B: periodic implicit beacons, negotiation, native ping downlink and ACK over paired services":
+        "1.1 Class C: DeviceMode negotiation, unsolicited native RXC and ACK over paired services");
+}
 void hostGates() {
     Rig rig(profile(false, false), profile(true, false));
     auto graph = topology("data"); auto nodes = graph.value("nodes").toArray(); auto a = nodes[0].toObject();
@@ -399,10 +435,16 @@ int main(int argc, char **argv) {
     if (!args.contains("--iq-only")) {
         run("paired ABP DATA modeled airtime", [] { roundtrip("data", false); });
         run("paired OTAA DATA modeled airtime", [] { roundtrip("data", true); });
+        run("paired 1.1 OTAA DATA", [] { roundtrip("data",true,true); });
+        run("paired 1.1 Class C DATA", [] { classBC("data",false); });
+        run("paired 1.1 Class B DATA", [] { classBC("data",true); });
     }
     if (!args.contains("--data-only")) {
         run("paired ABP IQ dynamic PHY", [] { roundtrip("iq", false); });
         run("paired OTAA IQ dynamic PHY", [] { roundtrip("iq", true); });
+        run("paired 1.1 OTAA IQ", [] { roundtrip("iq",true,true); });
+        run("paired 1.1 Class C IQ", [] { classBC("iq",false); });
+        run("paired 1.1 Class B IQ", [] { classBC("iq",true); });
     }
     std::printf("%d failure(s); test-owned loopback services only, no physical LoRaWAN RF\n", failures);
     return failures ? 1 : 0;

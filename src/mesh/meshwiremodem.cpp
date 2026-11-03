@@ -39,6 +39,7 @@ struct Configuration {
 
 quint64 estimate(const Configuration &c, int bytes) {
     if (bytes < 0 || bytes > (c.isLoRa ? LoRaMaximumBytes : AfskMaximumBytes)) return 0;
+    if(c.isLoRa && !c.lora.explicitHeader && bytes!=c.lora.implicitPayloadBytes)return 0;
     quint64 samples;
     if (c.isLoRa) {
         const quint64 n = c.lora.samplesPerSymbol();
@@ -70,7 +71,8 @@ bool validate(const QJsonObject &input, Configuration *result, QString *error) {
         const bool lora = key == QLatin1String("sf") || key == QLatin1String("bw") ||
             key == QLatin1String("cr") || key == QLatin1String("os") ||
             key == QLatin1String("preamble") || key == QLatin1String("syncWord") ||
-            key == QLatin1String("invertIq") || key == QLatin1String("payloadCrc") || key == QLatin1String("ldro");
+            key == QLatin1String("invertIq") || key == QLatin1String("payloadCrc") || key == QLatin1String("ldro") ||
+            key == QLatin1String("explicitHeader") || key == QLatin1String("implicitPayloadBytes");
         if (!common && !(c.isLoRa && lora))
             return fail(error, QStringLiteral("Unknown %1 modem field '%2'")
                 .arg(c.isLoRa ? QStringLiteral("LoRa") : QStringLiteral("AFSK1200"), key.left(48)));
@@ -118,6 +120,13 @@ bool validate(const QJsonObject &input, Configuration *result, QString *error) {
                 return fail(error, QStringLiteral("LoRa payloadCrc must be a boolean"));
             c.lora.payloadCrc = input.value(QStringLiteral("payloadCrc")).toBool();
         }
+        if (input.contains("explicitHeader")) {
+            if (!input.value("explicitHeader").isBool()) return fail(error, "LoRa explicitHeader must be a boolean");
+            c.lora.explicitHeader = input.value("explicitHeader").toBool();
+        }
+        if (!integer("implicitPayloadBytes", c.lora.implicitPayloadBytes, 0, 255)) return false;
+        if (!c.lora.explicitHeader && !input.contains("implicitPayloadBytes")) return fail(error,"Implicit LoRa requires an explicit fixed payload length");
+        if (c.lora.explicitHeader && c.lora.implicitPayloadBytes) return fail(error, "Explicit LoRa cannot set an implicit payload length");
         QString ldro = QStringLiteral("auto");
         if (input.contains(QStringLiteral("ldro"))) {
             const auto value = input.value(QStringLiteral("ldro"));
@@ -144,7 +153,7 @@ bool validate(const QJsonObject &input, Configuration *result, QString *error) {
                 quint64(obrii::lora::PacketCodec(maximum).symbolCount(255))) * n;
             if (c.receiverLimit > MaximumSamples || c.receiverLimit > quint64(c.rate) * 120)
                 return fail(error, QStringLiteral("LoRa maximum-packet RX buffer exceeds 2097152 CF32 samples or 120 seconds; reduce SF, OS or preamble"));
-            if (!estimate(c, LoRaMaximumBytes))
+            if (!estimate(c, c.lora.explicitHeader?LoRaMaximumBytes:c.lora.implicitPayloadBytes))
                 return fail(error, QStringLiteral("LoRa maximum TX burst exceeds 2097152 CF32 samples or 120 seconds"));
         } catch (const std::invalid_argument &e) {
             return fail(error, QString::fromLatin1(e.what()));
@@ -157,6 +166,11 @@ bool validate(const QJsonObject &input, Configuration *result, QString *error) {
         c.canonical.insert(QStringLiteral("syncWord"), sync);
         c.canonical.insert(QStringLiteral("invertIq"), c.lora.invertIq);
         c.canonical.insert(QStringLiteral("payloadCrc"), c.lora.payloadCrc);
+        // Preserve canonical defaults for existing explicit-header profiles.
+        if (!c.lora.explicitHeader) {
+            c.canonical.insert("explicitHeader", false);
+            c.canonical.insert("implicitPayloadBytes", c.lora.implicitPayloadBytes);
+        }
         c.canonical.insert(QStringLiteral("ldro"), ldro);
     }
     if (result) *result = std::move(c);
@@ -241,7 +255,7 @@ bool WireModem::normalize(const QJsonObject &input, QJsonObject *output, QString
     return true;
 }
 int WireModem::sampleRate() const { return d ? d->config.rate : 0; }
-int WireModem::maximumWireBytes() const { return d ? (d->config.isLoRa ? LoRaMaximumBytes : AfskMaximumBytes) : 0; }
+int WireModem::maximumWireBytes() const { return d ? (d->config.isLoRa ? (d->config.lora.explicitHeader?LoRaMaximumBytes:d->config.lora.implicitPayloadBytes) : AfskMaximumBytes) : 0; }
 quint64 WireModem::estimatedSamples(int bytes) const { return d ? estimate(d->config, bytes) : 0; }
 
 QVector<std::complex<float>> WireModem::modulate(const QByteArray &wire, QString *error) {
@@ -276,7 +290,7 @@ QVector<std::complex<float>> WireModem::modulate(const QByteArray &wire, QString
             double phase = 0;
             for (const auto sample : audio) {
                 phase = std::remainder(phase + 2 * Pi * Deviation * sample / IqModem::Rate, 2 * Pi);
-                output.append({float(d->config.amplitude * std::cos(phase)), float(d->config.amplitude * std::sin(phase))});
+                output.append(std::complex<float>(float(d->config.amplitude * std::cos(phase)), float(d->config.amplitude * std::sin(phase))));
             }
             output.resize(int(length));
         }

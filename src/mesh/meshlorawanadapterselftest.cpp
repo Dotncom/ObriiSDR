@@ -84,7 +84,9 @@ struct Endpoint {
                 require(interface == "radio" && !wire.isEmpty() && wire.size() <= 255, "TX must be a direct native PHYPayload");
                 require(plan.value("ticket").toString().toULongLong() == ticket, "TX must publish its PHY/timing plan first");
                 const auto native = savedNative(root.path());
-                if (quint8(wire[0]) == 0) {
+                if(plan.value("frameKind")=="beacon"){
+                    require(wire.size()==17,"Beacon native length");
+                } else if (quint8(wire[0]) == 0) {
                     const auto state = Lw::loadDeviceJoin(native);
                     require(state.pendingDevNonce && state.nextDevNonce > *state.pendingDevNonce, "DevNonce was not durable before TX");
                 } else if (quint8(wire[0]) == 0x20) {
@@ -92,7 +94,7 @@ struct Endpoint {
                     require(state.nextJoinNonce > 0 && state.activated, "JoinNonce/session were not durable before JoinAccept TX");
                 } else {
                     const auto state = savedSession(root.path(), config);
-                    require(state && state->nextTransmit > Lw::wireCounter(bytes(wire)), "FCnt was not durable before native TX escaped");
+                    require(state && (state->keys.version==Lw::Version::V1_1 ? state->cachedTransmitCounter==Lw::wireCounter(bytes(wire)) : state->nextTransmit>Lw::wireCounter(bytes(wire))), "FCnt was not durable before native TX escaped");
                 }
                 const auto dutyBlob = QByteArray::fromBase64(readBody(root.path()).value("duty").toString().toLatin1());
                 const auto duty = Lw::loadDuty(bytes(dutyBlob));
@@ -128,6 +130,12 @@ QJsonObject acknowledgeStart(Endpoint &sender, Tx &tx, qint64 now) {
 
 QByteArray throughIq(const Tx &tx) {
 #ifdef OBRII_LORAWAN_WITH_LORA
+    if(tx.plan.value("frameKind")=="beacon"){
+        const auto config=Lw::beaconPhyConfig(1);const auto iq=obrii::lora::Modem(config).modulate(bytes(tx.wire));obrii::lora::Receiver receiver(config);
+        std::vector<obrii::lora::Reception> result;
+        for(std::size_t at=0;at<iq.size();){const auto n=(std::min)(std::size_t(137),iq.size()-at);auto found=receiver.push(iq.data()+at,n);result.insert(result.end(),found.begin(),found.end());at+=n;}
+        require(result.size()==1 && bytes(result[0].packet.payload)==tx.wire,"Implicit beacon IQ changed bytes");return tx.wire;
+    }
     const auto rate = unsigned(tx.plan.value("dataRate").toInt());
     const bool down = tx.plan.value("modem").toObject().value("invertIq").toBool();
     const auto dir = down ? Lw::Direction::Downlink : Lw::Direction::Uplink;
@@ -151,8 +159,10 @@ struct Pair {
     Endpoint device, network;
     qint64 now = 0;
     explicit Pair(bool ot = false) : device(ot ? otaa(false) : abp(false)), network(ot ? otaa(true) : abp(true)) {}
+    Pair(const QJsonObject &d,const QJsonObject &n):device(d),network(n){}
     Tx take(Endpoint &sender, qint64 at, bool authorizeStart = true) {
         now = (std::max)(now, at); sender.adapter->step(now);
+        if(sender.flights.isEmpty())std::fprintf(stderr,"TX missing at %lld status=%s rejected=%s\n",static_cast<long long>(now),QJsonDocument(sender.adapter->status()).toJson(QJsonDocument::Compact).constData(),QJsonDocument(sender.last("rejected")).toJson(QJsonDocument::Compact).constData());
         require(!sender.flights.isEmpty(), "Expected a scheduled native TX");
         auto tx = sender.flights.dequeue();
         if (authorizeStart) require(acknowledgeStart(sender, tx, now).value("ok").toBool(), "Host tx_started callback was rejected");
@@ -163,8 +173,10 @@ struct Pair {
         const auto endUs = tx.plan.value("endUs").toString().toULongLong();
         const auto endMs = qint64((endUs + 999) / 1000);
         now = (std::max)(now, endMs);
-        const auto context = receiver.command({{"op", "rx_context"}, {"frequencyHz", frequency ? double(frequency) : tx.plan.value("frequencyHz")},
-            {"dataRate", tx.plan.value("dataRate")}, {"packetStartMs", double(startUs / 1000)}, {"packetEndMs", double(endMs)}}, now);
+        QJsonObject meta{{"op", "rx_context"}, {"frequencyHz", frequency ? double(frequency) : tx.plan.value("frequencyHz")},
+            {"dataRate", tx.plan.value("dataRate")}, {"packetStartMs", double(startUs / 1000)}, {"packetEndMs", double(endMs)}};
+        if(tx.plan.value("frameKind")=="beacon")meta.insert("beacon",true);
+        const auto context = receiver.command(meta, now);
         require(context.value("ok").toBool(), "Host RX context was rejected");
         receiver.adapter->receive("radio", wire, now);
     }
@@ -184,6 +196,57 @@ struct Pair {
     }
 };
 
+QJsonObject modernProfile(bool network,const char *mode,bool v11,bool ot=false){
+    auto c=ot?otaa(network):abp(network);c.insert("deviceClass",mode);c.insert("rx2DataRate",5);c.insert("pingDataRate",5);c.insert("pingPeriodicity",0);
+    if(v11){c.insert("version","1.1");if(ot)c.insert("nwkKeyHex",ApplicationKey);else{
+        c.remove("nwkSKeyHex");c.insert("fNwkSIntKeyHex",NetworkKey);c.insert("sNwkSIntKeyHex",ApplicationKey);c.insert("nwkSEncKeyHex","0102030405060708090a0b0c0d0e0f10");
+    }}return c;
+}
+void modernClasses(){
+    for(bool v11:{false,true}){
+        Pair pair(modernProfile(false,"C",v11),modernProfile(true,"C",v11));
+        if(v11){
+            const auto announce=pair.take(pair.device,0);pair.deliver(pair.device,pair.network,announce,true);
+            const auto response=pair.take(pair.network,pair.window());pair.deliver(pair.network,pair.device,response,true);
+        }
+        require(pair.network.command({{"op","send"},{"text","Class C unsolicited"},{"confirmed",true}},pair.now).value("ok").toBool(),"Queue Class C spontaneous downlink");
+        pair.now+=2000;auto down=pair.take(pair.network,pair.now);pair.deliver(pair.network,pair.device,down,true);
+        require(pair.device.last("message").value("payloadBase64")==QString::fromLatin1(QByteArray("Class C unsolicited").toBase64()),"Class C did not receive without a fresh uplink");
+        const auto ack=pair.take(pair.device,pair.nextUplink());pair.deliver(pair.device,pair.network,ack,true);
+        require(pair.network.last("message").value("ack").toBool(),"Class C confirmed ACK");
+        pair.device.adapter->stop();pair.device.start();require(pair.device.adapter->status().value("deviceClass")=="C","Class C lost on restart");
+        require(pair.device.command({{"op","set_class"},{"class","A"}},pair.now).value("ok").toBool(),"Class C to A transition");
+        if(v11){require(pair.device.adapter->status().value("deviceModePending").toBool(),"1.1 class change must announce DeviceModeInd");auto indication=pair.take(pair.device,pair.nextUplink());pair.deliver(pair.device,pair.network,indication,true);}
+        require(pair.device.adapter->status().value("deviceClass")=="A","Device did not revert to Class A");
+        Pair b(modernProfile(false,"B",v11),modernProfile(true,"B",v11));
+        auto info=b.take(b.device,0);b.deliver(b.device,b.network,info,true);auto answer=b.take(b.network,b.window());b.deliver(b.network,b.device,answer,true);
+        require(b.device.adapter->status().value("pingNegotiated").toBool(),"PingSlotInfo negotiation failed");
+        b.now+=2000;require(b.network.command({{"op","beacons"},{"enabled",true},{"gpsSeconds",128}},b.now).value("ok").toBool(),"Enable periodic Class B beacons");
+        auto beacon=b.take(b.network,b.now);require(beacon.plan.value("frameKind")=="beacon","Beacon requires explicit host PHY kind");b.deliver(b.network,b.device,beacon,true);
+        require(b.device.adapter->status().value("deviceClass")=="B"&&b.device.last("beacon").value("authenticated")==false,"Class B beacon lock/provenance");
+        require(b.device.command({{"op","send"},{"text","Class B available"}},b.now).value("ok").toBool(),"Queue Class B announcement");
+        b.now=b.nextUplink();auto announce=b.take(b.device,b.now);require(quint8(announce.wire[5])&0x10,"Class B uplink flag missing");b.deliver(b.device,b.network,announce,true);
+        require(b.network.adapter->status().value("deviceClass")=="B","Network did not learn Class B mode");
+        require(b.network.command({{"op","send"},{"text","ping down"}},b.now).value("ok").toBool(),"Queue ping-slot downlink");
+        b.now+=3000;b.network.adapter->step(b.now);
+        for(int i=0;i<20 && b.network.flights.isEmpty();++i){
+            const auto next=b.network.adapter->status().value("nextPingUs").toString().toULongLong();b.now=(std::max)(b.now+1,qint64((next+999)/1000));b.network.adapter->step(b.now);
+        }
+        require(!b.network.flights.isEmpty(),"Class B ping downlink not scheduled");auto ping=b.network.flights.dequeue();require(acknowledgeStart(b.network,ping,b.now).value("ok").toBool(),"Ping start authorization");b.deliver(b.network,b.device,ping,true);
+        require(b.device.last("message").value("payloadBase64")==QString::fromLatin1(QByteArray("ping down").toBase64()),"Class B ping delivery");
+        const auto againAt=qint64(beacon.plan.value("startUs").toString().toULongLong()/1000)+128000;
+        auto again=b.take(b.network,againAt);b.deliver(b.network,b.device,again,true);
+        require(b.device.count("beacon")==2&&b.device.last("beacon").value("gpsSeconds")==256,"Periodic beacon must preserve 128-second GPS/host timing");
+        require(b.network.command({{"op","beacons"},{"enabled",false}},b.now).value("ok").toBool(),"Stop periodic beacons");
+        b.device.adapter->stop();b.device.start();require(!b.device.adapter->status().value("beaconLocked").toBool()&&b.device.adapter->status().value("deviceClass")=="A","Restart reused stale Class B clock");
+    }
+    Pair ot(modernProfile(false,"C",true,true),modernProfile(true,"C",true,true));
+    require(ot.device.command({{"op","join"}},0).value("ok").toBool(),"Queue 1.1 join");auto req=ot.take(ot.device,0);ot.deliver(ot.device,ot.network,req,true);
+    auto accept=ot.take(ot.network,ot.window());ot.deliver(ot.network,ot.device,accept,true);
+    auto rekey=ot.take(ot.device,ot.nextUplink());ot.deliver(ot.device,ot.network,rekey,true);auto conf=ot.take(ot.network,ot.window(1));ot.deliver(ot.network,ot.device,conf,true);
+    require(!ot.device.adapter->status().value("rekeyPending").toBool()&&ot.device.adapter->status().value("deviceClass")=="C","OTAA 1.1 Rekey/DeviceMode exchange");
+    pass("Class B/C 1.0.4 and 1.1: implicit beacon IQ, negotiated ping scheduling, unsolicited RXC, ACK, switch/reboot and OTAA Rekey");
+}
 void abpRoundtrip() {
     Pair pair;
     const QByteArray payload("native\0up\xff", 10);
@@ -449,7 +512,7 @@ void failuresAndBounds() {
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     try {
-        abpRoundtrip(); activation(); repeatAndMic(); macAndPersistence(); rx2Fallback(); delayedStart(); rejectedStarts(); failuresAndBounds();
+        abpRoundtrip(); activation(); repeatAndMic(); macAndPersistence(); rx2Fallback(); delayedStart(); rejectedStarts(); failuresAndBounds();modernClasses();
         std::printf("LoRaWAN adapter self-test passed; explicit local test keys only, no RF or network opened\n");
         return 0;
     } catch (const std::exception &e) {

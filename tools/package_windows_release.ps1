@@ -71,6 +71,7 @@ if (Test-Path -LiteralPath (Join-Path $RuntimePath 'libcodec2.dll')) {
     }
 }
 $PublicDocs = @(
+    'mesh_vpn_discovery.md',
     'fft_tuning.md', 'phosphor_contours.md',
     'mesh_designer.md', 'mesh_devices_example.json', 'mesh_project_example.json', 'mesh_packet_example.json',
     'mesh_distributed.md', 'mesh_hybrid_ports.md', 'mesh_ports_ui.md', 'mesh_protocol_adapters.md', 'mesh_lorawan_adapter.md',

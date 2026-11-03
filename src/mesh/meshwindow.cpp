@@ -126,8 +126,8 @@ Window::Window(const QString &libraryFile,QWidget *parent):QMainWindow(parent),l
     project=example(presets.first().id);
     auto toolbar=addToolBar(tr("Сценарій"));toolbar->setMovable(false);
     auto add=[toolbar,this](const QString &name,std::function<void()> f){auto a=toolbar->addAction(name);QObject::connect(a,&QAction::triggered,toolbar,f);return a;};
-    add(tr("Новий"),[this]{if(runtime.state()!=Runtime::Idle||!maybeSave())return;project=example(presets.isEmpty()?"local":presets.first().id);projectPath.clear();modified=false;rebuild();});
-    add(tr("Відкрити"),[this]{if(runtime.state()!=Runtime::Idle||!maybeSave())return;auto path=QFileDialog::getOpenFileName(this,tr("Сценарій"),{},"JSON (*.json)");if(path.isEmpty())return;QString e;if(!loadProjectFile(path,&e))showError(this,e);});
+    add(tr("Новий"),[this]{if(runtime.state()!=Runtime::Idle||(remoteDialog&&remoteDialog->sessionActive())||!maybeSave())return;if(remoteDialog){auto old=remoteDialog;remoteDialog=nullptr;old->close();}project=example(presets.isEmpty()?"local":presets.first().id);projectPath.clear();modified=false;rebuild();});
+    add(tr("Відкрити"),[this]{if(runtime.state()!=Runtime::Idle||(remoteDialog&&remoteDialog->sessionActive())||!maybeSave())return;auto path=QFileDialog::getOpenFileName(this,tr("Сценарій"),{},"JSON (*.json)");if(path.isEmpty())return;QString e;if(!loadProjectFile(path,&e))showError(this,e);});
     add(tr("Зберегти"),[this]{QString path=projectPath;if(path.isEmpty())path=QFileDialog::getSaveFileName(this,tr("Зберегти сценарій"),"network.json","JSON (*.json)");if(path.isEmpty())return;QString e;if(!saveProjectFile(path,&e))showError(this,e);});
     toolbar->addSeparator();addAction=add(tr("+ Вузол"),[this]{addNode();});connectAction=add(tr("+ Зв'язок"),[this]{addLink();});removeAction=add(tr("Видалити"),[this]{removeSelected();});
     add(tr("Умістити"),[this]{view->fitInView(scene->itemsBoundingRect().adjusted(-35,-35,35,35),Qt::KeepAspectRatio);});
@@ -136,8 +136,8 @@ Window::Window(const QString &libraryFile,QWidget *parent):QMainWindow(parent),l
     packetsAction->setToolTip(tr("Окрема пакетна симуляція зі знімка графа, без IQ та RF"));
     auto remoteAction=add(tr("Реальні екземпляри"),[this]{showRemoteMesh();});remoteAction->setObjectName("remoteMeshAction");
     remoteAction->setToolTip(tr("Приєднати вже запущені служби mesh-вузлів; без запуску процесів чи фізичного RF"));
-    toolbar->addSeparator();startAction=add(tr("▶ Запустити"),[this]{QString e;if(!runtime.start(project,presets,&e))showError(this,e);else topologyPending=false;refreshRuntime();});
-    stopAction=add(tr("■ Зупинити"),[this]{runtime.stop();});
+    toolbar->addSeparator();startAction=add(tr("▶ Запустити"),[this]{if(remoteDialog){if(remoteDialog->sessionActive())return;auto old=remoteDialog;remoteDialog=nullptr;old->close();}QString e;if(!runtime.start(project,presets,&e))showError(this,e);else topologyPending=false;refreshRuntime();});
+    stopAction=add(tr("■ Зупинити"),[this]{if(remoteDialog&&remoteDialog->sessionActive())remoteDialog->stopSession();else runtime.stop();});
     scene=new Scene(this);view=new View(scene,this);view->setToolTip(tr("Ctrl + колесо — масштаб; перетягування вузлів — позиція на полотні."));view->setObjectName("topologyCanvas");view->setRenderHint(QPainter::Antialiasing);view->setDragMode(QGraphicsView::RubberBandDrag);setCentralWidget(view);
     auto dock=new QDockWidget(tr("Параметри"),this);dock->setMinimumWidth(300);dock->setMaximumWidth(410);properties=new QStackedWidget(dock);
     properties->setStyleSheet("QStackedWidget{background:#17212c;}");
@@ -151,6 +151,12 @@ Window::Window(const QString &libraryFile,QWidget *parent):QMainWindow(parent),l
     nodeName=new QLineEdit;nodeName->setObjectName("nodeName");device=new QComboBox;mode=new QComboBox;mode->addItems({"am","nfm","wfm","usb","lsb","cw"});
     frequency=spin(1,1e12,0,this);frequency->setObjectName("listeningHz");frequency->setSuffix(" Hz");bandwidth=spin(100,2e6,0,this);bandwidth->setSuffix(" Hz");level=spin(0,0.95,2,this);level->setSingleStep(0.05);
     form->addRow(tr("Назва"),nodeName);form->addRow(tr("Пристрій / Obrii"),device);form->addRow(tr("Частота прийому"),frequency);form->addRow(tr("Смуга"),bandwidth);form->addRow(tr("Демодуляція"),mode);form->addRow(tr("Рівень тестового TX"),level);
+    nodeEnabled=new QCheckBox(tr("Увімкнено"));nodeEnabled->setObjectName("nodeEnabled");form->addRow(nodeEnabled);
+    connect(nodeEnabled,&QCheckBox::toggled,this,[this](bool value){if(formBusy)return;const auto id=selectedNode();QString error;
+        if(remoteDialog&&remoteDialog->sessionActive()){if(!remoteDialog->setNodeEnabled(id,value,&error)){showError(this,error);selection();}return;}
+        if(runtime.state()==Runtime::Running){if(!runtime.setNodeEnabled(id,value,&error)){showError(this,error);selection();return;}value=runtime.snapshot(id).value("enabled").toBool();}
+        for(auto &n:project.nodes)if(n.id==id)n.enabled=value;dirty();selection();
+    });
     applyButton=new QPushButton(tr("Застосувати до RX"));applyButton->setObjectName("applyRadio");form->addRow(applyButton);
     connect(applyButton,&QPushButton::clicked,this,[this]{for(const auto &n:project.nodes)if(n.id==selectedNode()){QString e;if(!runtime.apply(n,&e))showError(this,e);}});
     testButton=new QPushButton(tr("Тестовий CW → середовище"));testButton->setObjectName("testCw");form->addRow(testButton);
@@ -159,7 +165,7 @@ Window::Window(const QString &libraryFile,QWidget *parent):QMainWindow(parent),l
     startRxButton=new QPushButton(tr("Запустити RX"));startRxButton->setObjectName("startNodeRx");
     stopRxButton=new QPushButton(tr("Зупинити RX"));stopRxButton->setObjectName("stopNodeRx");
     rxLayout->addWidget(startRxButton);rxLayout->addWidget(stopRxButton);form->addRow(rxButtons);
-    connect(startRxButton,&QPushButton::clicked,this,[this]{QString e;if(!runtime.setNodeRunning(selectedNode(),true,&e))showError(this,e);});
+    connect(startRxButton,&QPushButton::clicked,this,[this]{const auto id=selectedNode();QString e;if(!runtime.setNodeRunning(id,true,&e)){showError(this,e);return;}const bool enabled=runtime.snapshot(id).value("enabled").toBool();for(auto &n:project.nodes)if(n.id==id&&n.enabled!=enabled){n.enabled=enabled;dirty();break;}selection();});
     connect(stopRxButton,&QPushButton::clicked,this,[this]{QString e;if(!runtime.setNodeRunning(selectedNode(),false,&e))showError(this,e);});
     stopTxButton=new QPushButton(tr("Зупинити тестовий TX"));stopTxButton->setObjectName("stopNodeTx");form->addRow(stopTxButton);
     connect(stopTxButton,&QPushButton::clicked,this,[this]{QString e;if(!runtime.stopSignal(selectedNode(),&e))showError(this,e);});
@@ -253,7 +259,12 @@ Window::Window(const QString &libraryFile,QWidget *parent):QMainWindow(parent),l
     rebuild();refreshRuntime();resizeDocks({dock},{340},Qt::Horizontal);
     QTimer::singleShot(0,this,[this]{view->fitInView(scene->itemsBoundingRect().adjusted(-35,-35,35,35),Qt::KeepAspectRatio);});
 }
-void Window::dirty(){modified=true;setWindowTitle(tr("Obrii Mesh Designer · ")+(projectPath.isEmpty()?tr("Новий сценарій"):QFileInfo(projectPath).fileName())+" *");}
+void Window::dirty(){modified=true;setWindowTitle(tr("Obrii Mesh Designer · ")+(projectPath.isEmpty()?tr("Новий сценарій"):QFileInfo(projectPath).fileName())+" *");
+    if(remoteDialog){QString error;if(!remoteDialog->updateProject(project,&error)){
+        if(remoteDialog->sessionActive()){showError(this,error);project=remoteDialog->currentProject();}
+        else {auto old=remoteDialog;remoteDialog=nullptr;old->close();}
+    }else project=remoteDialog->currentProject();}
+}
 QString Window::selectedNode() const {for(auto item:scene->selectedItems())if(item->data(0)=="node")return item->data(1).toString();return {};}
 void Window::rebuild() {
     formBusy=true;nodeItems.clear();linkItems.clear();scene->clear();
@@ -276,7 +287,9 @@ void Window::linksGeometry() {
         QPainterPath path(p1);path.lineTo(p2);const QPointF normal(-unit.y(),unit.x());path.moveTo(p2);path.lineTo(p2-unit*15+normal*6);path.lineTo(p2-unit*15-normal*6);path.closeSubpath();item->setPath(path);
         const auto confirmed=confirmedLinks.value(l.tx+"/"+l.rx);
         const bool live=runtime.state()==Runtime::Running,changed=live&&!linkMatches(l,confirmed);
-        const bool on=live&&!confirmed.isEmpty()?confirmed.value("enabled").toBool():l.enabled;
+    bool on=live&&!confirmed.isEmpty()?confirmed.value("enabled").toBool():l.enabled;
+    for(const auto &n:project.nodes)if((n.id==l.tx||n.id==l.rx)&&!n.enabled)on=false;
+    if(remoteDialog&&remoteDialog->sessionActive())on=on&&remoteDialog->nodeState(l.tx).value("available").toBool()&&remoteDialog->nodeState(l.rx).value("available").toBool();
         const QColor color=changed?QColor("#e8b45d"):on?QColor("#52a9c2"):QColor("#64707b");
         item->setPen(QPen(color,2,on?Qt::SolidLine:Qt::DashLine));item->setBrush(color);
         item->setToolTip(l.tx+":"+l.txPort+" → "+l.rx+":"+l.rxPort+QString(" · %1 · %2 · %3 dB · %4 ms").arg(l.bearer,l.modem.value("type").toString("afsk1200")).arg(l.gainDb).arg(l.delayMs)+(changed?tr(" · не застосовано"):""));}
@@ -286,7 +299,7 @@ void Window::selection() {
     const auto id=selectedNode();
     if(!id.isEmpty())for(int index=0;index<project.nodes.size();++index){const auto &n=project.nodes[index];if(n.id!=id)continue;
         properties->setCurrentIndex(1);nodeName->setText(n.name);device->clear();for(const auto &p:presets)device->addItem(p.name+(p.kind=="local"?"":" · SSH"),p.id);
-        device->setCurrentIndex(device->findData(n.presetId));frequency->setValue(n.listeningHz);bandwidth->setValue(n.bandwidthHz);level->setValue(n.txLevel);mode->setCurrentText(n.mode);
+        device->setCurrentIndex(device->findData(n.presetId));frequency->setValue(n.listeningHz);bandwidth->setValue(n.bandwidthHz);level->setValue(n.txLevel);mode->setCurrentText(n.mode);nodeEnabled->setChecked(n.enabled);
         const auto rx=directionalPort(n,"rx"),tx=directionalPort(n,"tx");rxBackend->setCurrentIndex(rxBackend->findData(rx.value("backend").toString("network")));txBackend->setCurrentIndex(txBackend->findData(tx.value("backend").toString("network")));
         rxPortId->setText(rx.value("id").toString("radio"));txPortId->setText(tx.value("id").toString("radio"));receiverId->setText(rx.value("receiverId").toString("main"));channelId->setText(tx.value("channelId").toString("rx0"));
         rxChannelId->setText(rx.value("channelId").toString("rx0"));rxCenter->setValue(rx.value("centerHz").toDouble(n.listeningHz));protocolProfile->setText(n.protocol.value("profileId").toString());
@@ -360,10 +373,19 @@ void Window::editLinkOptions(){
     dirty();linksGeometry();refreshRuntime();
 }
 void Window::refreshRuntime() {
-    const bool idle=runtime.state()==Runtime::Idle,live=runtime.state()==Runtime::Running;
+    const bool remoteLive=remoteDialog&&remoteDialog->sessionActive();
+    const bool localIdle=runtime.state()==Runtime::Idle,idle=localIdle&&!remoteLive,live=runtime.state()==Runtime::Running;
     const bool extended=remoteOptions(project);startAction->setEnabled(idle&&!extended);stopAction->setEnabled(!idle&&runtime.state()!=Runtime::Stopping);
     startAction->setToolTip(extended?tr("Порти, протоколи й носії зв'язків запускаються через «Реальні екземпляри», не через локальний IQ-хаб."):QString());packetsAction->setEnabled(!extended);
     for(auto action:{addAction,connectAction,removeAction,libraryAction,mediumAction})action->setEnabled(idle);
+    const bool topologyEditable=(localIdle&&(!remoteLive||remoteDialog->canEditTopology()))||live;
+    addAction->setEnabled(topologyEditable&&project.nodes.size()<(remoteLive||project.mixIq?8:32));connectAction->setEnabled(topologyEditable);nodeEnabled->setEnabled(idle||live||(remoteLive&&remoteDialog->canEditTopology()));
+    if(auto action=findChild<QAction *>("remoteMeshAction"))action->setEnabled(localIdle);
+    for(const auto &n:project.nodes)if(auto item=nodeItems.value(n.id)){
+        if(remoteLive){const auto s=remoteDialog->nodeState(n.id);item->setData(2,!n.enabled?tr("Вимкнено"):s.value("available").toBool()?tr("Приєднано"):tr("Недоступний"));item->setToolTip(s.value("controllerState").toString());}
+        else item->setData(2,!n.enabled?tr("Вимкнено"):runtime.snapshot(n.id).value("phase").toString());item->update();
+    }
+    if(remoteLive)linksGeometry();
     device->setEnabled(idle);
     for(auto combo:{rxBackend,txBackend,nodeProtocol,linkBearer,linkModem})combo->setEnabled(idle);
     for(auto field:{rxPortId,txPortId,receiverId,channelId,rxChannelId,protocolProfile,linkTxPort,linkRxPort})field->setEnabled(idle);
@@ -442,9 +464,14 @@ void Window::changeEvent(QEvent *event) {
     QMainWindow::changeEvent(event);
     if(event->type()==QEvent::WindowStateChange)refreshSpectrum();
 }
-void Window::addNode(){Node n;int i=1;while(nodeItems.contains("node"+QString::number(i)))++i;n.id="node"+QString::number(i);n.name="SDR "+QString::number(i);n.presetId=presets.isEmpty()?"":presets.first().id;n.listeningHz=project.centerHz;n.position={double((project.nodes.size()%3)*250),double((project.nodes.size()/3)*150)};project.nodes<<n;dirty();rebuild();nodeItems[n.id]->setSelected(true);}
+void Window::addNode(){
+    Node n;int i=1;while(nodeItems.contains("node"+QString::number(i)))++i;n.id="node"+QString::number(i);n.name="SDR "+QString::number(i);n.presetId=presets.isEmpty()?"":presets.first().id;n.listeningHz=project.centerHz;n.position={double((project.nodes.size()%3)*250),double((project.nodes.size()/3)*150)};
+    if(runtime.state()==Runtime::Running){n.enabled=false;QString error;if(!runtime.addNode(n,presets,&error)){showError(this,error);return;}}
+    project.nodes<<n;dirty();rebuild();nodeItems[n.id]->setSelected(true);
+}
 void Window::addLink(){if(project.nodes.size()<2)return;QDialog d(this);d.setWindowTitle(tr("Напрямлений радіозв'язок"));QFormLayout f(&d);QComboBox tx,rx;for(const auto &n:project.nodes){tx.addItem(n.name,n.id);rx.addItem(n.name,n.id);}rx.setCurrentIndex(1);f.addRow("TX",&tx);f.addRow("RX",&rx);QDialogButtonBox buttons(QDialogButtonBox::Ok|QDialogButtonBox::Cancel);f.addRow(&buttons);connect(&buttons,&QDialogButtonBox::accepted,&d,&QDialog::accept);connect(&buttons,&QDialogButtonBox::rejected,&d,&QDialog::reject);if(d.exec()!=QDialog::Accepted)return;
-    Link l;l.tx=tx.currentData().toString();l.rx=rx.currentData().toString();Project p=project;p.links<<l;const auto e=p.validate(presets);if(!e.isEmpty()){showError(this,e);return;}project=p;dirty();rebuild();}
+    Link l;l.tx=tx.currentData().toString();l.rx=rx.currentData().toString();Project p=project;p.links<<l;const auto e=p.validate(presets);if(!e.isEmpty()){showError(this,e);return;}
+    if(runtime.state()==Runtime::Running){QString error;if(!runtime.applyLink(l,&error)){showError(this,error);return;}}project=p;dirty();rebuild();}
 void Window::removeSelected(){const QString id=selectedNode();if(!id.isEmpty()){for(int i=project.nodes.size()-1;i>=0;--i)if(project.nodes[i].id==id)project.nodes.removeAt(i);for(int i=project.links.size()-1;i>=0;--i)if(project.links[i].tx==id||project.links[i].rx==id)project.links.removeAt(i);}else{for(int i=project.links.size()-1;i>=0;--i)if(project.links[i].tx+"/"+project.links[i].rx==selectedLink)project.links.removeAt(i);}dirty();rebuild();}
 void Window::editMedium(){QDialog d(this);d.setWindowTitle(tr("Віртуальне середовище"));QFormLayout f(&d);auto center=spin(1,1e12,0,&d);center->setValue(project.centerHz);QComboBox rate;for(int n:{48000,96000,192000,384000})rate.addItem(QString::number(n),n);rate.setCurrentIndex(rate.findData(project.sampleRate));QCheckBox mixing(tr("Складати одночасні IQ-потоки"));mixing.setChecked(project.mixIq);f.addRow(tr("Центр, Hz"),center);f.addRow(tr("Частота дискретизації"),&rate);f.addRow(&mixing);QLabel note(tr("Чинний хаб: до 8 RX для суми IQ або до 32 RX для передачі кадрів. Частота й sample rate спільні для сеансу."));note.setWordWrap(true);f.addRow(&note);QDialogButtonBox b(QDialogButtonBox::Ok|QDialogButtonBox::Cancel);f.addRow(&b);connect(&b,&QDialogButtonBox::accepted,&d,&QDialog::accept);connect(&b,&QDialogButtonBox::rejected,&d,&QDialog::reject);if(d.exec()!=QDialog::Accepted)return;Project p=project;for(auto &n:p.nodes)n.listeningHz+=center->value()-p.centerHz;p.centerHz=center->value();p.sampleRate=rate.currentData().toInt();p.mixIq=mixing.isChecked();const auto e=p.validate(presets);if(!e.isEmpty()){showError(this,e);return;}project=p;dirty();selection();refreshRuntime();}
 void Window::editLibrary() {
@@ -464,7 +491,7 @@ void Window::editLibrary() {
     connect(&buttons,&QDialogButtonBox::accepted,&d,[&]{const auto values=collect();const auto e=project.validate(values);if(!e.isEmpty()){showError(&d,e);return;}QString error;if(!saveLibrary(libraryPath,values,&error)){showError(&d,error);return;}presets=values;d.accept();});d.exec();selection();
 }
 bool Window::saveProjectFile(const QString &path,QString *error){const auto e=project.validate(presets);if(!e.isEmpty()){if(error)*error=e;return false;}if(!saveJson(path,project.json(),error))return false;projectPath=path;modified=false;setWindowTitle(tr("Obrii Mesh Designer · ")+QFileInfo(path).fileName());return true;}
-bool Window::loadProjectFile(const QString &path,QString *error){if(runtime.state()!=Runtime::Idle){if(error)*error="Stop session before loading";return false;}QJsonObject json;Project p;if(!loadJson(path,&json,error)||!Project::parse(json,&p,error))return false;const auto e=p.validate(presets);if(!e.isEmpty()){if(error)*error=e;return false;}project=p;projectPath=path;modified=false;rebuild();refreshRuntime();return true;}
+bool Window::loadProjectFile(const QString &path,QString *error){if(runtime.state()!=Runtime::Idle||(remoteDialog&&remoteDialog->sessionActive())){if(error)*error="Stop session before loading";return false;}QJsonObject json;Project p;if(!loadJson(path,&json,error)||!Project::parse(json,&p,error))return false;const auto e=p.validate(presets);if(!e.isEmpty()){if(error)*error=e;return false;}if(remoteDialog){auto old=remoteDialog;remoteDialog=nullptr;old->close();}project=p;projectPath=path;modified=false;rebuild();refreshRuntime();return true;}
 bool Window::maybeSave(){if(!modified)return true;const auto answer=QMessageBox::question(this,tr("Сценарій змінено"),tr("Зберегти зміни?"),QMessageBox::Save|QMessageBox::Discard|QMessageBox::Cancel);if(answer==QMessageBox::Cancel)return false;if(answer==QMessageBox::Discard)return true;QString path=projectPath;if(path.isEmpty())path=QFileDialog::getSaveFileName(this,tr("Сценарій"),"network.json","JSON (*.json)");if(path.isEmpty())return false;QString e;if(!saveProjectFile(path,&e)){showError(this,e);return false;}return true;}
 void Window::showPacketLab() {
     if(packetDialog){packetDialog->show();packetDialog->raise();packetDialog->activateWindow();return;}
@@ -479,6 +506,9 @@ void Window::showPacketLab() {
 void Window::showRemoteMesh() {
     if(remoteDialog){remoteDialog->show();remoteDialog->raise();remoteDialog->activateWindow();return;}
     remoteDialog=new RemoteDialog(project,this);remoteDialog->show();
+    connect(remoteDialog,&RemoteDialog::projectChanged,this,[this]{if(!remoteDialog)return;const auto node=selectedNode(),link=selectedLink;project=remoteDialog->currentProject();modified=true;rebuild();if(nodeItems.contains(node))nodeItems[node]->setSelected(true);else if(linkItems.contains(link))linkItems[link]->setSelected(true);refreshRuntime();});
+    connect(remoteDialog,&RemoteDialog::sessionStateChanged,this,[this]{refreshRuntime();});
+    connect(remoteDialog,&QObject::destroyed,this,[this]{QTimer::singleShot(0,this,[this]{refreshRuntime();});});
 }
 void Window::closeEvent(QCloseEvent *event){if(closing&&runtime.state()==Runtime::Idle){if(packetDialog)packetDialog->close();if(remoteDialog)remoteDialog->close();event->accept();return;}if(!maybeSave()){event->ignore();return;}if(packetDialog)packetDialog->close();if(remoteDialog)remoteDialog->close();if(runtime.state()!=Runtime::Idle){closing=true;runtime.stop();event->ignore();return;}event->accept();}
 }

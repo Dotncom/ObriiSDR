@@ -20,7 +20,17 @@ bool confirmed(FrameType type);
 Block aesEncrypt(const Key &key, Block block);
 Block aesDecrypt(const Key &key, Block block);
 Block cmac(const Key &key, const Bytes &message);
-struct SessionKeys { Key network{}, application{}; };
+enum class Version : std::uint8_t { V1_0_4=0, V1_1=1 };
+// network is NwkSKey (1.0) / FNwkSIntKey (1.1).
+struct SessionKeys {
+    Key network{}, application{};
+    Version version=Version::V1_0_4;
+    Key servingIntegrity{}, networkEncryption{};
+};
+struct DataContext {
+    std::uint8_t txDataRate=0, txChannel=0;
+    std::uint16_t confirmedCounter=0;
+};
 SessionKeys deriveSessionKeys(const Key &appKey, std::uint32_t joinNonce,
                               std::uint32_t netId, std::uint16_t devNonce);
 struct JoinRequest { Eui joinEui{}, devEui{}; std::uint16_t devNonce=0; };
@@ -28,6 +38,7 @@ struct JoinAccept {
     std::uint32_t joinNonce=0, netId=0, devAddr=0;
     std::uint8_t rx1Offset=0, rx2DataRate=0, rxDelay=1;
     std::optional<std::array<std::uint8_t,16>> cfList;
+    bool optNeg=false;
 };
 Bytes encodeJoinRequest(const JoinRequest &request, const Key &appKey);
 JoinRequest decodeJoinRequest(const Bytes &wire, const Key &appKey);
@@ -39,11 +50,11 @@ struct DataFrame {
     std::uint8_t control=0; // High FCtrl bits only: ADR=0x80, ACK=0x20, etc.
     Bytes options;
     std::optional<std::uint8_t> port;
-    Bytes payload; // Plaintext. FPort=0 uses NwkSKey; all other ports AppSKey.
+    Bytes payload; // Plaintext. FPort=0: NwkSKey (1.0) / NwkSEncKey (1.1); otherwise AppSKey.
 };
-Bytes encodeData(const DataFrame &frame, const SessionKeys &keys);
+Bytes encodeData(const DataFrame &frame, const SessionKeys &keys, DataContext context={});
 // Caller supplies the full 32-bit FCnt; low 16 bits MUST match the wire.
-DataFrame decodeData(const Bytes &wire, const SessionKeys &keys, std::uint32_t counter);
+DataFrame decodeData(const Bytes &wire, const SessionKeys &keys, std::uint32_t counter, DataContext context={});
 std::uint16_t wireCounter(const Bytes &wire);
 std::uint32_t wireAddress(const Bytes &wire);
 
@@ -61,6 +72,13 @@ struct SessionState {
     std::uint8_t transmitCopies=0;
     bool mayRepeat=false;
     bool acknowledgmentPending=false;
+    // LoRaWAN 1.1 separates NFCntDown from AFCntDown. Legacy fields retain
+    // FCntUp (network RX/device TX) and NFCntDown (device RX/network TX).
+    std::uint64_t nextApplicationTransmit=0;
+    std::optional<std::uint32_t> lastApplicationReceived;
+    std::optional<std::uint32_t> confirmedTransmitted, confirmedReceived;
+    std::uint32_t cachedTransmitCounter=0;
+    DataContext cachedTransmitContext{}, cachedUplinkContext{};
 };
 struct Received { DataFrame frame; bool duplicate=false; };
 class Session {
@@ -72,10 +90,12 @@ public:
     Session(const Session &)=delete;
     Session &operator=(const Session &)=delete;
     const SessionState &state() const { return state_; }
-    Bytes transmit(DataFrame frame); // Assigns DevAddr/FCnt and pending ACK.
-    Bytes repeatUplink(); // Exact bytes/FCnt, bounded by maxUplinkCopies (NbTrans).
+    Bytes preview(DataFrame frame, DataContext context={}) const;
+    Bytes transmit(DataFrame frame, DataContext context={});
+    Bytes repeatUplink(std::optional<DataContext> context={}); // 1.1 MIC follows the actual DR/channel.
     void setNbTrans(std::uint8_t copies);
-    Received receive(const Bytes &wire, std::optional<std::uint32_t> counterHint={});
+    DataFrame inspect(const Bytes &wire, DataContext context={}, std::optional<std::uint32_t> counterHint={}) const;
+    Received receive(const Bytes &wire, std::optional<std::uint32_t> counterHint={}, DataContext context={});
 private:
     void commit(const SessionState &next);
     Role role_;
@@ -83,7 +103,11 @@ private:
     Persist persist_;
     bool busy_=false, failed_=false;
 };
-struct Credentials { Eui joinEui{}, devEui{}; Key appKey{}; };
+struct Credentials {
+    Eui joinEui{}, devEui{}; Key appKey{};
+    Version version=Version::V1_0_4;
+    Key nwkKey{};
+};
 struct DeviceJoinState {
     std::uint32_t nextDevNonce=0; // Exhausted at 65536; must never wrap.
     std::optional<std::uint16_t> pendingDevNonce;

@@ -1,8 +1,10 @@
 Obrii LoRaWAN module
 
-Independent C++17 LoRaWAN 1.0.4 protocol implementation, EU868 helpers and
-offline LoRa IQ adapter. No GUI, hardware, sockets or constructor integration.
-Specification: LoRa Alliance TS001-1.0.4 and EU863-870 regional parameters.
+Independent C++17 LoRaWAN 1.0.4 / 1.1 protocol implementation, EU868 Class A/B/C
+helpers and LoRa IQ adapter. The core opens no GUI, hardware or sockets.
+The mesh constructor uses a separate host adapter.
+Specifications: LoRa Alliance TS001-1.0.4, LoRaWAN 1.1 (including the FOpts
+encryption counter-domain erratum), and EU863-870 regional parameters.
 This is not a certified LoRaWAN stack or a claim of full MAC compliance.
 
 AES block primitive uses the unmodified tiny-AES-c files already present in

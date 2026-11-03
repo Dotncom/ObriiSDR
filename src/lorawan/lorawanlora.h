@@ -4,6 +4,7 @@
 
 namespace obrii::lorawan {
 obrii::lora::Config phyConfig(unsigned eu868Rate, Direction direction, int oversampling=2);
+obrii::lora::Config beaconPhyConfig(int oversampling=2);
 struct RadioPacket {
     Bytes wire;
     std::uint64_t payloadSampleOffset=0;

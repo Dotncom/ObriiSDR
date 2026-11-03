@@ -56,6 +56,7 @@ FobosAPP.ini
 # Temp
 *.tmp
 *.cache
+*.private.json
 __pycache__/
 *.py[cod]
 
@@ -83,6 +84,7 @@ release.zip
 downloads/
 recordings/
 .gradle/
+.qtcreator/
 local.properties
 *.apk
 *.aab

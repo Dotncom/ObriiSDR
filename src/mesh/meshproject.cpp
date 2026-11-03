@@ -59,7 +59,7 @@ bool validId(const QString &id) { return QRegularExpression("^[A-Za-z][A-Za-z0-9
 QJsonObject HostPreset::json() const { return {{"id",id},{"name",name},{"kind",kind},{"host",host},{"user",user},{"directory",directory},{"sshPort",sshPort}}; }
 QJsonObject Node::json() const {
     QJsonObject result{{"id",id},{"name",name},{"preset",presetId},{"x",position.x()},{"y",position.y()},
-        {"listeningHz",listeningHz},{"bandwidthHz",bandwidthHz},{"mode",mode},{"txLevel",txLevel}};
+        {"listeningHz",listeningHz},{"bandwidthHz",bandwidthHz},{"mode",mode},{"txLevel",txLevel},{"enabled",enabled}};
     if(!ports.isEmpty())result["ports"]=portsJson(ports);
     if(!protocol.isEmpty())result["protocol"]=protocolJson(protocol);
     return result;
@@ -169,6 +169,8 @@ bool Project::parse(const QJsonObject &o, Project *out, QString *error) {
         if((n.contains("ports")&&!n.value("ports").isArray())||(n.contains("protocol")&&!n.value("protocol").isObject()))return fail(error,"Invalid node ports/protocol schema");
         Node node{n.value("id").toString(),n.value("name").toString(),n.value("preset").toString(),{n.value("x").toDouble(),n.value("y").toDouble()},n.value("listeningHz").toDouble(),n.value("bandwidthHz").toDouble(),n.value("txLevel").toDouble(),n.value("mode").toString()};
         node.ports=n.value("ports").toArray();node.protocol=n.value("protocol").toObject();
+        if(n.contains("enabled")&&!n.value("enabled").isBool())return fail(error,"Node enabled must be boolean");
+        node.enabled=n.value("enabled").toBool(true);
         const auto options=validateNodeOptions(node);if(!options.isEmpty())return fail(error,options);p.nodes.push_back(node);
     }
     for(const auto &v:o.value("links").toArray()) {

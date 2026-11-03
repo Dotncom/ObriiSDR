@@ -135,8 +135,18 @@ The source center and sample rate are common to the session and editable while
 stopped. Link gain/delay/enabled edits are staged until **Apply link** is pressed.
 The hub validates both the fan-out and sample-mix paths before mutation, including
 the active mixer buffer capacity. Rejected changes leave the previous link and
-revision unchanged. Node creation/removal, endpoint changes and graph structure
-edits still require a stopped session; live link edits are not a routing protocol.
+revision unchanged. Nodes and links can now be appended while running; new nodes
+start disabled until their receiver endpoint is registered and explicitly enabled.
+Removing/reordering nodes or changing the common medium still requires Stop.
+The node's **Enabled** checkbox disables its owned RX/test-TX workers, unlike
+**Stop RX**, which pauses only reception. An RX/control/test-TX failure is local
+to that node: healthy workers and the hub remain alive. Recovery is explicit;
+neither RX failure nor re-enabling a node automatically restarts its test TX.
+If live receiver registration was unconfirmed, another enable attempt first
+queries the same authenticated hub and reconciles the exact endpoint. The node
+remains disabled after reconciliation; enable it again to start RX. A conflicting
+or unverified endpoint is rejected rather than silently adopted.
+Live link edits are not a routing protocol.
 Changes affect newly published frames, not contributions already in the queues
 or mixed blocks. The bounded old-condition tail drains normally. Acknowledgment
 is a control-plane boundary, not a sample-timestamped scheduled channel change.
@@ -179,8 +189,13 @@ and an `args` object with all five fields: `tx`, `rx`, `enabled`, `gainDb`,
 `delayMs`. Successful updates increment the revision and return the applied
 `link`; conflicts require a fresh status before retry. The API supports gain
 -120..60 dB and delay 0..60000 ms, subject to actual buffer capacity; the designer
-deliberately limits its delay editor to 500 ms. Default routing, receiver lists,
-mix geometry and arbitrary process commands are not remotely editable here.
+deliberately limits its delay editor to 500 ms. `addReceiver` accepts exactly
+`id`, numeric loopback `host` and `port` in `args`, with the same instance and
+revision checks. It appends a disabled node's receiver endpoint without replacing
+existing subscribers. Duplicate IDs, capacity limits or host rejection leave the
+models unchanged. `getReceiver` with `args: {"id":"node4"}` can reconcile an
+unconfirmed registration against the pinned hub. Receiver removal, default
+routing, mix geometry and arbitrary process commands are not editable here.
 
 Control is limited to eight simultaneous connections, 64 requests/second,
 64 KiB input, 256 KiB output and a two-second socket lifetime. It runs on the
@@ -203,12 +218,15 @@ Integration tests copy the existing
 CLI/hub/TX binaries into a private test directory so their running processes
 do not lock files used by the parallel main build.
 
-`-Test` builds and runs all 14 mesh suites from one shared target list, including
+`-Test` builds and runs all 19 mesh suites from one shared target list, including
 `ObriiMeshPortPlanSelfTest`, `ObriiMeshPortNodeSelfTest`,
 `ObriiMeshWireModemSelfTest`, `ObriiMeshProtocolAdapterSelfTest`,
 `ObriiMeshRadioEgressSelfTest`, `ObriiMeshLoRaWanAdapterSelfTest` and
-`ObriiMeshLoRaWanNodeSelfTest`, plus the six existing designer/packet/IQ/node/
-remote/discovery suites. The LoRaWAN node suite runs both ABP/OTAA and DATA/IQ,
+`ObriiMeshLoRaWanNodeSelfTest`, both live-topology suites and the existing
+designer/packet/IQ/node/remote/discovery suites, plus routed discovery, directory
+leases and actual TCP fallback/catalogue integration. The live tests cover node/link
+failure isolation, alternate known routes, disabled-node append/rejoin and
+rejection of stale updates. The LoRaWAN node suite runs both ABP/OTAA and DATA/IQ,
 without subset flags. Reticulum cases use the checkout's local runtime when
 present; otherwise the adapter suite explicitly reports them skipped. The
 script does not provision that runtime. These software tests do not qualify RF.
@@ -247,8 +265,11 @@ headless tests. The standalone CLI selects OFF when adding the shared mesh
 targets; its other Qt dependencies remain unchanged. See
 [standalone CLI builds](obrii_cli.md#standalone-cli-build).
 
-SSH process lifecycle, live graph/endpoint changes and hardware qualification
-are not provided by the local launcher. Attaching already running remote nodes
+SSH process lifecycle and hardware qualification are not provided by the local
+launcher. Live local additions use an authenticated, revision-guarded loopback
+receiver registration; existing socket callback addresses stay stable. A failed
+RX/TX process disables only that node; explicitly enable RX to recover it, never
+automatically restart TX. Hub failure remains a session-level failure. Attaching already running remote nodes
 is a separate supported workflow, not automatic SSH launch or learned routing.
 
 ## Packet Network Laboratory

@@ -4,7 +4,11 @@ Obrii SDR is a wideband SDR receiver and research workstation, optimized first
 for RigExpert Fobos SDR hardware while also supporting additional receiver
 backends.
 The current packaged release is Windows-first, with active Linux/Raspberry Pi
-support and a separately maintained Android USB/network client. Version 8.1.0
+support and a separately maintained Android USB/network client. Version 8.2.0
+adds saved VPN discovery addresses, bounded TCP fallback, an optional node
+directory, isolated live mesh topology changes, and experimental EU868 LoRaWAN
+1.1 and Class B/C simulation. It also fixes GCC/ARM mesh build portability.
+See `docs/release_notes_8.2.0.md` and `docs/mesh_vpn_discovery.md`. Version 8.1.0
 adds offline CPU FFT plan/thread tuning, optional phosphor Contours, distributed
 Mesh nodes with independent RX/TX ports and experimental LoRa/Meshtastic,
 Reticulum and modeled LoRaWAN adapters. See `docs/release_notes_8.1.0.md` for
@@ -93,7 +97,7 @@ The add-on contains the portable GNU Radio
 Wi-Fi and Wireshark tools; to enable them, run `Install-Wireless-AddOn.ps1` beside
 `ObriiSDR.exe` or extract the add-on into that same folder. See
 `docs/wireless_addon.md`. Npcap is not bundled.
-Extract the Linux source with `tar -xzf ObriiSDR-v8.1.0-raspberry-source.tar.gz`;
+Extract the Linux source with `tar -xzf ObriiSDR-v8.2.0-raspberry-source.tar.gz`;
 the build/run shell scripts have executable permissions. Android packages are
 maintained and released separately.
 

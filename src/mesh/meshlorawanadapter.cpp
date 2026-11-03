@@ -2,6 +2,8 @@
 #include "../lorawan/lorawan.h"
 #include "../lorawan/regional.h"
 #include "../lorawan/lorawanlora.h"
+#include "../lorawan/version11.h"
+#include "../lorawan/classbc.h"
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -95,14 +97,15 @@ quint64 storedNumber(const QJsonValue &v, quint64 high) {
 void increment(quint64 &v) { if (v != (std::numeric_limits<quint64>::max)()) ++v; }
 QJsonObject rejected(const QString &why) { return {{"ok", false}, {"error", why.left(256)}}; }
 
-QJsonObject phy(unsigned rate, Lw::Direction dir) {
-    const auto c = Lw::phyConfig(rate, dir, 1);
-    return {{"type", "lora"}, {"sf", c.spreadingFactor}, {"bw", c.bandwidthHz}, {"cr", c.codingRate},
+QJsonObject phy(unsigned rate, Lw::Direction dir, bool beacon=false) {
+    const auto c = beacon ? Lw::beaconPhyConfig(1) : Lw::phyConfig(rate, dir, 1);
+    QJsonObject result{{"type", "lora"}, {"sf", c.spreadingFactor}, {"bw", c.bandwidthHz}, {"cr", c.codingRate},
         {"os", 1}, {"preamble", c.preambleSymbols}, {"syncWord", int(c.syncWord)},
         {"invertIq", c.invertIq}, {"payloadCrc", c.payloadCrc}, {"ldro", "auto"}};
+    if(beacon){result.insert("explicitHeader",false);result.insert("implicitPayloadBytes",17);}return result;
 }
-quint64 airtime(int size, unsigned rate, Lw::Direction dir) {
-    const auto c = Lw::phyConfig(rate, dir, 1);
+quint64 airtime(int size, unsigned rate, Lw::Direction dir, bool beacon=false) {
+    const auto c = beacon ? Lw::beaconPhyConfig(1) : Lw::phyConfig(rate, dir, 1);
     const obrii::lora::PacketCodec codec(c);
     const auto count = (c.preambleSymbols + 4 + quint64(codec.symbolCount(size))) * c.samplesPerSymbol() + c.samplesPerSymbol() / 4;
     require(count <= 2u * 1024 * 1024, "LoRaWAN waveform exceeds host sample budget");
@@ -116,13 +119,17 @@ struct Snapshot {
     Lw::Eu868 region;
     Lw::DutyState duty;
     quint64 cooldown = 0, uptime = 0;
+    Lw::DeviceClass requested=Lw::DeviceClass::A,mode=Lw::DeviceClass::A;
+    Lw::ClassBConfig classB;
+    bool pingNegotiated=false,modePending=false,rekeyPending=false,resetPending=false;
 };
-struct RxContext { quint32 frequency; unsigned rate; quint64 begin, end, receivedAt; };
-enum class Kind { Data, Repeat, Join, JoinAccept };
+struct RxContext { quint32 frequency; unsigned rate; quint64 begin, end, receivedAt; bool beacon=false; };
+enum class Kind { Data, Repeat, Join, JoinAccept, Beacon };
 struct Pending {
     Kind kind = Kind::Data;
     Lw::DataFrame frame;
     quint64 id = 0, expires = 0;
+    quint32 beaconTime = 0;
 };
 struct Flight {
     quint64 ticket = 0, id = 0, begin = 0, duration = 0, timeout = 0;
@@ -132,6 +139,8 @@ struct Flight {
     unsigned rate = 0;
     quint64 expires = 0, latestStart = 0;
     bool started = false;
+    quint32 beaconTime = 0;
+    bool continuous=false;
 };
 
 class LoRaWanAdapter final : public ProtocolAdapter {
@@ -147,11 +156,17 @@ public:
             only(c, {"role", "activation", "interfaceId", "devAddr", "netId", "nwkSKeyHex", "appSKeyHex",
                 "joinEuiHex", "devEuiHex", "appKeyHex", "initializeState", "initialFCntUp", "initialFCntDown",
                 "frequencyHz", "dataRate", "nbTrans", "rx1Offset", "rx2DataRate", "rx2FrequencyHz", "receiveDelay",
-                "adrEnabled", "clockToleranceMs", "rxContextMaxAgeMs", "txCompleteTimeoutMs"});
+                "adrEnabled", "clockToleranceMs", "rxContextMaxAgeMs", "txCompleteTimeoutMs", "version", "deviceClass",
+                "fNwkSIntKeyHex", "sNwkSIntKeyHex", "nwkSEncKeyHex", "nwkKeyHex", "initialAFCntDown",
+                "pingPeriodicity", "pingDataRate", "pingFrequencyHz", "beaconFrequencyHz", "clockErrorPpm"});
             require(c.value("role") == "device" || c.value("role") == "network", "LoRaWAN role must be device or network");
             require(c.value("activation") == "abp" || c.value("activation") == "otaa", "LoRaWAN activation must be abp or otaa");
             network_ = c.value("role") == "network";
             otaa_ = c.value("activation") == "otaa";
+            require(!c.contains("version") || c.value("version")=="1.0.4" || c.value("version")=="1.1", "Unsupported LoRaWAN version");
+            version_=c.value("version")=="1.1"?Lw::Version::V1_1:Lw::Version::V1_0_4;
+            require(!c.contains("deviceClass") || QStringList{"A","B","C"}.contains(c.value("deviceClass").toString()), "deviceClass must be A, B or C");
+            const auto className=c.value("deviceClass").toString("A");
             const bool initialize = boolean(c, "initializeState", false);
             const auto initialUp = setting(c, "initialFCntUp", 0, 0, 65535);
             const auto initialDown = setting(c, "initialFCntDown", 0, 0, 65535);
@@ -165,8 +180,10 @@ public:
             configuredAddress_ = (!otaa_ || network_) ? address(c.value("devAddr")) : 0;
             Lw::SessionKeys keys;
             credentials_ = {};
+            credentials_.version=version_;
             QByteArray identity = network_ ? "network:" : "device:";
             identity += otaa_ ? "otaa:" : "abp:";
+            if(version_==Lw::Version::V1_1)identity+="1.1:";
             if (otaa_) {
                 require(!c.contains("nwkSKeyHex") && !c.contains("appSKeyHex") &&
                     !c.contains("initialFCntUp") && !c.contains("initialFCntDown"), "OTAA cannot import ABP session fields");
@@ -174,6 +191,9 @@ public:
                 credentials_.joinEui = fixed<8>(c.value("joinEuiHex"));
                 credentials_.devEui = fixed<8>(c.value("devEuiHex"));
                 credentials_.appKey = fixed<16>(c.value("appKeyHex"));
+                if(version_==Lw::Version::V1_1){credentials_.nwkKey=fixed<16>(c.value("nwkKeyHex"));identity+=hex(c.value("nwkKeyHex"),16);}
+                else require(!c.contains("nwkKeyHex"),"NwkKey requires a 1.1 profile");
+                require(!c.contains("fNwkSIntKeyHex")&&!c.contains("sNwkSIntKeyHex")&&!c.contains("nwkSEncKeyHex")&&!c.contains("initialAFCntDown"),"OTAA cannot import 1.1 ABP session fields");
                 eui_ = QString::fromLatin1(hex(c.value("devEuiHex"), 8).toHex());
                 identity += hex(c.value("joinEuiHex"), 8) + hex(c.value("devEuiHex"), 8) + hex(c.value("appKeyHex"), 16);
                 joinParameters_ = {};
@@ -185,8 +205,17 @@ public:
             } else {
                 require(!c.contains("joinEuiHex") && !c.contains("devEuiHex") && !c.contains("appKeyHex") && !c.contains("netId"),
                     "ABP requires session keys, not OTAA credentials");
-                keys.network = fixed<16>(c.value("nwkSKeyHex")); keys.application = fixed<16>(c.value("appSKeyHex"));
-                identity += QByteArray::number(configuredAddress_) + ':' + hex(c.value("nwkSKeyHex"), 16) + hex(c.value("appSKeyHex"), 16);
+                keys.version=version_; keys.application = fixed<16>(c.value("appSKeyHex"));
+                identity += QByteArray::number(configuredAddress_) + ':';
+                if(version_==Lw::Version::V1_1){
+                    require(!c.contains("nwkSKeyHex")&&!c.contains("nwkKeyHex"),"1.1 ABP requires three separate network session keys");
+                    keys.network=fixed<16>(c.value("fNwkSIntKeyHex"));keys.servingIntegrity=fixed<16>(c.value("sNwkSIntKeyHex"));keys.networkEncryption=fixed<16>(c.value("nwkSEncKeyHex"));
+                    identity+=hex(c.value("fNwkSIntKeyHex"),16)+hex(c.value("sNwkSIntKeyHex"),16)+hex(c.value("nwkSEncKeyHex"),16);
+                }else{
+                    require(!c.contains("fNwkSIntKeyHex")&&!c.contains("sNwkSIntKeyHex")&&!c.contains("nwkSEncKeyHex")&&!c.contains("nwkKeyHex")&&!c.contains("initialAFCntDown"),"1.1 keys/counters require a 1.1 profile");
+                    keys.network = fixed<16>(c.value("nwkSKeyHex"));identity+=hex(c.value("nwkSKeyHex"),16);
+                }
+                identity += hex(c.value("appSKeyHex"), 16);
                 eui_.clear();
             }
             contextHash_ = QCryptographicHash::hash(identity, QCryptographicHash::Sha256).toHex();
@@ -195,6 +224,16 @@ public:
             contextAge_ = setting(c, "rxContextMaxAgeMs", 10000, 1, 120000) * 1000;
             completeTimeout_ = setting(c, "txCompleteTimeoutMs", 120000, 1000, 180000) * 1000;
             store_ = {};
+            store_.requested=className=="B"?Lw::DeviceClass::B:className=="C"?Lw::DeviceClass::C:Lw::DeviceClass::A;
+            store_.mode=store_.requested==Lw::DeviceClass::C && version_==Lw::Version::V1_0_4?Lw::DeviceClass::C:Lw::DeviceClass::A;
+            store_.modePending=!network_ && version_==Lw::Version::V1_1 && store_.requested==Lw::DeviceClass::C;
+            store_.resetPending=!otaa_ && !network_ && version_==Lw::Version::V1_1;
+            store_.classB.periodicity=quint8(setting(c,"pingPeriodicity",7,0,7));
+            store_.classB.pingDataRate=quint8(setting(c,"pingDataRate",3,0,6));
+            store_.classB.pingFrequencyHz=quint32(setting(c,"pingFrequencyHz",869525000,863000000,870000000));
+            store_.classB.beaconFrequencyHz=quint32(setting(c,"beaconFrequencyHz",869525000,863000000,870000000));
+            store_.classB.clockErrorPpm=quint16(setting(c,"clockErrorPpm",20,0,1000));
+            store_.classB.toleranceUs=quint32(tolerance_);store_.classB.validate();
             auto &r = store_.region;
             r.dataRate = quint8(setting(c, "dataRate", 5, 0, 5));
             r.nbTrans = quint8(setting(c, "nbTrans", 1, 1, 15));
@@ -224,11 +263,13 @@ public:
                     Lw::SessionState initial; initial.role = role_; initial.devAddr = configuredAddress_; initial.keys = keys;
                     initial.maxUplinkCopies = r.nbTrans;
                     initial.nextTransmit = network_ ? initialDown : initialUp;
+                    if(network_ && version_==Lw::Version::V1_1)initial.nextApplicationTransmit=setting(c,"initialAFCntDown",0,0,65535);
                     store_.native = Lw::saveSession(initial);
                 }
                 persist(store_);
             }
             baseUptime_ = store_.uptime;
+            tracker_.configure(store_.classB);
             store_.region.channelIndex(frequency_, store_.region.dataRate);
             if (otaa_) {
                 if (network_) {
@@ -242,7 +283,8 @@ public:
                 }
             } else {
                 const auto state = Lw::loadSession(store_.native);
-                require(state.devAddr == configuredAddress_ && state.keys.network == keys.network && state.keys.application == keys.application,
+                require(state.devAddr == configuredAddress_ && state.keys.version==version_ && state.keys.network == keys.network && state.keys.application == keys.application &&
+                    state.keys.servingIntegrity==keys.servingIntegrity && state.keys.networkEncryption==keys.networkEncryption,
                     "ABP state does not match the local operator profile");
                 attach(state);
             }
@@ -265,7 +307,7 @@ public:
             clock(nowMs);
             if (op == "tx_started") return startFlight(request);
             if (op == "rx_context") {
-                only(request, {"op", "frequencyHz", "dataRate", "packetStartMs", "packetEndMs"});
+                only(request, {"op", "frequencyHz", "dataRate", "packetStartMs", "packetEndMs", "beacon"});
                 const auto begin = number(request.value("packetStartMs"), 0, quint64(MaxClockMs)) * 1000;
                 const auto end = number(request.value("packetEndMs"), 0, quint64(MaxClockMs)) * 1000;
                 require(begin <= end && end <= now_ && now_ - end <= contextAge_ && end - begin <= 120000000,
@@ -273,7 +315,7 @@ public:
                 const auto hz = quint32(number(request.value("frequencyHz"), 863000000, 870000000));
                 const auto rate = unsigned(number(request.value("dataRate"), 0, 6));
                 require(Lw::Eu868::validFrequency(hz), "Unsupported EU868 receive frequency");
-                rxContext_ = RxContext{hz, rate, begin, end, now_};
+                rxContext_ = RxContext{hz, rate, begin, end, now_,boolean(request,"beacon",false)};
                 return {{"ok", true}};
             }
             if (op == "cancel") {
@@ -281,11 +323,33 @@ public:
                 const int count = queue_.size(); queue_.clear();
                 return {{"ok", true}, {"cancelled", count}};
             }
-            require(op == "join" || op == "send" || op == "send_mac" || op == "repeat", "Unsupported LoRaWAN operation");
+            if(op=="beacons"){
+                only(request,{"op","enabled","gpsSeconds"});require(network_,"Only a network role schedules beacons");
+                require(request.value("enabled").isBool(),"enabled must be a boolean");
+                const bool enabled=request.value("enabled").toBool();
+                if(enabled){const auto gps=quint32(number(request.value("gpsSeconds"),0,0xffffffff));require(gps%128==0,"Beacon GPS time must align to 128 seconds");beaconGps_=gps;beaconDue_=now_;}
+                else require(!request.contains("gpsSeconds"),"gpsSeconds applies only when enabling beacons");
+                beaconEnabled_=enabled;return {{"ok",true}};
+            }
+            if(op=="set_class"){
+                only(request,{"op","class","periodicity"});require(session_ && !flight_.ticket && queue_.isEmpty(),"set_class requires an idle activated device/network pair");
+                const auto name=request.value("class").toString();require(QStringList{"A","B","C"}.contains(name),"class must be A, B or C");
+                auto next=store_;const bool leavingC=next.mode==Lw::DeviceClass::C;next.requested=name=="B"?Lw::DeviceClass::B:name=="C"?Lw::DeviceClass::C:Lw::DeviceClass::A;
+                if(next.requested==Lw::DeviceClass::B){next.classB.periodicity=quint8(setting(request,"periodicity",next.classB.periodicity,0,7));next.pingNegotiated=false;next.mode=Lw::DeviceClass::A;}
+                else {require(!request.contains("periodicity"),"periodicity applies only to Class B");if(network_ || version_==Lw::Version::V1_0_4)next.mode=next.requested;}
+                next.modePending=!network_ && version_==Lw::Version::V1_1 && (next.requested!=Lw::DeviceClass::B || leavingC);
+                persist(next);store_=std::move(next);tracker_.configure(store_.classB);
+                publish({{"event","class_requested"},{"class",name}});return {{"ok",true}};
+            }
+            require(op == "join" || op == "send" || op == "send_mac" || op == "repeat" || op=="beacon", "Unsupported LoRaWAN operation");
             require(queue_.size() < MaxQueue, "LoRaWAN queue is full (16 requests)");
             Pending p;
             p.expires = now_ + setting(request, "ttlMs", 60000, 1, 3600000) * 1000;
-            if (op == "join") {
+            if(op=="beacon"){
+                only(request,{"op","gpsSeconds","ttlMs"});require(network_,"Only a network role transmits beacons");
+                p.kind=Kind::Beacon;p.beaconTime=quint32(number(request.value("gpsSeconds"),0,0xffffffff));
+                require(p.beaconTime%128==0,"Beacon gpsSeconds must be divisible by 128");
+            } else if (op == "join") {
                 only(request, {"op", "ttlMs"});
                 require(!network_ && bool(device_), "join requires an OTAA device role");
                 require(!session_ && queue_.isEmpty() && !flight_.ticket, "OTAA join is already active or the device is activated");
@@ -307,8 +371,9 @@ public:
                     const auto parsed = Lw::parseMac(Lw::Direction::Downlink, mac);
                     require(!mac.empty() && parsed.unparsed.empty(), "MAC request contains empty or unsupported commands");
                     for (const auto &command : parsed.commands)
-                        require(command.cid == 2 || command.cid == 6 || command.cid == 13,
-                            "Network MAC parameter negotiation is not implemented; use LinkCheckAns, DevStatusReq or DeviceTimeAns");
+                        require(command.cid == 2 || command.cid == 6 || command.cid == 13 ||
+                            (version_==Lw::Version::V1_1 && command.cid==12),
+                            "Network MAC negotiation is limited to LinkCheckAns, DevStatusReq, DeviceTimeAns and 1.1 ADRParamSetupReq");
                     p.frame.port = 0; p.frame.payload = mac;
                 } else {
                     only(request, {"op", "port", "payloadBase64", "text", "confirmed", "ttlMs"});
@@ -345,14 +410,26 @@ public:
             const auto dir = network_ ? Lw::Direction::Uplink : Lw::Direction::Downlink;
             const auto duration = airtime(wire.size(), context->rate, dir);
             const auto measured = context->end - context->begin;
-            require((duration > measured ? duration - measured : measured - duration) <= tolerance_ + 2000,
+            const auto actualDuration=context->beacon?airtime(wire.size(),3,dir,true):duration;
+            require((actualDuration > measured ? actualDuration - measured : measured - actualDuration) <= tolerance_ + 2000,
                 "LoRaWAN capture duration does not match frequency/rate context");
+            require(!lastTx_ || context->end<lastTx_->first || context->begin>lastTx_->second,"Half-duplex radio cannot receive during its transmission");
+            if(context->beacon){
+                require(!network_ && context->rate==3 && context->frequency==store_.classB.beaconFrequencyHz,"Beacon has wrong direction/frequency/rate");
+                const auto beacon=Lw::decodeBeacon(bytes(wire));tracker_.acquire(bytes(wire),context->begin);
+                increment(rxCount_);publish({{"event","beacon"},{"gpsSeconds",double(beacon.gpsSeconds)},
+                    {"gatewayCrcValid",beacon.gatewayCrcValid},{"authenticated",false}});return;
+            }
             if (network_) store_.region.channelIndex(context->frequency, context->rate);
             else {
                 bool matched = false;
                 if (windows_) for (const auto &w : *windows_)
                     matched |= w.containsStart(context->begin) && w.frequencyHz == context->frequency && w.dataRate == context->rate;
-                require(matched, "Downlink is outside device RX1/RX2 or has the wrong frequency/rate");
+                if(session_ && effectiveClass()==Lw::DeviceClass::C)
+                    matched=Lw::acceptsClassC(store_.region,context->begin,context->frequency,context->rate,windows_,lastTx_);
+                if(session_ && effectiveClass()==Lw::DeviceClass::B)
+                    matched|=tracker_.acceptsPing(session_->state().devAddr,context->begin,context->frequency,context->rate);
+                require(matched, "Downlink is outside the active Class A/B/C receive opportunity");
             }
             const auto native = bytes(wire);
             if (quint8(wire[0]) == 0) {
@@ -361,7 +438,11 @@ public:
                 auto parameters = joinParameters_;
                 parameters.rx1Offset = store_.region.rx1Offset; parameters.rx2DataRate = store_.region.rx2DataRate;
                 parameters.rxDelay = store_.region.receiveDelay;
+                auto next=store_;next.mac.clear();next.pingNegotiated=false;
+                next.mode=version_==Lw::Version::V1_0_4 && next.requested==Lw::DeviceClass::C?Lw::DeviceClass::C:Lw::DeviceClass::A;
+                staged_=&next;
                 const auto response = server_->accept(native, parameters);
+                staged_=nullptr;
                 attach(response.session);
                 joinAccept_ = bytes(response.wire);
                 windows_ = Lw::receiveWindows(store_.region, context->end, context->frequency, context->rate, true, quint32(tolerance_));
@@ -369,7 +450,7 @@ public:
             } else if (quint8(wire[0]) == 0x20) {
                 require(!network_ && bool(device_) && !session_, "JoinAccept requires a pending OTAA device activation");
                 auto next = store_;
-                device_->accept(native, [&](const auto &a) { next.region.applyJoin(a); staged_ = &next; });
+                device_->accept(native, [&](const auto &a) { next.region.applyJoin(a);next.rekeyPending=a.optNeg;next.pingNegotiated=false; staged_ = &next; });
                 staged_ = nullptr;
                 attach(*device_->state().activated);
                 session_->setNbTrans(store_.region.nbTrans);
@@ -382,20 +463,26 @@ public:
                 std::optional<Lw::DataFrame> inspected;
                 if (!network_) {
                     // Inspect with the same FCnt reconstruction, but do not release data until Session commits.
-                    const auto &state = session_->state();
-                    quint64 count = Lw::wireCounter(native);
-                    if (state.lastReceived) {
-                        count |= (*state.lastReceived & 0xffff0000U);
-                        if (count <= *state.lastReceived) count += 0x10000;
-                    }
-                    require(count <= 0xffffffffULL, "LoRaWAN receive counter exhausted");
-                    inspected = Lw::decodeData(native, state.keys, quint32(count));
+                    inspected = session_->inspect(native);
                     const auto result = next.region.processDownlink(*inspected);
                     next.mac = result.answers;
+                    extendedMac(next,*inspected);
+                }
+                const Lw::DataContext capture{quint8(context->rate),network_?quint8(store_.region.channelIndex(context->frequency,context->rate)):quint8(0),0};
+                if(network_){
+                    // Deduplicated copies may only refresh ACK/window state; do
+                    // not replay MAC effects. New frames are inspected before the
+                    // persistence barrier so session + MAC state commit together.
+                    const auto &s=session_->state();const bool duplicate=!s.lastUplink.empty() && native.size()==s.lastUplink.size() &&
+                        std::equal(native.begin(),native.end()-4,s.lastUplink.begin());
+                    if(!duplicate)extendedMac(next,session_->inspect(native,capture));
                 }
                 staged_ = &next;
-                const auto received = session_->receive(native);
+                const auto received = session_->receive(native,{},capture);
                 staged_ = nullptr;
+                if(tracker_.config().pingFrequencyHz!=store_.classB.pingFrequencyHz || tracker_.config().beaconFrequencyHz!=store_.classB.beaconFrequencyHz ||
+                    tracker_.config().pingDataRate!=store_.classB.pingDataRate || tracker_.config().periodicity!=store_.classB.periodicity)
+                    tracker_.configure(store_.classB);
                 if (network_) {
                     windows_ = Lw::receiveWindows(store_.region, context->end, context->frequency, context->rate, false, quint32(tolerance_));
                 } else {
@@ -434,7 +521,19 @@ public:
             while (!queue_.isEmpty() && queue_.head().expires < now_) {
                 publish({{"event", "expired"}, {"nativeId", QString::number(queue_.dequeue().id)}});
             }
-            if (network_) sendDownlink();
+            if(network_ && beaconEnabled_){
+                if(now_>beaconDue_+tolerance_){const auto skip=(now_-beaconDue_-tolerance_+127999999)/128000000;beaconDue_+=skip*128000000;beaconGps_+=quint32(skip*128);}
+                if(now_>=beaconDue_){
+                    Pending b;b.kind=Kind::Beacon;b.beaconTime=beaconGps_;b.expires=beaconDue_+tolerance_;
+                    // Beacons preempt application requests, retain their absolute
+                    // slot, and are skipped rather than transmitted late.
+                    if(now_>=Lw::dutyReady(store_.duty,store_.classB.beaconFrequencyHz)){
+                        queue_.prepend(b);sendBeacon();beaconDue_+=128000000;beaconGps_+=128;return;
+                    }
+                }
+            }
+            if(network_ && !queue_.isEmpty() && queue_.head().kind==Kind::Beacon)sendBeacon();
+            else if (network_) sendDownlink();
             else sendUplink();
         } catch (const StateFailure &) { staged_ = nullptr; failClosed(QString::fromLatin1(StateFailure().what())); }
         catch (const std::exception &e) {
@@ -449,6 +548,7 @@ public:
         try {
             clock(nowMs);
             const auto f = std::exchange(flight_, Flight{});
+            if(f.kind==Kind::Beacon && !sent)tracker_.reset();
             const auto expected = f.begin + f.duration;
             if (sent && (now_ + tolerance_ < expected || now_ > expected + tolerance_)) {
                 failClosed("LoRaWAN completion is not the planned on-air end; timing validity unknown, reload required");
@@ -457,7 +557,7 @@ public:
             if (!network_ && sent) {
                 windows_ = Lw::receiveWindows(store_.region, now_, f.frequency, f.rate, f.kind == Kind::Join, quint32(tolerance_));
                 auto next = store_;
-                next.cooldown = (std::max)(next.cooldown, Lw::nextUplinkTime(*windows_, f.confirmed));
+                next.cooldown = (std::max<quint64>)(next.cooldown, Lw::nextUplinkTime(*windows_, f.confirmed));
                 persist(next); store_ = std::move(next);
                 publish({{"event", "rx_windows"}, {"windows", windowJson()}});
             }
@@ -476,10 +576,19 @@ public:
             {"pending", flight_.ticket != 0}, {"received", QString::number(rxCount_)}, {"transmitted", QString::number(txCount_)},
             {"rejected", QString::number(rejectCount_)}, {"hardwareTimingVerified", false}, {"networkServer", false},
             {"rxContextRequired", true}, {"automaticRetries", false}, {"error", fault_}};
+        s.insert("version",version_==Lw::Version::V1_1?"1.1":"1.0.4");
+        const auto name=[](Lw::DeviceClass c){return c==Lw::DeviceClass::B?"B":c==Lw::DeviceClass::C?"C":"A";};
+        s.insert("deviceClass",name(effectiveClass()));s.insert("requestedClass",name(store_.requested));
+        s.insert("beaconLocked",tracker_.locked(now_));s.insert("pingNegotiated",store_.pingNegotiated);
+        s.insert("pingPeriodicity",int(store_.classB.periodicity));s.insert("rekeyPending",store_.rekeyPending);
+        s.insert("beaconsEnabled",beaconEnabled_);
+        s.insert("deviceModePending",store_.modePending);
+        if(session_ && effectiveClass()==Lw::DeviceClass::B){const auto ping=tracker_.nextPing(session_->state().devAddr,now_);if(ping)s.insert("nextPingUs",QString::number(ping->nominalUs));}
         s.insert("txStartedSupported", true);
         s.insert("txStartAcknowledged", flight_.ticket != 0 && flight_.started);
         if (session_) {
             s.insert("nextTransmitCounter", QString::number(session_->state().nextTransmit));
+            if(version_==Lw::Version::V1_1)s.insert("nextApplicationDownCounter",QString::number(session_->state().nextApplicationTransmit));
             s.insert("nbTrans", int(session_->state().maxUplinkCopies));
             s.insert("ackPending", session_->state().acknowledgmentPending);
         }
@@ -487,7 +596,9 @@ public:
             s.insert("frequencyHz", double(frequency_));
             s.insert("dataRate", int(store_.region.dataRate));
             s.insert("clockAnchored", clocked_);
-            s.insert("nextUplinkUs", QString::number((std::max)(store_.cooldown, Lw::dutyReady(store_.duty, frequency_))));
+            auto earliest=(std::max<quint64>)(store_.cooldown,Lw::dutyReady(store_.duty,frequency_));
+            if(effectiveClass()==Lw::DeviceClass::B)earliest=tracker_.nextTransaction((std::max<quint64>)(earliest,now_));
+            s.insert("nextUplinkUs",QString::number(earliest));
             s.insert("uplinkModem", phy(store_.region.dataRate, Lw::Direction::Uplink));
             s.insert("downlinkModem", phy(store_.region.dataRate, Lw::Direction::Downlink));
             s.insert("windows", windowJson());
@@ -500,12 +611,15 @@ public:
         session_.reset(); device_.reset(); server_.reset();
         queue_.clear(); joinAccept_.clear(); flight_ = {};
         windows_.reset(); rxContext_.reset(); lock_.reset();
+        tracker_.reset();lastTx_.reset();
+        beaconEnabled_=false;beaconDue_=0;beaconGps_=0;
         credentials_ = {}; store_ = {}; contextHash_.clear();
     }
 
 private:
     bool ready_ = false, network_ = false, otaa_ = false, clocked_ = false;
     Lw::Role role_ = Lw::Role::Device;
+    Lw::Version version_=Lw::Version::V1_0_4;
     QString interface_, root_, statePath_, markerPath_, eui_, fault_;
     QByteArray contextHash_, joinAccept_;
     quint32 configuredAddress_ = 0, frequency_ = 868100000;
@@ -524,6 +638,54 @@ private:
     std::optional<RxContext> rxContext_;
     std::optional<std::array<Lw::RxWindow, 2>> windows_;
     Flight flight_;
+    Lw::ClassBTracker tracker_;
+    std::optional<std::pair<quint64,quint64>> lastTx_;
+    bool beaconEnabled_=false;
+    quint64 beaconDue_=0;
+    quint32 beaconGps_=0;
+
+    Lw::DeviceClass effectiveClass() const {
+        if(!session_)return Lw::DeviceClass::A;
+        if(store_.requested==Lw::DeviceClass::B && store_.pingNegotiated && tracker_.locked(now_) &&
+            (!network_ || store_.mode==Lw::DeviceClass::B))return Lw::DeviceClass::B;
+        return store_.mode==Lw::DeviceClass::C?Lw::DeviceClass::C:Lw::DeviceClass::A;
+    }
+    void extendedMac(Snapshot &next,const Lw::DataFrame &f){
+        const auto commands=Lw::parseMac(Lw::direction(f.type),f.port && *f.port==0?f.payload:f.options);
+        for(const auto &c:commands.commands){
+            const auto cid=c.cid;const auto &p=c.data;
+            if(cid==1 || cid==11){
+                require(version_==Lw::Version::V1_1 && (p[0]&15)==1 && !(p[0]&0xf0),"Unsupported Reset/Rekey version");
+                if(network_){next.mac.push_back(cid);next.mac.push_back(1);}
+                else if(cid==11)next.rekeyPending=false;else next.resetPending=false;
+            }else if(cid==16){
+                if(network_){require(!(p[0]&0xf8),"PingSlotInfoReq reserved bits set");next.classB.periodicity=p[0]&7;next.requested=Lw::DeviceClass::B;next.pingNegotiated=true;next.mac.push_back(16);}
+                else {require(next.requested==Lw::DeviceClass::B,"Unexpected PingSlotInfoAns");next.pingNegotiated=true;}
+            }else if(cid==32){
+                require(version_==Lw::Version::V1_1 && (p[0]==0 || p[0]==2),"Invalid DeviceMode command");
+                if(network_){next.mode=Lw::DeviceClass(p[0]);next.requested=next.mode;next.mac.push_back(32);next.mac.push_back(p[0]);}
+                else if((next.requested==Lw::DeviceClass::B && p[0]==0) || next.requested==Lw::DeviceClass(p[0]))next.modePending=false;
+            }else if(!network_ && cid==17){
+                const auto hz=(quint32(p[0])|quint32(p[1])<<8|quint32(p[2])<<16)*100;
+                const auto rate=p[3]&15;const bool goodHz=!hz||Lw::Eu868::validFrequency(hz),goodRate=rate<=6 && !(p[3]&0xf0);
+                if(goodHz&&goodRate){next.classB.pingFrequencyHz=hz?hz:869525000;next.classB.pingDataRate=rate;}
+                next.mac.push_back(17);next.mac.push_back(quint8((goodHz?1:0)|(goodRate?2:0)));
+            }else if(!network_ && cid==19){
+                const auto hz=(quint32(p[0])|quint32(p[1])<<8|quint32(p[2])<<16)*100;const bool good=!hz||Lw::Eu868::validFrequency(hz);
+                if(good)next.classB.beaconFrequencyHz=hz?hz:869525000;
+                next.mac.push_back(19);next.mac.push_back(good?1:0);
+            }else if(cid==14 || cid==15){
+                // Codec exposes these; a roaming/rejoin policy is not silently
+                // acknowledged by this single-pair constructor adapter.
+                throw std::invalid_argument("Automatic ForceRejoin/RejoinParam policy is not available");
+            }else if(cid==12)require(version_==Lw::Version::V1_1,"ADRParamSetup requires version 1.1");
+        }
+        if(network_){
+            if((f.control&0x10) && next.pingNegotiated)next.mode=Lw::DeviceClass::B;
+            else if(next.mode==Lw::DeviceClass::B)next.mode=Lw::DeviceClass::A;
+        }
+        require(next.mac.size()<=242,"Pending MAC answers exceed bound");next.classB.validate();
+    }
 
     void publish(QJsonObject v) {
         v.insert("protocol", "lorawan"); v.insert("type", "lorawan");
@@ -611,6 +773,11 @@ private:
         QJsonObject body{{"version", 1}, {"context", QString::fromLatin1(contextHash_)}, {"native", b64(s.native)},
             {"region", b64(Lw::saveRegion(s.region))}, {"duty", b64(Lw::saveDuty(duty))}, {"mac", b64(s.mac)},
             {"cooldownUs", QString::number(remaining(s.cooldown))}, {"uptimeUs", QString::number(uptime)}};
+        body.insert("extensions",QJsonObject{{"requested",int(s.requested)},{"mode",int(s.mode)},
+            {"pingNegotiated",s.pingNegotiated},{"modePending",s.modePending},{"rekeyPending",s.rekeyPending},{"resetPending",s.resetPending},
+            {"periodicity",int(s.classB.periodicity)},{"pingDataRate",int(s.classB.pingDataRate)},
+            {"pingFrequencyHz",double(s.classB.pingFrequencyHz)},{"beaconFrequencyHz",double(s.classB.beaconFrequencyHz)},
+            {"clockErrorPpm",int(s.classB.clockErrorPpm)}});
         const auto hash = QCryptographicHash::hash(QJsonDocument(body).toJson(QJsonDocument::Compact), QCryptographicHash::Sha256).toHex();
         const auto data = QJsonDocument(QJsonObject{{"body", body}, {"sha256", QString::fromLatin1(hash)}}).toJson(QJsonDocument::Compact);
         if (data.size() > MaxStateBytes) throw StateFailure();
@@ -623,7 +790,7 @@ private:
         const auto envelope = doc.object(); only(envelope, {"body", "sha256"});
         require(envelope.value("body").isObject(), "Invalid saved LoRaWAN state body");
         const auto body = envelope.value("body").toObject();
-        only(body, {"version", "context", "native", "region", "duty", "mac", "cooldownUs", "uptimeUs"});
+        only(body, {"version", "context", "native", "region", "duty", "mac", "cooldownUs", "uptimeUs", "extensions"});
         const auto hash = QCryptographicHash::hash(QJsonDocument(body).toJson(QJsonDocument::Compact), QCryptographicHash::Sha256).toHex();
         if (body.value("version") != 1 || body.value("context") != QString::fromLatin1(contextHash_) ||
             envelope.value("sha256") != QString::fromLatin1(hash)) throw StateFailure();
@@ -631,6 +798,18 @@ private:
         store_.region = Lw::loadRegion(bytes(base64(body.value("region"), 2048)));
         store_.duty = Lw::loadDuty(bytes(base64(body.value("duty"), 2048)));
         store_.mac = bytes(base64(body.value("mac"), 242));
+        if(body.contains("extensions")){
+            require(body.value("extensions").isObject(),"Invalid LoRaWAN extensions state");const auto e=body.value("extensions").toObject();
+            only(e,{"requested","mode","pingNegotiated","modePending","rekeyPending","resetPending","periodicity","pingDataRate","pingFrequencyHz","beaconFrequencyHz","clockErrorPpm"});
+            store_.requested=Lw::DeviceClass(number(e.value("requested"),0,2));store_.mode=Lw::DeviceClass(number(e.value("mode"),0,2));
+            for(const auto *key:{"pingNegotiated","modePending","rekeyPending","resetPending"})require(e.value(key).isBool(),"Invalid saved MAC flag");
+            store_.pingNegotiated=e.value("pingNegotiated").toBool();store_.modePending=e.value("modePending").toBool();
+            store_.rekeyPending=e.value("rekeyPending").toBool();store_.resetPending=e.value("resetPending").toBool();
+            store_.classB.periodicity=quint8(number(e.value("periodicity"),0,7));store_.classB.pingDataRate=quint8(number(e.value("pingDataRate"),0,6));
+            store_.classB.pingFrequencyHz=quint32(number(e.value("pingFrequencyHz"),863000000,870000000));
+            store_.classB.beaconFrequencyHz=quint32(number(e.value("beaconFrequencyHz"),863000000,870000000));
+            store_.classB.clockErrorPpm=quint16(number(e.value("clockErrorPpm"),0,1000));store_.classB.validate();
+        }
         for (auto t : store_.duty.bands) require(t <= MaxDelayUs, "Invalid saved duty delay");
         require(store_.duty.aggregate <= MaxDelayUs, "Invalid saved duty delay");
         store_.cooldown = storedNumber(body.value("cooldownUs"), MaxDelayUs);
@@ -644,7 +823,7 @@ private:
         } catch (const std::exception &) { throw StateFailure(); }
     }
     void attach(const Lw::SessionState &s) {
-        require(s.role == role_ && (!network_ || s.devAddr == configuredAddress_), "Restored LoRaWAN session has the wrong role/address");
+        require(s.role == role_ && s.keys.version==version_ && (!network_ || s.devAddr == configuredAddress_), "Restored LoRaWAN session has the wrong role/address/version");
         session_ = std::make_unique<Lw::Session>(role_, s, [this](const auto &next) {
             if (device_) device_->updateSession(next);
             else if (server_) server_->updateSession(next);
@@ -660,10 +839,10 @@ private:
         return result;
     }
     Lw::Bytes preview(Lw::DataFrame f) const {
-        require(bool(session_) && session_->state().nextTransmit <= 0xffffffffULL, "LoRaWAN TX counter exhausted or session unavailable");
-        f.devAddr = session_->state().devAddr; f.counter = quint32(session_->state().nextTransmit);
-        if (session_->state().acknowledgmentPending) f.control |= 0x20;
-        return Lw::encodeData(f, session_->state().keys);
+        require(bool(session_),"LoRaWAN session unavailable");return session_->preview(std::move(f),txContext());
+    }
+    Lw::DataContext txContext() const {
+        return {store_.region.dataRate,network_?quint8(0):quint8(store_.region.channelIndex(frequency_,store_.region.dataRate)),0};
     }
     void reserve(Snapshot &next, quint32 frequency, quint64 duration, bool join) {
         next.duty = join ? Lw::reserveBackoff(next.duty, frequency, now_, duration, baseUptime_ + now_ - boot_, next.region.dutyExponent) :
@@ -688,6 +867,13 @@ private:
         require(!network_ || (flight_.latestStart && begin <= flight_.latestStart),
             "tx_started is outside the original RX1/RX2 start opportunity; cancel this unsent job");
         const auto deadline = startDeadline();
+        if(effectiveClass()==Lw::DeviceClass::B && flight_.kind!=Kind::Beacon){
+            auto end=begin+flight_.duration;
+            if(!network_){const auto windows=Lw::receiveWindows(store_.region,end,flight_.frequency,flight_.rate,flight_.kind==Kind::Join,quint32(tolerance_));end=Lw::nextUplinkTime(windows,flight_.confirmed);}
+            require(tracker_.allowsTransaction(begin,end),"Delayed TX would overlap a Class B beacon reserved/guard interval");
+        }
+        if(network_ && flight_.continuous)
+            require(effectiveClass()==Lw::DeviceClass::C && Lw::acceptsClassC(store_.region,begin,flight_.frequency,flight_.rate,windows_),"Delayed Class C TX conflicts with RX1 or the current device class");
 
         auto next = store_;
         // The dispatch reservation already includes this packet. Recompute its
@@ -702,46 +888,53 @@ private:
         if (!network_) {
             const auto windows = Lw::receiveWindows(next.region, begin + flight_.duration,
                 flight_.frequency, flight_.rate, flight_.kind == Kind::Join, quint32(tolerance_));
-            next.cooldown = (std::max)(next.cooldown, Lw::nextUplinkTime(windows, flight_.confirmed));
+            next.cooldown = (std::max<quint64>)(next.cooldown, Lw::nextUplinkTime(windows, flight_.confirmed));
         }
         try { persist(next); } catch (const std::exception &) { throw StateFailure(); }
         store_ = std::move(next);
         flight_.begin = begin;
         flight_.timeout = begin + flight_.duration + completeTimeout_;
         flight_.started = true;
+        lastTx_=std::make_pair(begin,begin+flight_.duration);
+        if(flight_.kind==Kind::Beacon){tracker_.reset();tracker_.acquire(Lw::encodeBeacon({flight_.beaconTime}),begin);}
         QJsonObject result{{"ticket", QString::number(ticket)}, {"nativeId", QString::number(flight_.id)},
             {"startUs", QString::number(begin)}, {"endUs", QString::number(begin + flight_.duration)},
             {"airtimeUs", QString::number(flight_.duration)}, {"startDeadlineUs", QString::number(deadline)},
             {"frequencyHz", double(flight_.frequency)},
             {"dataRate", int(flight_.rate)},
-            {"modem", phy(flight_.rate, network_ ? Lw::Direction::Downlink : Lw::Direction::Uplink)},
+            {"modem", phy(flight_.rate, network_ ? Lw::Direction::Downlink : Lw::Direction::Uplink,flight_.kind==Kind::Beacon)},
             {"hardwareTimingVerified", false}};
+        if(flight_.kind==Kind::Beacon)result.insert("frameKind","beacon");
         auto value = result; value.insert("event", "tx_started"); publish(value);
         require(ready_ && flight_.ticket == ticket && flight_.started, "Adapter stopped before tx_started authorization returned");
         result.insert("ok", true);
         return result;
     }
     void launch(const Pending &p, const Lw::Bytes &wire, quint32 frequency, unsigned rate, quint64 duration,
-                quint64 latestStart = 0) {
+                quint64 latestStart = 0,bool continuous=false) {
         require(nextTicket_ != (std::numeric_limits<quint64>::max)(), "LoRaWAN transport ticket exhausted");
         flight_ = {nextTicket_++, p.id, now_, duration, now_ + duration + completeTimeout_, p.kind,
             (p.kind == Kind::Data || p.kind == Kind::Repeat) && Lw::confirmed(p.frame.type), frequency, rate,
             p.expires, latestStart, false};
+        flight_.beaconTime=p.beaconTime;lastTx_=std::make_pair(now_,now_+duration);
+        flight_.continuous=continuous;
         increment(txCount_);
         const auto ticket = flight_.ticket;
-        publish({{"event", "tx_plan"}, {"ticket", QString::number(ticket)}, {"nativeId", QString::number(p.id)},
+        QJsonObject plan{{"event", "tx_plan"}, {"ticket", QString::number(ticket)}, {"nativeId", QString::number(p.id)},
             {"startUs", QString::number(now_)}, {"endUs", QString::number(now_ + duration)},
             {"airtimeUs", QString::number(duration)},
             {"startDeadlineUs", QString::number(startDeadline())},
             {"frequencyHz", double(frequency)}, {"dataRate", int(rate)},
-            {"modem", phy(rate, network_ ? Lw::Direction::Downlink : Lw::Direction::Uplink)},
-            {"hardwareTimingVerified", false}});
+            {"modem", phy(rate, network_ ? Lw::Direction::Downlink : Lw::Direction::Uplink,p.kind==Kind::Beacon)},
+            {"hardwareTimingVerified", false}};
+        if(p.kind==Kind::Beacon)plan.insert("frameKind","beacon");publish(plan);
         // A synchronous host callback may stop the adapter while processing tx_plan.
         if (ready_ && flight_.ticket == ticket) emit transmit(ticket, interface_, bytes(wire));
     }
     void sendUplink() {
         const bool automatic = queue_.isEmpty();
-        if (automatic && (!session_ || (store_.mac.empty() && !session_->state().acknowledgmentPending))) return;
+        const bool handshake=store_.modePending || store_.rekeyPending || store_.resetPending || (store_.requested==Lw::DeviceClass::B && !store_.pingNegotiated);
+        if (automatic && (!session_ || (store_.mac.empty() && !session_->state().acknowledgmentPending && !handshake))) return;
         if (now_ < store_.cooldown || now_ < Lw::dutyReady(store_.duty, frequency_)) return;
         Pending p;
         if (!automatic) p = queue_.head();
@@ -758,7 +951,15 @@ private:
         }
         else {
             p.frame.control |= next.region.onNewUplink();
-            const auto allMac = !next.mac.empty() ? next.mac : next.region.stickyAnswers;
+            auto allMac = !next.mac.empty() ? next.mac : next.region.stickyAnswers;
+            Lw::Bytes indications;
+            if(next.rekeyPending){indications.push_back(11);indications.push_back(1);}
+            if(next.resetPending){indications.push_back(1);indications.push_back(1);}
+            if(next.modePending){indications.push_back(32);const auto mode=next.requested==Lw::DeviceClass::B?Lw::DeviceClass::A:next.requested;indications.push_back(quint8(mode));next.mode=mode;}
+            if(next.requested==Lw::DeviceClass::B && !next.pingNegotiated){indications.push_back(16);indications.push_back(next.classB.periodicity);}
+            allMac.insert(allMac.end(),indications.begin(),indications.end());
+            require(allMac.size()<=242,"MAC queue exceeds frame budget");
+            if(effectiveClass()==Lw::DeviceClass::B)p.frame.control|=0x10;
             Lw::Bytes mac;
             const auto capacity = Lw::Eu868::maxMacPayload(next.region.dataRate) - 8;
             const auto parsed = Lw::parseMac(Lw::Direction::Uplink, allMac);
@@ -786,7 +987,7 @@ private:
                 wire = preview(p.frame);
             }
             Lw::Eu868::checkPayload(wire, next.region.dataRate);
-            next.mac.assign(allMac.begin() + take, allMac.end());
+            next.mac.assign(allMac.begin() + (std::min)(take,allMac.size()-indications.size()), allMac.end()-indications.size());
         }
         const auto rate = next.region.dataRate;
         next.region.channelIndex(frequency_, rate);
@@ -795,44 +996,67 @@ private:
         reserve(next, frequency_, duration, p.kind == Kind::Join);
         const auto windows = Lw::receiveWindows(next.region, now_ + duration, frequency_, rate, p.kind == Kind::Join, quint32(tolerance_));
         next.cooldown = Lw::nextUplinkTime(windows, (p.kind == Kind::Data || p.kind == Kind::Repeat) && Lw::confirmed(p.frame.type));
+        if(effectiveClass()==Lw::DeviceClass::B && !tracker_.allowsTransaction(now_,next.cooldown))return;
         if (session_ && session_->state().maxUplinkCopies != next.region.nbTrans) session_->setNbTrans(next.region.nbTrans);
         staged_ = &next;
         if (p.kind == Kind::Join) wire = device_->request();
-        else if (p.kind == Kind::Repeat) wire = session_->repeatUplink();
-        else wire = session_->transmit(p.frame);
+        else if (p.kind == Kind::Repeat) wire = session_->repeatUplink(Lw::DataContext{quint8(rate),quint8(next.region.channelIndex(frequency_,rate)),0});
+        else wire = session_->transmit(p.frame,Lw::DataContext{quint8(rate),quint8(next.region.channelIndex(frequency_,rate)),0});
         staged_ = nullptr;
         if (consume) queue_.dequeue();
         launch(p, wire, frequency_, rate, duration);
     }
+    void sendBeacon(){
+        const auto p=queue_.head();const auto hz=store_.classB.beaconFrequencyHz;
+        if(now_<Lw::dutyReady(store_.duty,hz))return;
+        const auto wire=Lw::encodeBeacon({p.beaconTime});
+        const auto duration=airtime(int(wire.size()),3,Lw::Direction::Downlink,true);
+        auto next=store_;reserve(next,hz,duration,false);persist(next);store_=std::move(next);
+        tracker_.acquire(wire,now_);queue_.dequeue();launch(p,wire,hz,3,duration,now_+tolerance_);
+    }
     void sendDownlink() {
-        if (!windows_) return;
-        if (now_ > windows_->back().closesUs) {
-            windows_.reset(); joinAccept_.clear(); return;
+        if (windows_ && now_ > windows_->back().closesUs) {windows_.reset();joinAccept_.clear();}
+        if (joinAccept_.isEmpty() && queue_.isEmpty() && store_.mac.empty() && (!session_ || !session_->state().acknowledgmentPending)) return;
+        std::vector<Lw::RxWindow> opportunities;
+        if(windows_)opportunities.assign(windows_->begin(),windows_->end());
+        if(joinAccept_.isEmpty() && session_){
+            if(effectiveClass()==Lw::DeviceClass::B){const auto ping=tracker_.nextPing(session_->state().devAddr,now_);if(ping)opportunities.push_back(*ping);}
+            if(effectiveClass()==Lw::DeviceClass::C && (!windows_ || !(*windows_)[0].containsStart(now_)))
+                opportunities.push_back({now_,now_,now_+completeTimeout_,store_.region.rx2FrequencyHz,store_.region.rx2DataRate,4});
         }
-        if (joinAccept_.isEmpty() && queue_.isEmpty() && (!session_ || !session_->state().acknowledgmentPending)) return;
-        for (const auto &w : *windows_) {
+        for (const auto &w : opportunities) {
             if (now_ < w.nominalUs || now_ > w.nominalUs + tolerance_ || now_ < Lw::dutyReady(store_.duty, w.frequencyHz)) continue;
             Pending p; p.id = 0;
             const bool joining = !joinAccept_.isEmpty();
             if (joining) p.kind = Kind::JoinAccept;
             else if (!queue_.isEmpty()) p = queue_.head();
             else p.frame.type = Lw::FrameType::UnconfirmedDown;
-            const auto wire = joining ? bytes(joinAccept_) : preview(p.frame);
+            bool consume=!queue_.isEmpty();
+            if(!joining && !store_.mac.empty()){
+                if(store_.mac.size()<=15 && (!p.frame.port || *p.frame.port!=0))p.frame.options=store_.mac;
+                else {p.frame={};p.frame.type=Lw::FrameType::UnconfirmedDown;p.frame.port=0;p.frame.payload=store_.mac;consume=false;p.id=0;}
+            }
+            auto wire = joining ? bytes(joinAccept_) : preview(p.frame);
+            if(!joining && !p.frame.options.empty() && wire.size()>Lw::Eu868::maxMacPayload(w.dataRate)+5){
+                p.frame.port.reset();p.frame.payload.clear();p.frame.type=Lw::FrameType::UnconfirmedDown;consume=false;p.id=0;wire=preview(p.frame);
+            }
             Lw::Eu868::checkPayload(wire, w.dataRate);
             const auto duration = airtime(int(wire.size()), w.dataRate, Lw::Direction::Downlink);
+            if(effectiveClass()==Lw::DeviceClass::B && !tracker_.allowsTransaction(now_,now_+duration))continue;
             auto next = store_; reserve(next, w.frequencyHz, duration, false);
             if (joining) { persist(next); store_ = std::move(next); }
             else {
+                next.mac.clear();
                 staged_ = &next;
                 const auto committedWire = session_->transmit(p.frame);
                 staged_ = nullptr;
                 if (committedWire != wire) throw StateFailure();
             }
-            if (!joining && !queue_.isEmpty()) queue_.dequeue();
+            if (!joining && consume && !queue_.isEmpty()) queue_.dequeue();
             const auto frequency = w.frequencyHz; const auto rate = w.dataRate;
-            const auto latestStart = w.nominalUs + tolerance_;
-            windows_.reset(); joinAccept_.clear();
-            launch(p, wire, frequency, rate, duration, latestStart);
+            const auto latestStart = w.index==4?w.closesUs:w.nominalUs + tolerance_;
+            if(w.index!=4)windows_.reset();joinAccept_.clear();
+            launch(p, wire, frequency, rate, duration, latestStart,w.index==4);
             return;
         }
     }

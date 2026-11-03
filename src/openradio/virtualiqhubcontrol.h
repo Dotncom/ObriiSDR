@@ -7,6 +7,8 @@
 #include <QMap>
 #include <QTcpServer>
 #include <QSet>
+#include <functional>
+#include <utility>
 
 // Optional, loopback-only control plane. No control work in the IQ hot path.
 class VirtualIqHubControl : public QObject {
@@ -16,6 +18,9 @@ public:
     ~VirtualIqHubControl() override;
     bool listen(quint16 port, const QString &key, QString *error=nullptr);
     quint16 port() const { return server.serverPort(); }
+    using AddReceiverHandler=std::function<bool(const QString &,const QString &,quint16)>;
+    // Called only after validation. A rejecting handler must leave its endpoints unchanged.
+    void setAddReceiverHandler(AddReceiverHandler handler) { addReceiverHandler=std::move(handler); }
 private:
     QJsonObject execute(const QJsonObject &request);
     QJsonObject status() const;
@@ -24,9 +29,11 @@ private:
     QTcpServer server;
     QSet<QTcpSocket *> clients;
     QMap<QString,QJsonObject> links;
+    QMap<QString,QJsonObject> receiverEndpoints;
     QString key,instance;
     quint64 revision=0;
     bool defaultRoute;
     QElapsedTimer rateWindow;
     int requestsThisWindow=0;
+    AddReceiverHandler addReceiverHandler;
 };

@@ -2,6 +2,7 @@
 #include "meshpacketengine.h"
 #include "meshproject.h"
 #include "meshdiscovery.h"
+#include "meshnodedirectory.h"
 #include "meshiqmodem.h"
 #include "meshports.h"
 #include "meshlinksender.h"
@@ -71,10 +72,14 @@ bool radioFrame(const QJsonObject &input,bool uplink,QJsonObject *canonical){
     const auto hz=input.value("frequencyHz"),rate=input.value("dataRate"),duration=input.value("airtimeUs");bool okay=false;
     const auto us=duration.toString().toULongLong(&okay);
     if(!integer(hz,863000000,870000000)||!integer(rate,0,6)||!obrii::lorawan::Eu868::validFrequency(quint32(hz.toDouble()))||!okay||us<1||us>120000000||QString::number(us)!=duration.toString()||!input.value("modem").isObject())return false;
-    const auto expected=obrii::lorawan::phyConfig(unsigned(rate.toInt()),uplink?obrii::lorawan::Direction::Uplink:obrii::lorawan::Direction::Downlink,1);
+    const bool beacon=input.value("frameKind")=="beacon";
+    if(input.contains("frameKind")&&!beacon)return false;
+    if(beacon&&(uplink||rate.toInt()!=3))return false;
+    const auto expected=beacon?obrii::lorawan::beaconPhyConfig(1):obrii::lorawan::phyConfig(unsigned(rate.toInt()),uplink?obrii::lorawan::Direction::Uplink:obrii::lorawan::Direction::Downlink,1);
     QJsonObject modem;QString error;if(!WireModem::normalize(input.value("modem").toObject(),&modem,&error)||modem.value("type")!="lora")return false;
     if(modem.value("sf")!=expected.spreadingFactor||modem.value("bw")!=expected.bandwidthHz||modem.value("cr")!=expected.codingRate||modem.value("os")!=1||modem.value("preamble")!=expected.preambleSymbols||modem.value("syncWord")!=int(expected.syncWord)||modem.value("invertIq")!=expected.invertIq||modem.value("payloadCrc")!=expected.payloadCrc||modem.value("ldro")!="auto")return false;
-    if(canonical)*canonical={{"frequencyHz",hz},{"dataRate",rate},{"airtimeUs",duration},{"modem",modem},{"timingSource","simulated-transport"}};return true;
+    if(modem.value("explicitHeader").toBool(true)!=expected.explicitHeader||modem.value("implicitPayloadBytes").toInt()!=expected.implicitPayloadBytes)return false;
+    if(canonical){*canonical={{"frequencyHz",hz},{"dataRate",rate},{"airtimeUs",duration},{"modem",modem},{"timingSource","simulated-transport"}};if(beacon)canonical->insert("frameKind","beacon");}return true;
 }
 struct Packet {PacketEngine::Datagram data;QStringList path;};
 QJsonObject packetJson(const Packet &p){return {{"id",p.data.id},{"source",p.data.source},{"destination",p.data.destination},{"ttl",p.data.ttl},{"payloadBase64",QString::fromLatin1(p.data.payload.toBase64())},{"path",strings(p.path)}};}
@@ -88,6 +93,12 @@ public:
     struct Registration {QString token,name;};
     QMap<QString,Registration> registered;
     DiscoveryResponder *discovery=nullptr;
+    mutable NodeDirectory directory;
+    DirectoryAnnouncer *directoryClient=nullptr;
+    QJsonObject directoryClientOptions;
+    QElapsedTimer publicWindow;
+    int publicRequests=0;
+    QHash<QString,int> publicSources;
     QElapsedTimer pairWindow;
     int pairFailures=0;
     PacketEngine graph;
@@ -112,14 +123,18 @@ public:
     QMap<quint64,QJsonObject> txPlans;
     QJsonObject peers,topology;
     QStringList ids;
+    quint64 topologyRevision=0;
+    quint64 sessionEpoch=0;
+    QMap<QString,quint64> linkEpochs;
+    QHash<QTimer *,QString> pendingNativeRx;
     QElapsedTimer lease,clock;
     struct Connection {QByteArray buffer;QString from;bool peer=false,frameScheduled=false;int sequence=0;LinkBinding link;QJsonObject radioFrame;qint64 packetBeginMs=-1;std::unique_ptr<WireModem> modem;};
     QHash<QTcpSocket *,std::shared_ptr<Connection>> connections;
     QSet<QString> seen;QQueue<QString> seenOrder;
     QJsonArray outcomes;
     quint64 flight=0,tx=0,rx=0,delivered=0,forwarded=0,dropped=0,iqTx=0,iqRx=0,evicted=0,resultSerial=0;
-    explicit NodeWorker(const QString &token):admin(token){server.setParent(this);heartbeat.setParent(this);pump.setParent(this);radioPump.setParent(this);rfWatchdog.setParent(this);clock.start();}
-    ~NodeWorker() override {stopSession();for(auto s:connections.keys()){s->disconnect();s->abort();delete s;}connections.clear();server.close();}
+    explicit NodeWorker(const QString &token):admin(token){server.setParent(this);heartbeat.setParent(this);pump.setParent(this);radioPump.setParent(this);rfWatchdog.setParent(this);clock.start();publicWindow.start();}
+    ~NodeWorker() override {if(directoryClient)directoryClient->stop();stopSession();for(auto s:connections.keys()){s->disconnect();s->abort();delete s;}connections.clear();server.close();}
     QJsonObject status() const {
         QJsonArray ports,links;const auto ingress=radio.status();
         for(const auto &p:plan.ports(nodeId)){auto value=p.json();bool ready=p.enabled&&!session.isEmpty();QString state=ready?"ready":"disabled";
@@ -132,20 +147,46 @@ public:
         int pending=0;for(auto sender:senders)pending+=sender->pending();
         return {{"ok",true},{"protocol","obrii-mesh-node"},{"version",1},{"instanceId",instance},{"listening",server.isListening()},
             {"port",server.serverPort()},{"bind",server.serverAddress().toString()},{"active",!session.isEmpty()},{"session",session},{"nodeId",nodeId},
-            {"transport",transport},{"ports",ports},{"links",links},{"nativeProtocol",protocol},{"radioIngress",ingress},{"radioEgress",egress},{"radioRxAllowed",allowRadioRx},{"radioTxAllowed",!localTxProfiles.isEmpty()&&rfArmedUntil>clock.elapsed()},{"rfArmedMs",qMax<qint64>(0,rfArmedUntil-clock.elapsed())},{"portBindingsVersion",1},{"perLinkBearers",true},{"availableModems",QJsonArray{"afsk1200","lora"}},{"nativeProtocols",QJsonArray{"lab","meshtastic","reticulum","lorawan"}},
-            {"discovery",discovery&&discovery->listening()},{"registrations",registered.size()},{"rfEnabled",!radioTx.isEmpty()&&rfArmedUntil>clock.elapsed()},{"availableBearers",QJsonArray{"data","iq"}},{"queue",pending},{"tx",QString::number(tx)},{"rx",QString::number(rx)},
+            {"transport",transport},{"topologyRevision",QString::number(topologyRevision)},{"liveTopologyVersion",1},{"ports",ports},{"links",links},{"nativeProtocol",protocol},{"radioIngress",ingress},{"radioEgress",egress},{"radioRxAllowed",allowRadioRx},{"radioTxAllowed",!localTxProfiles.isEmpty()&&rfArmedUntil>clock.elapsed()},{"rfArmedMs",qMax<qint64>(0,rfArmedUntil-clock.elapsed())},{"portBindingsVersion",1},{"perLinkBearers",true},{"availableModems",QJsonArray{"afsk1200","lora"}},{"nativeProtocols",QJsonArray{"lab","meshtastic","reticulum","lorawan"}},
+            {"discovery",discovery&&discovery->listening()},{"directoryEnabled",directory.enabled()},{"directoryEntries",directory.count(clock.elapsed())},{"directoryClient",directoryClient?directoryClient->status():QJsonObject{{"configured",false}}},{"registrations",registered.size()},{"rfEnabled",!radioTx.isEmpty()&&rfArmedUntil>clock.elapsed()},{"availableBearers",QJsonArray{"data","iq"}},{"queue",pending},{"tx",QString::number(tx)},{"rx",QString::number(rx)},
             {"forwarded",QString::number(forwarded)},{"delivered",QString::number(delivered)},{"dropped",QString::number(dropped)},
             {"iqTxSamples",QString::number(iqTx)},{"iqRxSamples",QString::number(iqRx)},{"lastResultSerial",QString::number(resultSerial)},{"resultsEvicted",QString::number(evicted)},{"results",outcomes}};
     }
     void publish(){emit changed(status());}
+    QJsonObject publicMetadata(const QString &fallback={}) const {
+        auto host=server.serverAddress().toString();if(server.serverAddress()==QHostAddress::Any||server.serverAddress()==QHostAddress::AnyIPv4)host=fallback;
+        return {{"protocol","obrii-mesh-node"},{"version",1},{"instanceId",instance},{"host",host},{"port",server.serverPort()},
+            {"name",(QCoreApplication::applicationName()+" @ "+QHostInfo::localHostName()).left(128)},{"active",!session.isEmpty()},
+            {"availableBearers",QJsonArray{"data","iq"}},{"directoryVersion",directory.enabled()?1:0}};
+    }
+    QJsonObject publicDiscovery(const QJsonObject &r,QTcpSocket *socket) {
+        if(r.value("protocol")!="obrii-mesh-discovery"||r.value("version")!=1||QUuid(r.value("nonce").toString()).isNull()||QUuid(r.value("requestId").toString()).isNull())return {};
+        for(auto it=r.begin();it!=r.end();++it)if(!QStringList{"op","protocol","version","nonce","requestId"}.contains(it.key()))return {};
+        if(publicWindow.elapsed()>=1000){publicWindow.restart();publicRequests=0;publicSources.clear();}
+        const auto source=socket->peerAddress().toString();
+        if(publicRequests>=64||publicSources.value(source)>=16||(!publicSources.contains(source)&&publicSources.size()>=32))return {};
+        ++publicRequests;++publicSources[source];
+        auto result=publicDiscoveryEntry(publicMetadata(socket->localAddress().toString()));if(result.isEmpty())return {};
+        result["protocol"]="obrii-mesh-discovery";result["op"]=r.value("op")=="directoryList"?"directory":"instance";
+        result["nonce"]=r.value("nonce");result["requestId"]=r.value("requestId");result["ok"]=true;
+        if(r.value("op")=="directoryList"){
+            if(!directory.enabled())return {};
+            auto entries=directory.entries(clock.elapsed());if(entries.size()<64)entries.prepend(publicDiscoveryEntry(publicMetadata(socket->localAddress().toString())));
+            result["entries"]=entries;
+        }
+        return result;
+    }
     QJsonObject start(const QString &bind,quint16 port) {
         if(!server.listen(QHostAddress(bind),port))return failure(server.errorString());
         localStateRoot=QDir(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)).filePath("ObriiSDR/mesh-protocols/port-"+QString::number(server.serverPort()));
         if(!approvedStateRoot.isEmpty())localStateRoot=approvedStateRoot;
         pairWindow.start();discovery=new DiscoveryResponder([this]{return QJsonObject{{"instanceId",instance},{"port",server.serverPort()},
-            {"name",QCoreApplication::applicationName()+" @ "+QHostInfo::localHostName()},{"bind",server.serverAddress().toString()},{"active",!session.isEmpty()}};},this);
+            {"name",QCoreApplication::applicationName()+" @ "+QHostInfo::localHostName()},{"bind",server.serverAddress().toString()},{"active",!session.isEmpty()},{"directoryVersion",directory.enabled()?1:0}};},this);
         discovery->start();
-        heartbeat.setInterval(1000);connect(&heartbeat,&QTimer::timeout,this,[this]{if(!session.isEmpty()&&lease.elapsed()>15000){stopSession();publish();}});
+        directoryClient=new DirectoryAnnouncer([this]{return publicMetadata();},this);QString directoryError;
+        if(!directoryClient->configure(directoryClientOptions,&directoryError)){server.close();return failure(directoryError);}
+        heartbeat.setInterval(1000);connect(&heartbeat,&QTimer::timeout,this,[this]{if(!session.isEmpty()&&lease.elapsed()>15000){stopSession();publish();}else if(directoryClient&&directoryClient->status().value("configured").toBool())publish();});
+        if(directory.enabled()||directoryClient->status().value("configured").toBool())heartbeat.start();
         pump.setInterval(20);pump.setTimerType(Qt::PreciseTimer);connect(&pump,&QTimer::timeout,this,[this]{if(native)native->step(clock.elapsed());});
         rfWatchdog.setSingleShot(true);connect(&rfWatchdog,&QTimer::timeout,this,[this]{disarmTx();publish();});
         radioPump.setInterval(5);radioPump.setTimerType(Qt::PreciseTimer);connect(&radioPump,&QTimer::timeout,this,[this]{radio.poll([this](const QString &port,const float *iq,int count,bool gap){
@@ -193,6 +234,10 @@ public:
                     reply=receive(request,*c);
                     if(!c->radioFrame.isEmpty())deadline->start(int(c->radioFrame.value("airtimeUs").toString().toULongLong()/1000)+5000);
                 } else {
+                    if(request.value("op")=="discover"||request.value("op")=="directoryList"){
+                        if(bytes.size()>2048){s->abort();return;}reply=publicDiscovery(request,s);
+                        if(reply.isEmpty()){s->abort();return;}s->write(line(reply));s->disconnectFromHost();break;
+                    }
                     if(request.value("op")=="pair"){
                         reply=pair(request);reply["requestId"]=request.value("requestId");s->write(line(reply));s->disconnectFromHost();break;
                     }
@@ -214,7 +259,9 @@ public:
         });
     }
     void stopSession() {
-        pump.stop();heartbeat.stop();radioPump.stop();radio.clear();radioModems.clear();
+        ++sessionEpoch;linkEpochs.clear();topologyRevision=0;
+        for(auto timer:pendingNativeRx.keys()){timer->stop();delete timer;}pendingNativeRx.clear();
+        pump.stop();if(!directory.enabled()&&!(directoryClient&&directoryClient->status().value("configured").toBool()))heartbeat.stop();radioPump.stop();radio.clear();radioModems.clear();
         disarmTx();
         for(auto s:senders){s->disconnect(this);s->cancel();delete s;}senders.clear();
         for(const auto &p:labFlights)result(p,"session_stopped");labFlights.clear();nativeFlights.clear();txPlans.clear();
@@ -229,11 +276,13 @@ public:
         if(r.value("instanceId")!=instance||QUuid(client).isNull()||name.trimmed().isEmpty()||name.size()>128||r.value("code")!=pairingSecret){++pairFailures;return failure("Pairing code or instance identity is invalid");}
         if(registered.size()>=16&&!registered.contains(client))return failure("Registration limit reached");
         if(registered.contains(client)&&registered[client].token==ownerToken&&!session.isEmpty())return failure("Disconnect the registered client's active session before pairing again");
+        if(registered.contains(client))directory.revoke(registered[client].token);
         registered[client]={key(),name};auto reply=QJsonObject{{"ok",true},{"protocol","obrii-mesh-node"},{"version",1},{"instanceId",instance},{"token",registered[client].token},{"registrationId",client}};
         publish();return reply;
     }
     QJsonObject revoke(const QString &client) {
         if(!registered.contains(client))return failure("Unknown registration");
+        directory.revoke(registered[client].token);
         if(registered[client].token==ownerToken)stopSession();registered.remove(client);publish();return status();
     }
     QJsonObject registrations() const {
@@ -319,10 +368,49 @@ public:
             pump.start();
         }
         if(radio.active())radioPump.start();
-        outcomes={};tx=rx=delivered=forwarded=dropped=iqTx=iqRx=evicted=resultSerial=0;lease.start();heartbeat.start();publish();return status();
+        ++sessionEpoch;linkEpochs.clear();topologyRevision=1;outcomes={};tx=rx=delivered=forwarded=dropped=iqTx=iqRx=evicted=resultSerial=0;lease.start();heartbeat.start();publish();return status();
+    }
+    QJsonObject updateTopology(const QJsonObject &r) {
+        bool valid=false;const auto expected=r.value("expectedRevision").toString().toULongLong(&valid);
+        if(!valid||QString::number(expected)!=r.value("expectedRevision").toString()||expected!=topologyRevision)return failure("Stale topology revision; read status before updating");
+        const auto ts=r.value("topology").toObject(),ps=r.value("peers").toObject();
+        PortPlan proposed;PacketEngine candidate;QString error;
+        if(!proposed.configure(ts,transport,&error)||!candidate.configure(proposed.routingTopology(),&error))return failure(error);
+        QStringList names;QJsonObject local;
+        for(const auto &v:ts.value("nodes").toArray()){const auto n=v.toObject();names<<n.value("id").toString();if(n.value("id")==nodeId)local=n;}
+        if(names.size()>8||local.isEmpty()||!local.value("enabled").toBool(true)||ps.size()!=names.size())return failure("Live topology needs the enabled local node and 1..8 endpoints");
+        // Compact IQ paths encode node indices; append only, disable existing nodes instead of reindexing.
+        if(names.mid(0,ids.size())!=ids)return failure("Preserve existing node order; append nodes or disable them");
+        QSet<QString> instances;
+        for(const auto &name:names){const auto p=ps.value(name).toObject();const auto id=p.value("instanceId").toString();
+            if(!hostname(p.value("host").toString())||!integer(p.value("port"),1,65535)||QUuid(id).isNull()||instances.contains(QUuid(id).toString()))return failure("Invalid or duplicate peer identity");
+            instances.insert(QUuid(id).toString());
+        }
+        if(ps.value(nodeId).toObject()!=peers.value(nodeId).toObject())return failure("Local peer identity cannot change live");
+        if(proposed.protocol(nodeId)!=plan.protocol(nodeId))return failure("Local protocol changes require releasing this node");
+        QJsonArray oldPorts,newPorts;for(const auto &p:plan.ports(nodeId))oldPorts.append(p.json());for(const auto &p:proposed.ports(nodeId))newPorts.append(p.json());
+        if(oldPorts!=newPorts)return failure("Local port changes require releasing this node");
+        for(const auto &v:ts.value("links").toArray()){const auto l=v.toObject();const double gain=l.value("gainDb").toDouble(-6);
+            if(!std::isfinite(gain)||gain< -120||gain>60||l.value("delayMs").toInt()>500)return failure("Link gain/delay out of range");}
+        const auto changed=[&](const QString &from,const QString &to){const auto before=plan.link(from,to),after=proposed.link(from,to);
+            return !after||!after->enabled||!before||before->json()!=after->json()||peers.value(from)!=ps.value(from)||peers.value(to)!=ps.value(to)||candidate.route(from,to).isEmpty();};
+        // Cancel only affected queues/connections. Native protocol state, deduplication and counters survive.
+        QStringList cancelled;QList<QTcpSocket *> closed;QList<QTimer *> cancelledRx;
+        for(const auto &id:senders.keys()){const auto pair=id.split('/');if(pair.size()==2&&changed(pair[0],pair[1]))cancelled.append(id);}
+        for(auto socket:connections.keys()){const auto c=connections.value(socket);if(c&&c->peer&&changed(c->from,nodeId))closed.append(socket);}
+        for(auto timer:pendingNativeRx.keys())if(!pendingNativeRx.value(timer).isEmpty()&&changed(pendingNativeRx.value(timer),nodeId))cancelledRx.append(timer);
+        for(const auto &from:names)if(from!=nodeId&&changed(from,nodeId))++linkEpochs[from];
+        graph=std::move(candidate);plan=std::move(proposed);topology=plan.topology();peers=ps;ids=names;++topologyRevision;
+        for(const auto &id:cancelled)if(auto sender=senders.take(id)){sender->cancel("topology_changed");sender->deleteLater();}
+        for(auto socket:closed)socket->abort();
+        for(auto timer:cancelledRx){pendingNativeRx.remove(timer);timer->stop();delete timer;++dropped;}
+        lease.restart();publish();return status();
     }
     QJsonObject control(const QJsonObject &r) {
         const auto op=r.value("op").toString();
+        if(op=="directoryRegister"){
+            auto reply=directory.put(r.value("entry").toObject(),r.value("token").toString(),clock.elapsed());reply["instanceId"]=instance;publish();return reply;
+        }
         if(op=="configure")return configure(r);
         if(op=="status") {
             if(!session.isEmpty()&&r.value("token")!=ownerToken){auto reply=status();reply.remove("results");reply.remove("session");return reply;}
@@ -335,6 +423,7 @@ public:
         }
         if(session.isEmpty()||r.value("session")!=session||r.value("token")!=ownerToken)return failure("Session ownership mismatch");
         lease.restart();
+        if(op=="updateTopology")return updateTopology(r);
         if(op=="release"){stopSession();publish();return status();}
         if(op=="protocol"){
             if(!native)return failure("This node uses the laboratory router, not a native protocol adapter");
@@ -402,25 +491,32 @@ public:
             if(!sender(link)->submit({serial,wire,{},true,group->radioFrame},&error))completed(serial,false,error,0);
         }
     }
-    void receiveNative(const QString &port,const QByteArray &wire,const QJsonObject &frame={},qint64 beginMs=-1){
+    void receiveNative(const QString &port,const QByteArray &wire,const QJsonObject &frame={},qint64 beginMs=-1,const QString &from={}){
         if(!native)return;
         if(plan.protocol(nodeId).value("type")!="lorawan"){native->receive(port,wire,clock.elapsed());return;}
         const bool uplink=native->status().value("role")=="network";QJsonObject validated;
         if(!radioFrame(frame,uplink,&validated)||beginMs<0||wire.size()<12||wire.size()>255){++dropped;return;}
-        const auto cfg=obrii::lorawan::phyConfig(unsigned(validated.value("dataRate").toInt()),uplink?obrii::lorawan::Direction::Uplink:obrii::lorawan::Direction::Downlink,1);
+        const auto cfg=validated.value("frameKind")=="beacon"?obrii::lorawan::beaconPhyConfig(1):obrii::lorawan::phyConfig(unsigned(validated.value("dataRate").toInt()),uplink?obrii::lorawan::Direction::Uplink:obrii::lorawan::Direction::Downlink,1);
         const auto expected=quint64(std::ceil(obrii::lora::PacketCodec(cfg).timeOnAirSeconds(wire.size())*1000000));
         if(expected!=validated.value("airtimeUs").toString().toULongLong()){++dropped;return;}
-        deliverModeledNative(port,wire,validated,beginMs,beginMs+qint64((expected+999)/1000),session);
+        deliverModeledNative(port,wire,validated,beginMs,beginMs+qint64((expected+999)/1000),session,sessionEpoch,from,linkEpochs.value(from));
     }
-    void deliverModeledNative(const QString &port,const QByteArray &wire,const QJsonObject &frame,qint64 beginMs,qint64 endMs,const QString &expectedSession){
-        if(session!=expectedSession||!native)return;const auto now=clock.elapsed();
+    void deliverModeledNative(const QString &port,const QByteArray &wire,const QJsonObject &frame,qint64 beginMs,qint64 endMs,const QString &expectedSession,quint64 epoch,const QString &from,quint64 linkEpoch){
+        if(session!=expectedSession||sessionEpoch!=epoch||!native)return;
+        if(!from.isEmpty()&&(linkEpochs.value(from)!=linkEpoch||!plan.link(from,nodeId)||!plan.link(from,nodeId)->enabled))return;
+        const auto now=clock.elapsed();
         // Timer delivery is not a capture timestamp. Never present a future packet end to the MAC.
         if(now<endMs){
-            QTimer::singleShot(int(endMs-now),Qt::PreciseTimer,this,[this,port,wire,frame,beginMs,endMs,expectedSession]{
-                deliverModeledNative(port,wire,frame,beginMs,endMs,expectedSession);
-            });return;
+            if(pendingNativeRx.size()>=128){++dropped;return;}
+            auto timer=new QTimer(this);timer->setSingleShot(true);timer->setTimerType(Qt::PreciseTimer);pendingNativeRx.insert(timer,from);
+            connect(timer,&QTimer::timeout,this,[this,timer,port,wire,frame,beginMs,endMs,expectedSession,epoch,from,linkEpoch]{
+                pendingNativeRx.remove(timer);timer->deleteLater();
+                deliverModeledNative(port,wire,frame,beginMs,endMs,expectedSession,epoch,from,linkEpoch);
+            });timer->start(int(endMs-now));return;
         }
-        const auto context=native->command({{"op","rx_context"},{"frequencyHz",frame.value("frequencyHz")},{"dataRate",frame.value("dataRate")},{"packetStartMs",double(beginMs)},{"packetEndMs",double(endMs)}},now);
+        QJsonObject metadata{{"op","rx_context"},{"frequencyHz",frame.value("frequencyHz")},{"dataRate",frame.value("dataRate")},{"packetStartMs",double(beginMs)},{"packetEndMs",double(endMs)}};
+        if(frame.value("frameKind")=="beacon")metadata.insert("beacon",true);
+        const auto context=native->command(metadata,now);
         if(!context.value("ok").toBool()){
             ++dropped;appendResult({{"protocol","lorawan"},{"node",nodeId},{"port",port},{"status","rx_context_rejected"},{"reason",context.value("error").toString().left(256)},{"beginMs",double(beginMs)},{"endMs",double(endMs)},{"nowMs",double(now)},{"timingSource","simulated-transport"}});return;
         }
@@ -448,7 +544,7 @@ public:
             const auto encoded=r.value("payloadBase64").toString();const auto bytes=QByteArray::fromBase64(encoded.toLatin1());
             if(bytes.isEmpty()||bytes.size()>4096||QString::fromLatin1(bytes.toBase64())!=encoded)return failure("Invalid native frame");
             if(!c.radioFrame.isEmpty()&&c.frameScheduled)return failure("A modeled radio burst carries only one native frame");
-            c.frameScheduled=true;++rx;receiveNative(c.link.rxPort,bytes,c.radioFrame,clock.elapsed());return {{"ok",true},{"accepted",true}};
+            c.frameScheduled=true;++rx;receiveNative(c.link.rxPort,bytes,c.radioFrame,clock.elapsed(),c.from);return {{"ok",true},{"accepted",true}};
         }
         if(c.link.bearer=="data"&&r.value("op")=="packet"&&!native){
             if(!parsePacket(r.value("packet").toObject(),&p))return failure("Invalid packet");
@@ -460,7 +556,7 @@ public:
             if(c.packetBeginMs<0)c.packetBeginMs=clock.elapsed();
             const auto frames=c.modem->receive(values.constData(),values.size()/2);
             for(const auto &body:frames){
-                if(native){if(!c.radioFrame.isEmpty()&&c.frameScheduled)return failure("Duplicate native radio frame in one burst");c.frameScheduled=true;++rx;receiveNative(c.link.rxPort,body,c.radioFrame,c.packetBeginMs);continue;}
+                if(native){if(!c.radioFrame.isEmpty()&&c.frameScheduled)return failure("Duplicate native radio frame in one burst");c.frameScheduled=true;++rx;receiveNative(c.link.rxPort,body,c.radioFrame,c.packetBeginMs,c.from);continue;}
                 IqEnvelope e;QString error;if(!IqModem::decode(body,&e,&error)||e.session!=QUuid(session)||e.transmitter!=c.from||e.next!=nodeId||!expand(e,&p))return failure("IQ envelope identity mismatch");
                 route(std::move(p),c.from);
             }
@@ -501,6 +597,15 @@ QJsonObject NodeService::command(const QJsonObject &input) {
     const auto op=r.value("operation").toString();
     if(op=="status")return snapshot.isEmpty()?QJsonObject{{"ok",true},{"listening",false},{"rfEnabled",false}}:snapshot;
     if(op=="stop"){stop();return snapshot;}
+    if((op=="directory-on"||op=="directory-off"||op=="directory-client")&&worker){
+        if(op=="directory-client"&&!r.value("directoryClient").isObject())return failure("Specify a private directoryClient object, or an empty object to stop registration");
+        QJsonObject reply;auto w=static_cast<NodeWorker *>(worker);QMetaObject::invokeMethod(w,[&]{
+            if(op=="directory-client"){QString error;if(!w->directoryClient->configure(r.value("directoryClient").toObject(),&error)){reply=failure(error);return;}}
+            else w->directory.setEnabled(op=="directory-on");
+            if(w->directory.enabled()||w->directoryClient->status().value("configured").toBool()||!w->session.isEmpty())w->heartbeat.start();else w->heartbeat.stop();
+            w->publish();reply=w->status();
+        },Qt::BlockingQueuedConnection);if(reply.value("ok").toBool())snapshot=reply;return reply;
+    }
     if((op=="arm-tx"||op=="disarm-tx")&&worker){QJsonObject reply;auto w=static_cast<NodeWorker *>(worker);QMetaObject::invokeMethod(w,[&]{if(op=="arm-tx")reply=w->armTx(r.value("seconds").toInt());else {w->disarmTx();w->publish();reply=w->status();}},Qt::BlockingQueuedConnection);if(reply.value("ok").toBool())snapshot=reply;return reply;}
     if(op=="revoke"&&worker){QJsonObject reply;auto w=static_cast<NodeWorker *>(worker);QMetaObject::invokeMethod(w,[&]{reply=w->revoke(r.value("clientId").toString());},Qt::BlockingQueuedConnection);return reply;}
     if(op=="registrations"&&worker){QJsonObject reply;auto w=static_cast<NodeWorker *>(worker);QMetaObject::invokeMethod(w,[&]{reply=w->registrations();},Qt::BlockingQueuedConnection);return reply;}
@@ -510,12 +615,16 @@ QJsonObject NodeService::command(const QJsonObject &input) {
         QFile file(r.value("optionsFile").toString());QJsonParseError parse;
         if(!file.open(QIODevice::ReadOnly)||file.size()>65536)return failure("Cannot read private node options (limit 64 KiB)");
         const auto doc=QJsonDocument::fromJson(file.readAll(),&parse);if(parse.error!=QJsonParseError::NoError||!doc.isObject())return failure("Private node options must be a JSON object");
-        const auto values=doc.object();for(auto i=values.begin();i!=values.end();++i){if(!QStringList{"allowRadioRx","radioSources","radioTxProfiles","reticulum","protocolProfiles","protocolStateDirectory"}.contains(i.key()))return failure("Unknown private node option");r[i.key()]=i.value();}
+        const auto values=doc.object();for(auto i=values.begin();i!=values.end();++i){if(!QStringList{"allowRadioRx","radioSources","radioTxProfiles","reticulum","protocolProfiles","protocolStateDirectory","directoryEnabled","directoryClient"}.contains(i.key()))return failure("Unknown private node option");r[i.key()]=i.value();}
     }
     const auto bind=r.value("bind").toString("127.0.0.1");QHostAddress address;
     if(!address.setAddress(bind)||!integer(r.value("port"),0,65535))return failure("Specify a numeric bind address and port 0..65535");
     if(r.contains("protocolStateDirectory")&&(!r.value("protocolStateDirectory").isString()||!QDir::isAbsolutePath(r.value("protocolStateDirectory").toString())))return failure("Local protocol state directory must be absolute");
+    if(r.contains("directoryEnabled")&&!r.value("directoryEnabled").isBool())return failure("directoryEnabled must be boolean");
+    if(r.contains("directoryClient")&&!r.value("directoryClient").isObject())return failure("directoryClient must be a private configuration object");
+    QString directoryError;if(!DirectoryAnnouncer::validateConfiguration(r.value("directoryClient").toObject(),&directoryError))return failure(directoryError);
     secret=key();auto w=new NodeWorker(secret);worker=w;const auto current=++generation;w->moveToThread(&thread);
+    w->directory.setEnabled(r.value("directoryEnabled").toBool(false));w->directoryClientOptions=r.value("directoryClient").toObject();
     w->allowRadioRx=r.value("allowRadioRx").toBool(false);
     if(w->allowRadioRx){
         const auto sources=r.value("radioSources").toArray();

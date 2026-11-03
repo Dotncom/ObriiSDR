@@ -94,6 +94,7 @@ private:
     QDockWidget *spectrumDock=nullptr;
     SpectrumView *spectrumView=nullptr;
     QCheckBox *previewEnabled=nullptr;
+    QCheckBox *nodeEnabled=nullptr;
     QLabel *spectrumTitle=nullptr;
     QAction *startAction=nullptr,*stopAction=nullptr,*addAction=nullptr,*connectAction=nullptr,*removeAction=nullptr,*libraryAction=nullptr,*mediumAction=nullptr;
     QAction *packetsAction=nullptr;

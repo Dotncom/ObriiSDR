@@ -61,3 +61,12 @@ class Semtech(unittest.TestCase):
                 decode(rng.randbytes(rng.randrange(600)))
             except ValueError:
                 pass
+
+    def test_rejoin_11_transport(self):
+        for kind, size in ((0, 19), (1, 24), (2, 19)):
+            wire = bytes([0xc0, kind]) + bytes(size - 2)
+            wire_check(wire, 5, True)
+            with self.assertRaises(ValueError):
+                wire_check(wire, 5, False)
+            with self.assertRaises(ValueError):
+                wire_check(wire[:-1], 5, True)
