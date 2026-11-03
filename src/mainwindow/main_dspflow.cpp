@@ -523,6 +523,12 @@ visualization.insert(QStringLiteral("historyRows"), waterfall3DHistoryRows);
     visualization.insert(QStringLiteral("contrast"), contrast);
     visualization.insert(QStringLiteral("sensitivity"), sensitivity);
     visualization.insert(QStringLiteral("colorSpectrum"), checked(colorCheckbox));
+    visualization.insert(QStringLiteral("spectrumDisplayMode"), spectrumDisplayMode);
+    visualization.insert(QStringLiteral("spectrumPersistenceStyle"), spectrumPersistenceStyle);
+    visualization.insert(QStringLiteral("spectrumPersistenceSeconds"), spectrumPersistenceSeconds);
+    visualization.insert(QStringLiteral("spectrumPersistenceIntensity"), spectrumPersistenceIntensity);
+    visualization.insert(QStringLiteral("spectrumPersistenceThreshold"), spectrumPersistenceThreshold);
+    visualization.insert(QStringLiteral("spectrumPersistenceSmoothingMs"), spectrumPersistenceSmoothingMs);
     visualization.insert(QStringLiteral("spectrumGradientFill"),
                          checked(alternativeSpectrumGradientCheckbox));
     visualization.insert(QStringLiteral("spectrumGradientOpacity"),
@@ -779,6 +785,15 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
     auto *syncTimer = new QTimer(dialog);
     syncTimer->setInterval(180);
     syncTimer->start();
+
+    const auto addPersistenceControls = [this, form, dialog, syncTimer, &text]() {
+        form->addRow(text("Спектр:", "Spectrum:"), linkedCombo(spectrumDisplayModeCombo, dialog, syncTimer));
+        form->addRow(text("Люмінофор:", "Phosphor:"), linkedCombo(spectrumPersistenceStyleCombo, dialog, syncTimer));
+        form->addRow(text("Післясвітіння (с):", "Afterglow (s):"), linkedDoubleSpin(spectrumPersistenceTimeSpin, dialog, syncTimer));
+        form->addRow(text("Інтенсивність:", "Intensity:"), linkedSpin(spectrumPersistenceIntensitySpin, dialog, syncTimer));
+        form->addRow(text("Поріг перешкод:", "Clutter threshold:"), linkedSpin(spectrumPersistenceThresholdSpin, dialog, syncTimer));
+        form->addRow(text("Згладжування амплітуди (мс):", "Amplitude smoothing (ms):"), linkedSpin(spectrumPersistenceSmoothingSpin, dialog, syncTimer));
+    };
 
     const auto addFrequencyControl = [dialog, syncTimer](FrequencyControl *source,
                                                                const std::function<void()> &apply) {
@@ -1209,6 +1224,7 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
         auto *paused = new QCheckBox(text("Пауза", "Pause"), dialog);
         paused->setChecked(blockSettings.value(QStringLiteral("paused")).toBool(false));
         form->addRow(QString(), paused);
+        if (type == QStringLiteral("workspace_spectrum")) addPersistenceControls();
         QComboBox *workspaceDisplayMode = nullptr;
         if (type == QStringLiteral("workspace_waterfall")) {
             workspaceDisplayMode = new QComboBox(dialog);
@@ -1971,6 +1987,7 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
                            ? text("Налаштування 3D-водоспаду", "3D waterfall settings")
                            : text("Налаштування 2D-водоспаду", "2D waterfall settings"));
         const QJsonObject stored = dspFlowPanel ? dspFlowPanel->blockSettings(id) : QJsonObject();
+        if (spectrumProfile) addPersistenceControls();
         auto *targetSelector = new QComboBox(dialog);
         targetSelector->addItem(text("Не призначено", "Not assigned"), QString());
         if (dspFlowPanel) {

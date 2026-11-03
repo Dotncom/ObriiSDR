@@ -1,5 +1,57 @@
 # Changelog
 
+## 8.1.0 - 2026-11-03
+- Add opt-in offline FFT plan/thread tuning with machine-specific, checksummed
+  wisdom caches, stopped-receiver UI gating and a device-free CLI command.
+  Verify an export/forget/import/wisdom-only round trip before timing each
+  candidate, including bounded-planning FFTW 3.3.5 fallbacks; log cache acceptance.
+- Add optional digital-phosphor Contours: raw-level occupancy, amplitude-axis
+  ridge contrast and logarithmic brightness; preserve Classic smoothing.
+- Speed up shared FFT level classification and spectrum display reduction with
+  binary32 finite checks, per-frame detector specialization and division-free
+  cyclic indexing. Preserve FFT length, window, normalization and detector math.
+- Shared IQ channelizer uses alias-safe binary32 finite checks instead of
+  per-sample CRT classification on supported hosts, preserving NaN/Inf sanitation.
+  Live analog audio resets streaming state after IQ gaps or sequence restarts;
+  filtering, decimation and continuous-stream PCM remain unchanged.
+- Finish standalone headless CLI linkage and opt-out of mesh widget dependencies;
+  protect radio/session keys in command-console output and history.
+- RF bridge shutdown now cancels all ports before joining, has independent
+  authorization deadlines and waits for HackRF USB flush completion for bursts.
+- Modeled LoRaWAN RX delivery checks its monotonic packet-end deadline before
+  submitting timing context, preventing early timer callbacks from dropping frames.
+- Distributed mesh ports: independent RX/TX bindings, per-link DATA/IQ bearers,
+  bounded isolated queues, shared AFSK/LoRa PHY, native Meshtastic and Reticulum
+  adapters, local private protocol state and credential-free project exports.
+- Optional read-only radio ingress uses the running RX stream and shared DDC;
+  a separately authorized, expiring RF egress reuses native UHD/HackRF backends.
+  Physical RF interoperability and duplex timing still require hardware tests.
+- Mesh instance discovery over bounded LAN broadcast/multicast, with private
+  code-based per-client registration, revocation and active-session isolation.
+- Distributed mesh-node service shared by GUI and CLI: attach real independent
+  instances with pinned identities, session ownership/lease and bounded queues;
+  select lightweight data forwarding or actual CF32 modem hops. RF is opt-in only.
+- Added device-free `ObriiCli mesh-node` / ObriiMeshNodeHost and explicit local
+  `mesh.service` commands, with a separate masked GUI token-copy dialog.
+- Mesh Designer: opt-in virtual-IQ packet relay using shared AX.25/AFSK1200,
+  NFM CF32, actual TCP virtual receivers and FCS-checked per-hop delivery.
+  Added bounded worker queues, isolated reset, modem counters and timeout tests;
+  no physical RF sink is enabled.
+- Mesh Designer: packet-only network laboratory with hop-by-hop relay queues,
+  known-graph min-hop routing, TTL/deduplication, failures, route repair and metrics.
+- Added the shared Qt-Core packet engine and headless ObriiMeshSim scenario
+  replay, bounded evidence export and reproducible full/partial experiments.
+- Mesh Designer: apply link gain/delay/enabled changes to the live IQ hub without
+  restarting RX; show confirmed values, pending edits and topology revisions.
+- Added an optional authenticated loopback hub control API with bounded sockets,
+  identity/revision guards and capacity validation before mutation of either IQ
+  engine. Queued old-condition IQ is retained; changes affect future publications.
+- Mesh Designer: selected-node live spectrum, display range controls, independent
+  RX pause/resume and test-TX stop, reusing the running CLI sessions.
+- Added an explicit expiring `cli.preview` FFT demand and trace freshness fields.
+  Hidden/disabled viewers stop renewing demand; no new FFT runs for the preview
+  after cancellation/expiry unless another consumer requests it.
+
 ## 8.0.0 - 2026-11-02
 - Added ObriiCli: standalone headless RX/server/client, recording, optional
   decoder/TX workers, measurements, DSP graphs and experiment restoration.

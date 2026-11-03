@@ -18,6 +18,7 @@ sudo apt-get install -y \
     libqt5multimedia5-plugins \
     libfftw3-dev \
     libhdf5-dev \
+    libssl-dev \
     libusb-1.0-0-dev \
     librtlsdr-dev \
     rtl-sdr \

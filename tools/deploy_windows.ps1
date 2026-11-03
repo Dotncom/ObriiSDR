@@ -54,6 +54,9 @@ $RootFiles = @(
     @{ Source = Join-Path $BuildPath "ObriiAnalyzer.exe"; Name = "ObriiAnalyzer.exe" },
     @{ Source = Join-Path $BuildPath "ObriiFpgaLab.exe"; Name = "ObriiFpgaLab.exe" },
     @{ Source = Join-Path $BuildPath "ObriiIqHub.exe"; Name = "ObriiIqHub.exe" },
+    @{ Source = Join-Path $BuildPath "ObriiMeshDesigner.exe"; Name = "ObriiMeshDesigner.exe" },
+    @{ Source = Join-Path $BuildPath "ObriiMeshSim.exe"; Name = "ObriiMeshSim.exe" },
+    @{ Source = Join-Path $BuildPath "ObriiMeshNodeHost.exe"; Name = "ObriiMeshNodeHost.exe" },
     @{ Source = Join-Path $BuildPath "ObriiCli.exe"; Name = "ObriiCli.exe" },
     @{ Source = Join-Path $BuildPath "ObriiCliModule.exe"; Name = "ObriiCliModule.exe" },
     @{ Source = Join-Path $BuildPath "ObriiCliGnssModule.exe"; Name = "ObriiCliGnssModule.exe" },
@@ -229,6 +232,19 @@ $ReleaseDocFiles = @(
     "docs\mesh_designer.md",
     "docs\mesh_devices_example.json",
     "docs\mesh_project_example.json",
+    "docs\mesh_packet_example.json",
+    "docs\mesh_distributed.md",
+    "docs\mesh_hybrid_ports.md",
+    "docs\mesh_ports_ui.md",
+    "docs\mesh_protocol_adapters.md",
+    "docs\mesh_lorawan_adapter.md",
+    "docs\lora_phy.md",
+    "docs\meshtastic_core.md",
+    "docs\meshtastic_pki_admin.md",
+    "docs\reticulum_module.md",
+    "docs\lorawan_module.md",
+    "docs\fft_tuning.md",
+    "docs\phosphor_contours.md",
     "docs\cli_calibration.md",
     "docs\cli_digital_profiles.md",
     "docs\cli_remote_dsp.md",
@@ -304,6 +320,17 @@ $ResearchNotices = @{
     "ntia_itm" = @("LICENSE.md", "OBRII_CHANGES.md", "ERRORS_AND_WARNINGS.md")
     "dxcc" = @("LICENSE.txt", "README.md")
 }
+foreach ($Component in @('lora','meshtastic','reticulum','lorawan')) {
+    $Destination = Join-Path $DeployPath ('licenses/' + $Component)
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    foreach ($Name in @('NOTICE','LICENSE.LoRaPHY','LICENSE.Reticulum.txt')) {
+        $Source = Join-Path $Workspace ('src/' + $Component + '/' + $Name)
+        if (Test-Path -LiteralPath $Source) { Copy-Item -LiteralPath $Source -Destination $Destination -Force }
+    }
+}
+$TinyAesNotice = Join-Path $DeployPath 'licenses/tiny_aes'
+New-Item -ItemType Directory -Path $TinyAesNotice -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $Workspace 'third_party/tiny_aes/unlicense.txt') -Destination $TinyAesNotice -Force
 foreach ($Component in $ResearchNotices.Keys) {
     $Destination = Join-Path $DeployPath "licenses\$Component"
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null

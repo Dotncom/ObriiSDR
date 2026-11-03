@@ -104,6 +104,17 @@ void testReducers() {
                     const int bins = (std::min)(count, (std::max)(target, 2));
                     compare(output.levels, reference(frequencies, levels, low, high, bins, mode, regularPath));
                     compare(output.overlayLevels, reference(frequencies, overlay, low, high, bins, mode, regularPath));
+                    const auto expectedLevels = output.levels;
+                    const auto expectedOverlay = output.overlayLevels;
+                    std::vector<float> ordered(count), orderedOverlay(count);
+                    for (int i = 0; i < count; ++i) {
+                        ordered[i] = levels[(i + count / 2) % count];
+                        orderedOverlay[i] = overlay[(i + count / 2) % count];
+                    }
+                    prepareSpectrumDisplayFrame(frequencies, ordered, &orderedOverlay, count,
+                        low, high, target, -140, mode, output, true);
+                    compare(output.levels, expectedLevels);
+                    compare(output.overlayLevels, expectedOverlay);
                     for (int i = 0; i < bins; ++i)
                         require(std::abs(output.frequencies[i] - static_cast<float>(low + (i + 0.5) * (high - low) / bins)) < 0.01f,
                                 "frequency axis mismatch");

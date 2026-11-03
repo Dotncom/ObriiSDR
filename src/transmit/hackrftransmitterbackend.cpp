@@ -61,6 +61,9 @@ bool HackRfTransmitterBackend::start(const TxConfiguration &configuration, QStri
     bufferedSamples.store(0, std::memory_order_relaxed);
     generatedSamples.store(0, std::memory_order_relaxed);
     missingSourceSamples.store(0, std::memory_order_relaxed);
+    finiteInputDrained.store(false, std::memory_order_relaxed);
+    finiteEosReturned.store(false, std::memory_order_relaxed);
+    finiteState.store(FiniteState::Inactive, std::memory_order_release);
     stopping.store(false, std::memory_order_release);
     outputEnabled.store(true, std::memory_order_release);
 
@@ -122,6 +125,10 @@ bool HackRfTransmitterBackend::writeIq(const std::complex<float> *samples,
         if (error) *error = QStringLiteral("HackRF TX is not armed or no IQ samples were provided");
         return false;
     }
+    if (finiteState.load(std::memory_order_acquire) != FiniteState::Inactive) {
+        if (error) *error = QStringLiteral("HackRF finite burst cannot accept additional IQ; start a new session");
+        return false;
+    }
     if (!outputEnabled.load(std::memory_order_acquire)) {
         if (error) error->clear();
         return true;
@@ -159,6 +166,62 @@ bool HackRfTransmitterBackend::writeIq(const std::complex<float> *samples,
     return true;
 }
 
+bool HackRfTransmitterBackend::stageFiniteBurst(const std::complex<float> *samples,
+                                               int count, QString *error) {
+    QMutexLocker locker(&queueMutex);
+    const qint64 maximumSamples = static_cast<qint64>(currentConfiguration.sampleRate) * 180;
+    if (!running.load(std::memory_order_acquire) || streaming.load(std::memory_order_acquire) ||
+        stopping.load(std::memory_order_acquire) || !outputEnabled.load(std::memory_order_acquire) ||
+        currentConfiguration.liveSource || !sourceQueue.isEmpty() ||
+        finiteState.load(std::memory_order_acquire) != FiniteState::Inactive ||
+        !samples || count <= 0 || count > maximumSamples) {
+        if (error) *error = QStringLiteral("Finite HackRF TX requires one bounded burst in a fresh, armed non-live session");
+        return false;
+    }
+    sourceQueue.resize(count + 1);
+    std::copy_n(samples, count, sourceQueue.data());
+    // A zero lookahead lets the existing interpolator emit the final input sample.
+    sourceQueue[count] = std::complex<float>(0.0f, 0.0f);
+    sourcePosition = 0.0;
+    bufferedSamples.store(count + 1, std::memory_order_release);
+    finiteInputDrained.store(false, std::memory_order_relaxed);
+    finiteEosReturned.store(false, std::memory_order_relaxed);
+    finiteState.store(FiniteState::Pending, std::memory_order_release);
+    if (error) error->clear();
+    return true;
+}
+
+bool HackRfTransmitterBackend::writeFiniteBurst(const std::complex<float> *samples,
+                                               int count, QString *error) {
+    if (!device || !running.load(std::memory_order_acquire) ||
+        streaming.load(std::memory_order_acquire) ||
+        finiteState.load(std::memory_order_acquire) != FiniteState::Inactive) {
+        if (error) *error = QStringLiteral("Finite HackRF TX must be staged after start and before streaming");
+        return false;
+    }
+    if (enableHackRfTxFlushSafely(device, &HackRfTransmitterBackend::flushCallback, this) != HackRfSuccess ||
+        setHackRfTxBlockCompleteCallbackSafely(device, &HackRfTransmitterBackend::blockCompleteCallback) != HackRfSuccess) {
+        if (error) *error = hackRfLastErrorMessage();
+        stop();
+        return false;
+    }
+    if (!stageFiniteBurst(samples, count, error)) return false;
+    if (!beginStreaming(error)) {
+        finiteState.store(FiniteState::Failed, std::memory_order_release);
+        return false;
+    }
+    return true;
+}
+
+bool HackRfTransmitterBackend::finiteBurstComplete() const {
+    const auto state = finiteState.load(std::memory_order_acquire);
+    return state == FiniteState::Succeeded || state == FiniteState::Failed;
+}
+
+bool HackRfTransmitterBackend::finiteBurstSucceeded() const {
+    return finiteState.load(std::memory_order_acquire) == FiniteState::Succeeded;
+}
+
 bool HackRfTransmitterBackend::drain(int timeoutMs, QString *error) {
     if (!running.load(std::memory_order_acquire)) {
         if (error) *error = QStringLiteral("HackRF TX backend is not running");
@@ -166,12 +229,17 @@ bool HackRfTransmitterBackend::drain(int timeoutMs, QString *error) {
     }
     QElapsedTimer timer;
     timer.start();
-    while (bufferedSourceSamples() > 1) {
+    const bool finite = finiteState.load(std::memory_order_acquire) != FiniteState::Inactive;
+    while (finite ? !finiteBurstComplete() : bufferedSourceSamples() > 1) {
         if (timeoutMs >= 0 && timer.elapsed() >= timeoutMs) {
             if (error) *error = QStringLiteral("Timed out while draining the HackRF TX queue");
             return false;
         }
         QThread::msleep(5);
+    }
+    if (finite && !finiteBurstSucceeded()) {
+        if (error) *error = QStringLiteral("HackRF finite TX failed or was cancelled before a successful flush");
+        return false;
     }
     if (error) error->clear();
     return true;
@@ -185,6 +253,8 @@ bool HackRfTransmitterBackend::setOutputEnabled(bool enabled, QString *error) {
     outputEnabled.store(enabled, std::memory_order_release);
     if (!enabled) {
         stopping.store(true, std::memory_order_release);
+        auto pending = FiniteState::Pending;
+        finiteState.compare_exchange_strong(pending, FiniteState::Failed, std::memory_order_acq_rel);
         const bool wasStreaming = streaming.exchange(false, std::memory_order_acq_rel);
         if (device && wasStreaming) stopHackRfTxSafely(device);
         if (device) setHackRfAmpEnabledSafely(device, false);
@@ -207,10 +277,12 @@ bool HackRfTransmitterBackend::beginStreaming(QString *error) {
     }
     int status = setHackRfAmpEnabledSafely(device, currentConfiguration.rfAmpEnabled);
     if (status == HackRfSuccess) {
-        for (int attempt = 0; attempt < 4; ++attempt) {
+        // Finite callbacks may have consumed input even when startup fails; never replay it.
+        const int attempts = finiteState.load(std::memory_order_acquire) == FiniteState::Inactive ? 4 : 1;
+        for (int attempt = 0; attempt < attempts; ++attempt) {
             status = startHackRfTxSafely(device, &HackRfTransmitterBackend::transferCallback, this);
             if (status == HackRfSuccess) break;
-            if (attempt < 3) QThread::msleep(30);
+            if (attempt + 1 < attempts) QThread::msleep(30);
         }
     }
     if (status != HackRfSuccess) {
@@ -231,9 +303,36 @@ int HackRfTransmitterBackend::transferCallback(HackRfTransfer *transfer) {
     return backend ? backend->fillTransfer(transfer) : -1;
 }
 
+void HackRfTransmitterBackend::blockCompleteCallback(HackRfTransfer *transfer, int success) {
+    auto *backend = transfer ? static_cast<HackRfTransmitterBackend *>(transfer->txContext) : nullptr;
+    if (backend && !success) {
+        auto pending = FiniteState::Pending;
+        backend->finiteState.compare_exchange_strong(pending, FiniteState::Failed, std::memory_order_acq_rel);
+    }
+}
+
+void HackRfTransmitterBackend::flushCallback(void *context, int success) {
+    auto *backend = static_cast<HackRfTransmitterBackend *>(context);
+    if (!backend) return;
+    const bool okay = success && backend->finiteEosReturned.load(std::memory_order_acquire) &&
+                      !backend->stopping.load(std::memory_order_acquire);
+    auto pending = FiniteState::Pending;
+    backend->finiteState.compare_exchange_strong(
+        pending, okay ? FiniteState::Succeeded : FiniteState::Failed, std::memory_order_acq_rel);
+}
+
 int HackRfTransmitterBackend::fillTransfer(HackRfTransfer *transfer) {
     if (!transfer || !transfer->buffer || transfer->bufferLength <= 0) {
         return -1;
+    }
+    const auto state = finiteState.load(std::memory_order_acquire);
+    const bool finite = state != FiniteState::Inactive;
+    if (finite && (state != FiniteState::Pending || stopping.load(std::memory_order_acquire) ||
+                   finiteInputDrained.load(std::memory_order_acquire))) {
+        transfer->validLength = 0;
+        if (state == FiniteState::Pending && finiteInputDrained.load(std::memory_order_acquire))
+            finiteEosReturned.store(true, std::memory_order_release);
+        return 1;
     }
     int bytes = transfer->validLength > 0
                     ? (std::min)(transfer->validLength, transfer->bufferLength)
@@ -263,7 +362,7 @@ int HackRfTransmitterBackend::fillTransfer(HackRfTransfer *transfer) {
                 const float fraction = static_cast<float>(sourcePosition - first);
                 value = sourceQueue[first] + (sourceQueue[second] - sourceQueue[first]) * fraction;
                 sourcePosition += step;
-            } else {
+            } else if (!finite) {
                 ++missing;
             }
             output[index * 2] = quantize(value.real());
@@ -280,6 +379,9 @@ int HackRfTransmitterBackend::fillTransfer(HackRfTransfer *transfer) {
         outputIndex = chunkEnd;
     }
     transfer->validLength = bytes;
+    // Hand off the final valid buffer now; EOS must be returned on the NEXT callback.
+    if (finite && bufferedSamples.load(std::memory_order_acquire) <= 1)
+        finiteInputDrained.store(true, std::memory_order_release);
     generatedSamples.fetch_add(static_cast<quint64>(complexSamples), std::memory_order_relaxed);
     missingSourceSamples.fetch_add(missing, std::memory_order_relaxed);
     return 0;
@@ -287,6 +389,8 @@ int HackRfTransmitterBackend::fillTransfer(HackRfTransfer *transfer) {
 
 void HackRfTransmitterBackend::stop() {
     stopping.store(true, std::memory_order_release);
+    auto pending = FiniteState::Pending;
+    finiteState.compare_exchange_strong(pending, FiniteState::Failed, std::memory_order_acq_rel);
     const bool wasStreaming = streaming.exchange(false, std::memory_order_acq_rel);
     running.store(false, std::memory_order_release);
     QElapsedTimer stopTimer;

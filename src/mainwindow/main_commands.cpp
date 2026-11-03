@@ -6,6 +6,7 @@
 #include "iqbuffer.h"
 #include "tuningutils.h"
 #include "frequencycontrol.h"
+#include "../mesh/meshnodecommands.h"
 
 #include <QSignalBlocker>
 
@@ -79,6 +80,7 @@ void YourClassName::ensureCommandDispatcher() {
     if (commandDispatcher) return;
     commandDispatcher = std::make_unique<CommandDispatcher>(QStringLiteral("gui"));
     commandControlServer = new CommandControlServer(commandDispatcher.get(), this);
+    registerMeshNodeCommands(*commandDispatcher,this);
     commandDispatcher->addStandard("status", [this](const QJsonObject &) { return commandStatus(false); });
     commandDispatcher->addStandard("metrics", [this](const QJsonObject &) { return commandStatus(true); });
     commandDispatcher->addStandard("capabilities", [this](const QJsonObject &) {

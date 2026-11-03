@@ -4,6 +4,7 @@
 #include "computebudgetmanager.h"
 #include "coherentiqsession.h"
 #include "dspiqsourceregistry.h"
+#include "ffttuningguard.h"
 
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -994,7 +995,15 @@ SpectrumMosaicSourceSettings MultiSdrDialog::mainMosaicSettings(int sourceIndex)
     return settings;
 }
 
+bool MultiSdrDialog::anyReceiverRunning() const {
+    if (primaryRunning) return true;
+    for (const auto &source : sources)
+        if (source && source->active && source->receiver->isRunning()) return true;
+    return false;
+}
+
 bool MultiSdrDialog::startSource(int sourceIndex) {
+    if (fftTuningActive()) return false;
     SourceUi &source = *sources[static_cast<std::size_t>(sourceIndex)];
     if (!source.active) return false;
     if (source.receiver->isRunning()) return true;
@@ -1058,6 +1067,7 @@ void MultiSdrDialog::stopSource(int sourceIndex) {
 }
 
 void MultiSdrDialog::startAll() {
+    if (fftTuningActive()) return;
     updateCoherentSubscriptions();
     previewMosaicEngine.clear();
     mainMosaicEngine.clear();

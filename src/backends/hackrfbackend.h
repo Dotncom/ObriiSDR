@@ -32,6 +32,8 @@ struct HackRfTransfer {
 
 using HackRfRxCallback = int (*)(HackRfTransfer *transfer);
 using HackRfTxCallback = int (*)(HackRfTransfer *transfer);
+using HackRfTxBlockCompleteCallback = void (*)(HackRfTransfer *transfer, int success);
+using HackRfFlushCallback = void (*)(void *context, int success);
 
 enum class HackRfRfPath {
     Bypass = 0,
@@ -135,6 +137,8 @@ int startHackRfSweepSafely(void *dev, HackRfRxCallback callback, void *context);
 int startHackRfRxSafely(void *dev, HackRfRxCallback callback, void *context);
 int stopHackRfRxSafely(void *dev);
 int setHackRfTxUnderrunLimitSafely(void *dev, std::uint32_t sampleLimit);
+int setHackRfTxBlockCompleteCallbackSafely(void *dev, HackRfTxBlockCompleteCallback callback);
+int enableHackRfTxFlushSafely(void *dev, HackRfFlushCallback callback, void *context);
 int startHackRfTxSafely(void *dev, HackRfTxCallback callback, void *context);
 int stopHackRfTxSafely(void *dev);
 bool isHackRfStreamingSafely(void *dev);

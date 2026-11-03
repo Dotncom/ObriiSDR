@@ -4,6 +4,7 @@
 #include "../core/commanddispatcher.h"
 #include "../core/radiosettings.h"
 #include "../network/commandcontrolserver.h"
+#include "../mesh/meshnodecommands.h"
 
 inline QJsonObject cliAgentCommand(CommandControlServer &server, const QJsonObject &input) {
     const auto operation = input.value("operation").toString();
@@ -45,6 +46,20 @@ inline void registerCliCommandHandlers(CommandDispatcher &dispatcher,
                 input.insert("modulationType", modes.value(arguments.value("mode").toString(), -1)); input.remove("mode");
             }
             return legacyHandler(input);
+        });
+    }
+    if (includeTrace) {
+        CommandDispatcher::Spec preview;
+        preview.name = QStringLiteral("cli.preview");
+        preview.description = QStringLiteral("Lease the existing exact FFT for an optional display; ttlMs=0 cancels");
+        preview.access = CommandDispatcher::Access::Control;
+        preview.inputSchema = {{"type", "object"}, {"properties", QJsonObject{
+            {"ttlMs", QJsonObject{{"type", "integer"}, {"minimum", 0}, {"maximum", 3000}}},
+            {"intervalMs", QJsonObject{{"type", "integer"}, {"minimum", 100}, {"maximum", 2000}}}}},
+            {"required", QJsonArray{"ttlMs"}}, {"additionalProperties", false}};
+        preview.positional = QStringList{QStringLiteral("ttlMs"), QStringLiteral("intervalMs")};
+        dispatcher.add(preview, [legacyHandler](const QJsonObject &args) {
+            auto input = args; input.insert("action", "preview"); return legacyHandler(input);
         });
     }
     CommandDispatcher::Spec legacy;

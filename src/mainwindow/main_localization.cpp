@@ -207,6 +207,11 @@ void YourClassName::applyUiLanguage() {
     syncFftResolutionControls();
 
     setComboItemText(spectrumDisplayModeCombo, 0, QStringLiteral("spectrum_display_line"), QStringLiteral("Line spectrum"));
+    setComboItemText(spectrumPersistenceStyleCombo, 0, QStringLiteral("spectrum_persistence_classic"), QStringLiteral("Classic"));
+    setComboItemText(spectrumPersistenceStyleCombo, 1, QStringLiteral("spectrum_persistence_contours"), QStringLiteral("Contours"));
+    if (spectrumPersistenceStyleCombo) spectrumPersistenceStyleCombo->setToolTip(uiText(
+        QStringLiteral("spectrum_persistence_style_tooltip"),
+        QStringLiteral("Contours keeps raw amplitude states and sharpens density vertically. Classic uses amplitude smoothing. Line spectrum smoothing is independent.")));
     if (spectrumPersistenceSmoothingSpin) spectrumPersistenceSmoothingSpin->setToolTip(uiText(
         QStringLiteral("spectrum_persistence_smoothing_tooltip"),
         QStringLiteral("Smooth amplitude over time before accumulation. 0 disables smoothing. Higher values reduce scatter but slow the response to short signals.")));

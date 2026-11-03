@@ -43,6 +43,7 @@ public:
         return audioSourceIndex.load(std::memory_order_acquire);
     }
     int mainIncludedReceiverCount() const;
+    bool anyReceiverRunning() const;
     int focusedMainReceiverNumber() const;
 
 signals:

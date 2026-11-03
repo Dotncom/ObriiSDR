@@ -27,6 +27,11 @@ GUI/CLI boundary, rather than assuming every GUI control has a console twin.
 
 ## Additional Headless Services
 
+Offline CPU FFT tuning: `ObriiCli fft-tune --fft 8388608 --max-threads 4
+--planning-ms 500`. Stop receiving instances first. The command uses synthetic
+IQ and stores a machine/FFT-specific wisdom profile shared with the GUI's
+out-of-place FFT worker. See [FFT tuning](fft_tuning.md) for limits and cache rules.
+
 All services below are opt-in. Ordinary RX does not launch their workers.
 
 ```bash
@@ -943,6 +948,26 @@ archive. It is not required for Raspberry use or migration. Only when that
 reduced archive has no root `CMakeLists.txt` does `BUILD_TARGET=ObriiCli` fall
 back to `src/cli`; the full source tree always uses the shared root project.
 
+### Standalone CLI Build
+
+For a focused developer build from the full tree, `src/cli` is also an
+independent CMake entry point:
+
+```bash
+cmake -S src/cli -B build/cli-standalone
+cmake --build build/cli-standalone --target ObriiCli -j2
+```
+
+It links the same `ObriiMeshNode` service as the desktop/root build and selects
+`OBRII_MESH_BUILD_UI=OFF` when adding mesh targets, so mesh does not require Qt
+Widgets. This does not remove the CLI's existing Qt Core/Network/Gui/Concurrent,
+FFTW and Fobos dependencies; Multimedia and the Widgets-based view companion
+remain optional. Use a separate build directory, not the root build's cache.
+Root/designer builds retain mesh UI ON by default. This entry point does not
+start a mesh service, receiver or transmitter automatically.
+
+### Run The Shared Build
+
 Run either application from the shared output directory. For CLI reception:
 
 ```bash
@@ -1165,6 +1190,79 @@ is optional for local CLI playback; the stdout PCM pipe works without it. No
 display server is required unless the playback backend itself requires one.
 
 ## Live TX, GNSS And Research
+
+### Packet Mesh Simulation Companion
+
+`ObriiCli mesh-node --bind IP --mesh-port 17690` runs an independent optional
+distributed mesh endpoint without RX or visualization. Use a real trusted LAN
+address for remote peers, or 127.0.0.1 for same-PC tests. The same shared service
+can be started in a GUI/CLI command console with `mesh.service start IP 17690`;
+`mesh.service status` and `mesh.service stop` inspect/stop it. The GUI Start
+reply opens a masked token-copy dialog; ordinary console logs stay redacted.
+Nodes support independent RX/TX ports and per-link DATA/IQ; `inherit` uses the
+session default, not a mandatory global bearer. The legacy `lab` protocol
+forwards up to 4096 packet bytes over DATA and uses a 240-byte UI payload cap
+for IQ. IQ links support shared AFSK1200/FM or LoRa CSS, with native protocol
+MTUs and modem/sample bounds enforced separately.
+Native Meshtastic supports PSK channels and locally pinned PKI; Reticulum uses
+an isolated local RNS runtime with a default 15-second startup/readiness budget.
+Install private protocol profiles/runtime paths via `--node-options FILE` or
+the local service's `optionsFile`; projects hold only public settings/profile IDs.
+
+LoRaWAN supports one provisioned EU868 device/network pair, ABP/OTAA Class A
+over virtual DATA/IQ. NodeService defaults modeled tolerance to 250 ms and
+reports `timingSource: "simulated-transport"`, `hardwareTimingVerified: false`.
+`rx_context` and `tx_started` are host-only callbacks, rejected as remote
+protocol commands. Physical LoRaWAN RX/TX is blocked; no certified radio MAC
+is claimed. Native Meshtastic/RNS physical bridges are separate opt-in ports:
+RX needs local source permission; UHD/HackRF TX needs a local profile and
+explicit bounded `mesh.rf arm` authorization. Starting `mesh-node` alone
+does not open RF or supply a physical RX source. See
+[ports and RF authorization](mesh_hybrid_ports.md),
+[native protocols](mesh_protocol_adapters.md) and
+[LoRaWAN](mesh_lorawan_adapter.md).
+See [mesh_distributed.md](mesh_distributed.md) for configuration, safety, limits,
+credentials, peer reachability and the 15-second ownership lease.
+
+`ObriiMeshSim --scenario docs/mesh_packet_example.json --output packet-results.json`
+runs the same deterministic packet-only core as Mesh Designer's **Packet network**
+window, with no RX, IQ, display server or network sockets. It models per-hop
+unicast forwarding, centralized known-graph min-hop routes, TTL, bounded queues,
+duplicate suppression and node/link failures. It is not a modem, distributed
+routing protocol or an RF mesh. Saved GUI scenarios reproduce their counters,
+actual paths and retained traces; the optional stop time preserves pending work.
+See [mesh_designer.md](mesh_designer.md#packet-network-laboratory) for schema,
+commands and resource/evidence limits. This companion is not a new `ObriiCli
+control` command or a GUI command-console alias.
+
+Mesh Designer also offers a separate **IQ · AX.25 / AFSK1200 / FM** packet mode
+with actual loopback CF32 modem hops. It does not use ObriiMeshSim or pretend
+wall-clock modem runs are deterministic packet-only replay. See
+[IQ modem routing](mesh_designer.md#packet-routing-through-iq-modems).
+
+### Optional Display FFT Lease
+
+An optional viewer can explicitly request a short-lived FFT using the typed
+local command `cli.preview`. Send this envelope using
+`ObriiCli control request preview.json --control-port PORT`:
+
+```json
+{"command":"cli.preview","args":{"ttlMs":1500,"intervalMs":500}}
+```
+
+Renew while the viewer is active; `ttlMs: 0` cancels. TTL is limited to 0..3000
+ms and the optional interval to 100..2000 ms (default 500). This is a control
+operation for the existing RX, not hardware start, TX, trace accumulation or a
+new independent FFT engine. There is one preview lease per CLI session; multiple
+viewers of the same session must coordinate its renewal/cancellation. It requests
+the configured exact FFT length; it
+does not silently shorten a scientific trace. Expiry stops this demand only:
+other consumers such as recording or a network client continue normally.
+`status.previewLeaseMs` reports the remaining lease. `trace` remains a read-only
+cache operation, with added `sequence` and `computedUtcMs` string fields so a
+viewer can reject unchanged or stale frames. These values and leases are
+session-only and are not restored from experiment files. The GUI command
+catalog and a CLI in network-client mode do not expose this local-RX lease.
 
 `module tx microphone|manual-cw|microphones|control` provides independent live
 capture and keyed output. See [cli_live_tx.md](cli_live_tx.md) for commands,

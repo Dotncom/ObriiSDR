@@ -20,6 +20,7 @@
 #include <QPlainTextEdit>
 #include <QPainter>
 #include <QPointer>
+#include <QPushButton>
 #include <QSpinBox>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -203,6 +204,12 @@ void localAndHistory(const QString &snapshotDir) {
         check(!output->toPlainText().contains(QString::fromLatin1(secret)), "secret leaked in input echo or local response");
     key(input, Qt::Key_Up);
     check(input->text() == QLatin1String("tune 100M"), "sensitive JSON entered history");
+    send(dialog, QStringLiteral("{\"command\":\"echo\",\"args\":{\"nwkSKeyHex\":\"test-network-session-key\",\"appSKeyHex\":\"test-application-session-key\",\"key\":\"test-mesh-session-key\",\"publicKeyHex\":\"public-identity-visible\"}}"));
+    for (const auto &secret : {"test-network-session-key", "test-application-session-key", "test-mesh-session-key"})
+        check(!output->toPlainText().contains(QString::fromLatin1(secret)), "LoRaWAN or mesh session key leaked in console");
+    check(output->toPlainText().contains(QStringLiteral("public-identity-visible")), "public PKI identity was hidden with secrets");
+    key(input, Qt::Key_Up);
+    check(input->text() == QLatin1String("tune 100M"), "radio session keys entered console history");
     metrics->setChecked(true);
     check(until([&metricCalls] { return metricCalls > 0; }, 1600), "visible metrics did not poll");
     dialog.hide();
@@ -234,6 +241,24 @@ void localAndHistory(const QString &snapshotDir) {
     CommandDispatcher unsupported(QStringLiteral("without-metrics"));
     CommandConsoleDialog noMetrics(&unsupported);
     check(!child<QCheckBox>(noMetrics, "commandConsoleMetrics")->isEnabled(), "unsupported metrics were enabled");
+}
+
+void meshStartupToken() {
+    CommandDispatcher dispatcher("mesh-console-test");
+    CommandDispatcher::Spec spec;spec.name="mesh.service";spec.access=CommandDispatcher::Access::Files;
+    spec.positional=QStringList{"operation"};
+    spec.inputSchema={{"type","object"},{"properties",QJsonObject{{"operation",QJsonObject{{"type","string"}}}}},{"required",QJsonArray{"operation"}}};
+    const QString secret="private-mesh-startup-token";
+    dispatcher.add(spec,[secret](const QJsonObject &){return QJsonObject{{"ok",true},{"token",secret},{"pairingSecret","246810"},{"bind","127.0.0.1"},{"port",17690}};});
+    CommandConsoleDialog dialog(&dispatcher);dialog.setAttribute(Qt::WA_DontShowOnScreen);dialog.show();settle(20);
+    send(dialog,"mesh.service start");
+    auto field=dialog.findChild<QLineEdit *>("meshNodeStartupToken");
+    auto copy=dialog.findChild<QPushButton *>("meshNodeStartupCopy");
+    check(field&&copy&&field->isReadOnly()&&field->echoMode()==QLineEdit::Password&&field->text()==secret,"mesh startup did not offer a separate masked token field");
+    check(!child<QPlainTextEdit>(dialog,"commandConsoleOutput")->toPlainText().contains(secret),"mesh service token leaked in console output");
+    check(dialog.findChild<QLineEdit *>("meshNodePairingCode")&&dialog.findChild<QLineEdit *>("meshNodePairingCode")->text()=="246810"&&!child<QPlainTextEdit>(dialog,"commandConsoleOutput")->toPlainText().contains("246810"),"pairing code is local to the connection dialog, not console logs");
+    copy->click();check(QApplication::clipboard()->text()==secret,"explicit mesh token copy failed");QApplication::clipboard()->clear();
+    dialog.close();
 }
 
 void remoteRequests(const QString &snapshotDir) {
@@ -396,6 +421,7 @@ int main(int argc, char **argv) {
         localAndHistory(snapshots);
         remoteRequests(snapshots);
         agentSettings(snapshots);
+        meshStartupToken();
         std::cout << "Command console passed: " << checks << " checks (local human dispatch, history, "
             "visibility polling, remote framing/deadline/limits, redaction, Agent API ownership)\n";
         return 0;

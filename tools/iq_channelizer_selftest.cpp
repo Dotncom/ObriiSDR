@@ -6,8 +6,10 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <thread>
@@ -107,6 +109,37 @@ void testChunking() {
         std::cout << "Chunk comparison rate=" << rate << " maximumError=" << maximumError << '\n';
         require(maximumError < 5e-7, "Chunking changed channelizer waveform");
     }
+}
+void testNonfiniteInput() {
+    const std::array<std::uint32_t, 16> patterns{{0, 0x80000000U, 0x7f800000U, 0xff800000U,
+        0x7fc12345U, 0xffc12345U, 0x7f800001U, 0xff800001U, 1, 0x80000001U,
+        0x007fffffU, 0x807fffffU, 0x00800000U, 0x80800000U, 0x3f800000U, 0xbf800000U}};
+    std::vector<float> input(65536), sanitized, actual, expected;
+    for (std::size_t i = 0; i < input.size(); ++i) input[i] = float(0.03 * std::sin(i * 0.009));
+    for (std::size_t i = 0; i < patterns.size(); ++i)
+        std::memcpy(&input[500 + i * 991], &patterns[i], sizeof(float));
+    sanitized = input;
+    for (auto &sample : sanitized) if (!std::isfinite(sample)) sample = 0.0f;
+    for (double rate : {192000.0, 50000000.0}) {
+        for (bool agc : {false, true}) {
+            RadioSettings settings;
+            settings.sampleRate = rate;
+            settings.centerFrequency = 100e6;
+            settings.listeningFrequency = settings.centerFrequency + rate * 0.075;
+            settings.modulationType = MOD_NFM;
+            settings.bandwidth = 12500;
+            IqChannelizer tested, reference;
+            for (int block = 0; block < 3; ++block) {
+                require(tested.processFloatIq(input.data(), input.size(), settings, actual, agc).valid &&
+                    reference.processFloatIq(sanitized.data(), sanitized.size(), settings, expected, agc).valid,
+                    "Special-float channelizer configuration failed");
+                require(!actual.empty() && actual.size() == expected.size() &&
+                    std::memcmp(actual.data(), expected.data(), actual.size() * sizeof(float)) == 0,
+                    "NaN/Inf sanitation differs from std::isfinite reference");
+            }
+        }
+    }
+    std::cout << "Binary32 sanitation: signed NaN/Inf, zero and subnormals bit-exact PASS\n";
 }
 void testIndependentQueues() {
     IqBuffer::clear();
@@ -329,7 +362,7 @@ void benchmark() {
 }
 int main() {
     try {
-        testFrontFilter(); testChunking(); testIndependentQueues();
+        testFrontFilter(); testChunking(); testNonfiniteInput(); testIndependentQueues();
         testDeferredSnapshots(); testConcurrentSnapshots(); benchmark();
         std::cout << "IQ channelizer/independent queue tests: PASS\n";
         return 0;

@@ -1688,9 +1688,10 @@ void AudioProcessor::SDRThread() {
             audioFilterChain.configure(activeAudioFilterChainJson, AUDIO_OUTPUT_RATE);
         }
 
-        if (previousIqSequence != 0 && iqBlockSequence > previousIqSequence + 1) {
-            healthSequenceGaps += iqBlockSequence - previousIqSequence - 1;
-            if (settings.modulationType == MOD_DMR) resetDemodulatorState();
+        if (previousIqSequence != 0 && iqBlockSequence != previousIqSequence + 1) {
+            healthSequenceGaps += iqBlockSequence > previousIqSequence
+                                      ? iqBlockSequence - previousIqSequence - 1 : 1;
+            resetDemodulatorState();
         }
         previousIqSequence = iqBlockSequence;
 

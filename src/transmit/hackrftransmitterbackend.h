@@ -22,6 +22,9 @@ public:
     bool isRfCapable() const override;
     bool start(const TxConfiguration &configuration, QString *error) override;
     bool writeIq(const std::complex<float> *samples, int count, QString *error) override;
+    bool writeFiniteBurst(const std::complex<float> *samples, int count, QString *error);
+    bool finiteBurstComplete() const;
+    bool finiteBurstSucceeded() const;
     bool setOutputEnabled(bool enabled, QString *error) override;
     bool drain(int timeoutMs, QString *error) override;
     void stop() override;
@@ -35,8 +38,13 @@ public:
     const TxConfiguration &configuration() const;
 
 private:
+    friend struct HackRfFiniteBurstTestAccess;
+    enum class FiniteState { Inactive, Pending, Succeeded, Failed };
     static int transferCallback(HackRfTransfer *transfer);
+    static void blockCompleteCallback(HackRfTransfer *transfer, int success);
+    static void flushCallback(void *context, int success);
     int fillTransfer(HackRfTransfer *transfer);
+    bool stageFiniteBurst(const std::complex<float> *samples, int count, QString *error);
     bool beginStreaming(QString *error);
     void closeDevice();
 
@@ -52,6 +60,9 @@ private:
     std::atomic<quint64> generatedSamples{0};
     std::atomic<quint64> missingSourceSamples{0};
     std::atomic<int> bufferedSamples{0};
+    std::atomic<FiniteState> finiteState{FiniteState::Inactive};
+    std::atomic_bool finiteInputDrained{false};
+    std::atomic_bool finiteEosReturned{false};
 };
 
 #endif // HACKRFTRANSMITTERBACKEND_H

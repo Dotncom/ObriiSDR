@@ -133,3 +133,43 @@ IQ sequence numbers show the gap, and affected IQ recordings stop with an
 explicit overrun status rather than silently becoming incomplete. This bounds
 GUI-queue memory but does not make a saturated receiver lossless. Recheck live
 capture continuity and CPU cost on Raspberry before changing the budget.
+
+### Shared Audio Channelizer And IQ Gaps
+
+The input I/Q finite checks now classify IEEE binary32 exponents using an
+alias-safe `memcpy`. Non-IEEE float targets retain `std::isfinite`. This avoids
+two out-of-line CRT calls per complex sample in the tested MSVC release, without
+changing the channelizer's filters, rates or NaN/Inf-to-zero behavior. A prior
+isolated 50 MS/s NFM experiment measured 2.86 -> 1.95 ms per block with bit-exact
+PCM over 32 blocks. Those synthetic timings are not a live-RF or Raspberry
+performance guarantee; CPU placement/reservation policy has not been changed.
+
+Live audio now resets the demodulator, channelizer and audio-filter state after
+a nonconsecutive IQ sequence, including a restarted source. Previously the
+sequence-gap reset applied only to DMR. This prevents old phase/filter history
+from spanning missing data; it cannot reconstruct lost samples or guarantee
+click-free recovery from every dropout. Continuous IQ keeps its existing state.
+
+`ObriiIqChannelizerSelfTest` compares sanitation with a `std::isfinite` reference
+for signed NaN/Inf, zeros and subnormals with and without AGC, alongside the
+existing waveform/chunking and queue tests. `ObriiCliAudioSelfTest` runs the actual
+live worker for all eight analog modes, full and simplified paths, comparing
+continuous PCM and forward/backward sequence-gap recovery with a fresh offline
+demodulator. These tests open no RF or audio device. Both GUI and CLI compile the
+same shared sources, so the changes apply to both frontends.
+## FFT Postprocessing And Display Reduction
+
+FFT input and magnitude sanitation use exact binary32 finite classification,
+with the standard fallback on other formats. Float/double normalization paths
+and logarithms remain unchanged. Display reduction specializes its detector
+once per frame and replaces per-bin modulo indexing with an equivalent bounded
+cyclic shift, including odd lengths. All five detectors, overlays, irregular
+grids and explicit mosaic gaps retain their previous semantics. No FFT bins are
+skipped and scientific data is not replaced with screen-reduced data. FFT
+planning, threading and radio/audio scheduling are unchanged.
+
+Regression coverage includes random float bit patterns, signed NaN/Inf, zeros,
+subnormals, independent DFT and GUI/CLI parity, and ordered/natural display
+layouts at multiple zooms. An isolated 8M-bin before/after comparison checks
+bit-exact input, levels, frequencies and all five detector output hashes.
+Synthetic timings measure components, not end-to-end FPS.

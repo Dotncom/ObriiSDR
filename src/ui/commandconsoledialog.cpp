@@ -18,6 +18,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPlainTextEdit>
+#include <QPushButton>
 #include <QResizeEvent>
 #include <QShowEvent>
 #include <QSignalBlocker>
@@ -41,7 +42,11 @@ bool sensitiveKey(QString key) {
     key = key.toLower();
     return key.contains(QStringLiteral("token")) || key.contains(QStringLiteral("password")) ||
            key.contains(QStringLiteral("secret")) || key == QLatin1String("authorization") ||
-           key == QLatin1String("apikey");
+           key == QLatin1String("apikey") || key == QLatin1String("protocolprofiles") ||
+           key.contains(QStringLiteral("psk")) || key.contains(QStringLiteral("privatekey")) ||
+           key.contains(QStringLiteral("appkey")) || key.contains(QStringLiteral("networkkey")) ||
+           key.contains(QStringLiteral("applicationkey")) || key.contains(QStringLiteral("nwkskey")) ||
+           key.contains(QStringLiteral("appskey")) || key == QLatin1String("key");
 }
 
 QToolButton *tool(QWidget *parent, const char *name, const QIcon &icon, const QString &tip) {
@@ -400,6 +405,26 @@ void CommandConsoleDialog::executeLine(const QString &raw, bool poll) {
         auto context = poll ? CommandDispatcher::Context{} : CommandDispatcher::Context::human();
         if (poll) context.origin = QStringLiteral("console-metrics");
         const auto reply = dispatcher_->executeText(line, context);
+        if (!poll && reply.value("command") == QLatin1String("mesh.service") && reply.value("ok").toBool() && !reply.value("token").toString().isEmpty()) {
+            const auto secret = reply.value("token").toString();
+            rememberSecret(secret);
+            const auto pairing = reply.value("pairingSecret").toString();if(!pairing.isEmpty())rememberSecret(pairing);
+            auto dialog = new QDialog(this);dialog->setAttribute(Qt::WA_DeleteOnClose);
+            dialog->setAttribute(Qt::WA_DontShowOnScreen,testAttribute(Qt::WA_DontShowOnScreen));dialog->setObjectName("meshNodeStartupConnection");
+            dialog->setWindowTitle(text("command_console_mesh_connection", "Mesh node connection"));
+            auto layout = new QVBoxLayout(dialog);
+            auto address = new QLabel(QStringLiteral("%1:%2").arg(reply.value("bind").toString()).arg(reply.value("port").toInt()),dialog);
+            address->setTextInteractionFlags(Qt::TextSelectableByMouse);layout->addWidget(address);
+            auto field = new QLineEdit(secret,dialog);field->setReadOnly(true);field->setEchoMode(QLineEdit::Password);field->setObjectName("meshNodeStartupToken");layout->addWidget(field);
+            if(!pairing.isEmpty()){
+                layout->addWidget(new QLabel(text("command_console_mesh_pair_code","Pairing code (LAN registration)"),dialog));
+                auto code=new QLineEdit(pairing,dialog);code->setReadOnly(true);code->setObjectName("meshNodePairingCode");layout->addWidget(code);
+            }
+            auto copy = new QPushButton(text("command_console_copy_token", "Copy session token"),dialog);layout->addWidget(copy);
+            copy->setObjectName("meshNodeStartupCopy");
+            connect(copy,&QPushButton::clicked,dialog,[secret]{QApplication::clipboard()->setText(secret);});
+            dialog->resize(430,pairing.isEmpty()?130:220);dialog->show();
+        }
         appendReply(reply);
         if (reply.value(QStringLiteral("commands")).isArray()) refreshCatalog();
         if (poll && !reply.value(QStringLiteral("ok")).toBool(true) &&

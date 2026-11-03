@@ -8,6 +8,10 @@
 #include "dspflowpanel.h"
 #include "spaceeventsfeed.h"
 #include "wirelesslabdialog.h"
+#include "ffttuningdialog.h"
+#include "multisdrdialog.h"
+#include "spectrumfftworker.h"
+#include "playbackmanager.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -99,6 +103,12 @@ void YourClassName::syncSpectrumPersistenceControls() {
     spectrumPersistenceIntensity = (std::clamp)(spectrumPersistenceIntensity, 10, 400);
     spectrumPersistenceThreshold = (std::clamp)(spectrumPersistenceThreshold, 0, 90);
     spectrumPersistenceSmoothingMs = (std::clamp)(spectrumPersistenceSmoothingMs, 0, 2000);
+    spectrumPersistenceStyle = (std::clamp)(spectrumPersistenceStyle, 0, 1);
+    if (spectrumPersistenceStyleCombo) {
+        const QSignalBlocker blocker(spectrumPersistenceStyleCombo);
+        spectrumPersistenceStyleCombo->setCurrentIndex(spectrumPersistenceStyle);
+        spectrumPersistenceStyleCombo->setEnabled(spectrumDisplayMode == 1);
+    }
     if (spectrumPersistenceTimeSpin) {
         const QSignalBlocker blocker(spectrumPersistenceTimeSpin);
         spectrumPersistenceTimeSpin->setValue(spectrumPersistenceSeconds);
@@ -117,9 +127,11 @@ void YourClassName::syncSpectrumPersistenceControls() {
     if (spectrumPersistenceSmoothingSpin) {
         const QSignalBlocker blocker(spectrumPersistenceSmoothingSpin);
         spectrumPersistenceSmoothingSpin->setValue(spectrumPersistenceSmoothingMs);
-        spectrumPersistenceSmoothingSpin->setEnabled(spectrumDisplayMode == 1);
+        spectrumPersistenceSmoothingSpin->setEnabled(spectrumDisplayMode == 1 && spectrumPersistenceStyle == 0);
     }
+    if (graphWidget) graphWidget->setPersistenceStyle(spectrumPersistenceStyle);
     if (graphWidget) graphWidget->setPersistenceParameters(spectrumPersistenceSeconds, spectrumPersistenceIntensity, spectrumPersistenceThreshold, spectrumPersistenceSmoothingMs);
+    refreshDspControlStates();
 }
 
 void YourClassName::showConfiguredInterface() {
@@ -382,6 +394,18 @@ void YourClassName::openApplicationSettings() {
     generalLayout->addRow(uiText(QStringLiteral("fine_tune"), QStringLiteral("Fine tune")), fineTuneModeCombo);
     generalLayout->addRow(uiText(QStringLiteral("fft_window"), QStringLiteral("FFT window")), fftWindowCombo);
     generalLayout->addRow(uiText(QStringLiteral("fft_backend"), QStringLiteral("FFT backend")), fftBackendCombo);
+    auto *fftTuneButton = new QPushButton(normalizedUiLanguage(uiLanguage) == QStringLiteral("uk")
+        ? QStringLiteral("Автопідбір FFT") : QStringLiteral("FFT tuning"), &dialog);
+    generalLayout->addRow(QString(), fftTuneButton);
+    connect(fftTuneButton, &QPushButton::clicked, &dialog, [this, &dialog] {
+        showFftTuningDialog(&dialog, pendingSettings.fftLength,
+            normalizedUiLanguage(uiLanguage) == QStringLiteral("uk"), [this] {
+                return isRunningOrTransitioning() ||
+                    (playbackManager && playbackManager->isPlaying()) ||
+                    (multiSdrDialog && multiSdrDialog->anyReceiverRunning()) ||
+                    (spectrumFftWorker && (spectrumFftWorker->workOutstanding() || spectrumFftWorker->workExecuting()));
+            });
+    });
     generalLayout->addRow(uiText(QStringLiteral("spectrum_update_interval"), QStringLiteral("Spectrum/waterfall update")), spectrumUpdateSpin);
     generalLayout->addRow(uiText(QStringLiteral("waterfall_speed"), QStringLiteral("Waterfall speed")), waterfallRowsSpin);
     generalLayout->addRow(uiText(QStringLiteral("scan_measurement_update_interval"), QStringLiteral("Measurement accumulation")), scanMeasurementUpdateSpin);

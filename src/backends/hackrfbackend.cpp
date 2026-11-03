@@ -111,6 +111,8 @@ struct HackRfApi {
     int (*start_rx)(void *device, HackRfRxCallback callback, void *context) = nullptr;
     int (*stop_rx)(void *device) = nullptr;
     int (*start_tx)(void *device, HackRfTxCallback callback, void *context) = nullptr;
+    int (*set_tx_block_complete_callback)(void *device, HackRfTxBlockCompleteCallback callback) = nullptr;
+    int (*enable_tx_flush)(void *device, HackRfFlushCallback callback, void *context) = nullptr;
     int (*stop_tx)(void *device) = nullptr;
     int (*is_streaming)(void *device) = nullptr;
 };
@@ -231,6 +233,9 @@ bool ensureLoadedLocked() {
         resolveSymbol(hackrf, hackrf.set_hw_sync_mode, "hackrf_set_hw_sync_mode", false);
         resolveSymbol(hackrf, hackrf.set_rx_overrun_limit, "hackrf_set_rx_overrun_limit", false);
         resolveSymbol(hackrf, hackrf.set_tx_underrun_limit, "hackrf_set_tx_underrun_limit", false);
+        resolveSymbol(hackrf, hackrf.set_tx_block_complete_callback,
+                      "hackrf_set_tx_block_complete_callback", false);
+        resolveSymbol(hackrf, hackrf.enable_tx_flush, "hackrf_enable_tx_flush", false);
         resolveSymbol(hackrf, hackrf.get_operacake_boards, "hackrf_get_operacake_boards", false);
         resolveSymbol(hackrf, hackrf.set_operacake_mode, "hackrf_set_operacake_mode", false);
         resolveSymbol(hackrf, hackrf.set_operacake_ports, "hackrf_set_operacake_ports", false);
@@ -977,6 +982,40 @@ int setHackRfTxUnderrunLimitSafely(void *dev, std::uint32_t sampleLimit) {
             return HACKRF_SUCCESS;
         }
         const int result = hackrf.set_tx_underrun_limit(dev, sampleLimit);
+        if (result != HACKRF_SUCCESS) {
+            hackrf.lastError = statusToStringLocked(hackrf, result);
+        }
+        return result;
+    });
+}
+
+int setHackRfTxBlockCompleteCallbackSafely(void *dev, HackRfTxBlockCompleteCallback callback) {
+    if (!dev || !callback) {
+        return HACKRF_ERR_NOT_OPEN;
+    }
+    return withApi([dev, callback](HackRfApi &hackrf) {
+        if (!hackrf.set_tx_block_complete_callback) {
+            hackrf.lastError = QStringLiteral("hackrf_set_tx_block_complete_callback is unavailable");
+            return HACKRF_ERR_NOT_LOADED;
+        }
+        const int result = hackrf.set_tx_block_complete_callback(dev, callback);
+        if (result != HACKRF_SUCCESS) {
+            hackrf.lastError = statusToStringLocked(hackrf, result);
+        }
+        return result;
+    });
+}
+
+int enableHackRfTxFlushSafely(void *dev, HackRfFlushCallback callback, void *context) {
+    if (!dev || !callback) {
+        return HACKRF_ERR_NOT_OPEN;
+    }
+    return withApi([dev, callback, context](HackRfApi &hackrf) {
+        if (!hackrf.enable_tx_flush) {
+            hackrf.lastError = QStringLiteral("hackrf_enable_tx_flush is unavailable; finite TX requires flush completion");
+            return HACKRF_ERR_NOT_LOADED;
+        }
+        const int result = hackrf.enable_tx_flush(dev, callback, context);
         if (result != HACKRF_SUCCESS) {
             hackrf.lastError = statusToStringLocked(hackrf, result);
         }

@@ -174,8 +174,13 @@ void SpectrumFftWorker::run() {
             requestId = nextRequestId;
             requestGeneration = pendingGeneration;
             hasRequest = false;
+            executionActive.store(true, std::memory_order_release);
         }
 
+        struct ExecutionScope {
+            std::atomic<bool> &active;
+            ~ExecutionScope() { active.store(false, std::memory_order_release); }
+        } executionScope{executionActive};
         SpectrumFftFrame frame;
         frame.requestId = requestId;
         frame.generation = requestGeneration;

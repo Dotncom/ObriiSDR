@@ -1,4 +1,5 @@
 #include "main.h"
+#include "ffttuningguard.h"
 #include "appconstants.h"
 #include "appruntimeutils.h"
 #include "diagnosticlogging.h"
@@ -321,6 +322,7 @@ void YourClassName::resetNetworkIqReceptionState(bool clearGraph, bool clearWate
 }
 
 void YourClassName::startNetworkClientProcessing() {
+    if (fftTuningActive()) return;
     if (!isNetworkClientMode() || !isClientIqProcessingMode()) {
         return;
     }

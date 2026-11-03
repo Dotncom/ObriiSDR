@@ -1,4 +1,5 @@
 #include "main.h"
+#include "ffttuningguard.h"
 #include "appconstants.h"
 #include "iqbuffer.h"
 #include "spectrumframereplaydialog.h"
@@ -870,6 +871,7 @@ void YourClassName::refreshPlaybackFiles() {
 }
 
 void YourClassName::startPlayback() {
+    if (fftTuningActive()) return;
     if (!playbackManager) {
         return;
     }

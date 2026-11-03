@@ -222,6 +222,7 @@ QJsonObject YourClassName::settingsToJson() const {
     settings["spectrumPersistenceIntensity"] = spectrumPersistenceIntensity;
     settings["spectrumPersistenceThreshold"] = spectrumPersistenceThreshold;
     settings["spectrumPersistenceSmoothingMs"] = spectrumPersistenceSmoothingMs;
+    settings["spectrumPersistenceStyle"] = spectrumPersistenceStyle;
     settings["waterfallDisplayMode"] = waterfallDisplayMode;
     settings["multiSdrViewMode"] = multiSdrViewMode;
     settings["waterfall3DResolutionDivisor"] = waterfall3DResolutionDivisor;
@@ -707,6 +708,7 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
     spectrumPersistenceIntensity = readInt("spectrumPersistenceIntensity", spectrumPersistenceIntensity);
     spectrumPersistenceThreshold = readInt("spectrumPersistenceThreshold", spectrumPersistenceThreshold);
     spectrumPersistenceSmoothingMs = readInt("spectrumPersistenceSmoothingMs", spectrumPersistenceSmoothingMs);
+    spectrumPersistenceStyle = readInt("spectrumPersistenceStyle", spectrumPersistenceStyle);
     syncSpectrumPersistenceControls();
     if (spectrumDisplayModeCombo) {
         const QSignalBlocker blocker(spectrumDisplayModeCombo);

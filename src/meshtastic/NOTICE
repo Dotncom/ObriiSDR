@@ -1,0 +1,21 @@
+Obrii Meshtastic PSK/PKI core and remote administration
+
+Independent C++ implementation of the publicly documented Meshtastic wire
+format and protobuf field definitions. No Meshtastic firmware source or
+generated protobuf code is included. Protocol references are listed in
+docs/meshtastic_core.md. This is not a distribution of Meshtastic firmware.
+
+AES primitive: existing third_party/tiny_aes (tiny-AES-c, kokke), revision
+23856752fbd139da0b8ca6e471a13d5bcc99a08d, Unlicense/public domain.
+The two wrappers compile the existing source in separate C++ namespaces for
+AES-128 and AES-256 CTR without changing the DMR crypto build.
+Redistribute third_party/tiny_aes/unlicense.txt with this component.
+
+Optional LoRa adapter: uses ObriiLoRa. Retain its NOTICE and LICENSE.LoRaPHY
+as installed by that library. See src/lora/NOTICE for upstream attribution.
+
+PKI cryptographic primitives use the operating-system Windows CNG provider
+(bcrypt), or an externally supplied OpenSSL Crypto library on other platforms.
+No X25519/SHA256/AES-CCM implementation is vendored here. Binary distributions
+that supply OpenSSL must also supply that dependency's applicable notices.
+PKI fixture keys are the public RFC7748 test vectors, not operational keys.

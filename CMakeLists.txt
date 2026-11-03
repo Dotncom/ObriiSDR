@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 8.0.0)
+project(ObriiSDR VERSION 8.1.0)
 enable_testing()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -219,7 +219,8 @@ if(MSVC)
     target_compile_options(ObriiOpenRadio PRIVATE /utf-8)
 endif()
 
-add_executable(ObriiIqHub tools/virtual_iq_hub_main.cpp)
+add_executable(ObriiIqHub tools/virtual_iq_hub_main.cpp
+    src/openradio/virtualiqhubcontrol.cpp src/openradio/virtualiqhubcontrol.h)
 target_link_libraries(ObriiIqHub PRIVATE ObriiOpenRadio Qt5::Core Qt5::Network)
 if(MSVC)
     target_compile_options(ObriiIqHub PRIVATE /utf-8)
@@ -1503,6 +1504,14 @@ if(FOBOS_BUILD_CW_SELFTEST)
         target_compile_options(ObriiVirtualIqHubSelfTest PRIVATE /utf-8)
     endif()
 
+    add_executable(ObriiVirtualIqHubControlSelfTest tools/virtual_iq_hub_control_selftest.cpp
+        src/openradio/virtualiqhubcontrol.cpp src/openradio/virtualiqhubcontrol.h)
+    target_link_libraries(ObriiVirtualIqHubControlSelfTest PRIVATE ObriiOpenRadio Qt5::Core Qt5::Network)
+    if(MSVC)
+        target_compile_options(ObriiVirtualIqHubControlSelfTest PRIVATE /utf-8)
+    endif()
+    add_test(NAME ObriiVirtualIqHubControlSelfTest COMMAND ObriiVirtualIqHubControlSelfTest)
+
     add_executable(ObriiVirtualIqHubNetworkSelfTest tools/virtual_iq_hub_network_selftest.cpp)
     target_link_libraries(ObriiVirtualIqHubNetworkSelfTest PRIVATE ObriiOpenRadio Qt5::Core Qt5::Network)
     if(MSVC)
@@ -2068,9 +2077,15 @@ elseif(NOT WIN32)
 endif()
 
 add_subdirectory(src/mesh)
+target_link_libraries(ObriiSDR PRIVATE ObriiMeshNode)
+target_link_libraries(ObriiCli PRIVATE ObriiMeshNode)
 if(WIN32 AND OBRII_RUNTIME_OUTPUT_DIR)
-    set_target_properties(ObriiMeshDesigner PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+    foreach(mesh_executable ObriiMeshDesigner ObriiMeshSim ObriiMeshNodeHost)
+        if(TARGET ${mesh_executable})
+            set_target_properties(${mesh_executable} PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+        endif()
+    endforeach()
 endif()
 
 install(TARGETS ObriiSDR ObriiIqHub ObriiCli ObriiCliModule ObriiCliGnssModule
@@ -2078,7 +2093,34 @@ install(TARGETS ObriiSDR ObriiIqHub ObriiCli ObriiCliModule ObriiCliGnssModule
     ObriiCliM17Module ObriiCliTxModule ObriiCliView RUNTIME DESTINATION bin)
 
 # Shared algorithms are statically linked: no DLL boundary or per-sample dispatch.
-add_library(ObriiFftTransformCore STATIC src/core/ffttransformcore.cpp src/core/ffttransformcore.h)
+add_library(ObriiFftTransformCore STATIC src/core/ffttransformcore.cpp src/core/ffttransformcore.h src/core/fftplanprofile.cpp)
+if(WIN32)
+    target_compile_definitions(ObriiFftTransformCore PRIVATE FOBOSAPP_HAS_FFTW_THREADS=1)
+elseif(FFTW_FLOAT_THREADS_LIBRARY)
+    target_compile_definitions(ObriiFftTransformCore PRIVATE FOBOSAPP_HAS_FFTW_THREADS=1)
+    target_link_libraries(ObriiFftTransformCore PUBLIC ${FFTW_FLOAT_THREADS_LIBRARY})
+endif()
+target_sources(ObriiSDR PRIVATE src/ui/ffttuningdialog.cpp)
+add_executable(ObriiFftTuningSelfTest EXCLUDE_FROM_ALL tools/fft_tuning_selftest.cpp src/core/fftplannermutex.cpp)
+target_link_libraries(ObriiFftTuningSelfTest PRIVATE ObriiFftTransformCore)
+if(WIN32 OR FFTW_FLOAT_THREADS_LIBRARY)
+    target_compile_definitions(ObriiFftTuningSelfTest PRIVATE OBRII_TUNING_TEST_THREADS=1)
+endif()
+add_executable(ObriiFftTuningUiSelfTest EXCLUDE_FROM_ALL tools/fft_tuning_ui_selftest.cpp src/ui/ffttuningdialog.cpp src/core/computebudgetmanager.cpp src/core/fftplannermutex.cpp)
+target_include_directories(ObriiFftTuningUiSelfTest PRIVATE src/ui src/core)
+target_link_libraries(ObriiFftTuningUiSelfTest PRIVATE ObriiFftTransformCore Qt5::Widgets)
+if(MSVC)
+    target_compile_options(ObriiFftTuningUiSelfTest PRIVATE /utf-8)
+endif()
+if(WIN32 AND OBRII_RUNTIME_OUTPUT_DIR)
+    add_test(NAME ObriiFftTuningSelfTest COMMAND ${CMAKE_COMMAND} -E env
+        "PATH=${OBRII_RUNTIME_OUTPUT_DIR};$ENV{PATH}"
+        $<TARGET_FILE:ObriiFftTuningSelfTest> $<TARGET_FILE:ObriiCli>)
+else()
+    add_test(NAME ObriiFftTuningSelfTest COMMAND ObriiFftTuningSelfTest $<TARGET_FILE:ObriiCli>)
+endif()
+set_tests_properties(ObriiFftTuningSelfTest PROPERTIES TIMEOUT 90)
+obrii_register_selftest(ObriiFftTuningUiSelfTest)
 target_include_directories(ObriiFftTransformCore PUBLIC src/core ${FFTW_INCLUDE_DIR})
 target_link_libraries(ObriiFftTransformCore PUBLIC Qt5::Core ${FFTW_FLOAT_LIBRARY})
 add_library(ObriiRecordingFormatCore STATIC src/core/recordingformatcore.cpp src/core/recordingformatcore.h)

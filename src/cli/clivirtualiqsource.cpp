@@ -74,6 +74,7 @@ void CliVirtualIqSource::reject(const QString &message) {
 }
 void CliVirtualIqSource::pump() {
     if (!peer) return;
+    const auto beforeFrames = frames;
     qint64 processed = 0;
     while (peer && peer->bytesAvailable() > 0 && processed < 512 * 1024) {
         const QByteArray bytes = peer->read(64 * 1024);
@@ -117,6 +118,7 @@ void CliVirtualIqSource::pump() {
         }
         if (!error.isEmpty()) { reject(error); return; }
     }
+    if (frames != beforeFrames && onDataAvailable) onDataAvailable();
     if (peer && peer->bytesAvailable() && !scheduled) {
         scheduled = true;
         QTimer::singleShot(0, this, [this] { scheduled = false; pump(); });

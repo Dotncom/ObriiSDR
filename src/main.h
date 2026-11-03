@@ -703,6 +703,8 @@ private:
     int spectrumPersistenceThreshold = 0;
     QSpinBox *spectrumPersistenceSmoothingSpin = nullptr;
     int spectrumPersistenceSmoothingMs = 0;
+    QComboBox *spectrumPersistenceStyleCombo = nullptr;
+    int spectrumPersistenceStyle = 0;
     void syncSpectrumPersistenceControls();
     QComboBox *multiSdrViewModeCombo = nullptr;
     QCheckBox *alternativeSpectrumGradientCheckbox = nullptr;

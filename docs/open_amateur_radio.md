@@ -126,7 +126,8 @@ case-sensitive, 1..64 ASCII letters/digits with `._-` after the first character;
 `tx1`, `tx2`, ... are reserved for unnamed legacy TX and depend on connection
 order. Named RX and TX stay bound to the same scenario routes when startup
 order changes. An ID is a routing name, **not authentication**: use only a trusted lab
-network. The scenario is checked at startup and cannot be changed live yet.
+network. The scenario is checked at startup; optional authenticated loopback
+control can change enabled/gain/delay for future frames (see below).
 Collisions are now evaluated separately for each RX, so transmitters routed
 to disjoint receivers do not interfere. Gain scaling is applied only on links
 that request it; with noise disabled, ordinary fan-out shares the payload.
@@ -169,6 +170,12 @@ time-accurate behavior at very high sample rates still requires throughput
 validation on the target machines and network.
 
 ## Safety And Regulation
+
+The IQ hub now has an optional authenticated loopback-only control interface for
+live link gain/delay/enabled updates. It is off by default; see
+[mesh_designer.md](mesh_designer.md#hub-control-protocol) for key files, versioned
+requests, revision checks and limits. This does not authenticate/encrypt IQ data,
+implement mesh packet forwarding or schedule sample-exact channel transitions.
 
 The lab only builds bytes and symbols. It neither tunes nor transmits. A future
 RF backend must use the normal Obrii arming, watchdog, hardware ownership, band,

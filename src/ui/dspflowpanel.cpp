@@ -8,6 +8,7 @@
 #include "MyWaterfallWidget.h"
 #include "appsettingsutils.h"
 #include "radiosettings.h"
+#include "spectrumpersistence.h"
 
 #include <QAction>
 #include <QApplication>
@@ -437,6 +438,7 @@ public:
             QObject::connect(pauseControl_, &QToolButton::toggled, pauseControl_,
                              [this](bool paused) {
                 paused_ = paused;
+                persistenceClock_.invalidate();
                 updatePauseControl();
                 if (callbacks_.pauseToggled) callbacks_.pauseToggled(blockId_, paused);
                 update();
@@ -463,7 +465,9 @@ public:
 
     void setSettings(const QJsonObject &settings) {
         localSettings_ = settings;
-        paused_ = localSettings_.value(QStringLiteral("paused")).toBool(false);
+        const bool paused = localSettings_.value(QStringLiteral("paused")).toBool(false);
+        if (paused_ != paused) persistenceClock_.invalidate();
+        paused_ = paused;
         if (pauseControl_) {
             const QSignalBlocker blocker(pauseControl_);
             pauseControl_->setChecked(paused_);
@@ -513,6 +517,8 @@ public:
                                              ? &controllerSettings_
                                              : (localLevelOverride ? &localSettings_ : nullptr);
         hasCustomLevelRange_ = levelSource != nullptr;
+        const float previousMinimum = minimumDbfs_;
+        const float previousMaximum = maximumDbfs_;
         minimumDbfs_ = hasCustomLevelRange_
             ? static_cast<float>((std::clamp)(
                   levelSource->value(QStringLiteral("minimumDbfs")).toDouble(globalMinimumDbfs_),
@@ -523,6 +529,25 @@ public:
                   levelSource->value(QStringLiteral("maximumDbfs")).toDouble(globalMaximumDbfs_),
                   double(minimumDbfs_ + 1.0f), 20.0))
             : globalMaximumDbfs_;
+
+        // Phosphor controls are shared with the normal GUI, not per-waterfall profiles.
+        const bool persistenceEnabled = mode_ == Mode::Spectrum &&
+            globalVisualizationSettings_.value(QStringLiteral("spectrumDisplayMode")).toInt(0) == 1;
+        const auto persistenceStyle =
+            globalVisualizationSettings_.value(QStringLiteral("spectrumPersistenceStyle")).toInt(0) == 1
+                ? SpectrumPersistence::Style::Contours : SpectrumPersistence::Style::Classic;
+        if (persistenceEnabled_ != persistenceEnabled || previousMinimum != minimumDbfs_ ||
+            previousMaximum != maximumDbfs_ || persistence_.style() != persistenceStyle) {
+            persistence_.clear();
+            persistenceClock_.invalidate();
+        }
+        persistenceEnabled_ = persistenceEnabled;
+        persistence_.setStyle(persistenceStyle);
+        persistence_.setParameters(
+            globalVisualizationSettings_.value(QStringLiteral("spectrumPersistenceSeconds")).toDouble(1.6),
+            globalVisualizationSettings_.value(QStringLiteral("spectrumPersistenceIntensity")).toInt(100),
+            globalVisualizationSettings_.value(QStringLiteral("spectrumPersistenceThreshold")).toInt(0),
+            globalVisualizationSettings_.value(QStringLiteral("spectrumPersistenceSmoothingMs")).toInt(0));
 
         contrast_ = static_cast<float>((std::clamp)(
             value(QStringLiteral("contrast"), 10.0).toDouble(), 1.0, 20.0));
@@ -622,8 +647,17 @@ public:
         }
         if (updateTimer_.isValid() && updateTimer_.elapsed() < 16) return;
         updateTimer_.restart();
+        if (persistenceEnabled_ && (frequencies_.size() != frequencies.size() ||
+            frequencies_.empty() || frequencies_.front() != frequencies.front() ||
+            frequencies_.back() != frequencies.back() || sampleRate_ != persistenceSampleRate_)) {
+            persistence_.clear();
+            persistenceClock_.invalidate();
+        }
+        persistenceSampleRate_ = sampleRate_;
         frequencies_ = frequencies;
         levels_ = levels;
+        if (persistenceEnabled_ && isVisible()) accumulatePersistence();
+        else persistenceClock_.invalidate();
         ++fpsFrameCount_;
         if (!fpsTimer_.isValid()) fpsTimer_.start();
         if (fpsTimer_.elapsed() >= 500) {
@@ -678,6 +712,11 @@ protected:
                                         plot.width(), plot.height() - firstTarget),
                                   waterfallImage_,
                                   QRect(0, 0, waterfallImage_.width(), waterfallHead_));
+            }
+        } else if (mode_ == Mode::Spectrum && persistenceEnabled_) {
+            if (!persistence_.image().isNull()) {
+                painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+                painter.drawImage(plot, persistence_.image());
             }
         } else if (!levels_.empty()) {
             drawSpectrumTrace(painter, plot);
@@ -1008,6 +1047,7 @@ protected:
             update();
         } else if (selected == pause) {
             paused_ = !paused_;
+            persistenceClock_.invalidate();
             if (pauseControl_) {
                 const QSignalBlocker blocker(pauseControl_);
                 pauseControl_->setChecked(paused_);
@@ -1026,6 +1066,28 @@ protected:
     }
 
 private:
+    void accumulatePersistence() {
+        if (frequencies_.size() < 2) return;
+        const double minimum = frequencies_.front();
+        const double span = frequencies_.back() - minimum;
+        if (!std::isfinite(minimum) || !std::isfinite(span) || span <= 0.0) return;
+        const int columns = std::clamp(plotRect().width(), 1, SpectrumPersistence::MaxColumns);
+        std::vector<float> occupancy(static_cast<std::size_t>(columns),
+                                     std::numeric_limits<float>::quiet_NaN());
+        for (std::size_t i = 0; i < levels_.size(); ++i) {
+            if (!std::isfinite(frequencies_[i]) || !std::isfinite(levels_[i])) continue;
+            const double position = (frequencies_[i] - minimum) / span;
+            if (position < 0.0 || position > 1.0) continue;
+            const int x = std::clamp(static_cast<int>(position * (columns - 1)), 0, columns - 1);
+            float &level = occupancy[static_cast<std::size_t>(x)];
+            const float incoming = normalizedLevel(levels_[i]);
+            level = std::isfinite(level) ? (std::max)(level, incoming) : incoming;
+        }
+        const double elapsed = persistenceClock_.isValid() ? persistenceClock_.restart() / 1000.0 : 0.04;
+        if (!persistenceClock_.isValid()) persistenceClock_.start();
+        persistence_.append(occupancy, elapsed, true);
+    }
+
     void updatePauseControl() {
         if (!pauseControl_) return;
         pauseControl_->setIcon(style()->standardIcon(
@@ -2079,6 +2141,10 @@ private:
     WorkspaceDisplayCallbacks callbacks_;
     std::vector<float> frequencies_;
     std::vector<float> levels_;
+    bool persistenceEnabled_ = false;
+    SpectrumPersistence persistence_;
+    QElapsedTimer persistenceClock_;
+    double persistenceSampleRate_ = 0.0;
     QImage waterfallImage_;
     int waterfallHead_ = 0;
     std::deque<std::vector<float>> waterfallHistory_;

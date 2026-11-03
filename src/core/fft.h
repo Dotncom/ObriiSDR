@@ -105,6 +105,7 @@ private:
     fftwf_complex *fftOut;
     FftTransformCore cpuTransform;
     bool optimizeLargePlans;
+    unsigned planProfileGeneration = 0;
     int profileLength = 0;
     int profileFrames = 0;
     qint64 profileSnapshotNs = 0;

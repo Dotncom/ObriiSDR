@@ -6,6 +6,10 @@
   },
   "en": {
     "spectrum_display_mode": "Spectrum:",
+    "spectrum_persistence_style": "Phosphor:",
+    "spectrum_persistence_classic": "Classic",
+    "spectrum_persistence_contours": "Contours",
+    "spectrum_persistence_style_tooltip": "Contours keeps raw amplitude states and sharpens density vertically. Classic uses amplitude smoothing. Line spectrum smoothing is independent.",
     "spectrum_persistence_time": "Afterglow (s):",
     "spectrum_persistence_intensity": "Intensity:",
     "spectrum_persistence_threshold": "Clutter threshold:",
@@ -1137,6 +1141,10 @@
   },
   "uk": {
     "spectrum_display_mode": "Спектр:",
+    "spectrum_persistence_style": "Люмінофор:",
+    "spectrum_persistence_classic": "Класичний",
+    "spectrum_persistence_contours": "Контури",
+    "spectrum_persistence_style_tooltip": "Контури зберігають сирі стани амплітуди й підкреслюють щільність лише по вертикалі. Класичний режим використовує згладжування амплітуди. Згладжування лінійного спектра незалежне.",
     "spectrum_persistence_time": "Післясвітіння (с):",
     "spectrum_persistence_intensity": "Інтенсивність:",
     "spectrum_persistence_threshold": "Поріг видимості:",

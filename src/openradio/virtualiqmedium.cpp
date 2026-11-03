@@ -35,6 +35,13 @@ bool VirtualIqMedium::addSubscriber(const QString &id) {
 
 bool VirtualIqMedium::setLink(const QString &sourceId, const QString &subscriberId,
                               const VirtualIqLinkSettings &settings) {
+    if (!canSetLink(sourceId, subscriberId, settings)) return false;
+    links_[sourceId].insert(subscriberId, settings);
+    return true;
+}
+
+bool VirtualIqMedium::canSetLink(const QString &sourceId, const QString &subscriberId,
+                                 const VirtualIqLinkSettings &settings) const {
     const qint64 bufferedSamples = static_cast<qint64>(settings_.maximumBufferedBlocks) *
         settings_.blockSamples;
     const qint64 waitMs = static_cast<qint64>(settings_.playoutDelayMs) +
@@ -47,7 +54,6 @@ bool VirtualIqMedium::setLink(const QString &sourceId, const QString &subscriber
         !std::isfinite(settings.gainDb) || settings.gainDb < -120.0f ||
         settings.gainDb > 60.0f ||
         (settings.enabled && requiredSamples > bufferedSamples)) return false;
-    links_[sourceId].insert(subscriberId, settings);
     return true;
 }
 

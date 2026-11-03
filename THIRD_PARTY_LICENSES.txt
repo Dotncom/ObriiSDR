@@ -390,3 +390,16 @@ Windows binaries: MSYS2 mingw-w64-ucrt-x86_64-codec2 1.2.0-2, with libgcc
 licenses/libgcc and licenses/winpthreads directories, plus docs/ft4_m17_receive.md
 for exact source-package URLs and reproducible installation. Binary releases
 must retain those notices and provide the corresponding source packages.
+
+The optional mesh LoRa PHY retains the upstream attribution and MIT terms in
+licenses/lora/NOTICE and licenses/lora/LICENSE.LoRaPHY. Native Meshtastic and
+LoRaWAN adapters retain licenses/meshtastic/NOTICE and licenses/lorawan/NOTICE;
+their AES primitive uses the existing tiny-AES-c code and the accompanying
+licenses/tiny_aes/unlicense.txt. Windows PKI uses the operating system's crypto
+provider; Linux builds use the system OpenSSL dependency.
+
+The optional Reticulum integration starts a separately installed RNS runtime,
+not a replacement implementation of its cryptography or routing. Retain
+licenses/reticulum/NOTICE and LICENSE.Reticulum.txt, including upstream use
+restrictions, if distributing that runtime. The C++ adapter does not bundle a
+Python environment or change the upstream license; see docs/reticulum_module.md.

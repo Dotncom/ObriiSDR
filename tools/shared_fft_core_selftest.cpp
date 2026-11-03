@@ -2,6 +2,7 @@
 #include "fftplannermutex.h"
 #include "clispectrummeter.h"
 #include "diagnosticlogging.h"
+#include "../src/utils/finitevalue.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -261,6 +262,30 @@ void testMixedPlanners() {
     require(okay.load(), "mixed GUI/CLI planner serialization failed");
 }
 
+void testFiniteClassification() {
+    std::uint32_t bits = 0;
+    for (int i = 0; i < 100000; ++i) {
+        bits = bits * 1664525u + 1013904223u;
+        float value;
+        std::memcpy(&value, &bits, sizeof(value));
+        require(finiteValue(value) == bool(std::isfinite(value)), "Binary32 classification changed");
+        const float re = std::isfinite(value) ? value : 0.0f;
+        const float power = re * re;
+        const float expected = std::isfinite(power) && power > 0.0f
+            ? (std::max)(FftTransformCore::FloorDb, 10.0f * std::log10(power) - 13.0f)
+            : FftTransformCore::FloorDb;
+        const float actual = FftTransformCore::magnitudeDb(value, 0.0f, 13.0f);
+        require(std::memcmp(&expected, &actual, sizeof(float)) == 0, "Magnitude classification changed levels");
+    }
+    for (const std::uint32_t special : {0u, 0x80000000u, 1u, 0x80000001u,
+            0x7f800000u, 0xff800000u, 0x7fc00000u, 0xffc00000u, 0x7f800001u,
+            0xff800001u, 0x7f7fffffu, 0xff7fffffu}) {
+        float value;
+        std::memcpy(&value, &special, sizeof(value));
+        require(finiteValue(value) == bool(std::isfinite(value)), "Special binary32 classification changed");
+    }
+}
+
 void testWriterPrecision() {
     FftTransformCore core;
     require(core.allocateBuffers(8, FftTransformCore::Storage::OutOfPlace), "writer storage failed");
@@ -356,6 +381,7 @@ int main(int argc, char **argv) {
         testSnapshotsAndWindows();
         testCoreStorage();
         testWriterPrecision();
+        testFiniteClassification();
         testInterruptedWindow();
         testMixedPlanners();
         if (app.arguments().contains(QStringLiteral("--benchmark"))) benchmark();

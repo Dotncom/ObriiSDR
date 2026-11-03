@@ -897,6 +897,22 @@ void loopbackBenchmark() {
 }
 }
 
+static void cancelledExecutionGateTest() {
+    SpectrumFftWorker worker;
+    std::unique_lock<std::mutex> planner(fftwPlannerGlobalMutex());
+    RadioSettings settings;settings.fftLength=1024;settings.sampleRate=50000000;
+    worker.request(settings,FFT_BACKEND_CPU_FFTW);
+    QElapsedTimer timer;timer.start();
+    while(!worker.workExecuting()&&timer.elapsed()<3000)QThread::msleep(1);
+    const bool started=worker.workExecuting();
+    worker.resetHfNoiseCancelState();
+    const bool stillExecuting=worker.workExecuting(),cancelled=!worker.workOutstanding();
+    planner.unlock();timer.restart();
+    while(worker.workExecuting()&&timer.elapsed()<3000)QThread::msleep(1);
+    require(started&&stillExecuting&&cancelled&&!worker.workExecuting(),
+        "Cancelled request incorrectly reported an idle executing FFT worker");
+}
+
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("spectrum-compute-selftest"));
@@ -921,6 +937,7 @@ int main(int argc, char **argv) {
         remoteFailureTests();
         remoteCancellationTests();
         wrapperToggleTests();
+        cancelledExecutionGateTest();
         std::cout << "Spectrum compute self-test passed: " << sessionFrames << " session frames\n";
         return 0;
     } catch (const std::exception &error) {

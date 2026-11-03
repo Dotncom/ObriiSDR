@@ -52,6 +52,7 @@ public:
     bool takeLatest(SpectrumFftFrame &frame);
     bool resultReady() const noexcept { return resultAvailable.load(std::memory_order_acquire); }
     bool workOutstanding() const noexcept { return requestOutstanding.load(std::memory_order_acquire); }
+    bool workExecuting() const noexcept { return executionActive.load(std::memory_order_acquire); }
     void resetHfNoiseCancelState();
     void configureRemote(const DspStreamEndpoint &endpoint, const SpectrumComputeOptions &options);
     QString remoteStatus() const;
@@ -72,6 +73,7 @@ private:
     bool hasRequest = false;
     bool hasResult = false;
     std::atomic<bool> requestOutstanding{false};
+    std::atomic<bool> executionActive{false};
     std::atomic<bool> resultAvailable{false};
     bool resetRequested = false;
     quint64 nextRequestId = 0;

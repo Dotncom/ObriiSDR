@@ -90,7 +90,8 @@ void MyGraphWidget::setData(const std::vector<float> &xData, const std::vector<f
     this->colorf = colorf;
     this->dataDisplayOrdered = displayOrdered;
     this->preserveDataFrequencyGaps = preserveFrequencyGaps;
-    if (persistenceEnabled) accumulatePersistence();
+    if (persistenceEnabled && isVisible()) accumulatePersistence();
+    else persistenceClock.invalidate();
     update();
 }
 
@@ -104,6 +105,14 @@ void MyGraphWidget::setPersistenceEnabled(bool enabled) {
 
 void MyGraphWidget::setPersistenceParameters(double seconds, int intensityPercent, int thresholdPercent, int smoothingMs) {
     persistence.setParameters(seconds, intensityPercent, thresholdPercent, smoothingMs);
+    update();
+}
+
+void MyGraphWidget::setPersistenceStyle(int style) {
+    const auto next = style == 1 ? SpectrumPersistence::Style::Contours : SpectrumPersistence::Style::Classic;
+    if (persistence.style() == next) return;
+    persistence.setStyle(next);
+    persistenceClock.invalidate();
     update();
 }
 

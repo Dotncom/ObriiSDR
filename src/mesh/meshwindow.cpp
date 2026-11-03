@@ -1,4 +1,7 @@
 #include "meshwindow.h"
+#include "meshspectrum.h"
+#include "meshpacketdialog.h"
+#include "meshremotedialog.h"
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
@@ -6,6 +9,7 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QDateTime>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
@@ -16,15 +20,22 @@
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QHeaderView>
+#include <QHBoxLayout>
 #include <QLabel>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPlainTextEdit>
+#include <QRegularExpressionValidator>
+#include <QStandardItemModel>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QStyle>
 #include <QTableWidget>
 #include <QToolBar>
 #include <QVBoxLayout>
@@ -73,6 +84,30 @@ QDoubleSpinBox *spin(double min,double max,int decimals,QWidget *parent) {
     auto s=new QDoubleSpinBox(parent);s->setRange(min,max);s->setDecimals(decimals);s->setKeyboardTracking(false);return s;
 }
 QString nodeLabel(const Project &p,const QString &id){for(const auto &n:p.nodes)if(n.id==id)return n.name;return id;}
+bool linkMatches(const Link &link,const QJsonObject &applied) {
+    return !applied.isEmpty()&&applied.value("enabled").toBool()==link.enabled&&applied.value("delayMs").toInt()==link.delayMs&&
+        std::abs(applied.value("gainDb").toDouble()-link.gainDb)<0.0001;
+}
+void unavailable(QComboBox *combo,int index,const QString &reason){
+    if(auto model=qobject_cast<QStandardItemModel *>(combo->model())){model->item(index)->setEnabled(false);model->item(index)->setToolTip(reason);}
+}
+QJsonObject directionalPort(const Node &node,const QString &direction){
+    const auto ports=node.ports.isEmpty()?defaultNodePorts():node.ports;
+    for(const auto &value:ports)if(value.toObject().value("direction")==direction)return value.toObject();
+    return {{"id","radio"},{"direction",direction},{"backend","network"},{"enabled",false}};
+}
+bool remoteOptions(const Project &project){
+    for(const auto &node:project.nodes)if(!node.ports.isEmpty()||node.protocol.value("type").toString("lab")!="lab")return true;
+    for(const auto &link:project.links)if(link.bearer!="inherit"||link.txPort!="radio"||link.rxPort!="radio"||!link.modem.isEmpty())return true;
+    return false;
+}
+bool privateOptions(const QJsonValue &value,int depth=0){
+    if(depth>16)return true;
+    if(value.isArray())for(const auto &item:value.toArray())if(privateOptions(item,depth+1))return true;
+    if(value.isObject()){const auto object=value.toObject();for(auto it=object.begin();it!=object.end();++it){
+        const auto key=it.key().toLower();if(key.contains("key")||key.contains("secret")||key.contains("password")||key.contains("token")||key.contains("psk")||QStringList{"python","pythonpath","moduledirectory","statedirectory"}.contains(key)||privateOptions(it.value(),depth+1))return true;
+    }}return false;
+}
 }
 Window::Window(const QString &libraryFile,QWidget *parent):QMainWindow(parent),libraryPath(libraryFile),runtime(this) {
     setFont(QFont("Segoe UI",9));
@@ -97,12 +132,22 @@ Window::Window(const QString &libraryFile,QWidget *parent):QMainWindow(parent),l
     toolbar->addSeparator();addAction=add(tr("+ Вузол"),[this]{addNode();});connectAction=add(tr("+ Зв'язок"),[this]{addLink();});removeAction=add(tr("Видалити"),[this]{removeSelected();});
     add(tr("Умістити"),[this]{view->fitInView(scene->itemsBoundingRect().adjusted(-35,-35,35,35),Qt::KeepAspectRatio);});
     libraryAction=add(tr("Бібліотека пристроїв"),[this]{editLibrary();});mediumAction=add(tr("Середовище"),[this]{editMedium();});
+    packetsAction=add(tr("Пакетна мережа"),[this]{showPacketLab();});packetsAction->setObjectName("packetLabAction");
+    packetsAction->setToolTip(tr("Окрема пакетна симуляція зі знімка графа, без IQ та RF"));
+    auto remoteAction=add(tr("Реальні екземпляри"),[this]{showRemoteMesh();});remoteAction->setObjectName("remoteMeshAction");
+    remoteAction->setToolTip(tr("Приєднати вже запущені служби mesh-вузлів; без запуску процесів чи фізичного RF"));
     toolbar->addSeparator();startAction=add(tr("▶ Запустити"),[this]{QString e;if(!runtime.start(project,presets,&e))showError(this,e);else topologyPending=false;refreshRuntime();});
     stopAction=add(tr("■ Зупинити"),[this]{runtime.stop();});
     scene=new Scene(this);view=new View(scene,this);view->setToolTip(tr("Ctrl + колесо — масштаб; перетягування вузлів — позиція на полотні."));view->setObjectName("topologyCanvas");view->setRenderHint(QPainter::Antialiasing);view->setDragMode(QGraphicsView::RubberBandDrag);setCentralWidget(view);
-    auto dock=new QDockWidget(tr("Параметри"),this);dock->setMinimumWidth(300);dock->setMaximumWidth(410);properties=new QStackedWidget(dock);dock->setWidget(properties);addDockWidget(Qt::RightDockWidgetArea,dock);
+    auto dock=new QDockWidget(tr("Параметри"),this);dock->setMinimumWidth(300);dock->setMaximumWidth(410);properties=new QStackedWidget(dock);
+    properties->setStyleSheet("QStackedWidget{background:#17212c;}");
+    auto propertyScroll=new QScrollArea(dock);propertyScroll->setWidgetResizable(true);propertyScroll->setFrameShape(QFrame::NoFrame);
+    propertyScroll->setStyleSheet("QScrollArea{background:#17212c;}");
+    propertyScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);propertyScroll->setWidget(properties);
+    dock->setWidget(propertyScroll);addDockWidget(Qt::RightDockWidgetArea,dock);
     auto hint=new QLabel(tr("Вибери вузол або зв'язок.\n\nВузол прив'язаний до профілю пристрою.\nАдреси й шляхи редагуються в бібліотеці."));hint->setWordWrap(true);hint->setMargin(16);properties->addWidget(hint);
     auto nodePage=new QWidget;auto form=new QFormLayout(nodePage);
+    form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);form->setRowWrapPolicy(QFormLayout::WrapLongRows);
     nodeName=new QLineEdit;nodeName->setObjectName("nodeName");device=new QComboBox;mode=new QComboBox;mode->addItems({"am","nfm","wfm","usb","lsb","cw"});
     frequency=spin(1,1e12,0,this);frequency->setObjectName("listeningHz");frequency->setSuffix(" Hz");bandwidth=spin(100,2e6,0,this);bandwidth->setSuffix(" Hz");level=spin(0,0.95,2,this);level->setSingleStep(0.05);
     form->addRow(tr("Назва"),nodeName);form->addRow(tr("Пристрій / Obrii"),device);form->addRow(tr("Частота прийому"),frequency);form->addRow(tr("Смуга"),bandwidth);form->addRow(tr("Демодуляція"),mode);form->addRow(tr("Рівень тестового TX"),level);
@@ -110,21 +155,101 @@ Window::Window(const QString &libraryFile,QWidget *parent):QMainWindow(parent),l
     connect(applyButton,&QPushButton::clicked,this,[this]{for(const auto &n:project.nodes)if(n.id==selectedNode()){QString e;if(!runtime.apply(n,&e))showError(this,e);}});
     testButton=new QPushButton(tr("Тестовий CW → середовище"));testButton->setObjectName("testCw");form->addRow(testButton);
     connect(testButton,&QPushButton::clicked,this,[this]{QString e;if(!runtime.testSignal(selectedNode(),&e))showError(this,e);});
+    auto rxButtons=new QWidget;auto rxLayout=new QHBoxLayout(rxButtons);rxLayout->setContentsMargins(0,0,0,0);
+    startRxButton=new QPushButton(tr("Запустити RX"));startRxButton->setObjectName("startNodeRx");
+    stopRxButton=new QPushButton(tr("Зупинити RX"));stopRxButton->setObjectName("stopNodeRx");
+    rxLayout->addWidget(startRxButton);rxLayout->addWidget(stopRxButton);form->addRow(rxButtons);
+    connect(startRxButton,&QPushButton::clicked,this,[this]{QString e;if(!runtime.setNodeRunning(selectedNode(),true,&e))showError(this,e);});
+    connect(stopRxButton,&QPushButton::clicked,this,[this]{QString e;if(!runtime.setNodeRunning(selectedNode(),false,&e))showError(this,e);});
+    stopTxButton=new QPushButton(tr("Зупинити тестовий TX"));stopTxButton->setObjectName("stopNodeTx");form->addRow(stopTxButton);
+    connect(stopTxButton,&QPushButton::clicked,this,[this]{QString e;if(!runtime.stopSignal(selectedNode(),&e))showError(this,e);});
     actual=new QLabel;actual->setWordWrap(true);actual->setTextInteractionFlags(Qt::TextSelectableByMouse);form->addRow(tr("Підтверджено RX"),actual);properties->addWidget(nodePage);
+    auto makePort=[&](const QString &direction,QComboBox **backend,QLineEdit **id,QLineEdit **binding,QCheckBox **active){
+        *backend=new QComboBox;(*backend)->addItem(tr("Мережевий"),"network");(*backend)->addItem(direction=="rx"?tr("Фізичний RX · локальний дозвіл"):tr("Фізичний TX · локальне озброєння"),"radio");
+        if(direction=="tx")(*backend)->setToolTip(tr("TX потребує radioTxAllowed і локально озброєного backend. Віддалений конструктор не озброює радіо."));
+        else (*backend)->setToolTip(tr("RX потребує radioRxAllowed і локально дозволеної пари receiverId/channelId; конструктор не запускає приймач."));
+        (*backend)->setObjectName(direction=="rx"?"nodeRxBackend":"nodeTxBackend");
+        *id=new QLineEdit("radio");(*id)->setMaxLength(64);(*id)->setValidator(new QRegularExpressionValidator(QRegularExpression("[A-Za-z][A-Za-z0-9_.-]{0,63}"),*id));
+        (*id)->setObjectName(direction=="rx"?"nodeRxPortId":"nodeTxPortId");
+        *binding=new QLineEdit(direction=="rx"?"main":"rx0");(*binding)->setMaxLength(64);(*binding)->setObjectName(direction=="rx"?"nodeReceiverId":"nodeChannelId");
+        *active=new QCheckBox(tr("Увімкнено"));(*active)->setChecked(true);(*active)->setObjectName(direction=="rx"?"nodeRxPortEnabled":"nodeTxPortEnabled");
+        const auto label=direction=="rx"?QString("RX"):QString("TX");form->addRow(label+tr(" · backend"),*backend);form->addRow(label+tr(" · ID порту"),*id);
+        form->addRow(direction=="rx"?tr("RX · приймач"):tr("TX · канал"),*binding);form->addRow(label,*active);
+        connect(*backend,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this]{editNodeOptions();});
+        connect(*id,&QLineEdit::textEdited,this,[this]{editNodeOptions();});connect(*binding,&QLineEdit::textEdited,this,[this]{editNodeOptions();});
+        connect(*active,&QCheckBox::toggled,this,[this]{editNodeOptions();});
+    };
+    makePort("rx",&rxBackend,&rxPortId,&receiverId,&rxPortEnabled);makePort("tx",&txBackend,&txPortId,&channelId,&txPortEnabled);
+    rxChannelId=new QLineEdit("rx0");rxChannelId->setMaxLength(64);rxChannelId->setObjectName("nodeRxChannelId");rxCenter=spin(1,1e12,0,this);rxCenter->setObjectName("nodeRxCenterHz");rxCenter->setSuffix(" Hz");
+    rxModemCopy=new QPushButton(style()->standardIcon(QStyle::SP_BrowserReload),tr("Модем вхідного зв'язку"));rxModemCopy->setObjectName("nodeCopyRxModem");rxModemCopy->setToolTip(tr("Копіює канонічний модем першого вхідного IQ-зв'язку. Для RF LoRa потрібен OS ≥ 2; повні параметри є в JSON портів."));
+    form->addRow(tr("RX · канал"),rxChannelId);form->addRow(tr("RX · центр"),rxCenter);form->addRow(rxModemCopy);
+    connect(rxChannelId,&QLineEdit::textEdited,this,[this]{editNodeOptions();});connect(rxCenter,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this]{editNodeOptions();});connect(rxModemCopy,&QPushButton::clicked,this,&Window::copyRxModem);
+    portsJson=new QPlainTextEdit;portsJson->setObjectName("nodePortsJson");portsJson->setMaximumHeight(130);portsJson->setMaximumBlockCount(256);
+    portsJsonApply=new QPushButton(style()->standardIcon(QStyle::SP_DialogApplyButton),tr("Застосувати JSON портів"));portsJsonApply->setObjectName("nodePortsJsonApply");form->addRow(portsJson);form->addRow(portsJsonApply);connect(portsJsonApply,&QPushButton::clicked,this,[this]{applyNodeJson(true);});
+    nodeProtocol=new QComboBox;nodeProtocol->setObjectName("nodeProtocol");nodeProtocol->addItem(tr("Лабораторний"),"lab");nodeProtocol->addItem("Meshtastic","meshtastic");
+    nodeProtocol->addItem("Reticulum","reticulum");nodeProtocol->addItem(tr("LoRaWAN · потрібен backend"),"lorawan");nodeProtocol->setItemData(3,tr("Потрібна capability nativeProtocols: lorawan і локально встановлений профіль; наявність підтверджує служба."),Qt::ToolTipRole);
+    nodeNumber=spin(1,4294967295.0,0,this);nodeNumber->setObjectName("nodeNumber");nodeNumber->setSingleStep(1);nodeNumber->setToolTip(tr("32-бітний native-номер; зарезервовані номери перевіряє протокольний backend."));
+    nodeRole=new QComboBox;nodeRole->setObjectName("nodeRole");for(const auto &role:{"router","client","off"})nodeRole->addItem(role,role);
+    form->addRow(tr("Протокол"),nodeProtocol);form->addRow(tr("Номер Meshtastic"),nodeNumber);form->addRow(tr("Роль Meshtastic"),nodeRole);
+    protocolProfile=new QLineEdit;protocolProfile->setObjectName("nodeProtocolProfileId");protocolProfile->setMaxLength(64);protocolProfile->setToolTip(tr("ID локального профілю host-служби. Ключі й шляхи до backend не зберігаються у сценарії."));form->addRow(tr("Локальний профіль"),protocolProfile);
+    protocolJson=new QPlainTextEdit;protocolJson->setObjectName("nodeProtocolJson");protocolJson->setMaximumHeight(110);protocolJson->setMaximumBlockCount(128);protocolJsonApply=new QPushButton(style()->standardIcon(QStyle::SP_DialogApplyButton),tr("Застосувати JSON протоколу"));protocolJsonApply->setObjectName("nodeProtocolJsonApply");form->addRow(protocolJson);form->addRow(protocolJsonApply);
+    connect(protocolProfile,&QLineEdit::textEdited,this,[this]{editNodeOptions();});connect(protocolJsonApply,&QPushButton::clicked,this,[this]{applyNodeJson(false);});
+    protocolHint=new QLabel;protocolHint->setWordWrap(true);form->addRow(protocolHint);
+    connect(nodeProtocol,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this]{editNodeOptions();});connect(nodeRole,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this]{editNodeOptions();});
+    connect(nodeNumber,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this]{editNodeOptions();});
     connect(nodeName,&QLineEdit::textEdited,this,[this]{editDesired();});
     for(auto s:{frequency,bandwidth,level})connect(s,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this]{editDesired();});
     for(auto c:{device,mode})connect(c,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this]{editDesired();});
     auto linkPage=new QWidget;auto lf=new QFormLayout(linkPage);linkTitle=new QLabel;gain=spin(-120,60,1,this);gain->setSuffix(" dB");delay=new QSpinBox;delay->setRange(0,500);delay->setSuffix(" ms");enabled=new QCheckBox(tr("Увімкнений"));
+    lf->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);lf->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    gain->setObjectName("linkGainDb");delay->setObjectName("linkDelayMs");enabled->setObjectName("linkEnabled");
     lf->addRow(linkTitle);lf->addRow(tr("Підсилення / ослаблення"),gain);lf->addRow(tr("Затримка"),delay);lf->addRow(enabled);
-    auto staged=new QLabel(tr("Зміни зв'язку набувають чинності після перезапуску сеансу. Автоматичної ретрансляції пакетів на цьому етапі немає."));staged->setWordWrap(true);lf->addRow(staged);properties->addWidget(linkPage);
-    auto editLink=[this]{if(formBusy||selectedLink.isEmpty())return;for(auto &l:project.links)if(l.tx+"/"+l.rx==selectedLink){l.gainDb=gain->value();l.delayMs=delay->value();l.enabled=enabled->isChecked();}topologyPending=runtime.state()!=Runtime::Idle;dirty();linksGeometry();refreshRuntime();};
+    linkBearer=new QComboBox;linkBearer->setObjectName("linkBearer");linkBearer->addItem(tr("Успадкувати режим сеансу"),"inherit");linkBearer->addItem(tr("Дані · TCP"),"data");linkBearer->addItem(tr("IQ · між вузлами"),"iq");
+    linkTxPort=new QLineEdit("radio");linkRxPort=new QLineEdit("radio");linkTxPort->setObjectName("linkTxPort");linkRxPort->setObjectName("linkRxPort");
+    for(auto field:{linkTxPort,linkRxPort}){field->setMaxLength(64);field->setValidator(new QRegularExpressionValidator(QRegularExpression("[A-Za-z][A-Za-z0-9_.-]{0,63}"),field));}
+    linkModem=new QComboBox;linkModem->setObjectName("linkModem");linkModem->addItem("AFSK1200 / FM","afsk1200");linkModem->addItem("LoRa / CSS","lora");
+    lf->addRow(tr("Носій зв'язку"),linkBearer);lf->addRow(tr("TX · ID порту"),linkTxPort);lf->addRow(tr("RX · ID порту"),linkRxPort);lf->addRow(tr("Модем IQ"),linkModem);
+    loraSf=new QSpinBox;loraSf->setRange(7,12);loraSf->setValue(7);loraSf->setObjectName("linkLoraSf");loraSf->setToolTip(tr("Spreading Factor 7–12. Більший SF збільшує тривалість символу."));
+    loraBandwidth=new QComboBox;loraBandwidth->setObjectName("linkLoraBandwidth");for(int value:{31250,62500,125000,250000,500000})loraBandwidth->addItem(QString::number(value)+" Hz",value);loraBandwidth->setCurrentIndex(loraBandwidth->findData(125000));
+    loraBandwidth->setToolTip(tr("Смуга LoRa. Частота IQ дорівнює BW × OS; її підтримку перевіряє вузол."));
+    loraCodingRate=new QComboBox;loraCodingRate->setObjectName("linkLoraCodingRate");for(int value=1;value<=4;++value)loraCodingRate->addItem("4/"+QString::number(4+value),value);
+    loraCodingRate->setToolTip(tr("CR 1–4 означає кодування 4/5–4/8."));loraOversampling=new QComboBox;loraOversampling->setObjectName("linkLoraOversampling");for(int value:{1,2,4,8})loraOversampling->addItem(QString::number(value),value);
+    loraOversampling->setToolTip(tr("Кількість IQ-відліків на чип: 1, 2, 4 або 8."));
+    loraPreamble=new QSpinBox;loraPreamble->setRange(6,1024);loraPreamble->setValue(16);loraPreamble->setObjectName("linkLoraPreamble");
+    loraSyncWord=new QSpinBox;loraSyncWord->setRange(0,255);loraSyncWord->setValue(43);loraSyncWord->setDisplayIntegerBase(16);loraSyncWord->setPrefix("0x");loraSyncWord->setObjectName("linkLoraSyncWord");
+    lf->addRow("LoRa · SF",loraSf);lf->addRow("LoRa · BW",loraBandwidth);lf->addRow("LoRa · CR",loraCodingRate);lf->addRow("LoRa · OS",loraOversampling);lf->addRow(tr("LoRa · преамбула"),loraPreamble);lf->addRow("LoRa · sync",loraSyncWord);
+    for(auto combo:{linkBearer,linkModem,loraBandwidth,loraCodingRate,loraOversampling})connect(combo,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this]{editLinkOptions();});
+    for(auto field:{linkTxPort,linkRxPort})connect(field,&QLineEdit::textEdited,this,[this]{editLinkOptions();});
+    for(auto field:{loraSf,loraPreamble,loraSyncWord})connect(field,QOverload<int>::of(&QSpinBox::valueChanged),this,[this]{editLinkOptions();});
+    applyLinkButton=new QPushButton(tr("Застосувати зв'язок"));applyLinkButton->setObjectName("applyLink");lf->addRow(applyLinkButton);
+    linkActual=new QLabel;linkActual->setObjectName("appliedLinkState");linkActual->setWordWrap(true);linkActual->setTextInteractionFlags(Qt::TextSelectableByMouse);lf->addRow(tr("Застосовано"),linkActual);
+    connect(applyLinkButton,&QPushButton::clicked,this,[this]{for(const auto &l:project.links)if(l.tx+"/"+l.rx==selectedLink){QString e;if(!runtime.applyLink(l,&e))showError(this,e);break;}});
+    applyLinkButton->setToolTip(tr("Нові умови діють на наступні IQ-кадри. Буферизовані дані дограються за попередніми умовами."));properties->addWidget(linkPage);
+    auto editLink=[this]{if(formBusy||selectedLink.isEmpty())return;for(auto &l:project.links)if(l.tx+"/"+l.rx==selectedLink){l.gainDb=gain->value();l.delayMs=delay->value();l.enabled=enabled->isChecked();}dirty();refreshTopology();};
     connect(gain,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[editLink]{editLink();});connect(delay,QOverload<int>::of(&QSpinBox::valueChanged),this,[editLink]{editLink();});connect(enabled,&QCheckBox::toggled,this,[editLink]{editLink();});
     auto logDock=new QDockWidget(tr("Події сеансу"),this);logs=new QPlainTextEdit;logs->setReadOnly(true);logs->setMaximumBlockCount(500);logDock->setWidget(logs);addDockWidget(Qt::BottomDockWidgetArea,logDock);logDock->setMaximumHeight(190);
+    spectrumDock=new QDockWidget(tr("Спектр вузла"),this);spectrumDock->setObjectName("nodeSpectrumDock");
+    auto preview=new QWidget;auto previewLayout=new QVBoxLayout(preview);auto previewControls=new QHBoxLayout;
+    previewEnabled=new QCheckBox(tr("Живий перегляд"));previewEnabled->setObjectName("nodePreviewEnabled");previewEnabled->setChecked(true);
+    auto low=spin(-240,119,0,preview),high=spin(-239,120,0,preview);low->setValue(-140);high->setValue(0);
+    low->setObjectName("previewMinimumDbfs");high->setObjectName("previewMaximumDbfs");
+    low->setSuffix(" dBFS");high->setSuffix(" dBFS");
+    previewControls->addWidget(previewEnabled);previewControls->addStretch();previewControls->addWidget(new QLabel(tr("Мін.")));
+    previewControls->addWidget(low);previewControls->addWidget(new QLabel(tr("Макс.")));previewControls->addWidget(high);
+    previewLayout->addLayout(previewControls);spectrumTitle=new QLabel;previewLayout->addWidget(spectrumTitle);
+    spectrumView=new SpectrumView;previewLayout->addWidget(spectrumView);spectrumDock->setWidget(preview);
+    addDockWidget(Qt::BottomDockWidgetArea,spectrumDock);tabifyDockWidget(logDock,spectrumDock);spectrumDock->raise();
+    connect(previewEnabled,&QCheckBox::toggled,this,[this]{refreshSpectrum();});
+    connect(spectrumDock,&QDockWidget::visibilityChanged,this,[this]{refreshSpectrum();});
+    connect(low,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this,low,high]{if(low->value()>=high->value())high->setValue(low->value()+1);spectrumView->setRange(low->value(),high->value());});
+    connect(high,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this,low,high]{if(high->value()<=low->value())low->setValue(high->value()-1);spectrumView->setRange(low->value(),high->value());});
     status=new QLabel;statusBar()->addWidget(status,1);statusBar()->addPermanentWidget(new QLabel(tr("Етап 1 · віртуальне IQ-середовище")));
     connect(scene,&QGraphicsScene::selectionChanged,this,&Window::selection);
-    connect(&runtime,&Runtime::changed,this,[this]{refreshRuntime();if(closing&&runtime.state()==Runtime::Idle)QTimer::singleShot(0,this,&QWidget::close);});
+    connect(&runtime,&Runtime::changed,this,[this]{refreshTopology();if(closing&&runtime.state()==Runtime::Idle)QTimer::singleShot(0,this,&QWidget::close);});
+    connect(&runtime,&Runtime::topologyChanged,this,&Window::refreshTopology);
     connect(&runtime,&Runtime::nodeChanged,this,[this](const QString &id){if(auto item=nodeItems.value(id)){item->setData(2,runtime.snapshot(id).value("phase").toString());item->update();}refreshRuntime();});
     connect(&runtime,&Runtime::log,logs,&QPlainTextEdit::appendPlainText);
+    connect(&runtime,&Runtime::spectrumChanged,this,[this](const QString &id){if(id==selectedNode())refreshSpectrum();});
     rebuild();refreshRuntime();resizeDocks({dock},{340},Qt::Horizontal);
     QTimer::singleShot(0,this,[this]{view->fitInView(scene->itemsBoundingRect().adjusted(-35,-35,35,35),Qt::KeepAspectRatio);});
 }
@@ -149,23 +274,128 @@ void Window::linksGeometry() {
         QPointF p1=a->pos()+QPointF(90,45),p2=b->pos()+QPointF(90,45);QLineF line(p1,p2);if(line.length()<1)continue;
         const QPointF unit=(p2-p1)/line.length();p1+=unit*95;p2-=unit*95;
         QPainterPath path(p1);path.lineTo(p2);const QPointF normal(-unit.y(),unit.x());path.moveTo(p2);path.lineTo(p2-unit*15+normal*6);path.lineTo(p2-unit*15-normal*6);path.closeSubpath();item->setPath(path);
-        const QColor color=l.enabled?QColor("#52a9c2"):QColor("#64707b");item->setPen(QPen(color,2,l.enabled?Qt::SolidLine:Qt::DashLine));item->setBrush(color);item->setToolTip(l.tx+" → "+l.rx+QString(" · %1 dB · %2 ms").arg(l.gainDb).arg(l.delayMs));}
+        const auto confirmed=confirmedLinks.value(l.tx+"/"+l.rx);
+        const bool live=runtime.state()==Runtime::Running,changed=live&&!linkMatches(l,confirmed);
+        const bool on=live&&!confirmed.isEmpty()?confirmed.value("enabled").toBool():l.enabled;
+        const QColor color=changed?QColor("#e8b45d"):on?QColor("#52a9c2"):QColor("#64707b");
+        item->setPen(QPen(color,2,on?Qt::SolidLine:Qt::DashLine));item->setBrush(color);
+        item->setToolTip(l.tx+":"+l.txPort+" → "+l.rx+":"+l.rxPort+QString(" · %1 · %2 · %3 dB · %4 ms").arg(l.bearer,l.modem.value("type").toString("afsk1200")).arg(l.gainDb).arg(l.delayMs)+(changed?tr(" · не застосовано"):""));}
 }
 void Window::selection() {
     if(formBusy)return;formBusy=true;selectedLink.clear();properties->setCurrentIndex(0);
     const auto id=selectedNode();
-    if(!id.isEmpty())for(const auto &n:project.nodes)if(n.id==id){properties->setCurrentIndex(1);nodeName->setText(n.name);device->clear();for(const auto &p:presets)device->addItem(p.name+(p.kind=="local"?"":" · SSH"),p.id);device->setCurrentIndex(device->findData(n.presetId));frequency->setValue(n.listeningHz);bandwidth->setValue(n.bandwidthHz);level->setValue(n.txLevel);mode->setCurrentText(n.mode);break;}
-    if(id.isEmpty())for(auto item:scene->selectedItems())if(item->data(0)=="link"){selectedLink=item->data(1).toString();for(const auto &l:project.links)if(l.tx+"/"+l.rx==selectedLink){properties->setCurrentIndex(2);linkTitle->setText(nodeLabel(project,l.tx)+" → "+nodeLabel(project,l.rx));gain->setValue(l.gainDb);delay->setValue(l.delayMs);enabled->setChecked(l.enabled);}break;}
+    if(!id.isEmpty())for(int index=0;index<project.nodes.size();++index){const auto &n=project.nodes[index];if(n.id!=id)continue;
+        properties->setCurrentIndex(1);nodeName->setText(n.name);device->clear();for(const auto &p:presets)device->addItem(p.name+(p.kind=="local"?"":" · SSH"),p.id);
+        device->setCurrentIndex(device->findData(n.presetId));frequency->setValue(n.listeningHz);bandwidth->setValue(n.bandwidthHz);level->setValue(n.txLevel);mode->setCurrentText(n.mode);
+        const auto rx=directionalPort(n,"rx"),tx=directionalPort(n,"tx");rxBackend->setCurrentIndex(rxBackend->findData(rx.value("backend").toString("network")));txBackend->setCurrentIndex(txBackend->findData(tx.value("backend").toString("network")));
+        rxPortId->setText(rx.value("id").toString("radio"));txPortId->setText(tx.value("id").toString("radio"));receiverId->setText(rx.value("receiverId").toString("main"));channelId->setText(tx.value("channelId").toString("rx0"));
+        rxChannelId->setText(rx.value("channelId").toString("rx0"));rxCenter->setValue(rx.value("centerHz").toDouble(n.listeningHz));protocolProfile->setText(n.protocol.value("profileId").toString());
+        portsJson->setPlainText(QString::fromUtf8(QJsonDocument(n.ports.isEmpty()?defaultNodePorts():n.json().value("ports").toArray()).toJson()));protocolJson->setPlainText(QString::fromUtf8(QJsonDocument(n.json().value("protocol").toObject()).toJson()));
+        rxPortEnabled->setChecked(rx.value("enabled").toBool(true));txPortEnabled->setChecked(tx.value("enabled").toBool(true));nodeProtocol->setCurrentIndex(nodeProtocol->findData(n.protocol.value("type").toString("lab")));
+        nodeNumber->setValue(n.protocol.value("nodeNumber").toDouble(0x100+index));const auto role=n.protocol.value("relayRole").toString(n.protocol.value("role").toString("router"));if(nodeRole->findData(role)<0)nodeRole->addItem(role,role);nodeRole->setCurrentIndex(nodeRole->findData(role));break;
+    }
+    if(id.isEmpty())for(auto item:scene->selectedItems())if(item->data(0)=="link"){
+        selectedLink=item->data(1).toString();for(const auto &l:project.links)if(l.tx+"/"+l.rx==selectedLink){
+            properties->setCurrentIndex(2);linkTitle->setText(nodeLabel(project,l.tx)+" → "+nodeLabel(project,l.rx));gain->setValue(l.gainDb);delay->setValue(l.delayMs);enabled->setChecked(l.enabled);
+            linkBearer->setCurrentIndex(linkBearer->findData(l.bearer));linkTxPort->setText(l.txPort);linkRxPort->setText(l.rxPort);linkModem->setCurrentIndex(linkModem->findData(l.modem.value("type").toString("afsk1200")));
+            loraSf->setValue(l.modem.value("sf").toInt(7));const int bw=l.modem.value("bw").toInt(125000);if(loraBandwidth->findData(bw)<0)loraBandwidth->addItem(QString::number(bw)+" Hz",bw);loraBandwidth->setCurrentIndex(loraBandwidth->findData(bw));
+            loraCodingRate->setCurrentIndex(loraCodingRate->findData(l.modem.value("cr").toInt(1)));loraOversampling->setCurrentIndex(loraOversampling->findData(l.modem.value("os").toInt(1)));loraPreamble->setValue(l.modem.value("preamble").toInt(16));loraSyncWord->setValue(l.modem.value("syncWord").toInt(43));
+        }break;
+    }
     formBusy=false;refreshRuntime();
 }
 void Window::editDesired() {
     if(formBusy)return;const auto id=selectedNode();for(auto &n:project.nodes)if(n.id==id){n.name=nodeName->text();n.presetId=device->currentData().toString();n.listeningHz=frequency->value();n.bandwidthHz=bandwidth->value();n.txLevel=level->value();n.mode=mode->currentText();if(auto item=nodeItems.value(id)){item->setData(3,n.name);item->setData(4,n.presetId);item->update();}}dirty();
 }
+void Window::editNodeOptions(){
+    if(formBusy||runtime.state()!=Runtime::Idle)return;
+    for(auto &node:project.nodes)if(node.id==selectedNode()){
+        auto ports=node.ports.isEmpty()?defaultNodePorts():node.ports;
+        auto update=[&](const QString &direction,QComboBox *backend,QLineEdit *id,QLineEdit *binding,QCheckBox *enabled){
+            int index=-1;for(int i=0;i<ports.size();++i)if(ports[i].toObject().value("direction")==direction){index=i;break;}
+            auto port=index<0?QJsonObject():ports[index].toObject();port["id"]=id->text();port["direction"]=direction;port["backend"]=backend->currentData().toString();port["enabled"]=enabled->isChecked();
+            port[direction=="rx"?"receiverId":"channelId"]=binding->text();if(index<0)ports.append(port);else ports[index]=port;
+        };
+        update("rx",rxBackend,rxPortId,receiverId,rxPortEnabled);update("tx",txBackend,txPortId,channelId,txPortEnabled);
+        for(int index=0;index<ports.size();++index){auto port=ports[index].toObject();if(port.value("direction")!="rx")continue;
+            port["channelId"]=rxChannelId->text();port["centerHz"]=rxCenter->value();
+            if(port.value("backend")=="radio"&&!port.contains("modem")){QJsonObject modem{{"type","afsk1200"}};for(const auto &link:project.links)if(link.rx==node.id&&link.bearer=="iq"){modem=link.json().value("modem").toObject();if(modem.isEmpty())modem={{"type","afsk1200"}};break;}port["modem"]=modem;}
+            ports[index]=port;break;
+        }node.ports=ports;
+        auto protocol=node.json().value("protocol").toObject();const auto type=nodeProtocol->currentData().toString();
+        if(protocol.value("type").toString("lab")!=type)protocol={};protocol["type"]=type;node.protocol=protocol;
+        if(!protocolProfile->text().trimmed().isEmpty())node.protocol["profileId"]=protocolProfile->text().trimmed();else node.protocol.remove("profileId");
+        if(nodeProtocol->currentData()=="meshtastic"){
+            node.protocol["nodeNumber"]=nodeNumber->value();
+            node.protocol["relayRole"]=nodeRole->currentData().toString();
+        }
+        portsJson->setPlainText(QString::fromUtf8(QJsonDocument(node.json().value("ports").toArray()).toJson()));protocolJson->setPlainText(QString::fromUtf8(QJsonDocument(node.json().value("protocol").toObject()).toJson()));
+        break;
+    }
+    dirty();refreshRuntime();
+}
+void Window::applyNodeJson(bool ports){
+    if(formBusy||runtime.state()!=Runtime::Idle)return;const auto bytes=(ports?portsJson:protocolJson)->toPlainText().toUtf8();QJsonParseError parse;const auto document=QJsonDocument::fromJson(bytes,&parse);
+    if(bytes.size()>16384||parse.error!=QJsonParseError::NoError||(ports?!document.isArray():!document.isObject())){showError(this,tr("Перевір JSON і тип значення; межа 16 КіБ."));return;}
+    const QJsonValue value=ports?QJsonValue(document.array()):QJsonValue(document.object());if(privateOptions(value)){showError(this,tr("Ключі та шляхи backend налаштовуються локально на host-службі. Використайте profileId."));return;}
+    for(auto &node:project.nodes)if(node.id==selectedNode()){auto candidate=node;if(ports)candidate.ports=document.array();else candidate.protocol=document.object();const auto error=validateNodeOptions(candidate);if(!error.isEmpty()){showError(this,error);return;}node=candidate;dirty();selection();return;}
+}
+void Window::copyRxModem(){
+    if(formBusy||runtime.state()!=Runtime::Idle)return;
+    for(auto &node:project.nodes)if(node.id==selectedNode())for(const auto &link:project.links)if(link.rx==node.id&&link.bearer=="iq"){
+        auto ports=node.ports.isEmpty()?defaultNodePorts():node.ports;
+        for(int index=0;index<ports.size();++index){auto port=ports[index].toObject();if(port.value("direction")!="rx")continue;port["modem"]=link.json().value("modem").toObject();ports[index]=port;node.ports=ports;dirty();selection();return;}
+    }
+}
+void Window::editLinkOptions(){
+    if(formBusy||runtime.state()!=Runtime::Idle||selectedLink.isEmpty())return;
+    for(auto &link:project.links)if(link.tx+"/"+link.rx==selectedLink){
+        link.bearer=linkBearer->currentData().toString();link.txPort=linkTxPort->text();link.rxPort=linkRxPort->text();auto modem=link.json().value("modem").toObject();modem["type"]=linkModem->currentData().toString();link.modem=modem;
+        if(linkModem->currentData()=="lora"){
+            link.modem["sf"]=loraSf->value();link.modem["bw"]=loraBandwidth->currentData().toInt();link.modem["cr"]=loraCodingRate->currentData().toInt();link.modem["os"]=loraOversampling->currentData().toInt();
+            link.modem["preamble"]=loraPreamble->value();link.modem["syncWord"]=loraSyncWord->value();
+        }else for(const auto key:{"sf","bw","cr","os","preamble","syncWord","invertIq","ldro","explicitHeader","payloadCrc"})link.modem.remove(key);
+        break;
+    }
+    dirty();linksGeometry();refreshRuntime();
+}
 void Window::refreshRuntime() {
     const bool idle=runtime.state()==Runtime::Idle,live=runtime.state()==Runtime::Running;
-    startAction->setEnabled(idle);stopAction->setEnabled(!idle&&runtime.state()!=Runtime::Stopping);
+    const bool extended=remoteOptions(project);startAction->setEnabled(idle&&!extended);stopAction->setEnabled(!idle&&runtime.state()!=Runtime::Stopping);
+    startAction->setToolTip(extended?tr("Порти, протоколи й носії зв'язків запускаються через «Реальні екземпляри», не через локальний IQ-хаб."):QString());packetsAction->setEnabled(!extended);
     for(auto action:{addAction,connectAction,removeAction,libraryAction,mediumAction})action->setEnabled(idle);
-    device->setEnabled(idle);applyButton->setEnabled(live&&!selectedNode().isEmpty());testButton->setEnabled(live&&!selectedNode().isEmpty());
+    device->setEnabled(idle);
+    for(auto combo:{rxBackend,txBackend,nodeProtocol,linkBearer,linkModem})combo->setEnabled(idle);
+    for(auto field:{rxPortId,txPortId,receiverId,channelId,rxChannelId,protocolProfile,linkTxPort,linkRxPort})field->setEnabled(idle);
+    rxCenter->setEnabled(idle);rxModemCopy->setEnabled(idle);portsJson->setEnabled(idle);portsJsonApply->setEnabled(idle);protocolJson->setEnabled(idle);protocolJsonApply->setEnabled(idle);
+    rxPortEnabled->setEnabled(idle);txPortEnabled->setEnabled(idle);
+    const bool meshtastic=nodeProtocol->currentData()=="meshtastic";nodeNumber->setEnabled(idle&&meshtastic);nodeRole->setEnabled(idle&&meshtastic);
+    protocolHint->setText(nodeProtocol->currentData()=="reticulum"?tr("Reticulum: потрібен host-sidecar; доступність підтверджує служба."):nodeProtocol->currentData()=="lorawan"?tr("LoRaWAN: потрібні локальний профіль і підтримка служби."):QString());
+    const bool lora=idle&&linkBearer->currentData()!="data"&&linkModem->currentData()=="lora";
+    for(auto combo:{loraBandwidth,loraCodingRate,loraOversampling})combo->setEnabled(lora);for(auto field:{loraSf,loraPreamble,loraSyncWord})field->setEnabled(lora);
+    linkModem->setEnabled(idle&&linkBearer->currentData()!="data");
+    const auto selected=runtime.snapshot(selectedNode());
+    const bool ready=live&&selected.value("phase").toString()!="Control unavailable"&&!selected.isEmpty();
+    const bool running=selected.value("applied").toObject().value("running").toBool();
+    const bool pending=selected.value("runningPending").toBool();
+    applyButton->setEnabled(ready&&!pending);testButton->setEnabled(live&&!selectedNode().isEmpty()&&!selected.value("txRunning").toBool());
+    startRxButton->setEnabled(ready&&!running&&!pending);stopRxButton->setEnabled(ready&&running&&!pending);
+    stopTxButton->setEnabled(live&&selected.value("txRunning").toBool());
+    const auto hub=runtime.hubSnapshot();
+    applyLinkButton->setEnabled(false);
+    linkActual->setText(idle?tr("Буде задано під час запуску"):tr("Очікування хаба"));
+    for(const auto &l:project.links)if(l.tx+"/"+l.rx==selectedLink) {
+        const auto applied=confirmedLinks.value(selectedLink);
+        applyLinkButton->setEnabled(live&&!hub.contains("controlError")&&!hub.value("pending").toBool()&&!linkMatches(l,applied));
+        if(live&&!applied.isEmpty())linkActual->setText(QString("%1 · %2 dB · %3 ms\n%4 %5%6")
+            .arg(applied.value("enabled").toBool()?tr("Увімкнений"):tr("Вимкнений"))
+            .arg(applied.value("gainDb").toDouble(),0,'f',1).arg(applied.value("delayMs").toInt())
+            .arg(tr("Ревізія")).arg(hub.value("revision").toString())
+            .arg(hub.value("pending").toBool()?tr(" · застосовується"):linkMatches(l,applied)?"":tr(" · є незастосовані зміни")));
+    }
+    const auto controlError=hub.value("controlError").toString(),lastError=hub.value("lastLinkError").toString();
+    if(live&&(!controlError.isEmpty()||!lastError.isEmpty()))linkActual->setText(linkActual->text()+"\n"+
+        (controlError.isEmpty()?tr("Остання помилка: ")+lastError:tr("Керування: ")+controlError));
     const QStringList states{tr("Зупинено"),tr("Запуск"),tr("Працює"),tr("Завершення")};status->setText(QString("%1 · %2 SDR · %3 · %4 Hz / %5 S/s%6").arg(states[int(runtime.state())]).arg(project.nodes.size()).arg(project.mixIq?tr("Сума IQ"):tr("Кадри IQ")).arg(project.centerHz,0,'f',0).arg(project.sampleRate).arg(topologyPending?tr(" · зв'язки мають незастосовані зміни"):""));
     const auto s=runtime.snapshot(selectedNode());const auto a=s.value("applied").toObject();
     actual->setText(s.isEmpty()?tr("Ще не запущено"):QString("%1 · PID %2\nCenter: %3 Hz\nListen: %4 Hz\nBW: %5 Hz · samples: %6\n%7")
@@ -176,6 +406,41 @@ void Window::refreshRuntime() {
         if(std::abs(a.value("listeningFrequencyHz").toDouble()-n.listeningHz)>0.5||std::abs(a.value("audioBandwidthHz").toDouble()-n.bandwidthHz)>0.5||a.value("modulationType").toInt()!=codes.value(n.mode))
             actual->setText(actual->text()+tr("\nЄ незастосовані зміни RX"));
     }
+    refreshSpectrum();
+}
+void Window::refreshTopology() {
+    confirmedLinks.clear();topologyPending=false;
+    if(runtime.state()!=Runtime::Idle)for(const auto &value:runtime.hubSnapshot().value("links").toArray()){
+        const auto link=value.toObject();confirmedLinks.insert(link.value("tx").toString()+"/"+link.value("rx").toString(),link);
+    }
+    if(runtime.state()==Runtime::Running)for(const auto &link:project.links)
+        topologyPending|=!linkMatches(link,confirmedLinks.value(link.tx+"/"+link.rx));
+    linksGeometry();refreshRuntime();
+}
+void Window::refreshSpectrum() {
+    if(!spectrumView)return;
+    const QString id=selectedNode();
+    const bool active=runtime.state()==Runtime::Running&&!id.isEmpty()&&previewEnabled->isChecked()&&
+        spectrumDock->isVisible()&&!isMinimized();
+    runtime.inspectNode(active?id:QString());
+    spectrumTitle->setText(id.isEmpty()?tr("Вузол не вибрано"):nodeLabel(project,id)+" · "+id);
+    const auto snapshot=runtime.snapshot(id),applied=snapshot.value("applied").toObject();
+    if(!active){spectrumView->clear(tr("Перегляд вимкнено"));return;}
+    if(!applied.value("running").toBool()||snapshot.value("runningPending").toBool()){
+        spectrumView->clear(tr("RX зупинено або перемикається"));return;
+    }
+    const auto trace=snapshot.value("trace").toObject();
+    const qint64 received=qint64(trace.value("receivedMs").toDouble());
+    if(trace.isEmpty()||QDateTime::currentMSecsSinceEpoch()-received>2000){
+        const auto error=snapshot.value("previewError").toString();
+        spectrumView->clear(error.isEmpty()?tr("Очікування нових даних RX"):error.left(180));return;
+    }
+    spectrumView->setListener(applied.value("listeningFrequencyHz").toDouble(),applied.value("audioBandwidthHz").toDouble());
+    if(spectrumView->setTrace(trace))spectrumTitle->setText(spectrumTitle->text()+" · "+QDateTime::fromMSecsSinceEpoch(received).toString("HH:mm:ss"));
+}
+void Window::changeEvent(QEvent *event) {
+    QMainWindow::changeEvent(event);
+    if(event->type()==QEvent::WindowStateChange)refreshSpectrum();
 }
 void Window::addNode(){Node n;int i=1;while(nodeItems.contains("node"+QString::number(i)))++i;n.id="node"+QString::number(i);n.name="SDR "+QString::number(i);n.presetId=presets.isEmpty()?"":presets.first().id;n.listeningHz=project.centerHz;n.position={double((project.nodes.size()%3)*250),double((project.nodes.size()/3)*150)};project.nodes<<n;dirty();rebuild();nodeItems[n.id]->setSelected(true);}
 void Window::addLink(){if(project.nodes.size()<2)return;QDialog d(this);d.setWindowTitle(tr("Напрямлений радіозв'язок"));QFormLayout f(&d);QComboBox tx,rx;for(const auto &n:project.nodes){tx.addItem(n.name,n.id);rx.addItem(n.name,n.id);}rx.setCurrentIndex(1);f.addRow("TX",&tx);f.addRow("RX",&rx);QDialogButtonBox buttons(QDialogButtonBox::Ok|QDialogButtonBox::Cancel);f.addRow(&buttons);connect(&buttons,&QDialogButtonBox::accepted,&d,&QDialog::accept);connect(&buttons,&QDialogButtonBox::rejected,&d,&QDialog::reject);if(d.exec()!=QDialog::Accepted)return;
@@ -201,5 +466,19 @@ void Window::editLibrary() {
 bool Window::saveProjectFile(const QString &path,QString *error){const auto e=project.validate(presets);if(!e.isEmpty()){if(error)*error=e;return false;}if(!saveJson(path,project.json(),error))return false;projectPath=path;modified=false;setWindowTitle(tr("Obrii Mesh Designer · ")+QFileInfo(path).fileName());return true;}
 bool Window::loadProjectFile(const QString &path,QString *error){if(runtime.state()!=Runtime::Idle){if(error)*error="Stop session before loading";return false;}QJsonObject json;Project p;if(!loadJson(path,&json,error)||!Project::parse(json,&p,error))return false;const auto e=p.validate(presets);if(!e.isEmpty()){if(error)*error=e;return false;}project=p;projectPath=path;modified=false;rebuild();refreshRuntime();return true;}
 bool Window::maybeSave(){if(!modified)return true;const auto answer=QMessageBox::question(this,tr("Сценарій змінено"),tr("Зберегти зміни?"),QMessageBox::Save|QMessageBox::Discard|QMessageBox::Cancel);if(answer==QMessageBox::Cancel)return false;if(answer==QMessageBox::Discard)return true;QString path=projectPath;if(path.isEmpty())path=QFileDialog::getSaveFileName(this,tr("Сценарій"),"network.json","JSON (*.json)");if(path.isEmpty())return false;QString e;if(!saveProjectFile(path,&e)){showError(this,e);return false;}return true;}
-void Window::closeEvent(QCloseEvent *event){if(closing&&runtime.state()==Runtime::Idle){event->accept();return;}if(!maybeSave()){event->ignore();return;}if(runtime.state()!=Runtime::Idle){closing=true;runtime.stop();event->ignore();return;}event->accept();}
+void Window::showPacketLab() {
+    if(packetDialog){packetDialog->show();packetDialog->raise();packetDialog->activateWindow();return;}
+    auto snapshot=project;
+    if(runtime.state()==Runtime::Running)for(auto &l:snapshot.links){
+        const auto applied=confirmedLinks.value(l.tx+"/"+l.rx);
+        l.enabled=!applied.isEmpty()&&applied.value("enabled").toBool();l.delayMs=applied.value("delayMs").toInt();
+        if(!applied.isEmpty())l.gainDb=applied.value("gainDb").toDouble();
+    }
+    packetDialog=new PacketDialog(snapshot,this);packetDialog->show();
+}
+void Window::showRemoteMesh() {
+    if(remoteDialog){remoteDialog->show();remoteDialog->raise();remoteDialog->activateWindow();return;}
+    remoteDialog=new RemoteDialog(project,this);remoteDialog->show();
+}
+void Window::closeEvent(QCloseEvent *event){if(closing&&runtime.state()==Runtime::Idle){if(packetDialog)packetDialog->close();if(remoteDialog)remoteDialog->close();event->accept();return;}if(!maybeSave()){event->ignore();return;}if(packetDialog)packetDialog->close();if(remoteDialog)remoteDialog->close();if(runtime.state()!=Runtime::Idle){closing=true;runtime.stop();event->ignore();return;}event->accept();}
 }

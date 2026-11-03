@@ -1,0 +1,17 @@
+Obrii LoRaWAN module
+
+Independent C++17 LoRaWAN 1.0.4 protocol implementation, EU868 helpers and
+offline LoRa IQ adapter. No GUI, hardware, sockets or constructor integration.
+Specification: LoRa Alliance TS001-1.0.4 and EU863-870 regional parameters.
+This is not a certified LoRaWAN stack or a claim of full MAC compliance.
+
+AES block primitive uses the unmodified tiny-AES-c files already present in
+third_party/tiny_aes (revision 23856752fbd139da0b8ca6e471a13d5bcc99a08d),
+under the Unlicense. See installed unlicense.txt. Obrii implements CMAC,
+LoRaWAN packet construction and state management around the block primitive.
+When linking the IQ adapter, also retain src/lora/NOTICE and LICENSE.LoRaPHY.
+
+Independent protocol vectors reference the MIT-licensed brocaar/lorawan library:
+https://github.com/brocaar/lorawan/tree/4bb09b3bdacba097680894e8d35dbcbc0d260c7e
+Its implementation is only a test dependency in the ignored build/ directory;
+it is not linked into the production C++ library.

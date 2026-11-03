@@ -52,7 +52,7 @@ New-Item -ItemType Directory -Path $Stage -Force | Out-Null
 # Explicit runtime manifest: a development folder also contains private overrides,
 # rotated logs, captures and screenshots. Unknown files never enter a release.
 $RootFiles = @(
-    'ObriiMeshDesigner.exe',
+    'ObriiMeshDesigner.exe', 'ObriiMeshSim.exe', 'ObriiMeshNodeHost.exe',
     'libcodec2.dll', 'libgcc_s_seh-1.dll', 'libwinpthread-1.dll',
     'ObriiCliGnssModule.exe',
     'ObriiSDR.exe', 'ObriiAnalyzer.exe', 'ObriiFpgaLab.exe', 'ObriiIqHub.exe', 'ObriiCli.exe', 'ObriiCliModule.exe', 'ObriiCliPacketModule.exe', 'ObriiCliImageModule.exe', 'ObriiCliSpectrumModule.exe', 'ObriiCliM17Module.exe', 'ObriiCliTxModule.exe', 'ObriiCliView.exe', 'Install-Wireless-AddOn.ps1', 'LICENSE', 'README.md', 'CHANGELOG.md', 'THIRD_PARTY_LICENSES.txt',
@@ -71,7 +71,10 @@ if (Test-Path -LiteralPath (Join-Path $RuntimePath 'libcodec2.dll')) {
     }
 }
 $PublicDocs = @(
-    'mesh_designer.md', 'mesh_devices_example.json', 'mesh_project_example.json',
+    'fft_tuning.md', 'phosphor_contours.md',
+    'mesh_designer.md', 'mesh_devices_example.json', 'mesh_project_example.json', 'mesh_packet_example.json',
+    'mesh_distributed.md', 'mesh_hybrid_ports.md', 'mesh_ports_ui.md', 'mesh_protocol_adapters.md', 'mesh_lorawan_adapter.md',
+    'lora_phy.md', 'meshtastic_core.md', 'meshtastic_pki_admin.md', 'reticulum_module.md', 'lorawan_module.md',
     'ft4_m17_receive.md',
     'cli_calibration.md', 'cli_digital_profiles.md', 'cli_remote_dsp.md',
     'cli_web_service.md', 'cli_gnss.md', 'cli_parity.md', 'cli_live_tx.md', 'cli_research_tools.md',
@@ -125,7 +128,7 @@ Get-ChildItem -LiteralPath $RuntimePath -Recurse -File -Force | ForEach-Object {
         '^[^/]+$' { $Allowed = $RootFiles -contains $File.Name }
         '^docs/[^/]+$' { $Allowed = $PublicDocs -contains $File.Name }
         '^dsp/[^/]+$' { $Allowed = $Relative -in @('dsp/obrii_gr_bridge.py', 'dsp/obrii_gr_resampler.py', 'dsp/obrii_gr_hier_resampler.py') }
-        '^licenses/' { $Allowed = $File.Extension -in @('', '.txt', '.md', '.json') -or $Relative -eq 'licenses/codec2/sources/mingw-w64-codec2-1.2.0-2.src.tar.zst' }
+        '^licenses/' { $Allowed = $File.Extension -in @('', '.txt', '.md', '.json') -or $Relative -in @('licenses/lora/LICENSE.LoRaPHY', 'licenses/codec2/sources/mingw-w64-codec2-1.2.0-2.src.tar.zst') }
         '^config/' { $Allowed = $Relative -in @('config/dmr_backends.example.json', 'config/fobosapp_defaults_4.2.json') }
         '^platforms/' { $Allowed = $Relative -eq 'platforms/qwindows.dll' }
         '^imageformats/' { $Allowed = $File.Name -in @('qgif.dll', 'qico.dll', 'qjpeg.dll', 'qtiff.dll', 'qwebp.dll') }
@@ -149,6 +152,7 @@ $RequiredFiles = if ($WirelessAddOn) {
 } else {
     @('ObriiSDR.exe', 'ObriiAnalyzer.exe', 'ObriiFpgaLab.exe', 'ObriiIqHub.exe', 'ObriiCli.exe', 'ObriiCliModule.exe', 'ObriiCliGnssModule.exe', 'ObriiCliPacketModule.exe', 'ObriiCliImageModule.exe', 'ObriiCliSpectrumModule.exe', 'ObriiCliM17Module.exe', 'ObriiCliTxModule.exe', 'ObriiCliView.exe', 'Install-Wireless-AddOn.ps1', 'LICENSE', 'translations.json', 'platforms/qwindows.dll')
 }
+if (-not $WirelessAddOn) { $RequiredFiles += @('ObriiMeshDesigner.exe', 'ObriiMeshSim.exe', 'ObriiMeshNodeHost.exe') }
 foreach ($Required in $RequiredFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $Stage $Required))) { throw "Missing release file: $Required" }
 }

@@ -1,5 +1,6 @@
 #pragma once
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QPointF>
 #include <QVector>
 
@@ -15,6 +16,8 @@ struct Node {
     double listeningHz = 145500000, bandwidthHz = 12500, txLevel = 0.3;
     QString mode = "nfm";
     QJsonObject json() const;
+    QJsonArray ports;
+    QJsonObject protocol;
 };
 struct Link {
     QString tx, rx;
@@ -22,6 +25,8 @@ struct Link {
     int delayMs = 0;
     bool enabled = true;
     QJsonObject json() const;
+    QString bearer="inherit",txPort="radio",rxPort="radio";
+    QJsonObject modem;
 };
 struct Project {
     double centerHz = 145500000;
@@ -34,6 +39,9 @@ struct Project {
     static bool parse(const QJsonObject &, Project *, QString *error);
 };
 bool validId(const QString &id);
+QJsonArray defaultNodePorts();
+QString validateNodeOptions(const Node &);
+QString validateLinkOptions(const Link &);
 bool saveJson(const QString &path, const QJsonObject &, QString *error);
 bool loadJson(const QString &path, QJsonObject *, QString *error);
 bool saveLibrary(const QString &path, const QVector<HostPreset> &, QString *error);

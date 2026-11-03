@@ -40,6 +40,8 @@ public:
     explicit VirtualIqMedium(const VirtualIqMediumSettings &settings);
 
     bool addSubscriber(const QString &id);
+    bool canSetLink(const QString &sourceId, const QString &subscriberId,
+                    const VirtualIqLinkSettings &settings) const;
     bool setLink(const QString &sourceId, const QString &subscriberId,
                  const VirtualIqLinkSettings &settings);
     bool publish(const QString &sourceId, const VirtualSignalFrame &frame,

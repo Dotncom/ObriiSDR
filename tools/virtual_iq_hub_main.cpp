@@ -1,5 +1,6 @@
 #include "virtualiqhub.h"
 #include "virtualiqmedium.h"
+#include "virtualiqhubcontrol.h"
 #include "virtualsignaltransport.h"
 
 #include <QCommandLineParser>
@@ -20,6 +21,7 @@
 #include <QUuid>
 
 #include <cstdio>
+#include <memory>
 
 namespace {
 struct Receiver {
@@ -73,8 +75,10 @@ int main(int argc, char **argv) {
                          QStringLiteral("endpoint"), QStringLiteral("127.0.0.1:17662")});
     arguments.addOption({QStringLiteral("rx"), QStringLiteral("Receiver [node-id@]listen-address:port; repeat for each receiver"),
                          QStringLiteral("endpoint")});
-    arguments.addOption({QStringLiteral("scenario"), QStringLiteral("Static TX-to-RX link scenario JSON"),
+    arguments.addOption({QStringLiteral("scenario"), QStringLiteral("Initial TX-to-RX link scenario JSON"),
                          QStringLiteral("file")});
+    arguments.addOption({QStringLiteral("control-port"), QStringLiteral("Optional authenticated loopback control port"), QStringLiteral("port")});
+    arguments.addOption({QStringLiteral("control-key-file"), QStringLiteral("Private JSON file containing the 64-hex control token"), QStringLiteral("file")});
     arguments.addOption({QStringLiteral("delay-ms"), QStringLiteral("Fixed frame delay, 0..60000 ms"),
                          QStringLiteral("value"), QStringLiteral("0")});
     arguments.addOption({QStringLiteral("collision-ms"), QStringLiteral("Drop frames from overlapping TX sources, 0..1000 ms"),
@@ -240,6 +244,25 @@ int main(int argc, char **argv) {
         seenLinks.insert(pair);
     }
 
+    std::unique_ptr<VirtualIqHubControl> control;
+    if(arguments.isSet("control-port")!=arguments.isSet("control-key-file")) {
+        std::fprintf(stderr,"Hub control needs both --control-port and --control-key-file\n");return 2;
+    }
+    if(arguments.isSet("control-port")) {
+        int port=0;
+        QFile file(arguments.value("control-key-file"));
+        if(!nonnegative(arguments.value("control-port"),65535,&port)||port==0||
+           !file.open(QIODevice::ReadOnly)||file.size()>4096) {
+            std::fprintf(stderr,"Invalid control port or private key file\n");return 2;
+        }
+        QJsonParseError parse;
+        const auto key=QJsonDocument::fromJson(file.readAll(),&parse).object().value("token").toString();
+        QString error;
+        control=std::make_unique<VirtualIqHubControl>(hub,mixing?&medium:nullptr,scenario.value("links").toArray(),settings.defaultRoute);
+        if(parse.error!=QJsonParseError::NoError||!control->listen(quint16(port),key,&error)) {
+            std::fprintf(stderr,"Cannot start authenticated loopback hub control\n");return 2;
+        }
+    }
     QTcpServer server;
     QElapsedTimer mediumClock;
     mediumClock.start();

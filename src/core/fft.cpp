@@ -3,6 +3,7 @@
 #include "diagnosticlogging.h"
 #include "iqbuffer.h"
 #include "computebudgetmanager.h"
+#include "fftplanprofile.h"
 
 #include <QDir>
 #include <QDebug>
@@ -276,7 +277,8 @@ bool FFTResult::ensurePlan(int length) {
         return false;
     }
 
-    if (cpuTransform.ready() && cpuTransform.length() == length) {
+    if (cpuTransform.ready() && cpuTransform.length() == length &&
+        planProfileGeneration == fftPlanProfileGeneration().load()) {
         return true;
     }
 
@@ -309,12 +311,24 @@ bool FFTResult::ensurePlan(int length) {
             fftwf_plan_with_nthreads(planThreads);
         }
 #endif
-        cpuTransform.createPlanLocked();
+        const auto cached = optimizeLargePlans ? loadFftPlanProfile(length,
+            ComputeBudgetManager::instance().budget().totalWorkerThreads) : FftPlanProfile{};
+        const bool tuned = restoreFftPlanProfile(cached, cpuTransform);
+        if (tuned) planThreads = cached.threads;
+        else {
+#ifdef FOBOSAPP_HAS_FFTW_THREADS
+            if (fftwThreadsAvailable) fftwf_plan_with_nthreads(planThreads);
+#endif
+            cpuTransform.createPlanLocked();
+        }
+        planProfileGeneration = fftPlanProfileGeneration().load();
         if (fobosVerboseLoggingEnabled()) {
             qInfo() << "[FFT] adaptive plan selected"
                     << "length" << length
                     << "threads" << planThreads
-                    << "benchmark" << "skipped";
+                    << "benchmark" << (tuned ? "cached" : "skipped")
+                    << "cacheStatus" << (tuned ? "applied" : cached.threads ? "restore-failed" : "missing-or-incompatible")
+                    << "cachedMedianMs" << cached.medianMs;
         }
 #ifdef FOBOSAPP_HAS_FFTW_THREADS
         if (fftwThreadsAvailable) {

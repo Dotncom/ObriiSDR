@@ -1,4 +1,5 @@
 #include "cliaudiooutput.h"
+#include "fftplanprofile.h"
 #include "clivfomanager.h"
 #include "clifrequencyscanner.h"
 #include "cliiqtrigger.h"
@@ -33,6 +34,8 @@
 #include "commanddispatcher.h"
 #include "commandcontrolserver.h"
 #include "clicommandadapter.h"
+#include "../mesh/meshnodecli.h"
+#include "../core/dspiqsourceregistry.h"
 #include "hackrfbackend.h"
 #include "remoteaudioplayer.h"
 #include "rtlsdrbackend.h"
@@ -2122,6 +2125,7 @@ int runClient(QCoreApplication &app, const QString &host, quint16 port,
     if (!localControl.listen(QHostAddress::LocalHost, controlPort))
         return fail(localControl.errorString());
     CommandDispatcher dispatcher(QStringLiteral("cli-client"));
+    registerMeshNodeCommands(dispatcher,&app);
     CommandControlServer agentApi(&dispatcher);
     const auto executeControl = [&](const QJsonObject &input) -> QJsonObject {
                 const QString action = input.value(QStringLiteral("action")).toString();
@@ -2510,6 +2514,9 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
     bool stop = false, receiverRunning = false, discontinuity = true, fileAtEof = false;
     std::vector<float> orderedTrace;
     std::vector<float> traceBinIndices;
+    quint64 traceSequence = 0;
+    qint64 traceComputedUtcMs = 0, previewUntilMs = 0;
+    int previewIntervalMs = 500;
     SpectrumScienceAnalyzer accumulatedTraces;
     bool tracesEnabled = false;
     quint64 accumulatedFrames = 0;
@@ -2790,6 +2797,7 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
     if (!options.virtualHost.isEmpty()) virtualSink.connectToHost(options.virtualHost, options.virtualPort);
     QObject::connect(&virtualSink, &QTcpSocket::connected, &app, [&] { discontinuity = true; });
     CommandDispatcher dispatcher(QStringLiteral("cli"));
+    registerMeshNodeCommands(dispatcher,&app);
     CommandControlServer agentApi(&dispatcher);
     const auto executeControl = [&](const QJsonObject &input) -> QJsonObject {
                 const QString action = input.value(QStringLiteral("action")).toString();
@@ -2904,6 +2912,7 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                     }
                 } else if (action == QStringLiteral("status")) {
                     reply.insert(QStringLiteral("running"), receiverRunning);
+                    reply.insert(QStringLiteral("previewLeaseMs"), double((std::max)(qint64(0), previewUntilMs - elapsed.elapsed())));
                     if (spectrum) reply.insert(QStringLiteral("fftWorker"), spectrum->status());
                     reply.insert(QStringLiteral("input"), inputName(options.inputMode));
                     reply.insert(QStringLiteral("sampleRateHz"), actualRate);
@@ -3223,6 +3232,25 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                         }
                         reply.insert(QStringLiteral("science"), science);
                     }
+                } else if (action == QStringLiteral("preview")) {
+                    const auto ttlValue = input.value(QStringLiteral("ttlMs"));
+                    const double ttl = ttlValue.toDouble(-1);
+                    const auto intervalValue = input.value(QStringLiteral("intervalMs"));
+                    const double interval = intervalValue.isUndefined() ? 500 : intervalValue.toDouble(-1);
+                    if (!ttlValue.isDouble() || !std::isfinite(ttl) || ttl < 0 || ttl > 3000 || std::floor(ttl) != ttl ||
+                        !std::isfinite(interval) || interval < 100 || interval > 2000 || std::floor(interval) != interval) {
+                        reply = {{"ok", false}, {"error", "Preview requires ttlMs 0..3000 and intervalMs 100..2000 (whole milliseconds)"}};
+                    } else {
+                        if (ttl > 0 && !spectrum) spectrum = std::make_unique<CliAsyncSpectrum>(options.fftSize);
+                        if (ttl > 0 && !spectrum->valid()) {
+                            spectrum.reset();
+                            reply = {{"ok", false}, {"error", "Cannot create preview FFT plan"}};
+                        } else {
+                            previewUntilMs = ttl > 0 ? elapsed.elapsed() + qint64(ttl) : 0;
+                            previewIntervalMs = int(interval);
+                            reply.insert("previewLeaseMs", int(ttl));
+                        }
+                    }
                 } else if (action == QStringLiteral("trace")) {
                     const QString source = input.value(QStringLiteral("source")).toString(QStringLiteral("live"));
                     const std::vector<float> *values = traceForSource(source);
@@ -3246,6 +3274,8 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                         reply.insert(QStringLiteral("returnedBins"), end - offset);
                         reply.insert(QStringLiteral("truncated"), end < static_cast<int>(values->size()));
                         reply.insert(QStringLiteral("levelsDbfs"), bins);
+                        reply.insert(QStringLiteral("sequence"), QString::number(traceSequence));
+                        reply.insert(QStringLiteral("computedUtcMs"), QString::number(traceComputedUtcMs));
                     }
                 } else if (action == QStringLiteral("traces")) {
                     const QString operation = input.value(QStringLiteral("operation")).toString();
@@ -3509,6 +3539,7 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                     }
                 } else if (action == QStringLiteral("stop")) {
                     scanner.stop();
+                    previewUntilMs = 0;
                     gnss.command({{"operation", "stop"}}, actualRate, actualCenter);
                     researchCapture = {};
                     trigger.disarm();
@@ -3792,6 +3823,7 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
         if (!result.error.isEmpty()) { fail(result.error); exitCode = 1; stop = true; return; }
         latestSpectrum = std::move(result.summary);
         orderedTrace = std::move(result.trace);
+        ++traceSequence; traceComputedUtcMs = result.utcMs;
         if (runtimeRecorder.needsSpectrum() && !orderedTrace.empty())
             runtimeRecorder.submitSpectrum(orderedTrace, spectrumFirstHz(actualCenter, actualRate, options.fftSize),
                 actualRate / options.fftSize, runtimeSettings(), false, result.utcMs);
@@ -3942,6 +3974,7 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
         const float *published = block.data() + static_cast<std::size_t>(skip) * 2;
         const unsigned int publishedCount = count - skip;
         if (!publishedCount) { QCoreApplication::processEvents(QEventLoop::AllEvents, 1); continue; }
+        if(Mesh::NodeService::radioCaptureActive())DspIqSourceRegistry::instance().publish(DspSourceIdentity{},published,static_cast<std::size_t>(publishedCount)*2,actualRate,actualCenter);
         if (gnss.ready()) gnss.submitIq(published, static_cast<int>(publishedCount), actualRate, actualCenter);
         if (runtimeRecorder.needsIq()) runtimeRecorder.submitIq(published, publishedCount, runtimeSettings());
         if (!researchCapture.isEmpty()) {
@@ -4045,14 +4078,15 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
             settings.modulationType = modulation;
             bridge->sendIq(published, static_cast<int>(publishedCount), settings);
         }
-        const bool needsSpectrum = spectrum && (calibration.capturing() || options.spectrum || multi.hasRunningAuxiliary() || tracesEnabled || scanner.running() || trigger.needsSpectrum() || zeroSpan.running() || modules.needsSpectrum() || spectrumRecorder.isRecording() || runtimeRecorder.needsSpectrum() ||
+        const bool previewActive = previewUntilMs > elapsed.elapsed();
+        const bool needsSpectrum = spectrum && (previewActive || calibration.capturing() || options.spectrum || multi.hasRunningAuxiliary() || tracesEnabled || scanner.running() || trigger.needsSpectrum() || zeroSpan.running() || modules.needsSpectrum() || spectrumRecorder.isRecording() || runtimeRecorder.needsSpectrum() ||
                          (bridge && bridge->peerCount() > 0)) &&
-            (calibration.capturing() || options.spectrum || multi.hasRunningAuxiliary() || tracesEnabled || scanner.running() || trigger.needsSpectrum() || zeroSpan.running() || modules.needsSpectrum() || spectrumRecorder.isRecording() || runtimeRecorder.needsSpectrum() || !bridge || bridge->processingMode() != 2);
+            (previewActive || calibration.capturing() || options.spectrum || multi.hasRunningAuxiliary() || tracesEnabled || scanner.running() || trigger.needsSpectrum() || zeroSpan.running() || modules.needsSpectrum() || spectrumRecorder.isRecording() || runtimeRecorder.needsSpectrum() || !bridge || bridge->processingMode() != 2);
         if (needsSpectrum) {
             const int interval = spectrumRecorder.isRecording() || runtimeRecorder.needsSpectrum() ? options.spectrumIntervalMs :
-                calibration.capturing() || multi.hasRunningAuxiliary() || tracesEnabled || scanner.running() || trigger.needsSpectrum() || zeroSpan.running() || modules.needsSpectrum() || (bridge && bridge->peerCount() > 0) ? 50 : 1000;
+                calibration.capturing() || multi.hasRunningAuxiliary() || tracesEnabled || scanner.running() || trigger.needsSpectrum() || zeroSpan.running() || modules.needsSpectrum() || (bridge && bridge->peerCount() > 0) ? 50 : previewActive ? previewIntervalMs : 1000;
             spectrum->submit(published, static_cast<int>(publishedCount), actualRate, actualCenter, interval,
-                calibration.capturing() || options.spectrum || multi.hasRunningAuxiliary() || tracesEnabled || trigger.needsSpectrum() ||
+                previewActive || calibration.capturing() || options.spectrum || multi.hasRunningAuxiliary() || tracesEnabled || trigger.needsSpectrum() ||
                 zeroSpan.running() || modules.needsSpectrum() || spectrumRecorder.isRecording() || runtimeRecorder.needsSpectrum());
         } else if (spectrum) spectrum->reset();
         if (!options.virtualHost.isEmpty()) {
@@ -4213,6 +4247,12 @@ int runComputeService(QCoreApplication &app, const QString &path, double duratio
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("ObriiCli"));
+    if(app.arguments().value(1)==QLatin1String("fft-tune")) {
+        auto args=app.arguments();args.removeAt(1);return runFftTuningCommand(args);
+    }
+    if(app.arguments().value(1)==QLatin1String("mesh-node")){
+        auto args=app.arguments();args.removeAt(1);return Mesh::runNodeService(app,args);
+    }
     if (app.arguments().size() >= 3 && app.arguments()[1] == QStringLiteral("module") &&
         app.arguments()[2] == QStringLiteral("gnss"))
         return runLocalModule(app, QStringLiteral("ObriiCliGnssModule"), 3);

@@ -27,6 +27,7 @@ public:
     void setOverlayData(const std::vector<float> &yData, bool enabled, bool displayOrdered = false);
     void setLevelRange(float minLevel, float maxLevel);
     void setPersistenceEnabled(bool enabled);
+    void setPersistenceStyle(int style);
     void setPersistenceParameters(double seconds, int intensityPercent, int thresholdPercent = 0, int smoothingMs = 0);
     void setBandMarkersEnabled(bool generalEnabled, bool amateurEnabled);
     void setBandMarkersCompact(bool compact);

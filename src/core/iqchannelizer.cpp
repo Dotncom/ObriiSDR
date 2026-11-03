@@ -4,11 +4,22 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace {
 constexpr double TWO_PI = 6.28318530717958647692;
 constexpr float CHANNEL_IQ_TARGET_LEVEL = 0.45f;
+
+bool finiteIqSample(float value) {
+    if constexpr (sizeof(float) == sizeof(std::uint32_t) && std::numeric_limits<float>::is_iec559) {
+        // Classify binary32 without per-sample CRT calls or aliasing violations.
+        std::uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        return (bits & 0x7f800000U) != 0x7f800000U;
+    }
+    return std::isfinite(value);
+}
 
 double normalizedSinc(double value) {
     if (std::abs(value) < 1.0e-12) {
@@ -318,10 +329,10 @@ IqChannelizer::Result IqChannelizer::processFloatIq(const float *samples,
     for (std::size_t n = 0; n < iqSamples; ++n) {
         float iSample = samples[2U * n];
         float qSample = samples[2U * n + 1U];
-        if (!std::isfinite(iSample)) {
+        if (!finiteIqSample(iSample)) {
             iSample = 0.0f;
         }
-        if (!std::isfinite(qSample)) {
+        if (!finiteIqSample(qSample)) {
             qSample = 0.0f;
         }
 

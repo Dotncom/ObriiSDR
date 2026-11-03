@@ -940,6 +940,7 @@ void YourClassName::loadPersistentSettings() {
     spectrumPersistenceIntensity = settings.value("ui/spectrumPersistenceIntensity", 100).toInt();
     spectrumPersistenceThreshold = settings.value("ui/spectrumPersistenceThreshold", 0).toInt();
     spectrumPersistenceSmoothingMs = settings.value("ui/spectrumPersistenceSmoothingMs", 0).toInt();
+    spectrumPersistenceStyle = settings.value("ui/spectrumPersistenceStyle", 0).toInt();
     syncSpectrumPersistenceControls();
     if (spectrumDisplayModeCombo) {
         const QSignalBlocker blocker(spectrumDisplayModeCombo);
@@ -1984,6 +1985,7 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("ui/spectrumPersistenceIntensity", spectrumPersistenceIntensity);
     settings.setValue("ui/spectrumPersistenceThreshold", spectrumPersistenceThreshold);
     settings.setValue("ui/spectrumPersistenceSmoothingMs", spectrumPersistenceSmoothingMs);
+    settings.setValue("ui/spectrumPersistenceStyle", spectrumPersistenceStyle);
     settings.setValue("ui/waterfallDisplayMode", waterfallDisplayMode);
     settings.setValue("ui/multiSdrViewMode", multiSdrViewMode);
     settings.setValue("ui/waterfall3DResolutionDivisor", waterfall3DResolutionDivisor);

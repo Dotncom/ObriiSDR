@@ -1,4 +1,5 @@
 #include "spectrumdisplayreducer.h"
+#include "finitevalue.h"
 
 #include <algorithm>
 #include <cmath>
@@ -15,7 +16,7 @@ struct BinAccumulator {
     int count = 0;
 
     void add(float value, double distance, SpectrumDisplayReduction reduction) {
-        if (!std::isfinite(value)) return;
+        if (!finiteValue(value)) return;
         switch (reduction) {
         case SpectrumDisplayReduction::AverageDb:
             sumDb += value;
@@ -108,7 +109,8 @@ bool hasRegularFrequencyGrid(const std::vector<float> &frequencies, int count) {
 }
 }
 
-void prepareSpectrumDisplayFrame(const std::vector<float> &sourceFrequencies,
+template <SpectrumDisplayReduction Reduction>
+static void prepareDisplayFrame(const std::vector<float> &sourceFrequencies,
                                  const std::vector<float> &sourceLevels,
                                  const std::vector<float> *sourceOverlayLevels,
                                  int sourceCount,
@@ -116,10 +118,10 @@ void prepareSpectrumDisplayFrame(const std::vector<float> &sourceFrequencies,
                                  double maxFrequency,
                                  int targetBins,
                                  float fallbackLevel,
-                                 SpectrumDisplayReduction reduction,
                                  SpectrumDisplayFrame &output,
                                  bool sourceLevelsFrequencyOrdered,
                                  bool preserveFrequencyGaps) {
+    constexpr auto reduction = Reduction;
     const int availableCount = std::min({sourceCount,
                                          static_cast<int>(sourceFrequencies.size()),
                                          static_cast<int>(sourceLevels.size())});
@@ -170,7 +172,9 @@ void prepareSpectrumDisplayFrame(const std::vector<float> &sourceFrequencies,
             for (int index = firstIndex; index < lastIndex; ++index) {
                 const int shiftedIndex = sourceLevelsFrequencyOrdered
                                              ? index
-                                             : (index + availableCount / 2) % availableCount;
+                                             : (index >= availableCount - availableCount / 2
+                                                    ? index - (availableCount - availableCount / 2)
+                                                    : index + availableCount / 2);
                 const float level = sourceLevels[static_cast<std::size_t>(shiftedIndex)];
                 const double distance = reduction == SpectrumDisplayReduction::Sample
                     ? std::abs(static_cast<double>(sourceFrequencies[static_cast<std::size_t>(index)]) - centerFrequency)
@@ -208,7 +212,9 @@ void prepareSpectrumDisplayFrame(const std::vector<float> &sourceFrequencies,
                 ? std::abs(static_cast<double>(frequency) - centerFrequency) : 0.0;
             const int shiftedIndex = sourceLevelsFrequencyOrdered
                                          ? index
-                                         : (index + availableCount / 2) % availableCount;
+                                         : (index >= availableCount - availableCount / 2
+                                                ? index - (availableCount - availableCount / 2)
+                                                : index + availableCount / 2);
             const float level = sourceLevels[static_cast<std::size_t>(shiftedIndex)];
             levelAccumulators[static_cast<std::size_t>(bin)].add(level, distance, reduction);
             if (includeOverlay) {
@@ -267,5 +273,30 @@ void prepareSpectrumDisplayFrame(const std::vector<float> &sourceFrequencies,
         output.frequencies[static_cast<std::size_t>(bin)] = static_cast<float>(
             minFrequency + (static_cast<double>(bin) + 0.5) * span /
                                static_cast<double>(binCount));
+    }
+}
+
+void prepareSpectrumDisplayFrame(const std::vector<float> &frequencies,
+                                 const std::vector<float> &levels,
+                                 const std::vector<float> *overlay, int count,
+                                 double low, double high, int bins, float fallback,
+                                 SpectrumDisplayReduction reduction, SpectrumDisplayFrame &output,
+                                 bool ordered, bool preserveGaps) {
+    // Dispatch once per frame, leaving no detector switch in the per-source-bin loop.
+    const auto prepare = [&](auto mode) {
+        prepareDisplayFrame<decltype(mode)::value>(frequencies, levels, overlay, count,
+            low, high, bins, fallback, output, ordered, preserveGaps);
+    };
+    switch (reduction) {
+    case SpectrumDisplayReduction::AverageDb:
+        prepare(std::integral_constant<SpectrumDisplayReduction, SpectrumDisplayReduction::AverageDb>{}); break;
+    case SpectrumDisplayReduction::AveragePower:
+        prepare(std::integral_constant<SpectrumDisplayReduction, SpectrumDisplayReduction::AveragePower>{}); break;
+    case SpectrumDisplayReduction::Minimum:
+        prepare(std::integral_constant<SpectrumDisplayReduction, SpectrumDisplayReduction::Minimum>{}); break;
+    case SpectrumDisplayReduction::Sample:
+        prepare(std::integral_constant<SpectrumDisplayReduction, SpectrumDisplayReduction::Sample>{}); break;
+    default:
+        prepare(std::integral_constant<SpectrumDisplayReduction, SpectrumDisplayReduction::Peak>{}); break;
     }
 }

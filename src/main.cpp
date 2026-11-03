@@ -1,4 +1,5 @@
 #include "main.h"
+#include "ffttuningguard.h"
 #include "commanddispatcher.h"
 #include "commandconsoledialog.h"
 #include "commandcontrolserver.h"
@@ -1081,6 +1082,19 @@ YourClassName::YourClassName(QWidget *parent)
 
     auto *persistenceControlsLayout = new QFormLayout();
     persistenceControlsLayout->setContentsMargins(0, 0, 0, 0);
+    auto *persistenceStyleLabel = new QLabel(this);
+    markTranslatable(persistenceStyleLabel, QStringLiteral("spectrum_persistence_style"), QStringLiteral("Phosphor:"));
+    spectrumPersistenceStyleCombo = new QComboBox(this);
+    spectrumPersistenceStyleCombo->addItem(uiText(QStringLiteral("spectrum_persistence_classic"), QStringLiteral("Classic")), 0);
+    spectrumPersistenceStyleCombo->addItem(uiText(QStringLiteral("spectrum_persistence_contours"), QStringLiteral("Contours")), 1);
+    spectrumPersistenceStyleCombo->setToolTip(uiText(QStringLiteral("spectrum_persistence_style_tooltip"),
+        QStringLiteral("Contours keeps raw amplitude states and sharpens density vertically. Classic uses amplitude smoothing. Line spectrum smoothing is independent.")));
+    persistenceControlsLayout->addRow(persistenceStyleLabel, spectrumPersistenceStyleCombo);
+    connect(spectrumPersistenceStyleCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        spectrumPersistenceStyle = spectrumPersistenceStyleCombo->itemData(index).toInt();
+        syncSpectrumPersistenceControls();
+        savePersistentSettings();
+    });
     auto *persistenceTimeLabel = new QLabel(this);
     markTranslatable(persistenceTimeLabel, QStringLiteral("spectrum_persistence_time"), QStringLiteral("Afterglow (s):"));
     spectrumPersistenceTimeSpin = new QDoubleSpinBox(this);
@@ -8806,6 +8820,7 @@ bool YourClassName::applyFobosSettings(bool forceFrequencyApply) {
 }
 
 void YourClassName::startFobosProcessing() {
+    if (fftTuningActive()) return;
     if (playbackManager && playbackManager->isPlaying()) {
         stopPlayback();
     }

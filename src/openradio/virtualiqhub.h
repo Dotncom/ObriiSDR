@@ -46,6 +46,8 @@ public:
     explicit VirtualIqHub(const VirtualIqHubSettings &settings = {});
 
     bool addSubscriber(const QString &id);
+    bool canSetLink(const QString &sourceId, const QString &subscriberId,
+                    const VirtualIqLinkSettings &settings) const;
     bool setLink(const QString &sourceId, const QString &subscriberId,
                  const VirtualIqLinkSettings &settings);
     void removeSubscriber(const QString &id);

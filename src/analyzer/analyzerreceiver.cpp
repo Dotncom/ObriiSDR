@@ -1,4 +1,5 @@
 #include "analyzerreceiver.h"
+#include "ffttuningguard.h"
 #include "../core/fobosreceivercore.h"
 #include "computebudgetmanager.h"
 #include "dspiqsourceregistry.h"
@@ -738,7 +739,7 @@ QVector<AnalyzerReceiverDevice> AnalyzerReceiver::enumerateDevices() {
 
 QVector<AnalyzerReceiverDevice> AnalyzerReceiver::enumerate() { return enumerateDevices(); }
 
-bool AnalyzerReceiver::start(const AnalyzerReceiverSettings &settings) { return impl->start(settings); }
+bool AnalyzerReceiver::start(const AnalyzerReceiverSettings &settings) { return !fftTuningActive() && impl->start(settings); }
 bool AnalyzerReceiver::retune(double centerHz) { return impl->retune(centerHz); }
 bool AnalyzerReceiver::setGains(int lnaGainDb, int vgaGainDb) {
     return impl->setGains(lnaGainDb, vgaGainDb);

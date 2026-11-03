@@ -1,0 +1,19 @@
+{
+  "format": "obrii-packet-scenario",
+  "version": 1,
+  "topology": {
+    "nodes": [{"id":"A","name":"A"},{"id":"B","name":"Relay B"},{"id":"C","name":"C"}],
+    "links": [
+      {"tx":"A","rx":"B","enabled":true,"delayMs":10},
+      {"tx":"B","rx":"C","enabled":true,"delayMs":20}
+    ]
+  },
+  "actions": [
+    {"atMs":0,"op":"send","id":"p1","source":"A","destination":"C","ttl":2,"payloadBase64":"VEVTVA=="},
+    {"atMs":40,"op":"link","tx":"B","rx":"C","enabled":false,"delayMs":20},
+    {"atMs":41,"op":"send","id":"p2","source":"A","destination":"C","ttl":2,"payloadBase64":"VEVTVA=="},
+    {"atMs":50,"op":"link","tx":"B","rx":"C","enabled":true,"delayMs":20},
+    {"atMs":51,"op":"send","id":"p3","source":"A","destination":"C","ttl":2,"payloadBase64":"VEVTVA=="}
+  ],
+  "untilMs": 100
+}

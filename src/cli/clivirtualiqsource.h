@@ -7,6 +7,7 @@
 #include <QPointer>
 #include <QQueue>
 #include <QTcpServer>
+#include <functional>
 
 class CliVirtualIqSource : public QObject {
 public:
@@ -18,6 +19,9 @@ public:
     unsigned int read(float *target, unsigned int capacity);
     bool takeDiscontinuity();
     QJsonObject status() const;
+    quint16 listeningPort() const { return tcp.serverPort(); }
+    // Optional notification on the owning QObject thread, after blocks arrive.
+    std::function<void()> onDataAvailable;
 private:
     struct Chunk { QVector<float> iq; int offset = 0; bool gap = false; };
     void accept(QIODevice *socket);

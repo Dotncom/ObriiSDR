@@ -1,5 +1,6 @@
 #include "ffttransformcore.h"
 #include "fftplannermutex.h"
+#include "../utils/finitevalue.h"
 
 #include <limits>
 #include <mutex>
@@ -10,11 +11,11 @@ template <typename Real>
 float levelDb(Real re, Real im, Real normalizationDb) noexcept {
     // Preserve the established GUI float and CLI double overflow behavior.
     if constexpr (std::is_same_v<Real, float>) {
-        if (!std::isfinite(re)) re = 0.0f;
-        if (!std::isfinite(im)) im = 0.0f;
+        if (!finiteValue(re)) re = 0.0f;
+        if (!finiteValue(im)) im = 0.0f;
     }
     const Real power = re * re + im * im;
-    return std::isfinite(power) && power > Real(0) ?
+    return finiteValue(power) && power > Real(0) ?
         static_cast<float>((std::max)(Real(FftTransformCore::FloorDb),
             Real(10) * std::log10(power) - normalizationDb)) : FftTransformCore::FloorDb;
 }
@@ -39,12 +40,12 @@ void stageInput(const float *source, fftwf_complex *destination, const float *wi
         if constexpr (Mode == FftTransformCore::Input::QImaginary) destination[i][0] = 0.0f;
         else {
             const float real = source[offset + (Mode == FftTransformCore::Input::QReal ? 1 : 0)];
-            destination[i][0] = std::isfinite(real) ? real * coefficient : 0.0f;
+            destination[i][0] = finiteValue(real) ? real * coefficient : 0.0f;
         }
         if constexpr (Mode == FftTransformCore::Input::Complex ||
                       Mode == FftTransformCore::Input::QImaginary) {
             const float imag = source[offset + 1];
-            destination[i][1] = std::isfinite(imag) ? imag * coefficient : 0.0f;
+            destination[i][1] = finiteValue(imag) ? imag * coefficient : 0.0f;
         } else destination[i][1] = 0.0f;
     }
 }

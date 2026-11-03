@@ -44,13 +44,19 @@ bool VirtualIqHub::addSubscriber(const QString &id) {
 
 bool VirtualIqHub::setLink(const QString &sourceId, const QString &subscriberId,
                            const VirtualIqLinkSettings &settings) {
+    if (!canSetLink(sourceId, subscriberId, settings)) return false;
+    links_[subscriberId].insert(sourceId, settings);
+    refreshGainSources();
+    return true;
+}
+
+bool VirtualIqHub::canSetLink(const QString &sourceId, const QString &subscriberId,
+                              const VirtualIqLinkSettings &settings) const {
     if (sourceId.trimmed().isEmpty() || sourceId.size() > 128 ||
         !subscribers_.contains(subscriberId) || settings.delayMs < 0 ||
         settings.delayMs > 60000 || !std::isfinite(settings.gainDb) ||
         settings.gainDb < -120.0f || settings.gainDb > 60.0f)
         return false;
-    links_[subscriberId].insert(sourceId, settings);
-    refreshGainSources();
     return true;
 }
 
