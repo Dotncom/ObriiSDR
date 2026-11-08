@@ -1,0 +1,350 @@
+{
+  "files": [
+    {
+      "path": "ITURHFProp/Bin/1-5-85.in",
+      "size": 1039,
+      "sha": "dfb62811d89f999ab5751e7dbc12411dd31ebef2"
+    },
+    {
+      "path": "ITURHFProp/Bin/1-5-85.out",
+      "size": 3250,
+      "sha": "e17465b9efcab75c6e050d777ad4725c1990a862"
+    },
+    {
+      "path": "ITURHFProp/Bin/itu_old22012020.in",
+      "size": 1378,
+      "sha": "ec155c5f34f73ca27e00f613a276a07115abee7f"
+    },
+    {
+      "path": "ITURHFProp/Bin/itu_old22012020.out",
+      "size": 15812,
+      "sha": "203ef1966702aa408ac40a732f532561ebfd7ad2"
+    },
+    {
+      "path": "ITURHFProp/Src/ITURHFProp/Common.h",
+      "size": 1527,
+      "sha": "d89696a6b69f230a0589f28f684c7b264c1ec2a6"
+    },
+    {
+      "path": "ITURHFProp/Src/ITURHFProp/DumpPathData.c",
+      "size": 22303,
+      "sha": "014782675f1aad54b39978b7dbf490118f2834a3"
+    },
+    {
+      "path": "ITURHFProp/Src/ITURHFProp/ITURHFProp.c",
+      "size": 20482,
+      "sha": "a4ec074f7eb234d8fc1dca14032ef40834a7789e"
+    },
+    {
+      "path": "ITURHFProp/Src/ITURHFProp/ITURHFProp.h",
+      "size": 14127,
+      "sha": "1c948ace1ee4367c850d9fd4e3b50ab7f6769c8a"
+    },
+    {
+      "path": "ITURHFProp/Src/ITURHFProp/Noise.h",
+      "size": 8031,
+      "sha": "abcf62f53be01537658349ce6d7feb8d4b9ac967"
+    },
+    {
+      "path": "ITURHFProp/Src/ITURHFProp/P533.h",
+      "size": 23720,
+      "sha": "5bb1ef6d36731512c5ebaacdf836c9e183b9b546"
+    },
+    {
+      "path": "ITURHFProp/Src/ITURHFProp/ReadInputConfiguration.c",
+      "size": 22475,
+      "sha": "315bedd7d01c5952ce86ad5a1f245f07235490ef"
+    },
+    {
+      "path": "ITURHFProp/Src/ITURHFProp/Report.c",
+      "size": 41823,
+      "sha": "e773a6481a9085106455d6cf2228fc366f0146c0"
+    },
+    {
+      "path": "ITURHFProp/Src/ITURHFProp/ValidateITURHFP.c",
+      "size": 2666,
+      "sha": "03f7e0d5f7af883d8a452cc8e35ac26c251ad4fe"
+    },
+    {
+      "path": "P372/Src/P372/Common.h",
+      "size": 1527,
+      "sha": "d89696a6b69f230a0589f28f684c7b264c1ec2a6"
+    },
+    {
+      "path": "P372/Src/P372/InitializeNoise.c",
+      "size": 514,
+      "sha": "6ef5ce87c434cbc8052c7a315ab4004a8580b15e"
+    },
+    {
+      "path": "P372/Src/P372/MakeNoise.c",
+      "size": 6571,
+      "sha": "c7d8f62b084700a8169c19464916f30068a7065f"
+    },
+    {
+      "path": "P372/Src/P372/Noise.c",
+      "size": 33331,
+      "sha": "1d3d8bb9fd62d0acd961c103955297d3edf2cb46"
+    },
+    {
+      "path": "P372/Src/P372/Noise.h",
+      "size": 8031,
+      "sha": "abcf62f53be01537658349ce6d7feb8d4b9ac967"
+    },
+    {
+      "path": "P372/Src/P372/NoiseDriver.c",
+      "size": 3945,
+      "sha": "caff2345e4d519888a28f4e92888d3c79e63d1b7"
+    },
+    {
+      "path": "P372/Src/P372/NoiseMemory.c",
+      "size": 2967,
+      "sha": "dafde7a6fdec383db0dfd5618f296fc0121590b1"
+    },
+    {
+      "path": "P533/Src/P533/Between7000kmand9000km.c",
+      "size": 1736,
+      "sha": "bce427b02f94e7dcbf96e77882bade361bafde6a"
+    },
+    {
+      "path": "P533/Src/P533/CalculateCPParameters.c",
+      "size": 21256,
+      "sha": "cac976c8b63e1928fcc4dc0edd7452f5b2948108"
+    },
+    {
+      "path": "P533/Src/P533/CircuitReliability.c",
+      "size": 33895,
+      "sha": "b55d2e5b2bea257398029307aaad3da8fddb8c3d"
+    },
+    {
+      "path": "P533/Src/P533/Common.h",
+      "size": 1527,
+      "sha": "d89696a6b69f230a0589f28f684c7b264c1ec2a6"
+    },
+    {
+      "path": "P533/Src/P533/ELayerScreeningFrequency.c",
+      "size": 5830,
+      "sha": "771c9f958c99b74aba7ab686c9f5353bde69c4bd"
+    },
+    {
+      "path": "P533/Src/P533/Geometry.c",
+      "size": 3832,
+      "sha": "8718a654627e4b2573cda7ff6bcf90cfa282c26e"
+    },
+    {
+      "path": "P533/Src/P533/InitializePath.c",
+      "size": 9152,
+      "sha": "afc65a7bdef2e38eb7de73a942424cedd50cc493"
+    },
+    {
+      "path": "P533/Src/P533/InputDump.c",
+      "size": 11652,
+      "sha": "0f2af7692fe1a54ccf0c23f89cda062957743f93"
+    },
+    {
+      "path": "P533/Src/P533/MUFBasic.c",
+      "size": 14733,
+      "sha": "47d2f8bbb6b9cd07a31a94f6556026cb02839def"
+    },
+    {
+      "path": "P533/Src/P533/MUFOperational.c",
+      "size": 4475,
+      "sha": "7eafd6517dafaed9c945b5c2e3e8953ff995606a"
+    },
+    {
+      "path": "P533/Src/P533/MUFVariability.c",
+      "size": 7749,
+      "sha": "8aec3c30b81f08570b47a7dee5ee62a3667d1b9e"
+    },
+    {
+      "path": "P533/Src/P533/Magfit.c",
+      "size": 5839,
+      "sha": "7c37a48531f2abeeec5e9e0422edb34b55b1e13c"
+    },
+    {
+      "path": "P533/Src/P533/MedianAvailableReceiverPower.c",
+      "size": 6237,
+      "sha": "2a1eee5ca7af43a17e1d11de95333b72e65eed67"
+    },
+    {
+      "path": "P533/Src/P533/MedianSkywaveFieldStrengthLong.c",
+      "size": 30551,
+      "sha": "a0119d4b5aeb1f8adc3cdfda0ff28fdb94fe06ea"
+    },
+    {
+      "path": "P533/Src/P533/MedianSkywaveFieldStrengthShort.c",
+      "size": 46750,
+      "sha": "3389053ce02b2fd141739c28a030fb2237eda80d"
+    },
+    {
+      "path": "P533/Src/P533/Noise.h",
+      "size": 8031,
+      "sha": "abcf62f53be01537658349ce6d7feb8d4b9ac967"
+    },
+    {
+      "path": "P533/Src/P533/P533.c",
+      "size": 15510,
+      "sha": "fdc86e446c0067c352a950f754bf6822875f6ae3"
+    },
+    {
+      "path": "P533/Src/P533/P533.h",
+      "size": 23720,
+      "sha": "5bb1ef6d36731512c5ebaacdf836c9e183b9b546"
+    },
+    {
+      "path": "P533/Src/P533/PathMemory.c",
+      "size": 7586,
+      "sha": "bd7036cabe335a5d827a8855142de8dbd755af01"
+    },
+    {
+      "path": "P533/Src/P533/ReadIonParameters.c",
+      "size": 11744,
+      "sha": "36c755ed009b040fdcaed2d6b2bba88feaa02ddd"
+    },
+    {
+      "path": "P533/Src/P533/ReadP1239.c",
+      "size": 3202,
+      "sha": "363f6f8d9eb28d29b249234daf15b2a4a8c82513"
+    },
+    {
+      "path": "P533/Src/P533/ReadType13.c",
+      "size": 14331,
+      "sha": "10489c52574d7840845eafc74efd73102f05313c"
+    },
+    {
+      "path": "P533/Src/P533/ValidatePath.c",
+      "size": 3009,
+      "sha": "70d9ee43485a14b08b92ea8ed6f3bb9996fc2d31"
+    },
+    {
+      "path": "README.md",
+      "size": 56644,
+      "sha": "f01d5b2c59ae70c350f64239c08292e47ed83c01"
+    },
+    {
+      "path": "P533/Data/COEFF01W.txt",
+      "size": 235276,
+      "sha": "8e61b4b32f66126cf18ef08caefe5dc4cde4913f"
+    },
+    {
+      "path": "P533/Data/COEFF02W.txt",
+      "size": 235275,
+      "sha": "8cd821ded5fdbce5b47edb3b505ffa6883b4ac4b"
+    },
+    {
+      "path": "P533/Data/COEFF03W.txt",
+      "size": 235275,
+      "sha": "cfcc0d89dab2e5c974a46d5df9152a7c368cc6d3"
+    },
+    {
+      "path": "P533/Data/COEFF04W.txt",
+      "size": 235275,
+      "sha": "813872f50b03856c3fd2f114fa0d3408d6fbdd94"
+    },
+    {
+      "path": "P533/Data/COEFF05W.txt",
+      "size": 235275,
+      "sha": "b8873cb0039323e9db77f853f71ae7951f8e23c0"
+    },
+    {
+      "path": "P533/Data/COEFF06W.txt",
+      "size": 235275,
+      "sha": "4778493bda8b9a402bc59762ef955726d779dac5"
+    },
+    {
+      "path": "P533/Data/COEFF07W.txt",
+      "size": 235275,
+      "sha": "35e61722662865c70f868cf87754ea14452c3a74"
+    },
+    {
+      "path": "P533/Data/COEFF08W.txt",
+      "size": 235275,
+      "sha": "8d0b67563c3547a2e3610286825d23b07b122248"
+    },
+    {
+      "path": "P533/Data/COEFF09W.txt",
+      "size": 235275,
+      "sha": "2675e5d374c958ad248a0fe3789eceb42c187fab"
+    },
+    {
+      "path": "P533/Data/COEFF10W.txt",
+      "size": 235275,
+      "sha": "1f4b8dcd437fc419c3f983796b102e1daf95c05b"
+    },
+    {
+      "path": "P533/Data/COEFF11W.txt",
+      "size": 235275,
+      "sha": "b1199372611b1817aed73608ba8b9f137711aaad"
+    },
+    {
+      "path": "P533/Data/COEFF12W.txt",
+      "size": 235275,
+      "sha": "4dfe989468ad86116bc198a2db4046cb78059712"
+    },
+    {
+      "path": "P533/Data/P1239-3 Decile Factors.txt",
+      "size": 73427,
+      "sha": "ccb85bcac9b076202c2d62abfd215f033929e87e"
+    },
+    {
+      "path": "P533/Data/ionos01.bin",
+      "size": 11197844,
+      "sha": "2d7b0a0641e782fd501f2978b170f5dd436ee8d0"
+    },
+    {
+      "path": "P533/Data/ionos02.bin",
+      "size": 11197844,
+      "sha": "d83852a70ea3c85bf1b18b8d37313b284c278fd4"
+    },
+    {
+      "path": "P533/Data/ionos03.bin",
+      "size": 11197844,
+      "sha": "58a3283ee32ad3844fe3bad40e110502806b898b"
+    },
+    {
+      "path": "P533/Data/ionos04.bin",
+      "size": 11197844,
+      "sha": "245170d99378fe8f130c06e798c20fd6b921497e"
+    },
+    {
+      "path": "P533/Data/ionos05.bin",
+      "size": 11197844,
+      "sha": "f22ea9c3d43c0aa14a35e32fae1f5aa5fd785ad1"
+    },
+    {
+      "path": "P533/Data/ionos06.bin",
+      "size": 11197844,
+      "sha": "6102ee0bf09d23d9bd88e2a5ecb4dd6cea61bb8e"
+    },
+    {
+      "path": "P533/Data/ionos07.bin",
+      "size": 11197844,
+      "sha": "84bd226539951f7aba2b9f81fd412a249787cfba"
+    },
+    {
+      "path": "P533/Data/ionos08.bin",
+      "size": 11197844,
+      "sha": "ef1b033cbd3afb018ebf8bdca43975da7ad1d5e2"
+    },
+    {
+      "path": "P533/Data/ionos09.bin",
+      "size": 11197844,
+      "sha": "22f02f8e30e09428c1a75f73c8400baa3c263229"
+    },
+    {
+      "path": "P533/Data/ionos10.bin",
+      "size": 11197844,
+      "sha": "a99bf9ca95a1564a892913824b839d683398145f"
+    },
+    {
+      "path": "P533/Data/ionos11.bin",
+      "size": 11197844,
+      "sha": "e989ed5efc5814d39045326bd0cbe58f88977771"
+    },
+    {
+      "path": "P533/Data/ionos12.bin",
+      "size": 11197844,
+      "sha": "631dd7fc034988cb9d5742e08ddfbd4aa790847d"
+    }
+  ],
+  "commit": "82017594a1c6cacfaa7e86954c4ae7b3a5825a3d"
+}

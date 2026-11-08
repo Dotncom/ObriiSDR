@@ -1,0 +1,12 @@
+Obrii LoRa PHY
+
+The packet-coding conventions in loracodec.cpp and the independent golden
+symbol vector in loratest.cpp are adapted from/referenced against LoRaPHY:
+https://github.com/jkadbear/LoRaPHY/blob/master/LoRaPHY.m
+Copyright (C) 2020-2022 jkadbear, jkadbear@gmail.com
+MIT license: LICENSE.LoRaPHY in this directory. Retain this notice and license
+when redistributing this component, including in binary distributions.
+
+Obrii additions include the C++17 API, bounded streaming receiver, error
+reporting, FFT implementation and offline tool. No GNU Radio or MATLAB runtime
+is linked or required. No gr-lora_sdr source is included in this component.

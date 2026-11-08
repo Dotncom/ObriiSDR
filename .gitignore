@@ -1,0 +1,157 @@
+# Build folders
+build/
+release/
+debug/
+x64/
+x86/
+
+# Visual Studio
+.vs/
+*.vcxproj.user
+*.suo
+
+# Qt
+moc_*
+ui_*.h
+qrc_*.cpp
+*.pro.user
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Binaries
+*.exe
+*.dll
+*.obj
+*.o
+*.pdb
+*.ilk
+*.lib
+*.a
+*.exp
+
+# Logs
+*.log
+*.log.*
+ObriiSDR.ini
+privacy_override.txt
+*.csv
+*.nmea
+*.ubx
+FobosAPP.ini
+
+# Local context screenshots/photos kept in the workspace root
+/*.jpg
+/*.jpeg
+/*.png
+/*.txt
+
+# IDE
+.idea/
+.vscode/
+
+# Temp
+*.tmp
+*.cache
+*.private.json
+__pycache__/
+*.py[cod]
+
+# Your local/private files
+token.txt
+FobosAPP_diagnostic.log
+CMakeLists.txt.user
+CMakeSettings.json
+FobosAPP.desktop
+fobos-sdr.rules
+resources.qrc
+toolchain.cmake
+
+# Backups and drafts
+_stable_backups/
+/git/
+/sandbox/
+/new/
+
+# Build/output
+build/
+out/
+release/
+release.zip
+downloads/
+recordings/
+.gradle/
+.qtcreator/
+local.properties
+*.apk
+*.aab
+
+# Local SDR captures / decoder dumps
+*.wav
+*.iq.wav
+*.iq
+*.cu8
+*.cs16
+*.pcm
+*.raw
+
+# Bundled binary deps / SDKs
+fftw-3.3.5-dll64/
+libusb-1.0.27/
+
+# Local SDK/cache trees
+fobos/
+fobos_agile/
+third_party/fobos-linux/
+third_party/firmware/
+third_party/downloads/
+third_party/rtl-sdr/
+third_party/src/
+third_party/dsd-fme/
+
+# Local vendor FPGA project and generated Vivado outputs
+/B210_Project_Firmwire/
+
+# Private development plans
+/docs/roadmap_4.0_cleanup.md
+
+# unused source
+src/udp_sender.cpp
+src/udp_sender.h
+src/ringbuffer.cpp
+src/ringbuffer.h
+src.Fobos.example/
+
+# unused folders
+/shaders/
+
+# User policy: LOCAL PRIVATE receiver firmware implementation / reverse engineering.
+# Do not remove local evidence; ignored files remain usable by local builds.
+# Already tracked files still require an explicit publication audit.
+/firmware/agile-if-extension/
+/firmware/agile-native-draft/
+/tools/fobos_firmware/
+/tools/ghidra/
+/tools/agile_if_tools/
+/tools/standard_if_tools/
+/tools/private_fobos/
+/tools/build_agile_if_extension.py
+/tools/test_agile_if_extension.py
+/tools/test_agile_runtime_extension.py
+/tools/export_fobos_if_table.py
+/tools/generate_standard_if_test.py
+/tools/test_fobos_global_if_live.py
+/tools/probe_fobos_integrity.py
+/tools/compare_fobos_if_test.py
+/tools/summarize_fobos_if_test.py
+/tools/analyze_fobos_spur_survey.py
+/third_party/patched/libfobos-sdr-agile/
+/third_party/patched/libfobos/
+/docs/research/fobos-*/
+/docs/research/receiver-noise-*/
+*.gpr
+*.gzf
+*.rep/

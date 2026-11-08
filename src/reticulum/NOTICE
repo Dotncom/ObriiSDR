@@ -1,0 +1,30 @@
+Obrii Reticulum adapter
+
+This directory contains Obrii's own packet interface, host RPC, framing,
+process client, native LoRa bearer and tests. It uses the unmodified official
+Reticulum Python package (rns==1.5.5) as a separately installed dependency.
+It is not an independent implementation or a fork of Reticulum cryptography,
+wire packets, routing, link establishment or resource transfer.
+
+Reticulum: Copyright (c) 2016-2026 Mark Qvist
+https://github.com/markqvist/Reticulum
+https://reticulum.network/
+Reticulum's own license includes additional use restrictions. See the copy
+in LICENSE.Reticulum.txt and the installed upstream distribution. Preserve
+upstream notices and dependency licenses when distributing a bundled runtime.
+This notice does not change the license of Reticulum or relicense it as MIT.
+
+The native bearer links ObriiLoRa. Preserve src/lora/NOTICE and
+src/lora/LICENSE.LoRaPHY in distributions containing that library.
+
+The OBRN radio envelope is an Obrii transport format, not RNode firmware's
+on-air framing and not compatible with Meshtastic or LoRaWAN radio packets.
+
+The optional RNode normal-mode radio envelope and chip profiles independently
+implement the public wire behaviour of RNode Firmware 1.86:
+https://github.com/markqvist/RNode_Firmware/tree/56775c51b60a6190242e324c210997dcc7637e53
+The production module does not include or link RNode firmware implementation.
+tools/generate_rnode_vectors.py can compile original GPL-3.0-or-later TX/RX
+functions in a separate, ignored build/ test executable. That executable and
+downloaded firmware retain upstream copyright/license and are not installed
+with ObriiReticulumLoRa. Committed vectors are captured protocol test data.

@@ -1,0 +1,9 @@
+# RigExpert Fobos SDR USB access for non-root users.
+# Install with:
+#   sudo cp packaging/linux/99-fobos-sdr.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+#
+# The vendor/product IDs may need adjustment if a future Fobos firmware reports
+# different USB IDs. Check with `lsusb` if the device still requires root.
+SUBSYSTEM=="usb", ATTR{idVendor}=="16d0", MODE="0666", GROUP="plugdev"

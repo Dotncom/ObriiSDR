@@ -1,0 +1,410 @@
+Obrii SDR third-party components
+Version: 8.2.0
+
+Obrii SDR is published as a GPL project. The repository root
+contains the GNU General Public License version 2 text in LICENSE.
+
+This file lists third-party runtime, build, and optional DMR voice components
+used by Obrii SDR. Legacy Fobos names remain in compatibility APIs and wrapper
+directories. Copyrights remain owned by their respective authors.
+
+Important DMR/AMBE note:
+DMR voice support is experimental. AMBE/AMBE+2 technologies may be
+patent-encumbered in some jurisdictions. The DMR voice backend binaries are
+optional research/interoperability components. Users and redistributors should
+verify local legal and patent requirements before compiling, distributing, or
+using AMBE-capable binaries.
+
+1. Qt 5.15.2 runtime libraries
+   Files used in the Windows package:
+   - Qt5Core.dll
+   - Qt5Gui.dll
+   - Qt5Widgets.dll
+   - Qt5Network.dll
+   - Qt5SerialPort.dll
+   - Qt5Multimedia.dll and audio plugins
+   - platforms/qwindows.dll
+
+   Upstream: https://www.qt.io/
+   License: Qt Open Source licensing terms or commercial Qt license, depending
+   on how Qt is obtained and used. For open-source Qt 5.15 builds, consult the
+   Qt LGPL/GPL license files distributed with your Qt installation.
+   Packaged texts and original source-module links: licenses/qt/.
+
+2. FFTW 3.3.5 single-precision runtime
+   File used in the Windows package:
+   - libfftw3f-3.dll
+
+   Upstream: https://www.fftw.org/
+   Copyright: Matteo Frigo and Massachusetts Institute of Technology
+   License: GNU General Public License version 2 or later, or a separate
+   commercial FFTW license.
+   Local license texts:
+   - licenses/FFTW-COPYING.txt
+   - licenses/FFTW-COPYRIGHT.txt
+
+3. libusb runtime
+   File used in the Windows package:
+   - libusb-1.0.dll
+   The Obrii Windows runtime may use libusb 1.0.30 with the IOCP priority
+   extension. The optional Fobos compatibility DLLs use the vendor libusb,
+   installed separately as fobos-compat/usb-vendor.dll.
+
+   Upstream: https://github.com/libusb/libusb
+   License: GNU Lesser General Public License version 2.1 or later.
+   Local license text:
+   - licenses/libusb-COPYING.txt
+
+4. RigExpert Fobos SDR standard API library
+   Files used for build/runtime:
+   - fobos.h
+   - fobos.dll
+   - fobos.lib
+   - fobos-compat/fobos_stock.dll (optional RigExpert Standard 2.4.0
+     compatibility build with the asynchronous Stop fix)
+
+   Upstream/vendor: RigExpert / Fobos SDR SDK
+   The published library source distributed in third_party/patched/libfobos
+   contains the GNU LGPL 2.1 license. Preserve its source notices and the
+   licenses/fobos/standard-COPYING.txt text when redistributing the runtime.
+
+5. RigExpert Fobos SDR agile API library
+   Files used for build/runtime:
+   - fobos_sdr.h
+   - fobos_sdr.dll
+   - fobos_sdr.lib
+
+   Upstream/vendor: RigExpert / Fobos SDR agile SDK
+   The published library source in third_party/patched/libfobos-sdr-agile
+   contains the GNU LGPL 2.1 license. The package preserves this text in
+   licenses/fobos/agile-COPYING.txt and keeps the manufacturer's source notices.
+
+6. Microsoft Visual C++ runtime
+   Files used in the Windows package:
+   - MSVCP140.dll
+   - MSVCP140_1.dll
+   - VCRUNTIME140.dll
+   - VCRUNTIME140_1.dll
+
+   Upstream/vendor: Microsoft
+   License: Microsoft Visual C++ Redistributable license terms.
+
+7. Fobos DMR Voice Backend GPL
+   Project path:
+   - FobosDMRVoiceBackend-gpl/
+
+   Runtime files, when built and deployed:
+   - dmr_voice_backends/fobos_dmr_voice_mbelib.dll
+   - dmr_voice_backends/fobos_dmr_voice_opendmr.dll
+
+   Purpose: optional loadable DMR voice backend modules using the stable
+   Fobos DMR voice C ABI in FobosDMRVoiceBackend-gpl/include.
+
+   License: GPL-2.0-or-later for the Fobos backend wrapper code, except where
+   upstream GPL-2.0-only components make the combined backend module GPL-2.0
+   compatible only.
+
+   Local license and notice files in release packages:
+   - licenses/dmr_voice_backend/FobosDMRVoiceBackend-LICENSE.txt
+   - licenses/dmr_voice_backend/FobosDMRVoiceBackend-README.md
+
+8. mbelib-neo
+   Project path:
+   - third_party/mbelib-neo/
+
+   Upstream:
+   - https://github.com/arancormonk/mbelib-neo
+
+   This is an optional Git submodule. Users who need DMR voice backend support
+   can fetch it with:
+   - git submodule update --init --recursive third_party/mbelib-neo
+
+   Used by:
+   - optional fobos_dmr_voice_mbelib backend
+   - internal DMR voice fallback when FobosAPP is built with
+     FOBOS_ENABLE_MBELIB_NEO=ON
+
+   License: GNU General Public License version 2 or later.
+   Local license and notice files in release packages:
+   - licenses/dmr_voice_backend/mbelib-neo-LICENSE.txt
+   - licenses/dmr_voice_backend/mbelib-neo-README.md
+
+9. OpenDMR / softdmr
+   Project path:
+   - third_party/softdmr/
+
+   Upstream:
+   - https://github.com/hicaoc/softdmr
+
+   This is an optional Git submodule. Users who need the OpenDMR/OP25-backed
+   backend can fetch it with:
+   - git submodule update --init --recursive third_party/softdmr
+
+   Used by:
+   - optional fobos_dmr_voice_opendmr backend
+
+   License: GNU General Public License version 2.
+   Local license and notice files in release packages:
+   - licenses/dmr_voice_backend/softdmr-LICENSE.txt
+   - licenses/dmr_voice_backend/softdmr-README.md
+
+10. OP25 MBE encoder-derived code
+   Project path:
+   - third_party/softdmr/encoder/
+
+   Used by:
+   - optional fobos_dmr_voice_opendmr backend
+
+   The OpenDMR/softdmr tree contains encoder code derived from OP25
+   MBEEncoder work. Preserve upstream source headers, attribution comments,
+   and the softdmr GPL license when distributing source or binaries that use
+   this backend.
+
+11. RTL-SDR / librtlsdr optional runtime
+   Runtime files, when installed or copied next to FobosAPP:
+   - rtlsdr.dll
+   - rtlsdr/rtlsdr.dll
+   - rtlsdr/libusb-1.0.dll
+   - rtlsdr/rtl_test.exe
+
+   Upstream:
+   - https://github.com/steve-m/librtlsdr
+
+   FobosAPP loads rtlsdr.dll dynamically at runtime. Native RTL-SDR support is
+   optional and is not required to build or start FobosAPP. The alternative
+   rtl_tcp backend can also connect to an external rtl_tcp server without
+   loading the local DLL.
+
+   License: GNU General Public License version 2 or later for librtlsdr.
+   Local license text:
+   - licenses/rtl-sdr-COPYING.txt
+
+12. SoapySDR optional runtime
+   Runtime files, when installed or copied next to FobosAPP:
+   - SoapySDR.dll
+   - optional SoapySDR device modules/plugins
+
+   Upstream:
+   - https://github.com/pothosware/SoapySDR
+
+   FobosAPP loads SoapySDR dynamically at runtime. SoapySDR is not required to
+   build or start FobosAPP. If the runtime and device modules are available,
+   the optional SoapySDR receiver backend can open the first detected RX device
+   using a CF32 stream.
+
+   License: Boost Software License 1.0 for SoapySDR itself. Individual
+   SoapySDR device modules may use their own licenses and should be checked
+   separately before bundling them in a binary release.
+
+13. VkFFT
+   Project path:
+   - third_party/VkFFT/vkFFT/
+
+   Upstream:
+   - https://github.com/DTolm/VkFFT
+
+   Purpose: optional Vulkan GPU acceleration for large complex FFTs. Builds
+   without a compatible Vulkan SDK retain the CPU FFTW path.
+
+   Copyright: 2020-present Dmitrii Tolmachev
+   License: MIT License.
+   Local license text:
+   - licenses/VkFFT-LICENSE.txt
+
+14. Khronos glslang, SPIRV-Tools, and SPIRV-Headers
+   Build-time/static components used by the Windows VkFFT backend:
+   - glslang
+   - SPIRV-Tools
+   - SPIRV-Tools-opt
+   - SPIRV-Headers
+
+   Upstream:
+   - https://github.com/KhronosGroup/glslang
+   - https://github.com/KhronosGroup/SPIRV-Tools
+   - https://github.com/KhronosGroup/SPIRV-Headers
+
+   These components come from the LunarG Vulkan SDK and are linked statically
+   into VkFFT-enabled Windows builds. Their upstream license files include the
+   applicable BSD, Apache-2.0, MIT, and component-specific notices.
+
+   Local license texts:
+   - licenses/glslang-LICENSE.txt
+   - licenses/SPIRV-Tools-LICENSE.txt
+   - licenses/SPIRV-Headers-LICENSE.txt
+
+15. ft8_lib
+   Project path:
+   - third_party/ft8_lib/
+
+   Upstream:
+   - https://github.com/kgoba/ft8_lib
+
+   Purpose: standards-compatible FT8 message packing and channel encoding for
+   the transmitter laboratory. Obrii supplies its own waveform generator;
+   the selected output backend and explicit arming, not ft8_lib, control RF.
+
+   Copyright: ft8_lib contributors
+   License: MIT License.
+   Local license text:
+   - licenses/ft8_lib/LICENSE
+
+16. HackRF host library and tools (optional native runtime)
+   Runtime files in the Windows package:
+   - hackrf/hackrf.dll
+   - hackrf/hackrf_info.exe
+
+   Upstream: https://github.com/greatscottgadgets/hackrf
+   License: GNU General Public License version 2 or later.
+   Packaged license text: hackrf/COPYING-hackrf.txt
+
+   The isolated HackRF runtime directory also contains libusb 1.0.27 under
+   LGPL-2.1-or-later and pthreads4w under Apache License 2.0. Their license and
+   notice files are stored beside the corresponding DLLs.
+
+Research model and catalog notices:
+DSD-neo v2.1.0 is a separate optional executable with its native Windows DLL
+dependencies, not linked into Obrii SDR. Source/release:
+https://github.com/arancormonk/dsd-neo/releases/tag/v2.1.0
+The package carries its LICENSE, COPYRIGHT, THIRD_PARTY.md and upstream SPDX
+manifest in licenses/dsd-neo/. Consult those files for its GPL and bundled
+dependency terms. The legacy DSD-FME backend is not shipped.
+
+The native Motorola DMR AES-256-OFB path uses tiny-AES-c, revision
+23856752fbd139da0b8ca6e471a13d5bcc99a08d.
+Source: https://github.com/kokke/tiny-AES-c
+License: Unlicense (public domain). Original source, license and Obrii build
+notice are in third_party/tiny_aes/. It is statically linked, not an external DLL.
+The binary package carries the license and notice in licenses/tiny_aes/.
+
+The optional GopherTrunk virtual DMR adapter is a separate external executable.
+Upstream: https://github.com/MattCheramie/GopherTrunk
+License: Apache License 2.0. Maintained adapter source and its license are in
+tools/gophertrunk_adapter/. Changes include explicit A-F burst assembly, DMR
+Golay/CRC handling and known-key ARC4 synchronization regression tests.
+Windows deployment preserves upstream LICENSE.txt and THIRD_PARTY_LICENSES.md
+beside gophertrunk/fobos-dmr-virtual.exe; Linux build scripts do the same.
+
+Radio propagation uses the NTIA Irregular Terrain Model (ITM/Longley-Rice).
+Source: https://github.com/NTIA/itm
+Revision: 183ad95bd813a8be11009df396e1c631356864b2
+U.S. Government work with the worldwide permission in licenses/ntia_itm/LICENSE.md.
+Obrii modifications (static linkage and portable include paths) are documented
+in licenses/ntia_itm/OBRII_CHANGES.md. No NTIA endorsement is implied.
+
+The embedded amateur radio CTY/DXCC catalog is by Jim Reisert AD1C, as
+distributed by WSJT-X revision 11c564e966c860a7f633e70e4704732409ce48d3.
+Source: https://www.country-files.com/ and https://github.com/WSJTX/wsjtx
+Copyright and permissive redistribution notice: licenses/dxcc/LICENSE.txt.
+
+Release/source obligation note:
+Wireless packet analysis optionally uses the separate Wireshark/TShark 4.6.9
+executables (GPL-2.0-or-later). Original COPYING and the exact runtime manifest
+are in wireshark/. Source: https://www.wireshark.org/download.html
+Corresponding source: https://www.wireshark.org/download/src/wireshark-4.6.9.tar.xz
+Npcap Free Edition is not redistributed. Use its official interactive installer
+and license: https://npcap.com/ . Offline analysis needs no capture driver.
+
+Optional recorded/live receive-only OFDM uses GNU Radio 3.10.12.0, gr-ieee802-11 revision
+ad0598e4a874f4b8e1f391a1e0323e80df2b34ff, and gr-foo revision
+9e0e002f5daf18e91ae428478785b74b2061a9f5 (GPL-3.0-or-later).
+Source: https://github.com/gnuradio/gnuradio
+https://github.com/bastibl/gr-ieee802-11
+https://github.com/bastibl/gr-foo
+The adapter's receive graph derives from upstream wifi_phy_hier.grc and retains
+credits/GPL notice in tools/wifi_phy_decoder.py. PACKAGE_SOURCES.json records
+all exact public conda package URLs/builds/hashes/licenses, with original notices
+in wifi-phy/source-notices/. It includes Python, BSD OpenBLAS and UHD 4.11.0
+(GPL-3.0-or-later, https://github.com/EttusResearch/uhd), among other dependencies.
+UHD inclusion does not claim tested native USRP support. Microsoft components
+remain under their own redistribution terms. No private preferences, keys,
+captures or environment history are on the publication manifest.
+Before binary publication, satisfy GPL/LGPL corresponding-source obligations
+for the exact packages and include these manifests/notices and adapter source.
+
+Native BPSK31 adapts the gMFSK receive filters, symbol timing and Varicode table.
+Copyright Tomi Manninen OH2BNS, with filter work by Peter Martinez G3PLX.
+Source: https://github.com/rubund/gmfsk (psk31rx.c, coeff.c, varicode.c).
+License: GPL-2.0-or-later, as noted in src/digital/psk31audiodecoder.cpp.
+
+Optional experimental Wi-Fi HT20 packet reception uses josephnef/gr-ieee802-11
+revision b3dbd2d476407db92f77056df23c166e4274c507 (GPL-3.0-or-later)
+in a separate GNU Radio Python process. Source:
+https://github.com/josephnef/gr-ieee802-11/tree/b3dbd2d476407db92f77056df23c166e4274c507
+The independent wifi-ht/ runtime carries package source metadata, notices and
+the fork's LICENSE. This does not add a Wi-Fi TX or association implementation.
+
+Optional GNSS PVT uses PocketSDR v0.20 as a separate executable, revision
+03787da53c65a8eb291eec571b6412ec470aeb17.
+Source: https://github.com/tomojitakasu/PocketSDR/tree/03787da53c65a8eb291eec571b6412ec470aeb17
+PocketSDR/RTKLIB: BSD-2-Clause. PocketFFT: BSD-3-Clause. SoapySDR: BSL-1.0.
+Upstream notices are beside pocketsdr/pocket_trk.exe. Only loopback IQ is used;
+the executable does not own the receiver. Native ARM builds use PocketFFT and
+disable SoapySDR in tools/prepare_pocketsdr_linux.sh.
+
+Optional Meteor LRPT image decoding uses the separate GPL-3.0 SatDump 1.2.2
+executable. It is not linked with the Obrii process.
+Source/build instructions: https://github.com/SatDump/SatDump/tree/1.2.2
+The portable backend retains the upstream license and uses an offline subset
+of its plugins. Publication must provide corresponding source for SatDump and
+its GPL/LGPL dependencies, with their notices. Do not ship private SatDump
+config/cache/output directories. Offline decoding disables automatic TLE fetch.
+
+Spectrum HDF5 export dynamically loads HDF5 1.14.6 (permissive HDF Group license).
+Source: https://github.com/HDFGroup/hdf5/releases/tag/hdf5_1.14.6
+The original COPYING notice is beside hdf5/hdf5.dll. No HDF5 DLL is required
+for ordinary reception or audio. Linux builds use libhdf5-dev headers and the
+system HDF5 shared library. Microsoft runtimes remain under their redistribution
+terms, not under the licenses of these engines.
+
+Optional HF sky-wave prediction uses the official ITU-R P.533/P.372 C model,
+revision 82017594a1c6cacfaa7e86954c4ae7b3a5825a3d, in a separate native helper.
+Source: https://github.com/ITU-R-Study-Group-3/ITU-R-HF
+This has a custom upstream ITU free-use/no-warranty notice, not MIT/BSD/GPL.
+The original notice and older reserved-rights headers are preserved, together
+with complete selected model source in itu_hf/source and source-notices.
+See docs/hf_prediction.md for the exact pin, license caveat and limitations.
+The public monthly model datasets are bundled; no user coordinates or cached
+prediction jobs are included. No ITU endorsement is implied.
+
+If a binary release includes GPL DMR voice backend DLLs, publish the
+corresponding FobosAPP and FobosDMRVoiceBackend-gpl source, plus the exact
+mbelib-neo and softdmr/OpenDMR source revisions used to build those DLLs, or
+provide an equivalent GPL-compliant source offer.
+
+If a binary release includes rtlsdr.dll or rtl_test.exe, also publish the exact
+librtlsdr source revision used for those binaries, or provide an equivalent
+GPL-compliant source offer. The FobosAPP repository itself does not vendor the
+local RTL-SDR checkout used during development.
+
+M17 framing and symbol generation use the official libm17 1.4.1 reference
+library, revision e1f0f5ca5bfe2dd98eeda8e945725d505b7d6aae.
+Source: https://github.com/M17-Project/libm17
+License: GNU General Public License version 2 or later. The vendored source and
+upstream LICENSE are in third_party/libm17. Obrii carries two portability-only
+MSVC changes: an export-attribute guard and portable popcount/ctz helpers; the
+protocol algorithms and on-air constants are unchanged.
+
+FT4 receive candidate search, LDPC and CRC validation use the same MIT-licensed
+ft8_lib revision listed in third_party/ft8_lib/VENDORED.md. Its decoder adds
+one fixed-size scratch-array portability change for MSVC C.
+
+Optional M17 voice uses dynamically loaded Codec2 1.2.0, LGPL-2.1-or-later.
+Windows binaries: MSYS2 mingw-w64-ucrt-x86_64-codec2 1.2.0-2, with libgcc
+16.2.0-6 (GPL-3.0-or-later WITH GCC-exception-3.1) and winpthreads
+14.0.0.r569.g34eeafb7d-1 (MIT/BSD). See licenses/codec2/COPYING and the runtime's
+licenses/libgcc and licenses/winpthreads directories, plus docs/ft4_m17_receive.md
+for exact source-package URLs and reproducible installation. Binary releases
+must retain those notices and provide the corresponding source packages.
+
+The optional mesh LoRa PHY retains the upstream attribution and MIT terms in
+licenses/lora/NOTICE and licenses/lora/LICENSE.LoRaPHY. Native Meshtastic and
+LoRaWAN adapters retain licenses/meshtastic/NOTICE and licenses/lorawan/NOTICE;
+their AES primitive uses the existing tiny-AES-c code and the accompanying
+licenses/tiny_aes/unlicense.txt. Windows PKI uses the operating system's crypto
+provider; Linux builds use the system OpenSSL dependency.
+
+The optional Reticulum integration starts a separately installed RNS runtime,
+not a replacement implementation of its cryptography or routing. Retain
+licenses/reticulum/NOTICE and LICENSE.Reticulum.txt, including upstream use
+restrictions, if distributing that runtime. The C++ adapter does not bundle a
+Python environment or change the upstream license; see docs/reticulum_module.md.

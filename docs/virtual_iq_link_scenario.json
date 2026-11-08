@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "defaultRoute": false,
+  "links": [
+    { "tx": "lecturer", "rx": "student-a", "delayMs": 20, "gainDb": -6 },
+    { "tx": "lecturer", "rx": "student-b", "delayMs": 35, "gainDb": -18 },
+    { "tx": "lab-tx-2", "rx": "student-b", "delayMs": 5, "gainDb": -3 }
+  ]
+}

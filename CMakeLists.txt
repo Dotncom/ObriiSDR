@@ -1,0 +1,2266 @@
+cmake_minimum_required(VERSION 3.10)
+project(ObriiSDR VERSION 9.0.0)
+enable_testing()
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+if(POLICY CMP0072)
+    cmake_policy(SET CMP0072 NEW)
+endif()
+
+if(POLICY CMP0074)
+    cmake_policy(SET CMP0074 NEW)
+endif()
+
+if(WIN32 AND NOT DEFINED Qt5_DIR AND EXISTS "C:/Qt/5.15.2/msvc2019_64/lib/cmake/Qt5")
+    set(Qt5_DIR "C:/Qt/5.15.2/msvc2019_64/lib/cmake/Qt5" CACHE PATH "Qt5 CMake package directory")
+endif()
+
+find_package(Qt5 REQUIRED COMPONENTS Core Widgets Network SerialPort Concurrent)
+find_package(Qt5 COMPONENTS Multimedia QUIET)
+add_library(ObriiUsrpLabCore STATIC src/core/usrplabjob.cpp src/core/usrplabjob.h)
+set_target_properties(ObriiUsrpLabCore PROPERTIES AUTOMOC ON AUTOUIC OFF AUTORCC OFF)
+target_include_directories(ObriiUsrpLabCore PUBLIC src/core)
+target_link_libraries(ObriiUsrpLabCore PUBLIC Qt5::Core)
+add_executable(ObriiUsrpLabJobSelfTest EXCLUDE_FROM_ALL tools/usrp_lab_job_selftest.cpp)
+target_link_libraries(ObriiUsrpLabJobSelfTest PRIVATE ObriiUsrpLabCore)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/fobos_firmware/CMakeLists.txt")
+    add_subdirectory(tools/fobos_firmware)
+endif()
+set(OBRII_LOCAL_IF_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/firmware/agile-if-extension/protocol.h")
+add_library(ObriiCommandCore STATIC src/core/commanddispatcher.cpp src/core/commanddispatcher.h)
+set_target_properties(ObriiCommandCore PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_include_directories(ObriiCommandCore PUBLIC src/core)
+target_link_libraries(ObriiCommandCore PUBLIC Qt5::Core)
+add_executable(ObriiCommandDispatcherSelfTest EXCLUDE_FROM_ALL tools/command_dispatcher_selftest.cpp)
+target_link_libraries(ObriiCommandDispatcherSelfTest PRIVATE ObriiCommandCore)
+add_library(ObriiCommandNetwork STATIC src/network/commandcontrolserver.cpp src/network/commandcontrolserver.h)
+set_target_properties(ObriiCommandNetwork PROPERTIES AUTOMOC ON AUTOUIC OFF AUTORCC OFF)
+target_include_directories(ObriiCommandNetwork PUBLIC src/network)
+target_link_libraries(ObriiCommandNetwork PUBLIC ObriiCommandCore Qt5::Network)
+add_library(ObriiCommandUi STATIC src/ui/commandconsoledialog.cpp src/ui/commandconsoledialog.h)
+set_target_properties(ObriiCommandUi PROPERTIES AUTOMOC ON AUTOUIC OFF AUTORCC OFF)
+target_include_directories(ObriiCommandUi PUBLIC src/ui)
+target_link_libraries(ObriiCommandUi PUBLIC ObriiCommandNetwork Qt5::Widgets)
+add_executable(ObriiCommandControlSelfTest EXCLUDE_FROM_ALL tools/command_control_selftest.cpp)
+target_link_libraries(ObriiCommandControlSelfTest PRIVATE ObriiCommandNetwork)
+add_executable(ObriiCommandConsoleSelfTest EXCLUDE_FROM_ALL tools/command_console_selftest.cpp)
+target_link_libraries(ObriiCommandConsoleSelfTest PRIVATE ObriiCommandUi)
+if(MSVC)
+    target_compile_options(ObriiCommandUi PRIVATE /utf-8)
+    target_compile_options(ObriiCommandControlSelfTest PRIVATE /utf-8)
+    target_compile_options(ObriiCommandConsoleSelfTest PRIVATE /utf-8)
+endif()
+if(NOT WIN32)
+    find_package(OpenGL REQUIRED)
+    find_package(Threads REQUIRED)
+endif()
+
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTOUIC ON)
+set(CMAKE_AUTORCC ON)
+set(CMAKE_INCLUDE_CURRENT_DIR ON)
+
+set(FOBOS_STANDARD_ROOT "${CMAKE_SOURCE_DIR}/fobos" CACHE PATH "Path to standard libfobos headers/library")
+set(FOBOS_AGILE_ROOT "${CMAKE_SOURCE_DIR}/fobos_agile" CACHE PATH "Path to agile libfobos_sdr headers/library")
+set(FFTW_ROOT "${CMAKE_SOURCE_DIR}/fftw-3.3.5-dll64" CACHE PATH "Path to FFTW headers/library")
+
+find_path(FOBOS_STANDARD_INCLUDE_DIR
+    NAMES fobos.h
+    HINTS "${FOBOS_STANDARD_ROOT}" "${FOBOS_STANDARD_ROOT}/include"
+)
+find_path(FOBOS_AGILE_INCLUDE_DIR
+    NAMES fobos_sdr.h
+    HINTS "${FOBOS_AGILE_ROOT}" "${FOBOS_AGILE_ROOT}/include"
+)
+find_path(FFTW_INCLUDE_DIR
+    NAMES fftw3.h
+    HINTS "${FFTW_ROOT}" "${FFTW_ROOT}/include"
+)
+
+find_library(FOBOS_STANDARD_LIBRARY
+    NAMES fobos libfobos
+    HINTS "${FOBOS_STANDARD_ROOT}" "${FOBOS_STANDARD_ROOT}/lib" "${FOBOS_STANDARD_ROOT}/x64" "${FOBOS_STANDARD_ROOT}/x86"
+)
+find_library(FOBOS_AGILE_LIBRARY
+    NAMES fobos_sdr libfobos_sdr
+    HINTS "${FOBOS_AGILE_ROOT}" "${FOBOS_AGILE_ROOT}/lib"
+)
+find_library(FFTW_FLOAT_LIBRARY
+    NAMES fftw3f libfftw3f-3
+    HINTS "${FFTW_ROOT}" "${FFTW_ROOT}/lib"
+)
+if(NOT WIN32)
+    find_library(FFTW_FLOAT_THREADS_LIBRARY
+        NAMES fftw3f_threads libfftw3f_threads
+        HINTS "${FFTW_ROOT}" "${FFTW_ROOT}/lib"
+    )
+endif()
+
+foreach(required_path
+        FOBOS_STANDARD_INCLUDE_DIR
+        FOBOS_AGILE_INCLUDE_DIR
+        FFTW_INCLUDE_DIR
+        FOBOS_STANDARD_LIBRARY
+        FOBOS_AGILE_LIBRARY
+        FFTW_FLOAT_LIBRARY)
+    if(NOT DEFINED ${required_path} OR "${${required_path}}" STREQUAL "")
+        message(FATAL_ERROR "Missing ${required_path}. Set FOBOS_STANDARD_ROOT, FOBOS_AGILE_ROOT, or FFTW_ROOT, or install the dependency system-wide.")
+    endif()
+endforeach()
+
+option(FOBOS_ENABLE_MBELIB_NEO "Enable mbelib-neo DMR AMBE vocoder support" ON)
+set(FOBOS_HAS_MBELIB_NEO OFF)
+if(FOBOS_ENABLE_MBELIB_NEO AND EXISTS "${CMAKE_SOURCE_DIR}/third_party/mbelib-neo/CMakeLists.txt")
+    set(MBELIB_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(MBELIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(MBELIB_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(MBELIB_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+    set(MBELIB_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+    # GCC 12 on AArch64 can ICE in its loop-vectorizer while compiling the
+    # tone detector, especially when newer mbelib/PFFFT enables -mcpu=native.
+    # Keep this dependency portable; explicit codec SIMD remains available.
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU"
+       AND CMAKE_C_COMPILER_VERSION VERSION_LESS 13
+       AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|arm.*)$")
+        set(MBELIB_ENABLE_NATIVE OFF CACHE BOOL "" FORCE)
+    endif()
+    add_subdirectory(third_party/mbelib-neo EXCLUDE_FROM_ALL)
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU"
+       AND CMAKE_C_COMPILER_VERSION VERSION_LESS 13
+       AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|arm.*)$")
+        target_compile_options(mbe-static PRIVATE -fno-tree-vectorize)
+        if(TARGET mbe-shared)
+            target_compile_options(mbe-shared PRIVATE -fno-tree-vectorize)
+        endif()
+        message(STATUS "Applying ARM GCC 12 mbelib vectorizer workaround.")
+    endif()
+    set(FOBOS_HAS_MBELIB_NEO ON)
+else()
+    message(STATUS "mbelib-neo not found or disabled; DMR voice synthesis will be unavailable.")
+endif()
+
+option(FOBOS_ENABLE_VKFFT "Enable experimental Vulkan VkFFT acceleration when the SDK is available" ON)
+option(FOBOS_BUILD_GPU_FFT_SELFTEST "Build the VkFFT numerical comparison utility" OFF)
+option(FOBOS_BUILD_CW_SELFTEST "Build the CW audio decoder self-test" OFF)
+set(FOBOS_HAS_VKFFT OFF)
+if(FOBOS_ENABLE_VKFFT AND EXISTS "${CMAKE_SOURCE_DIR}/third_party/VkFFT/vkFFT/vkFFT.h")
+    find_package(Vulkan QUIET COMPONENTS glslang SPIRV-Tools)
+    find_library(VKFFT_SPIRV_TOOLS_OPT_LIBRARY
+        NAMES SPIRV-Tools-opt
+        HINTS "${Vulkan_INCLUDE_DIR}/../Lib" "${Vulkan_INCLUDE_DIR}/../lib"
+    )
+    if(Vulkan_FOUND AND Vulkan_glslang_FOUND AND Vulkan_SPIRV-Tools_FOUND
+       AND TARGET Vulkan::glslang AND TARGET Vulkan::SPIRV-Tools
+       AND VKFFT_SPIRV_TOOLS_OPT_LIBRARY)
+        set(FOBOS_HAS_VKFFT ON)
+        message(STATUS "VkFFT Vulkan backend enabled.")
+    else()
+        message(STATUS "Vulkan SDK with glslang not found; GPU FFT will fall back to FFTW.")
+    endif()
+else()
+    message(STATUS "VkFFT source not found or disabled; GPU FFT will fall back to FFTW.")
+endif()
+
+set_source_files_properties(third_party/tiny_aes/aes.c PROPERTIES LANGUAGE CXX)
+add_library(ObriiDmrCrypto STATIC src/digital/dmrprivacycodec.cpp third_party/tiny_aes/aes.c)
+target_compile_definitions(ObriiDmrCrypto PRIVATE AES256=1 CBC=0 CTR=0 ECB=1)
+target_include_directories(ObriiDmrCrypto PRIVATE src/digital src/utils third_party/tiny_aes)
+target_link_libraries(ObriiDmrCrypto PRIVATE Qt5::Core)
+
+# Open amateur-radio protocols are isolated from the receiver hot path. M17
+# uses the upstream reference implementation; AX.25/KISS and the versioned
+# virtual-signal envelope live in the small QtCore-only ObriiOpenRadio library.
+set(OBRII_M17_SOURCES
+    third_party/libm17/encode/convol.c
+    third_party/libm17/encode/symbols.c
+    third_party/libm17/decode/viterbi.c
+    third_party/libm17/decode/symbols.c
+    third_party/libm17/phy/sync.c
+    third_party/libm17/phy/slice.c
+    third_party/libm17/phy/interleave.c
+    third_party/libm17/phy/randomize.c
+    third_party/libm17/math/rrc.c
+    third_party/libm17/math/math.c
+    third_party/libm17/math/golay.c
+    third_party/libm17/payload/lich.c
+    third_party/libm17/payload/call.c
+    third_party/libm17/payload/crc.c
+    third_party/libm17/payload/lsf.c
+    third_party/libm17/m17.c
+)
+add_library(ObriiM17 STATIC ${OBRII_M17_SOURCES})
+set_target_properties(ObriiM17 PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_include_directories(ObriiM17 PUBLIC ${CMAKE_SOURCE_DIR}/third_party/libm17)
+if(UNIX)
+    target_link_libraries(ObriiM17 PUBLIC m)
+endif()
+
+add_library(ObriiOpenRadio STATIC
+    src/openradio/openradioprotocol.cpp
+    src/openradio/openradioprotocol.h
+    src/openradio/openradiobackend.cpp
+    src/openradio/openradiobackend.h
+    src/openradio/ax25codec.cpp
+    src/openradio/ax25codec.h
+    src/openradio/ax25afsk1200.cpp
+    src/openradio/ax25afsk1200.h
+    src/openradio/ax25livedecoder.cpp
+    src/openradio/ax25livedecoder.h
+    src/openradio/kisscodec.cpp
+    src/openradio/kisscodec.h
+    src/openradio/m17adapter.cpp
+    src/openradio/m17adapter.h
+    src/openradio/virtualsignalframe.cpp
+    src/openradio/virtualsignalframe.h
+    src/openradio/virtualsignaltransport.cpp
+    src/openradio/virtualsignaltransport.h
+    src/openradio/virtualiqhub.cpp
+    src/openradio/virtualiqhub.h
+    src/openradio/virtualiqmedium.cpp
+    src/openradio/virtualiqmedium.h
+)
+target_include_directories(ObriiOpenRadio PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/openradio
+    ${CMAKE_SOURCE_DIR}/third_party/libm17)
+target_link_libraries(ObriiOpenRadio PUBLIC Qt5::Core ObriiM17)
+if(MSVC)
+    target_compile_options(ObriiOpenRadio PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiIqHub tools/virtual_iq_hub_main.cpp
+    src/openradio/virtualiqhubcontrol.cpp src/openradio/virtualiqhubcontrol.h)
+target_link_libraries(ObriiIqHub PRIVATE ObriiOpenRadio Qt5::Core Qt5::Network)
+if(MSVC)
+    target_compile_options(ObriiIqHub PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiCli
+    src/cli/obriicli.cpp
+    src/cli/clivirtualiqsource.cpp src/cli/clivirtualiqsource.h
+    src/cli/clicalibration.cpp src/cli/clicalibration.h
+    src/research/receivercalibrationtable.cpp
+    src/research/receivernoisebaseline.cpp
+    src/research/receiveryfactorcalibration.cpp
+    src/cli/climodulemanager.cpp
+    src/utils/dmrprivacyutils.cpp
+    src/cli/climodulemanager.h
+    src/cli/climoduleprotocol.h
+    src/cli/clitextdecoder.cpp
+    src/cli/clitextdecoder.h
+    src/digital/cwaudiodecoder.cpp
+    src/digital/cwaudiodecoder.h
+    src/digital/psk31audiodecoder.cpp
+    src/digital/psk31audiodecoder.h
+    src/backends/soapysdrbackend.cpp
+    src/backends/soapysdrbackend.h
+    src/backends/uhdbackend.cpp
+    src/backends/uhdbackend.h
+    src/backends/rtlsdrbackend.cpp
+    src/backends/rtlsdrbackend.h
+    src/cli/cliaudiooutput.cpp
+    src/cli/cliaudiooutput.h
+    src/cli/clivfomanager.cpp
+    src/cli/clivfomanager.h
+    src/cli/clifrequencyscanner.cpp
+    src/cli/clifrequencyscanner.h
+    src/cli/cliiqtrigger.cpp
+    src/cli/cliiqtrigger.h
+    src/cli/cliiqquality.cpp
+    src/cli/cliiqquality.h
+    src/cli/clizerospan.cpp
+    src/cli/clizerospan.h
+    src/cli/clidspgraph.cpp
+    src/cli/clidspgraph.h
+    src/cli/climultisdr.cpp
+    src/cli/climultisdr.h
+    src/cli/cliwebservice.cpp src/cli/cliwebservice.h
+    src/cli/clignsssession.cpp src/cli/clignsssession.h
+    src/cli/cliresearchtools.cpp src/cli/cliresearchtools.h
+    src/research/headlessresearchmetrics.cpp src/research/headlessresearchmetrics.h
+    src/network/remotewebserver.cpp src/network/remotewebserver.h
+    src/network/remotevfoservice.cpp src/network/remotevfoservice.h
+    src/core/dspstreammanager.cpp src/core/dspconnectionprobe.cpp
+    src/core/spectrumcomputesession.cpp src/core/fft.cpp src/core/fft.h
+    src/core/gpufftbackend.cpp tools/fft_test_globals.cpp
+    src/analyzer/analyzerfobosglobals.cpp
+    src/analyzer/analyzerreceiver.cpp
+    src/analyzer/analyzerreceiver.h
+    src/analyzer/spectrummosaicengine.cpp
+    src/analyzer/spectrummosaicengine.h
+    src/backends/fobosbackend.cpp
+    src/backends/fobosbackend.h
+    src/backends/fobosfrequencylimits.h
+    src/backends/hackrfbackend.cpp
+    src/backends/hackrfbackend.h
+    src/core/dspgraphmodel.cpp
+    src/core/dspbranchengine.cpp
+    src/core/dspstreamprocessor.cpp
+    src/core/dspstreamrecorder.cpp
+    src/core/dspiqcodec.cpp
+    src/core/dspsourceidentity.cpp
+    src/core/dspiqsourceregistry.cpp
+    src/core/computebudgetmanager.cpp
+    src/core/pfbchannelizer.cpp
+    src/core/fftplannermutex.cpp
+    src/cli/clispectrummeter.cpp
+    src/cli/cliasyncspectrum.cpp src/cli/cliasyncspectrum.h
+    src/cli/clidoctor.cpp src/cli/clidoctor.h
+    src/cli/cliruntimerecorder.cpp src/cli/cliruntimerecorder.h
+    src/cli/clispectrummeter.h
+    src/cli/clinetworkbridge.cpp
+    src/cli/clinetworkbridge.h
+    src/research/spectrumframerecorder.cpp
+    src/research/spectrumframerecorder.h
+    src/research/spectrumiqeventrecorder.cpp
+    src/research/spectrumiqeventrecorder.h
+    src/research/spectrumscienceanalyzer.cpp
+    src/research/spectrumscienceanalyzer.h
+    src/research/tonalspectrum.cpp
+    src/research/tonalspectrum.h
+    src/network/networkcontroller.cpp
+    src/network/networkcontroller.h
+    src/network/displayspectrumcodec.cpp
+    src/network/displayspectrumcodec.h
+    src/audio/audioprocessor.cpp
+    src/audio/audioprocessor.h
+    src/audio/audiofilterchain.cpp
+    src/audio/remoteaudioplayer.cpp
+    src/audio/remoteaudioplayer.h
+    src/core/iqbuffer.cpp
+    src/core/iqchannelizer.cpp
+    src/core/channelizerutils.cpp
+    src/openradio/virtualsignalframe.cpp
+    src/openradio/virtualsignaltransport.cpp)
+target_include_directories(ObriiCli PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/utils
+    ${CMAKE_SOURCE_DIR}/src/analyzer
+    ${CMAKE_SOURCE_DIR}/src/backends
+    ${CMAKE_SOURCE_DIR}/src/audio
+    ${CMAKE_SOURCE_DIR}/src/digital
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/openradio
+    ${CMAKE_SOURCE_DIR}/src/network
+    ${CMAKE_SOURCE_DIR}/src/research
+    ${CMAKE_SOURCE_DIR}/src/ui
+    ${FOBOS_STANDARD_INCLUDE_DIR}
+    ${FOBOS_AGILE_INCLUDE_DIR}
+    ${FFTW_INCLUDE_DIR})
+target_link_libraries(ObriiCli PRIVATE
+    ${FOBOS_STANDARD_LIBRARY} ${FOBOS_AGILE_LIBRARY} ${FFTW_FLOAT_LIBRARY}
+    Qt5::Core Qt5::Network Qt5::Concurrent)
+if(WIN32)
+    target_link_libraries(ObriiCli PRIVATE winmm)
+else()
+    target_link_libraries(ObriiCli PRIVATE Threads::Threads)
+    if(Qt5Multimedia_FOUND)
+        target_link_libraries(ObriiCli PRIVATE Qt5::Multimedia)
+        target_compile_definitions(ObriiCli PRIVATE FOBOSAPP_HAS_QT_AUDIO=1)
+    endif()
+endif()
+if(MSVC)
+    target_compile_options(ObriiCli PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiCliScannerSelfTest EXCLUDE_FROM_ALL
+    tools/cli_scanner_selftest.cpp
+    src/cli/clifrequencyscanner.cpp src/cli/clifrequencyscanner.h)
+add_executable(ObriiCliAsyncSpectrumSelfTest EXCLUDE_FROM_ALL tools/cli_async_spectrum_selftest.cpp
+    src/cli/cliasyncspectrum.cpp src/cli/clispectrummeter.cpp src/core/fftplannermutex.cpp)
+target_include_directories(ObriiCliAsyncSpectrumSelfTest PRIVATE src/cli ${FFTW_INCLUDE_DIR})
+target_link_libraries(ObriiCliAsyncSpectrumSelfTest PRIVATE Qt5::Core ${FFTW_FLOAT_LIBRARY})
+add_executable(ObriiCliDoctorSelfTest EXCLUDE_FROM_ALL tools/cli_doctor_selftest.cpp src/cli/clidoctor.cpp)
+add_executable(ObriiSharedReceiverCoreSelfTest EXCLUDE_FROM_ALL tools/shared_receiver_core_selftest.cpp)
+target_include_directories(ObriiSharedReceiverCoreSelfTest PRIVATE src/core
+    ${FOBOS_STANDARD_INCLUDE_DIR} ${FOBOS_AGILE_INCLUDE_DIR})
+target_link_libraries(ObriiSharedReceiverCoreSelfTest PRIVATE Qt5::Core)
+target_include_directories(ObriiCliDoctorSelfTest PRIVATE src/cli)
+target_link_libraries(ObriiCliDoctorSelfTest PRIVATE Qt5::Core Qt5::Network)
+add_executable(ObriiCliRuntimeRecordingSelfTest EXCLUDE_FROM_ALL tools/cli_runtime_recording_selftest.cpp
+    src/cli/cliruntimerecorder.cpp src/research/spectrumframerecorder.cpp
+    src/core/iqchannelizer.cpp src/core/channelizerutils.cpp)
+target_include_directories(ObriiCliRuntimeRecordingSelfTest PRIVATE src/cli src/research src/core src/ui src)
+target_link_libraries(ObriiCliRuntimeRecordingSelfTest PRIVATE Qt5::Core)
+if(NOT WIN32)
+    target_link_libraries(ObriiCliRuntimeRecordingSelfTest PRIVATE Threads::Threads)
+endif()
+target_include_directories(ObriiCliScannerSelfTest PRIVATE src/cli)
+target_link_libraries(ObriiCliScannerSelfTest PRIVATE Qt5::Core)
+if(MSVC)
+    target_compile_options(ObriiCliScannerSelfTest PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiCliIqTriggerSelfTest EXCLUDE_FROM_ALL
+    tools/cli_iq_trigger_selftest.cpp
+    src/cli/cliiqtrigger.cpp src/cli/cliiqtrigger.h)
+target_include_directories(ObriiCliIqTriggerSelfTest PRIVATE src/cli)
+target_link_libraries(ObriiCliIqTriggerSelfTest PRIVATE Qt5::Core)
+if(NOT WIN32)
+    target_link_libraries(ObriiCliIqTriggerSelfTest PRIVATE Threads::Threads)
+endif()
+
+add_executable(ObriiCliIqQualitySelfTest EXCLUDE_FROM_ALL
+    tools/cli_iq_quality_selftest.cpp
+    src/cli/cliiqquality.cpp src/cli/cliiqquality.h)
+target_include_directories(ObriiCliIqQualitySelfTest PRIVATE src/cli)
+target_link_libraries(ObriiCliIqQualitySelfTest PRIVATE Qt5::Core)
+add_executable(ObriiCliZeroSpanSelfTest EXCLUDE_FROM_ALL
+    tools/cli_zero_span_selftest.cpp
+    src/cli/clizerospan.cpp src/cli/clizerospan.h)
+target_include_directories(ObriiCliZeroSpanSelfTest PRIVATE src/cli)
+target_link_libraries(ObriiCliZeroSpanSelfTest PRIVATE Qt5::Core)
+if(MSVC)
+    target_compile_options(ObriiCliIqQualitySelfTest PRIVATE /utf-8)
+    target_compile_options(ObriiCliZeroSpanSelfTest PRIVATE /utf-8)
+endif()
+if(MSVC)
+    target_compile_options(ObriiCliIqTriggerSelfTest PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiCliModule
+    src/cli/obriiclimodule.cpp
+    src/cli/climodulemanager.cpp src/cli/climodulemanager.h
+    src/cli/climoduleprotocol.h
+    src/digital/digitaldecoder.cpp src/digital/digitaldecoder.h
+    src/digital/dmrdecoder.cpp src/digital/dmrdecoder.h
+    src/digital/dmrvocoder.cpp src/digital/dmrvocoder.h
+    src/digital/dmrprivacyprocessor.cpp src/digital/dmrprivacyprocessor.h
+    src/digital/dmrprivacycodec.h
+    src/utils/dmrprivacyutils.cpp src/utils/dmrprivacyutils.h
+    src/digital/cwaudiodecoder.cpp src/digital/cwaudiodecoder.h
+    src/digital/psk31audiodecoder.cpp src/digital/psk31audiodecoder.h
+    src/audio/audioprocessor.cpp src/audio/audioprocessor.h
+    src/audio/audiofilterchain.cpp src/audio/audiofilterchain.h
+    src/core/iqbuffer.cpp src/core/iqbuffer.h
+    src/core/iqchannelizer.cpp src/core/iqchannelizer.h
+    src/core/channelizerutils.cpp src/core/channelizerutils.h)
+target_include_directories(ObriiCliModule PRIVATE
+    src/cli src/audio src/core src/digital src/utils src/backends
+    third_party/tiny_aes FobosDMRVoiceBackend-gpl/include ${FFTW_INCLUDE_DIR})
+target_link_libraries(ObriiCliModule PRIVATE Qt5::Core ObriiDmrCrypto ${FFTW_FLOAT_LIBRARY})
+if(WIN32)
+    target_link_libraries(ObriiCliModule PRIVATE winmm)
+else()
+    target_link_libraries(ObriiCliModule PRIVATE Threads::Threads)
+    if(Qt5Multimedia_FOUND)
+        target_link_libraries(ObriiCliModule PRIVATE Qt5::Multimedia)
+        target_compile_definitions(ObriiCliModule PRIVATE FOBOSAPP_HAS_QT_AUDIO=1)
+    endif()
+endif()
+
+add_executable(ObriiCliGnssModule
+    src/cli/obriiclignssmodule.cpp src/gnss/gnsssdrstream.cpp src/gnss/gnsssdrstream.h
+    src/audio/playbackmanager.cpp src/audio/playbackmanager.h src/core/iqbuffer.cpp)
+target_include_directories(ObriiCliGnssModule PRIVATE src/gnss src/audio src/core)
+target_link_libraries(ObriiCliGnssModule PRIVATE Qt5::Core Qt5::Network)
+add_executable(ObriiCliGnssSelfTest EXCLUDE_FROM_ALL tools/cli_gnss_selftest.cpp)
+add_executable(ObriiCliLiveTxSelfTest EXCLUDE_FROM_ALL tools/cli_live_tx_selftest.cpp)
+target_link_libraries(ObriiCliLiveTxSelfTest PRIVATE Qt5::Core Qt5::Network)
+target_link_libraries(ObriiCliGnssSelfTest PRIVATE Qt5::Core Qt5::Network)
+add_executable(ObriiCliGnssLiveSelfTest EXCLUDE_FROM_ALL tools/cli_gnss_live_selftest.cpp
+    src/cli/clignsssession.cpp src/gnss/gnsssdrstream.cpp src/gnss/gnsssdrstream.h
+    src/openradio/virtualsignalframe.cpp src/openradio/virtualsignaltransport.cpp
+    src/audio/playbackmanager.cpp src/audio/playbackmanager.h src/core/iqbuffer.cpp)
+target_include_directories(ObriiCliGnssLiveSelfTest PRIVATE src/cli src/gnss src/audio src/core src/openradio)
+target_link_libraries(ObriiCliGnssLiveSelfTest PRIVATE Qt5::Core Qt5::Network)
+add_executable(ObriiCliResearchToolsSelfTest EXCLUDE_FROM_ALL tools/cli_research_tools_selftest.cpp
+    src/cli/cliresearchtools.cpp src/cli/cliiqquality.cpp
+    src/research/headlessresearchmetrics.cpp src/research/spectrumscienceanalyzer.cpp src/research/tonalspectrum.cpp)
+target_include_directories(ObriiCliResearchToolsSelfTest PRIVATE src/cli src/research src/ui)
+target_link_libraries(ObriiCliResearchToolsSelfTest PRIVATE Qt5::Core)
+if(NOT WIN32)
+    target_link_libraries(ObriiCliGnssLiveSelfTest PRIVATE Threads::Threads)
+endif()
+if(MSVC)
+    target_compile_options(ObriiCliGnssLiveSelfTest PRIVATE /utf-8)
+    target_compile_options(ObriiCliResearchToolsSelfTest PRIVATE /utf-8)
+endif()
+if(MSVC)
+    target_compile_options(ObriiCliGnssSelfTest PRIVATE /utf-8)
+endif()
+if(NOT WIN32)
+    target_link_libraries(ObriiCliGnssModule PRIVATE Threads::Threads)
+endif()
+if(MSVC)
+    target_compile_options(ObriiCliGnssModule PRIVATE /utf-8)
+endif()
+
+add_library(ObriiCliServicesTestCore STATIC EXCLUDE_FROM_ALL
+    src/cli/clidspgraph.cpp src/cli/cliwebservice.cpp src/cli/cliwebservice.h
+    src/network/remotewebserver.cpp src/network/remotewebserver.h
+    src/network/remotevfoservice.cpp src/network/remotevfoservice.h
+    src/core/dspgraphmodel.cpp src/core/dspbranchengine.cpp src/core/dspstreammanager.cpp
+    src/core/dspstreamprocessor.cpp src/core/dspstreamrecorder.cpp src/core/dspiqcodec.cpp
+    src/core/dspsourceidentity.cpp src/core/dspiqsourceregistry.cpp src/core/computebudgetmanager.cpp
+    src/core/pfbchannelizer.cpp src/core/fftplannermutex.cpp src/core/dspconnectionprobe.cpp
+    src/core/spectrumcomputesession.cpp src/core/fft.cpp src/core/fft.h
+    src/core/gpufftbackend.cpp tools/fft_test_globals.cpp src/core/iqbuffer.cpp
+    src/core/iqchannelizer.cpp src/core/channelizerutils.cpp
+    src/audio/audioprocessor.cpp src/audio/audioprocessor.h src/audio/audiofilterchain.cpp)
+target_include_directories(ObriiCliServicesTestCore PUBLIC src/cli src/core src/audio src/network ${FFTW_INCLUDE_DIR})
+target_link_libraries(ObriiCliServicesTestCore PUBLIC Qt5::Core Qt5::Network Qt5::Concurrent ${FFTW_FLOAT_LIBRARY})
+if(WIN32)
+    target_link_libraries(ObriiCliServicesTestCore PUBLIC winmm)
+else()
+    target_link_libraries(ObriiCliServicesTestCore PUBLIC Threads::Threads)
+endif()
+if(MSVC)
+    target_compile_options(ObriiCliServicesTestCore PRIVATE /utf-8 /DNOMINMAX)
+endif()
+add_executable(ObriiCliRemoteDspSelfTest EXCLUDE_FROM_ALL tools/cli_remote_dsp_selftest.cpp)
+target_link_libraries(ObriiCliRemoteDspSelfTest PRIVATE ObriiCliServicesTestCore)
+add_executable(ObriiCliWebServiceSelfTest EXCLUDE_FROM_ALL tools/cli_web_service_selftest.cpp)
+target_link_libraries(ObriiCliWebServiceSelfTest PRIVATE ObriiCliServicesTestCore)
+if(MSVC)
+    target_compile_options(ObriiCliRemoteDspSelfTest PRIVATE /utf-8 /DNOMINMAX)
+    target_compile_options(ObriiCliWebServiceSelfTest PRIVATE /utf-8 /DNOMINMAX)
+endif()
+if(MSVC)
+    target_compile_options(ObriiCliModule PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiCliPacketModule
+    src/cli/obriiclipacketmodule.cpp src/cli/climoduleprotocol.h
+    src/openradio/ax25livedecoder.cpp src/openradio/ax25livedecoder.h
+    src/openradio/ax25afsk1200.cpp src/openradio/ax25afsk1200.h
+    src/openradio/ax25codec.cpp src/openradio/ax25codec.h
+    src/openradio/kisscodec.cpp src/openradio/kisscodec.h)
+target_include_directories(ObriiCliPacketModule PRIVATE src/cli src/openradio)
+target_link_libraries(ObriiCliPacketModule PRIVATE Qt5::Core Qt5::Network)
+if(MSVC)
+    target_compile_options(ObriiCliPacketModule PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiCliImageModule
+    src/cli/obriicliimagemodule.cpp src/cli/climoduleprotocol.h
+    src/digital/videoprocessor.cpp src/digital/videoprocessor.h)
+target_include_directories(ObriiCliImageModule PRIVATE src/cli src/digital src/core)
+target_link_libraries(ObriiCliImageModule PRIVATE Qt5::Core Qt5::Gui)
+if(MSVC)
+    target_compile_options(ObriiCliImageModule PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiCliSpectrumModule
+    src/cli/obriiclispectrummodule.cpp src/cli/climoduleprotocol.h)
+target_include_directories(ObriiCliSpectrumModule PRIVATE src/cli)
+target_link_libraries(ObriiCliSpectrumModule PRIVATE Qt5::Core)
+if(MSVC)
+    target_compile_options(ObriiCliSpectrumModule PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiCliM17Module
+    src/cli/obriiclim17module.cpp
+    src/openradio/m17adapter.cpp src/openradio/m17adapter.h)
+target_include_directories(ObriiCliM17Module PRIVATE src/cli src/openradio third_party/libm17)
+target_link_libraries(ObriiCliM17Module PRIVATE Qt5::Core ObriiM17)
+if(MSVC)
+    target_compile_options(ObriiCliM17Module PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiCliTxModule
+    src/cli/obriiclitxmodule.cpp
+    src/openradio/kissvirtualtx.cpp src/openradio/kissvirtualtx.h
+    src/openradio/kisscodec.cpp src/openradio/kisscodec.h
+    src/cli/clilivetransmit.cpp src/cli/clilivetransmit.h
+    src/cli/climicrophonecapture.cpp src/cli/climicrophonecapture.h
+    src/transmit/windowsmicrophonecapture.cpp src/transmit/windowsmicrophonecapture.h
+    src/transmit/transmitmediagenerator.cpp src/transmit/transmitmediagenerator.h
+    src/openradio/ax25afsk1200.cpp src/openradio/ax25afsk1200.h
+    src/openradio/ax25codec.cpp src/openradio/ax25codec.h
+    src/transmit/signallabgenerator.cpp src/transmit/signallabgenerator.h
+    src/transmit/dmrtransmitencoder.cpp
+    src/digital/dmrvocoder.cpp
+    src/utils/dmrprivacyutils.cpp
+    src/transmit/transmitterbackend.cpp src/transmit/transmitterbackend.h
+    src/transmit/hackrftransmitterbackend.cpp src/transmit/hackrftransmitterbackend.h
+    src/backends/hackrfbackend.cpp src/backends/hackrfbackend.h
+    src/backends/uhdbackend.cpp src/backends/uhdbackend.h
+    src/transmit/virtualtransmitterbackend.cpp src/transmit/virtualtransmitterbackend.h
+    src/transmit/transmitwaveformgenerator.cpp src/transmit/transmitwaveformgenerator.h
+    src/openradio/virtualsignalframe.cpp src/openradio/virtualsignalframe.h
+    src/openradio/virtualsignaltransport.cpp src/openradio/virtualsignaltransport.h
+    third_party/ft8_lib/ft8/constants.c
+    third_party/ft8_lib/ft8/crc.c
+    third_party/ft8_lib/ft8/encode.c
+    third_party/ft8_lib/ft8/message.c
+    third_party/ft8_lib/ft8/text.c)
+target_include_directories(ObriiCliTxModule PRIVATE
+    src src/transmit src/openradio src/core src/utils src/backends third_party/ft8_lib
+    third_party/tiny_aes ${FFTW_INCLUDE_DIR}
+    FobosDMRVoiceBackend-gpl/include)
+target_link_libraries(ObriiCliTxModule PRIVATE Qt5::Core Qt5::Gui Qt5::Network Qt5::Concurrent ObriiDmrCrypto ${FFTW_FLOAT_LIBRARY})
+if(WIN32)
+    target_link_libraries(ObriiCliTxModule PRIVATE winmm ole32)
+else()
+    target_link_libraries(ObriiCliTxModule PRIVATE Threads::Threads)
+endif()
+if(Qt5Multimedia_FOUND)
+    target_link_libraries(ObriiCliTxModule PRIVATE Qt5::Multimedia)
+    target_compile_definitions(ObriiCliTxModule PRIVATE OBRII_CLI_QT_MICROPHONE=1)
+endif()
+if(MSVC)
+    target_compile_options(ObriiCliTxModule PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiCliView
+    src/core/fftplannermutex.cpp
+    src/cli/obriicliview.cpp
+    src/cli/clinetworkbridge.cpp src/cli/clinetworkbridge.h
+    src/cli/clispectrummeter.cpp src/cli/clispectrummeter.h
+    src/network/networkcontroller.cpp src/network/networkcontroller.h
+    src/network/displayspectrumcodec.cpp src/network/displayspectrumcodec.h
+    src/core/iqchannelizer.cpp src/core/iqchannelizer.h
+    src/core/channelizerutils.cpp src/core/channelizerutils.h)
+target_include_directories(ObriiCliView PRIVATE src/cli src/network src/core ${FFTW_INCLUDE_DIR})
+target_link_libraries(ObriiCliView PRIVATE Qt5::Core Qt5::Network Qt5::Widgets ${FFTW_FLOAT_LIBRARY})
+if(MSVC)
+    target_compile_options(ObriiCliView PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiCliTextDecoderSelfTest EXCLUDE_FROM_ALL
+    tools/cli_text_decoder_selftest.cpp
+    src/cli/clitextdecoder.cpp
+    src/digital/cwaudiodecoder.cpp
+    src/digital/psk31audiodecoder.cpp)
+
+add_executable(ObriiCliVirtualIqSelfTest EXCLUDE_FROM_ALL
+    tools/cli_virtual_iq_selftest.cpp src/cli/clivirtualiqsource.cpp
+    src/openradio/virtualsignaltransport.cpp src/openradio/virtualsignalframe.cpp)
+target_include_directories(ObriiCliVirtualIqSelfTest PRIVATE src/cli src/openradio)
+target_link_libraries(ObriiCliVirtualIqSelfTest PRIVATE Qt5::Core Qt5::Network)
+if(MSVC)
+    target_compile_options(ObriiCliVirtualIqSelfTest PRIVATE /utf-8)
+endif()
+
+target_include_directories(ObriiCliTextDecoderSelfTest PRIVATE src/cli src/digital)
+target_link_libraries(ObriiCliTextDecoderSelfTest PRIVATE Qt5::Core)
+if(MSVC)
+    target_compile_options(ObriiCliTextDecoderSelfTest PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiCliAudioSelfTest EXCLUDE_FROM_ALL
+    tools/cli_audio_selftest.cpp
+    src/cli/cliaudiooutput.cpp src/cli/cliaudiooutput.h
+    src/audio/audioprocessor.cpp src/audio/audioprocessor.h
+    src/audio/audiofilterchain.cpp
+    src/core/iqbuffer.cpp src/core/iqchannelizer.cpp src/core/channelizerutils.cpp)
+target_include_directories(ObriiCliAudioSelfTest PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/cli ${CMAKE_SOURCE_DIR}/src/audio
+    ${CMAKE_SOURCE_DIR}/src/core ${FFTW_INCLUDE_DIR})
+target_link_libraries(ObriiCliAudioSelfTest PRIVATE Qt5::Core ${FFTW_FLOAT_LIBRARY})
+if(WIN32)
+    target_link_libraries(ObriiCliAudioSelfTest PRIVATE winmm)
+else()
+    target_link_libraries(ObriiCliAudioSelfTest PRIVATE Threads::Threads)
+endif()
+if(MSVC)
+    target_compile_options(ObriiCliAudioSelfTest PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiCliSpectrumSelfTest EXCLUDE_FROM_ALL
+    src/core/fftplannermutex.cpp
+    tools/cli_spectrum_selftest.cpp
+    src/cli/clispectrummeter.cpp src/cli/clispectrummeter.h)
+target_include_directories(ObriiCliSpectrumSelfTest PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/cli ${FFTW_INCLUDE_DIR})
+target_link_libraries(ObriiCliSpectrumSelfTest PRIVATE Qt5::Core ${FFTW_FLOAT_LIBRARY})
+add_executable(ObriiCliCalibrationSelfTest EXCLUDE_FROM_ALL
+    tools/cli_calibration_selftest.cpp src/cli/clicalibration.cpp
+    src/research/receivercalibrationtable.cpp src/research/receivernoisebaseline.cpp
+    src/research/receiveryfactorcalibration.cpp)
+target_include_directories(ObriiCliCalibrationSelfTest PRIVATE src/cli src/research)
+target_link_libraries(ObriiCliCalibrationSelfTest PRIVATE Qt5::Core)
+if(MSVC)
+    target_compile_options(ObriiCliCalibrationSelfTest PRIVATE /utf-8)
+endif()
+add_executable(ObriiCliDigitalProfileSelfTest EXCLUDE_FROM_ALL
+    tools/cli_digital_profile_selftest.cpp src/cli/climodulemanager.cpp
+    src/utils/dmrprivacyutils.cpp src/digital/dmrprivacyprocessor.cpp)
+target_include_directories(ObriiCliDigitalProfileSelfTest PRIVATE src/cli src/core src/digital src/utils)
+target_link_libraries(ObriiCliDigitalProfileSelfTest PRIVATE Qt5::Core ObriiDmrCrypto)
+add_dependencies(ObriiCliDigitalProfileSelfTest ObriiCliModule)
+add_custom_command(TARGET ObriiCliDigitalProfileSelfTest POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:ObriiCliModule> $<TARGET_FILE_DIR:ObriiCliDigitalProfileSelfTest>)
+if(MSVC)
+    target_compile_options(ObriiCliDigitalProfileSelfTest PRIVATE /utf-8)
+endif()
+if(MSVC)
+    target_compile_options(ObriiCliSpectrumSelfTest PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiIqFormatBench
+    tools/iq_format_benchmark.cpp
+    src/core/dspiqcodec.cpp)
+target_include_directories(ObriiIqFormatBench PRIVATE src/core)
+target_link_libraries(ObriiIqFormatBench PRIVATE Qt5::Core)
+if(MSVC)
+    target_compile_options(ObriiIqFormatBench PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiIq8QuantizerSelfTest tools/iq8_quantizer_selftest.cpp)
+target_include_directories(ObriiIq8QuantizerSelfTest PRIVATE src/core)
+
+add_executable(ObriiIqFrameBudgetSelfTest tools/iq_frame_budget_selftest.cpp)
+target_include_directories(ObriiIqFrameBudgetSelfTest PRIVATE src/core)
+if(NOT WIN32)
+    target_link_libraries(ObriiIqFrameBudgetSelfTest PRIVATE Threads::Threads)
+endif()
+
+add_executable(ObriiAppHelpSelfTest tools/apphelp_selftest.cpp src/ui/apphelp.cpp src/ui/apphelp.h)
+target_include_directories(ObriiAppHelpSelfTest PRIVATE src/ui)
+target_link_libraries(ObriiAppHelpSelfTest PRIVATE Qt5::Core Qt5::Widgets)
+if(MSVC)
+    target_compile_options(ObriiAppHelpSelfTest PRIVATE /utf-8)
+endif()
+
+function(obrii_register_selftest target)
+    if(WIN32 AND OBRII_RUNTIME_OUTPUT_DIR)
+        get_filename_component(_obrii_test_platforms "${Qt5_DIR}/../../../plugins/platforms" ABSOLUTE)
+        if(NOT EXISTS "${_obrii_test_platforms}/qwindows.dll")
+            set(_obrii_test_platforms "${OBRII_RUNTIME_OUTPUT_DIR}/platforms")
+        endif()
+        add_test(NAME ${target} COMMAND ${CMAKE_COMMAND} -E env
+            "PATH=${OBRII_RUNTIME_OUTPUT_DIR};$ENV{PATH}"
+            "QT_QPA_PLATFORM_PLUGIN_PATH=${_obrii_test_platforms}"
+            $<TARGET_FILE:${target}>)
+    else()
+        add_test(NAME ${target} COMMAND ${CMAKE_COMMAND} -E env
+            "QT_QPA_PLATFORM=offscreen" $<TARGET_FILE:${target}>)
+    endif()
+    set_tests_properties(${target} PROPERTIES TIMEOUT 120 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+endfunction()
+
+obrii_register_selftest(ObriiIq8QuantizerSelfTest)
+obrii_register_selftest(ObriiIq16QuantizerSelfTest)
+obrii_register_selftest(ObriiIqFrameBudgetSelfTest)
+obrii_register_selftest(ObriiAppHelpSelfTest)
+obrii_register_selftest(ObriiCommandDispatcherSelfTest)
+obrii_register_selftest(ObriiUsrpLabJobSelfTest)
+obrii_register_selftest(ObriiCommandControlSelfTest)
+obrii_register_selftest(ObriiCommandConsoleSelfTest)
+
+add_executable(ObriiCliLaunchScriptSelfTest tools/cli_launch_script_selftest.cpp
+    src/core/clilaunchscript.cpp src/core/clilaunchscript.h)
+target_include_directories(ObriiCliLaunchScriptSelfTest PRIVATE src/core)
+target_link_libraries(ObriiCliLaunchScriptSelfTest PRIVATE Qt5::Core Qt5::Network)
+if(MSVC)
+    target_compile_options(ObriiCliLaunchScriptSelfTest PRIVATE /utf-8)
+endif()
+obrii_register_selftest(ObriiCliLaunchScriptSelfTest)
+
+add_executable(ObriiCliNetworkBridgeSelfTest tools/cli_network_bridge_selftest.cpp
+    src/cli/clinetworkbridge.cpp src/cli/clinetworkbridge.h
+    src/network/networkcontroller.cpp src/network/networkcontroller.h
+    src/network/displayspectrumcodec.cpp src/network/displayspectrumcodec.h
+    src/core/iqchannelizer.cpp src/core/iqchannelizer.h
+    src/core/channelizerutils.cpp src/core/channelizerutils.h)
+target_include_directories(ObriiCliNetworkBridgeSelfTest PRIVATE
+    src/cli src/network src/core)
+target_link_libraries(ObriiCliNetworkBridgeSelfTest PRIVATE Qt5::Core Qt5::Network)
+if(MSVC)
+    target_compile_options(ObriiCliNetworkBridgeSelfTest PRIVATE /utf-8)
+endif()
+obrii_register_selftest(ObriiCliNetworkBridgeSelfTest)
+
+add_executable(ObriiIq16QuantizerSelfTest tools/iq16_quantizer_selftest.cpp)
+target_include_directories(ObriiIq16QuantizerSelfTest PRIVATE src/core)
+
+add_library(ObriiItm STATIC
+    third_party/ntia_itm/src/ComputeDeltaH.cpp
+    third_party/ntia_itm/src/DiffractionLoss.cpp
+    third_party/ntia_itm/src/FindHorizons.cpp
+    third_party/ntia_itm/src/FreeSpaceLoss.cpp
+    third_party/ntia_itm/src/FresnelIntegral.cpp
+    third_party/ntia_itm/src/H0Function.cpp
+    third_party/ntia_itm/src/InitializeArea.cpp
+    third_party/ntia_itm/src/InitializePointToPoint.cpp
+    third_party/ntia_itm/src/InverseComplementaryCumulativeDistributionFunction.cpp
+    third_party/ntia_itm/src/itm_area.cpp
+    third_party/ntia_itm/src/itm_p2p.cpp
+    third_party/ntia_itm/src/KnifeEdgeDiffraction.cpp
+    third_party/ntia_itm/src/LinearLeastSquaresFit.cpp
+    third_party/ntia_itm/src/LineOfSightLoss.cpp
+    third_party/ntia_itm/src/LongleyRice.cpp
+    third_party/ntia_itm/src/QuickPfl.cpp
+    third_party/ntia_itm/src/SigmaHFunction.cpp
+    third_party/ntia_itm/src/SmoothEarthDiffraction.cpp
+    third_party/ntia_itm/src/TerrainRoughness.cpp
+    third_party/ntia_itm/src/TroposcatterLoss.cpp
+    third_party/ntia_itm/src/ValidateInputs.cpp
+    third_party/ntia_itm/src/Variability.cpp
+)
+set_target_properties(ObriiItm PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_include_directories(ObriiItm PUBLIC ${CMAKE_SOURCE_DIR}/third_party/ntia_itm/include)
+
+# Shared, statically linked measurement code. Keeping the hot algorithms here
+# lets ObriiSDR and the standalone instrument use identical calculations without
+# a runtime DLL boundary or per-frame indirection.
+add_library(ObriiMeasurementCore STATIC
+    src/analyzer/analyzerframechannel.cpp
+    src/analyzer/analyzerframechannel.h
+    src/analyzer/analyzerinstrumentplan.cpp
+    src/analyzer/analyzerinstrumentplan.h
+    src/analyzer/analyzerinstrumentbackend.h
+    src/analyzer/instrumentsweepengine.cpp
+    src/analyzer/instrumentsweepengine.h
+    src/analyzer/spectrummosaicengine.cpp
+    src/analyzer/spectrummosaicengine.h
+    src/research/spectrumframerecorder.cpp
+    src/research/spectrumframerecorder.h
+    src/research/spectrumscienceanalyzer.cpp
+    src/research/spectrumscienceanalyzer.h
+    src/research/tonalspectrum.cpp
+    src/research/tonalspectrum.h
+    src/research/receivercalibrationtable.cpp
+    src/research/receivercalibrationtable.h
+    src/research/receivernoisebaseline.cpp
+    src/research/receivernoisebaseline.h
+    src/research/receiveryfactorcalibration.cpp
+    src/research/receiveryfactorcalibration.h
+)
+target_include_directories(ObriiMeasurementCore PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/analyzer
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/research
+    ${CMAKE_SOURCE_DIR}/src/ui
+)
+target_link_libraries(ObriiMeasurementCore PUBLIC Qt5::Core Qt5::Network)
+if(MSVC)
+    target_compile_options(ObriiMeasurementCore PRIVATE /utf-8)
+endif()
+
+set(SOURCES
+    src/main.cpp
+    src/main.h
+    src/mainwindow/main_appsettings.cpp
+    src/mainwindow/main_fobos_if_editor.cpp
+    src/mainwindow/main_fobos_runtime.cpp
+    src/mainwindow/main_receiver_noise_baseline.cpp
+    src/mainwindow/main_receiver_yfactor.cpp
+    src/mainwindow/main_controls.cpp
+    src/mainwindow/main_devices.cpp
+    src/mainwindow/main_digital.cpp
+    src/mainwindow/main_ft8.cpp
+    src/mainwindow/main_dmr.cpp
+    src/mainwindow/main_dmr_privacy.cpp
+    src/mainwindow/main_dspflow.cpp
+    src/mainwindow/main_gnss.cpp
+    src/mainwindow/main_gnss_acquisition.cpp
+    src/mainwindow/main_gnss_acquisition_tests.cpp
+    src/mainwindow/main_gnss_map.cpp
+    src/mainwindow/main_gnss_satellites.cpp
+    src/mainwindow/main_gnss_serial.cpp
+    src/mainwindow/main_hardware_controls.cpp
+    src/mainwindow/main_hackrf.cpp
+    src/mainwindow/main_localization.cpp
+    src/mainwindow/main_localization_translations.cpp
+    src/mainwindow/main_measurements.cpp
+    src/mainwindow/main_spurcalibration.cpp
+    src/mainwindow/main_experiment.cpp
+    src/mainwindow/main_wireless.cpp
+    src/mainwindow/main_propagation.cpp
+    src/research/radiopropagation.cpp
+    src/research/radiopropagation.h
+    src/research/maptilerterrain.cpp
+    src/research/maptilerterrain.h
+    src/research/propagationlabdialog.cpp
+    src/research/propagationlabdialog.h
+    src/research/solarconditionswidget.cpp
+    src/research/solarconditionswidget.h
+    src/wireless/wirelesspackettools.cpp
+    src/wireless/wirelesspackettools.h
+    src/wireless/wirelesscaptureworker.cpp
+    src/wireless/wirelesscaptureworker.h
+    src/wireless/wirelesslabdialog.cpp
+    src/wireless/usrplabdialog.cpp
+    src/wireless/wirelesslabdialog.h
+    src/wireless/wirelesspacketdetails.cpp
+    src/wireless/wirelesspacketdetails.h
+    src/wireless/wifiphywidget.cpp
+    src/wireless/wifiphywidget.h
+    src/wireless/wifiliveiqworker.cpp
+    src/wireless/wifiliveiqworker.h
+    src/core/dmrcicdecimator.h
+    src/core/clilaunchscript.cpp
+    src/core/clilaunchscript.h
+    src/mainwindow/main_network.cpp
+    src/mainwindow/main_network_audio.cpp
+    src/mainwindow/main_network_dialog.cpp
+    src/mainwindow/main_network_iq.cpp
+    src/mainwindow/main_network_spectrum.cpp
+    src/mainwindow/main_presets.cpp
+    src/mainwindow/main_recording.cpp
+    src/mainwindow/main_scan.cpp
+    src/mainwindow/main_scan_hunters.cpp
+    src/mainwindow/main_settings.cpp
+    src/mainwindow/main_settings_json.cpp
+    src/mainwindow/main_settings_ui.cpp
+    src/mainwindow/main_spectrum.cpp
+    src/utils/appruntimeutils.cpp
+    src/utils/appruntimeutils.h
+    src/core/appdiagnostics.cpp
+    src/core/appdiagnostics.h
+    src/core/channelizerutils.cpp
+    src/core/channelizerutils.h
+    src/core/dspsourceidentity.cpp
+    src/core/dspsourceidentity.h
+    src/core/coherentiqaligner.cpp
+    src/core/coherentiqaligner.h
+    src/core/coherentiqlive.cpp
+    src/core/coherentiqlive.h
+    src/core/coherentiqsession.cpp
+    src/core/coherentiqsession.h
+    src/core/dspiqsourceregistry.cpp
+    src/core/dspiqsourceregistry.h
+    src/core/computebudgetmanager.cpp
+    src/core/computebudgetmanager.h
+    src/core/iqchannelizer.cpp
+    src/core/iqchannelizer.h
+    src/core/pfbchannelizer.cpp
+    src/core/pfbchannelizer.h
+    src/ui/dspbranchsettingswidget.cpp
+    src/ui/dspbranchsettingswidget.h
+    src/audio/dspbranchaudiooutput.cpp
+    src/audio/dspbranchaudiooutput.h
+    src/audio/dspbranchaudioqueue_p.h
+    src/core/dspgraphmodel.cpp
+    src/core/dspgraphmodel.h
+    src/core/dspbranchengine.cpp
+    src/core/dspbranchengine.h
+    src/core/dspstreamprocessor.cpp
+    src/core/dspstreamprocessor.h
+    src/core/dspiqcodec.cpp
+    src/core/dspiqcodec.h
+    src/core/dspstreammanager.cpp
+    src/core/dspstreammanager.h
+    src/core/dspconnectionprobe.cpp
+    src/core/dspconnectionprobe.h
+    src/core/dspstreamtransport_p.h
+    src/core/spectrumcomputeoptions.h
+    src/core/spectrumcomputesession.cpp
+    src/core/spectrumcomputesession.h
+    src/core/dspstreamrecorder.cpp
+    src/core/dspstreamrecorder.h
+    src/ui/dspcomputedialog.cpp
+    src/ui/dspcomputedialog.h
+    src/core/fftplannermutex.cpp
+    src/utils/appconstants.h
+    src/utils/appsettingsutils.cpp
+    src/utils/appsettingsutils.h
+    src/ui/apphelp.cpp
+    src/ui/apphelp.h
+    src/analyzer/analyzerreceiver.cpp
+    src/analyzer/analyzerreceiver.h
+    src/analyzer/analyzerspectrumwidget.cpp
+    src/analyzer/analyzerspectrumwidget.h
+    src/analyzer/multisdrdialog.cpp
+    src/analyzer/multisdrdialog.h
+    src/analyzer/multisdrliveiq.cpp
+    src/analyzer/multisdrliveiq.h
+    src/analyzer/multisdrsignalalignment.cpp
+    src/analyzer/multisdrsignalalignment.h
+    src/ui/spectrummarkerpairsdialog.cpp
+    src/ui/spectrummarkerpairsdialog.h
+    src/core/dataprocessor.cpp
+    src/core/dataprocessor.h
+    src/core/diagnosticlogging.h
+    src/utils/dmrbackendpaths.cpp
+    src/utils/dmrbackendpaths.h
+    src/digital/dmrdecoder.cpp
+    src/digital/dmrdecoder.h
+    src/digital/dmrvocoder.cpp
+    src/digital/dmrvocoder.h
+    src/utils/dmrprivacyutils.cpp
+    src/utils/dmrprivacyutils.h
+    src/digital/dsdneobridge.cpp
+    src/digital/dsdneobridge.h
+    src/digital/gophertrunkbridge.cpp
+    src/digital/gophertrunkbridge.h
+    src/digital/dmrhunterdetector.cpp
+    src/digital/dmrhunterdetector.h
+    src/digital/digitalvideohunterdetector.cpp
+    src/digital/digitalvideohunterdetector.h
+    src/digital/digitaldecoder.cpp
+    src/digital/digitaldecoder.h
+    src/digital/dmrprivacyprocessor.cpp
+    src/digital/dmrprivacyprocessor.h
+    src/digital/ft8stationutils.cpp
+    src/digital/ft8countrycatalog.cpp
+    src/digital/ft8stationutils.h
+    src/digital/ft8stationdialog.cpp
+    src/digital/ft8stationservices.cpp
+    src/digital/ft8stationdialog.h
+    src/digital/cwaudiodecoder.cpp
+    src/digital/psk31audiodecoder.cpp
+    src/digital/psk31audiodecoder.h
+    src/digital/cwaudiodecoder.h
+    src/openradio/openradiolabdialog.cpp
+    src/openradio/openradiolabdialog.h
+    src/openradio/kissvirtualtx.cpp
+    src/openradio/kissvirtualtx.h
+    src/backends/bladerfbackend.cpp
+    src/backends/bladerfbackend.h
+    src/backends/hackrfbackend.cpp
+    src/backends/hackrfbackend.h
+    src/ui/frequencycontrol.cpp
+    src/ui/frequencycontrol.h
+    src/ui/finetunewidget.cpp
+    src/ui/finetunewidget.h
+    src/ui/multivfowidget.cpp
+    src/ui/multivfowidget.h
+    src/backends/fobosbackend.cpp
+    src/backends/fobosbackend.h
+    src/backends/fobosfrequencylimits.h
+    src/digital/fpvhunterdetector.cpp
+    src/digital/fpvhunterdetector.h
+    src/digital/fpvautoscancontroller.cpp
+    src/digital/fpvautoscancontroller.h
+    src/gnss/gnssacquisition.cpp
+    src/gnss/gnssacquisition.h
+    src/gnss/gnssqthhelpers.cpp
+    src/gnss/gnssqthhelpers.h
+    src/utils/gnssserialutils.cpp
+    src/utils/gnssserialutils.h
+    src/gnss/gnsssignalmonitor.cpp
+    src/gnss/gnsssignalmonitor.h
+    src/core/iqbuffer.cpp
+    src/core/iqbuffer.h
+    src/network/networkcontroller.cpp
+    src/network/networkcontroller.h
+    src/network/displayspectrumcodec.cpp
+    src/network/displayspectrumcodec.h
+    src/network/remotevfoservice.cpp
+    src/network/remotevfoservice.h
+    src/network/remotewebserver.cpp
+    src/network/remotewebserver.h
+    src/research/spectrumframereplaydialog.cpp
+    src/research/spectrumframereplaydialog.h
+    src/research/spectrumiqeventrecorder.cpp
+    src/research/spectrumiqeventrecorder.h
+    src/gnss/gnsssdrstream.cpp
+    src/gnss/gnsssdrstream.h
+    src/gnss/gnsssdrpvtdialog.cpp
+    src/gnss/gnsssdrpvtdialog.h
+    src/digital/lrptdecodedialog.cpp
+    src/digital/lrptdecodedialog.h
+    src/mainwindow/main_externaltools.cpp
+    src/research/hdf5spectrumexport.cpp
+    src/research/hdf5spectrumexport.h
+    src/research/hdf5spectrumexportui.cpp
+    src/research/hdf5spectrumexportui.h
+    src/research/publicdatafetch.cpp src/research/publicdatafetch.h
+    src/research/spaceeventsfeed.cpp src/research/spaceeventsfeed.h
+    src/research/researchanalysisdialog.cpp
+    src/research/researchanalysisdialog.h
+    src/research/iqconstellationpreview.cpp
+    src/research/iqconstellationpreview.h
+    src/research/scientificsessiontools.cpp
+    src/research/scientificsessiontools.h
+    src/research/experimentbundle.cpp
+    src/research/experimentbundle.h
+    src/research/experimentbundledialog.cpp
+    src/research/experimentbundledialog.h
+    src/research/spectrumpersistencetools.cpp
+    src/research/spectrumpersistencetools.h
+    src/research/zerospandialog.cpp
+    src/research/zerospandialog.h
+    src/research/zoomspectrumprocessor.cpp
+    src/research/zoomspectrumprocessor.h
+    src/research/zoomspectrumdialog.cpp
+    src/research/zoomspectrumdialog.h
+    src/research/zoomdensitydialog.cpp
+    src/research/zoomdensitydialog.h
+    src/transmit/transmitterbackend.cpp
+    src/transmit/transmitterbackend.h
+    src/transmit/hackrftransmitterbackend.cpp
+    src/transmit/hackrftransmitterbackend.h
+    src/transmit/virtualtransmitterbackend.cpp
+    src/transmit/virtualtransmitterbackend.h
+    src/transmit/transmitwaveformgenerator.cpp
+    src/transmit/transmitwaveformgenerator.h
+    src/transmit/signallabgenerator.cpp
+    src/transmit/signallabgenerator.h
+    src/transmit/signallabdialog.cpp
+    src/transmit/signallabdialog.h
+    src/transmit/signallabpreview.cpp
+    src/transmit/signallabpreview.h
+    src/transmit/signallabconstellation3d.cpp
+    src/transmit/signallabconstellation3d.h
+    src/transmit/dmrtransmitencoder.cpp
+    src/transmit/dmrtransmitencoder.h
+    src/transmit/transmitmediagenerator.cpp
+    src/transmit/transmitmediagenerator.h
+    src/transmit/sstvimageeditordialog.cpp
+    src/transmit/sstvimageeditordialog.h
+    src/transmit/transmitdialog.cpp
+    src/transmit/transmitdialog.h
+    src/transmit/windowsmicrophonecapture.cpp
+    src/transmit/windowsmicrophonecapture.h
+    third_party/ft8_lib/ft8/constants.c
+    third_party/ft8_lib/ft8/crc.c
+    third_party/ft8_lib/ft8/encode.c
+    third_party/ft8_lib/ft8/message.c
+    third_party/ft8_lib/ft8/text.c
+    src/audio/playbackmanager.cpp
+    src/audio/playbackmanager.h
+    src/audio/audiofilterchain.cpp
+    src/audio/audiofilterchain.h
+    src/presets/presethelpers.cpp
+    src/presets/presethelpers.h
+    src/presets/presetmanager.cpp
+    src/gnss/qthlocator.cpp
+    src/gnss/qthlocator.h
+    src/gnss/qthmapwidget.cpp
+    src/gnss/qthmapwidget.h
+    src/audio/remoteaudioplayer.cpp
+    src/audio/remoteaudioplayer.h
+    src/audio/recordingmanager.cpp
+    src/audio/recordingmanager.h
+    src/core/radiosettings.h
+    src/backends/receiverbackend.h
+    src/backends/receiverbackendregistry.cpp
+    src/backends/receiverbackendregistry.h
+    src/utils/receiverdeviceutils.cpp
+    src/utils/receiverdeviceutils.h
+    src/utils/fobosdevicecatalog.cpp
+    src/utils/fobosdevicecatalog.h
+    src/backends/rtlsdrbackend.cpp
+    src/backends/rtlsdrbackend.h
+    src/utils/samplefileutils.cpp
+    src/utils/samplefileutils.h
+    src/ui/spectrumhuntercontrols.cpp
+    src/ui/spectrumhuntercontrols.h
+    src/ui/audiofilterchainwidget.cpp
+    src/ui/audiofilterchainwidget.h
+    src/ui/dspflowpanel.cpp
+    src/transmit/dspboardsignal.cpp
+    src/transmit/dspboardqpskreceiver.cpp
+    src/ui/dspflowpanel.h
+    src/ui/dspresearchwidget.cpp
+    src/ui/dspresearchwidget.h
+    src/digital/videoprocessor.cpp
+    src/digital/videoprocessor.h
+    src/digital/videowidget.cpp
+    src/digital/videowidget.h
+    src/core/fft.cpp
+    src/core/fft.h
+    src/core/gpufftbackend.cpp
+    src/core/gpufftbackend.h
+    src/utils/spectrumfftworker.cpp
+    src/utils/spectrumfftworker.h
+    src/utils/remotespectrumworker.cpp
+    src/utils/remotespectrumworker.h
+    src/utils/spectrumdisplayreducer.cpp
+    src/utils/spectrumdisplayreducer.h
+    src/audio/audioprocessor.cpp
+    src/audio/audioprocessor.h
+    src/ui/MyGraphWidget.cpp
+    src/ui/MyGraphWidget.h
+    src/ui/MyWaterfallWidget.cpp
+    src/ui/MyWaterfallWidget.h
+    src/ui/waterfall3drenderer.cpp
+    src/ui/waterfall3drenderer.h
+    src/ui/waterfall3dview.cpp
+    src/ui/waterfall3dview.h
+    src/utils/modulationutils.cpp
+    src/utils/modulationutils.h
+    src/ui/scalewidget.cpp
+    src/ui/scalewidget.h
+    src/scan/scanvisualassembler.cpp
+    src/scan/scanvisualassembler.h
+    src/utils/scanvisualutils.cpp
+    src/utils/scanvisualutils.h
+    src/backends/soapysdrbackend.cpp
+    src/backends/soapysdrbackend.h
+    src/backends/uhdbackend.cpp
+    src/backends/uhdbackend.h
+    src/utils/tuningutils.cpp
+    src/utils/tuningutils.h
+    src/app_resources.qrc
+)
+
+if(WIN32)
+    list(APPEND SOURCES packaging/windows/fobosapp.rc)
+endif()
+
+add_executable(ObriiSDR ${SOURCES})
+if(EXISTS "${OBRII_LOCAL_IF_HEADER}")
+    target_compile_definitions(ObriiSDR PRIVATE OBRII_LOCAL_FOBOS_IF_HEADER="${OBRII_LOCAL_IF_HEADER}")
+endif()
+target_sources(ObriiSDR PRIVATE src/mainwindow/main_commands.cpp)
+target_link_libraries(ObriiSDR PRIVATE ObriiCommandUi ObriiUsrpLabCore)
+target_link_libraries(ObriiCli PRIVATE ObriiCommandNetwork ObriiUsrpLabCore)
+
+add_executable(ObriiUhdBackendSelfTest
+    tools/uhd_backend_selftest.cpp
+    src/backends/uhdbackend.cpp
+    src/backends/uhdbackend.h)
+target_include_directories(ObriiUhdBackendSelfTest PRIVATE src)
+target_link_libraries(ObriiUhdBackendSelfTest PRIVATE Qt5::Core)
+if(MSVC)
+    target_compile_options(ObriiUhdBackendSelfTest PRIVATE /utf-8)
+endif()
+
+add_executable(ObriiAnalyzer
+    src/ui/apphelp.cpp
+    src/ui/apphelp.h
+    src/analyzer/analyzerfobosglobals.cpp
+    src/analyzer/analyzerreceiver.cpp
+    src/analyzer/analyzerreceiver.h
+    src/analyzer/analyzermain.cpp
+    src/analyzer/analyzermainwindow.cpp
+    src/analyzer/analyzermainwindow.h
+    src/analyzer/analyzerinstrumentdialog.cpp
+    src/analyzer/analyzerinstrumentdialog.h
+    src/analyzer/multisdrdialog.cpp
+    src/analyzer/multisdrdialog.h
+    src/analyzer/multisdrliveiq.cpp
+    src/analyzer/multisdrliveiq.h
+    src/analyzer/multisdrsignalalignment.cpp
+    src/analyzer/multisdrsignalalignment.h
+    src/core/iqchannelizer.cpp
+    src/core/channelizerutils.cpp
+    src/analyzer/analyzerspectrumwidget.cpp
+    src/analyzer/analyzerspectrumwidget.h
+    src/ui/spectrummarkerpairsdialog.cpp
+    src/ui/spectrummarkerpairsdialog.h
+    src/backends/fobosbackend.cpp
+    src/backends/fobosbackend.h
+    src/backends/fobosfrequencylimits.h
+    src/backends/hackrfbackend.cpp
+    src/backends/hackrfbackend.h
+    src/backends/rtlsdrbackend.cpp
+    src/backends/rtlsdrbackend.h
+    src/backends/soapysdrbackend.cpp
+    src/backends/soapysdrbackend.h
+    src/core/fftplannermutex.cpp
+    src/core/fftplannermutex.h
+    src/core/computebudgetmanager.cpp
+    src/core/computebudgetmanager.h
+    src/core/dspsourceidentity.cpp
+    src/core/dspsourceidentity.h
+    src/core/coherentiqaligner.cpp
+    src/core/coherentiqaligner.h
+    src/core/coherentiqlive.cpp
+    src/core/coherentiqlive.h
+    src/core/coherentiqsession.cpp
+    src/core/coherentiqsession.h
+    src/core/dspiqsourceregistry.cpp
+    src/core/dspiqsourceregistry.h
+    src/app_resources.qrc
+)
+if(WIN32)
+    target_sources(ObriiAnalyzer PRIVATE packaging/windows/fobosapp.rc)
+endif()
+add_executable(ObriiFpgaLab
+    src/ui/apphelp.cpp
+    src/ui/apphelp.h
+    src/fpgalab/fpgalabmain.cpp
+    src/fpgalab/fpgalabwindow.cpp
+    src/fpgalab/fpgalabwindow.h
+    src/fpgalab/fpgapipelinecompiler.cpp
+    src/fpgalab/fpgapipelinecompiler.h
+    src/fpgalab/fpgalogicblock.cpp
+    src/fpgalab/fpgalogicblock.h
+    src/fpgalab/fpgalogiceditor.cpp
+    src/fpgalab/fpgalogiceditor.h
+    src/fpgalab/openxc7project.cpp
+    src/fpgalab/openxc7project.h
+    src/app_resources.qrc)
+target_link_libraries(ObriiFpgaLab PRIVATE Qt5::Core Qt5::Widgets)
+target_include_directories(ObriiFpgaLab PRIVATE src/ui)
+add_executable(ObriiFpgaLabSelfTest EXCLUDE_FROM_ALL
+    tools/fpgalab_selftest.cpp
+    src/ui/apphelp.cpp
+    src/ui/apphelp.h
+    src/fpgalab/fpgalabwindow.cpp
+    src/fpgalab/fpgalabwindow.h
+    src/fpgalab/fpgapipelinecompiler.cpp
+    src/fpgalab/fpgapipelinecompiler.h
+    src/fpgalab/fpgalogicblock.cpp
+    src/fpgalab/fpgalogicblock.h
+    src/fpgalab/fpgalogiceditor.cpp
+    src/fpgalab/fpgalogiceditor.h
+    src/fpgalab/openxc7project.cpp
+    src/fpgalab/openxc7project.h)
+target_include_directories(ObriiFpgaLabSelfTest PRIVATE src/fpgalab)
+target_include_directories(ObriiFpgaLabSelfTest PRIVATE src/ui)
+target_link_libraries(ObriiFpgaLabSelfTest PRIVATE Qt5::Core Qt5::Widgets)
+if(WIN32)
+    target_sources(ObriiFpgaLab PRIVATE packaging/windows/fobosapp.rc)
+endif()
+if(MSVC)
+    target_compile_options(ObriiFpgaLab PRIVATE /utf-8)
+    target_compile_options(ObriiFpgaLabSelfTest PRIVATE /utf-8)
+endif()
+add_executable(ObriiOpenXc7ProjectSelfTest EXCLUDE_FROM_ALL
+    tools/openxc7_project_selftest.cpp
+    src/fpgalab/openxc7project.cpp
+    src/fpgalab/openxc7project.h)
+target_include_directories(ObriiOpenXc7ProjectSelfTest PRIVATE src/fpgalab)
+target_link_libraries(ObriiOpenXc7ProjectSelfTest PRIVATE Qt5::Core)
+if(MSVC)
+    target_compile_options(ObriiOpenXc7ProjectSelfTest PRIVATE /utf-8)
+endif()
+add_executable(ObriiFpgaPipelineCompilerSelfTest EXCLUDE_FROM_ALL
+    tools/fpgapipeline_compiler_selftest.cpp
+    src/fpgalab/fpgapipelinecompiler.cpp
+    src/fpgalab/fpgapipelinecompiler.h
+    src/fpgalab/fpgalogicblock.cpp
+    src/fpgalab/fpgalogicblock.h)
+target_include_directories(ObriiFpgaPipelineCompilerSelfTest PRIVATE src/fpgalab)
+target_link_libraries(ObriiFpgaPipelineCompilerSelfTest PRIVATE Qt5::Core)
+if(MSVC)
+    target_compile_options(ObriiFpgaPipelineCompilerSelfTest PRIVATE /utf-8)
+endif()
+add_executable(ObriiFpgaLogicBlockSelfTest EXCLUDE_FROM_ALL
+    tools/fpgalogicblock_selftest.cpp
+    src/fpgalab/fpgalogicblock.cpp
+    src/fpgalab/fpgalogicblock.h)
+target_include_directories(ObriiFpgaLogicBlockSelfTest PRIVATE src/fpgalab)
+target_link_libraries(ObriiFpgaLogicBlockSelfTest PRIVATE Qt5::Core)
+if(MSVC)
+    target_compile_options(ObriiFpgaLogicBlockSelfTest PRIVATE /utf-8)
+endif()
+target_include_directories(ObriiAnalyzer PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/analyzer
+    ${CMAKE_SOURCE_DIR}/src/backends
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/research
+    ${CMAKE_SOURCE_DIR}/src/ui
+    ${FOBOS_STANDARD_INCLUDE_DIR}
+    ${FOBOS_AGILE_INCLUDE_DIR}
+    ${FFTW_INCLUDE_DIR}
+)
+target_compile_definitions(ObriiAnalyzer PRIVATE OBRII_ANALYZER_VERSION="${PROJECT_VERSION}")
+target_link_libraries(ObriiAnalyzer PRIVATE
+    ObriiMeasurementCore
+    ${FOBOS_STANDARD_LIBRARY}
+    ${FOBOS_AGILE_LIBRARY}
+    ${FFTW_FLOAT_LIBRARY}
+    Qt5::Core Qt5::Widgets Qt5::Network Qt5::Concurrent)
+if(NOT WIN32)
+    target_link_libraries(ObriiAnalyzer PRIVATE Threads::Threads)
+endif()
+if(MSVC)
+    target_compile_options(ObriiAnalyzer PRIVATE /utf-8)
+    target_compile_definitions(ObriiAnalyzer PRIVATE FOBOSAPP_HAS_FFTW_THREADS=1)
+endif()
+set(OBRII_RUNTIME_OUTPUT_DIR "" CACHE PATH "Persistent local runtime directory for the Windows application")
+if(WIN32 AND OBRII_RUNTIME_OUTPUT_DIR)
+    set_target_properties(ObriiCliGnssModule PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+    set_target_properties(ObriiSDR PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+    set_target_properties(ObriiAnalyzer PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+    set_target_properties(ObriiFpgaLab PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+    set_target_properties(ObriiIqHub PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+    set_target_properties(ObriiCli PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+    set_target_properties(ObriiCliModule PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+    set_target_properties(ObriiCliPacketModule PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+    set_target_properties(ObriiCliImageModule PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+    set_target_properties(ObriiCliSpectrumModule PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+    set_target_properties(ObriiCliM17Module PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+    set_target_properties(ObriiCliTxModule PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+    set_target_properties(ObriiCliView PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+endif()
+option(FOBOS_ENABLE_HF_PREDICTION "Optional isolated ITU HF planning dialog" ON)
+if(FOBOS_ENABLE_HF_PREDICTION)
+    add_subdirectory(src/propagation/ituhf)
+    target_link_libraries(ObriiSDR PRIVATE $<LINK_ONLY:fobos_hf_prediction>)
+    set_source_files_properties(src/research/propagationlabdialog.cpp PROPERTIES COMPILE_DEFINITIONS FOBOS_ENABLE_HF_PREDICTION=1)
+endif()
+
+if(MSVC)
+    target_compile_options(ObriiSDR PRIVATE /utf-8)
+endif()
+
+target_compile_definitions(ObriiSDR PRIVATE FOBOSAPP_VERSION="${PROJECT_VERSION}")
+
+# Desktop receive extensions stay optional for independently-built CLI modules.
+add_library(ObriiExtraReceiveModes STATIC
+    src/digital/ft4audiodecoder.cpp src/digital/ft4audiodecoder.h
+    src/digital/m17audiodecoder.cpp src/digital/m17audiodecoder.h
+    third_party/ft8_lib/ft8/decode.c third_party/ft8_lib/ft8/ldpc.c
+    third_party/ft8_lib/ft8/constants.c third_party/ft8_lib/ft8/crc.c
+    third_party/ft8_lib/ft8/message.c third_party/ft8_lib/ft8/text.c)
+target_include_directories(ObriiExtraReceiveModes PUBLIC src/digital
+    PRIVATE src/core ${FFTW_INCLUDE_DIR} third_party/ft8_lib third_party/libm17)
+target_link_libraries(ObriiExtraReceiveModes PUBLIC Qt5::Core ObriiM17 ${FFTW_FLOAT_LIBRARY})
+if(MSVC)
+    target_compile_options(ObriiExtraReceiveModes PRIVATE /utf-8)
+endif()
+target_link_libraries(ObriiSDR PRIVATE ObriiExtraReceiveModes)
+target_compile_definitions(ObriiSDR PRIVATE OBRII_HAS_EXTRA_RECEIVE_MODES=1)
+target_link_libraries(ObriiCliModule PRIVATE ObriiExtraReceiveModes)
+target_compile_definitions(ObriiCliModule PRIVATE OBRII_HAS_EXTRA_RECEIVE_MODES=1)
+target_sources(ObriiCliModule PRIVATE src/core/fftplannermutex.cpp)
+
+add_executable(ObriiExtraReceiveModesSelfTest EXCLUDE_FROM_ALL
+    tools/extra_receive_modes_selftest.cpp src/core/fftplannermutex.cpp
+    src/audio/audioprocessor.cpp src/audio/audioprocessor.h src/audio/audiofilterchain.cpp
+    src/core/iqbuffer.cpp src/core/iqchannelizer.cpp src/core/channelizerutils.cpp
+    src/openradio/m17adapter.cpp third_party/ft8_lib/ft8/encode.c)
+target_include_directories(ObriiExtraReceiveModesSelfTest PRIVATE
+    src/core src/audio src/openradio ${FFTW_INCLUDE_DIR} third_party/libm17 third_party/ft8_lib)
+target_link_libraries(ObriiExtraReceiveModesSelfTest PRIVATE ObriiExtraReceiveModes)
+obrii_register_selftest(ObriiExtraReceiveModesSelfTest)
+add_dependencies(ObriiExtraReceiveModesSelfTest ObriiCliModule)
+if(WIN32 AND OBRII_RUNTIME_OUTPUT_DIR)
+    add_test(NAME ObriiCliExtraReceiveWorkerSelfTest COMMAND ${CMAKE_COMMAND} -E env
+        "PATH=${OBRII_RUNTIME_OUTPUT_DIR};$ENV{PATH}"
+        $<TARGET_FILE:ObriiExtraReceiveModesSelfTest> --cli-worker $<TARGET_FILE:ObriiCliModule>)
+else()
+    add_test(NAME ObriiCliExtraReceiveWorkerSelfTest
+        COMMAND ObriiExtraReceiveModesSelfTest --cli-worker $<TARGET_FILE:ObriiCliModule>)
+endif()
+set_tests_properties(ObriiCliExtraReceiveWorkerSelfTest PROPERTIES TIMEOUT 90)
+if(WIN32)
+    target_link_libraries(ObriiExtraReceiveModesSelfTest PRIVATE winmm)
+endif()
+if(MSVC)
+    target_compile_options(ObriiExtraReceiveModesSelfTest PRIVATE /utf-8)
+endif()
+
+target_include_directories(ObriiSDR PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/audio
+    ${CMAKE_SOURCE_DIR}/src/backends
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/digital
+    ${CMAKE_SOURCE_DIR}/src/gnss
+    ${CMAKE_SOURCE_DIR}/src/mainwindow
+    ${CMAKE_SOURCE_DIR}/src/network
+    ${CMAKE_SOURCE_DIR}/src/openradio
+    ${CMAKE_SOURCE_DIR}/src/presets
+    ${CMAKE_SOURCE_DIR}/src/research
+    ${CMAKE_SOURCE_DIR}/src/scan
+    ${CMAKE_SOURCE_DIR}/src/ui
+    ${CMAKE_SOURCE_DIR}/src/utils
+    ${CMAKE_SOURCE_DIR}/src/transmit
+    ${CMAKE_SOURCE_DIR}/src/wireless
+    ${CMAKE_SOURCE_DIR}/third_party/ft8_lib
+    ${CMAKE_SOURCE_DIR}/FobosDMRVoiceBackend-gpl/include
+    ${FOBOS_STANDARD_INCLUDE_DIR}
+    ${FOBOS_AGILE_INCLUDE_DIR}
+    ${FFTW_INCLUDE_DIR}
+)
+
+target_link_libraries(ObriiSDR PRIVATE
+    ObriiDmrCrypto
+    ObriiItm
+    ObriiMeasurementCore
+    ObriiOpenRadio
+    ${FOBOS_STANDARD_LIBRARY}
+    ${FOBOS_AGILE_LIBRARY}
+    ${FFTW_FLOAT_LIBRARY}
+    Qt5::Core
+    Qt5::Widgets
+    Qt5::Network
+    Qt5::SerialPort
+    Qt5::Concurrent
+)
+
+if(FOBOS_HAS_VKFFT)
+    target_include_directories(ObriiSDR PRIVATE
+        "${CMAKE_SOURCE_DIR}/third_party/VkFFT/vkFFT"
+        "${Vulkan_INCLUDE_DIR}/glslang/Include"
+    )
+    target_compile_definitions(ObriiSDR PRIVATE
+        FOBOSAPP_HAS_VKFFT=1
+        VKFFT_BACKEND=0
+        VK_API_VERSION=11
+    )
+    set_source_files_properties(src/core/gpufftbackend.cpp PROPERTIES
+        COMPILE_DEFINITIONS "_CRT_SECURE_NO_WARNINGS"
+    )
+    target_link_libraries(ObriiSDR PRIVATE
+        Vulkan::Vulkan
+        Vulkan::glslang
+        Vulkan::SPIRV-Tools
+        ${VKFFT_SPIRV_TOOLS_OPT_LIBRARY}
+    )
+    if(MSVC)
+        target_link_options(ObriiSDR PRIVATE "/DELAYLOAD:vulkan-1.dll")
+        target_link_libraries(ObriiSDR PRIVATE delayimp)
+    endif()
+endif()
+
+if(FOBOS_HAS_VKFFT AND FOBOS_BUILD_GPU_FFT_SELFTEST)
+    add_executable(FobosGpuFftSelfTest
+        tools/vkfft_selftest.cpp
+        src/core/gpufftbackend.cpp
+        src/core/gpufftbackend.h
+    )
+    target_include_directories(FobosGpuFftSelfTest PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/core"
+        "${CMAKE_SOURCE_DIR}/third_party/VkFFT/vkFFT"
+        "${Vulkan_INCLUDE_DIR}/glslang/Include"
+        "${FFTW_INCLUDE_DIR}"
+    )
+    target_compile_definitions(FobosGpuFftSelfTest PRIVATE
+        FOBOSAPP_HAS_VKFFT=1
+        VKFFT_BACKEND=0
+        VK_API_VERSION=11
+        _CRT_SECURE_NO_WARNINGS
+    )
+    target_link_libraries(FobosGpuFftSelfTest PRIVATE
+        Qt5::Core
+        ${FFTW_FLOAT_LIBRARY}
+        Vulkan::Vulkan
+        Vulkan::glslang
+        Vulkan::SPIRV-Tools
+        ${VKFFT_SPIRV_TOOLS_OPT_LIBRARY}
+    )
+endif()
+
+find_path(OBRII_HDF5_INCLUDE_DIR hdf5.h
+    HINTS "${CMAKE_SOURCE_DIR}/build/deps/hdf5-runtime/HDF5-1.14.6-win64/include"
+    PATH_SUFFIXES hdf5/serial)
+if(OBRII_HDF5_INCLUDE_DIR)
+    target_include_directories(ObriiSDR PRIVATE ${OBRII_HDF5_INCLUDE_DIR})
+    target_compile_definitions(ObriiSDR PRIVATE OBRII_HAS_HDF5_HEADERS=1)
+endif()
+
+if(FOBOS_BUILD_CW_SELFTEST)
+    add_executable(ObriiVirtualIqMediumSelfTest tools/virtual_iq_medium_selftest.cpp)
+    target_link_libraries(ObriiVirtualIqMediumSelfTest PRIVATE ObriiOpenRadio Qt5::Core)
+    if(MSVC)
+        target_compile_options(ObriiVirtualIqMediumSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiVirtualIqHubSelfTest tools/virtual_iq_hub_selftest.cpp)
+    target_link_libraries(ObriiVirtualIqHubSelfTest PRIVATE ObriiOpenRadio Qt5::Core)
+    if(MSVC)
+        target_compile_options(ObriiVirtualIqHubSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiVirtualIqHubControlSelfTest tools/virtual_iq_hub_control_selftest.cpp
+        src/openradio/virtualiqhubcontrol.cpp src/openradio/virtualiqhubcontrol.h)
+    target_link_libraries(ObriiVirtualIqHubControlSelfTest PRIVATE ObriiOpenRadio Qt5::Core Qt5::Network)
+    if(MSVC)
+        target_compile_options(ObriiVirtualIqHubControlSelfTest PRIVATE /utf-8)
+    endif()
+    add_test(NAME ObriiVirtualIqHubControlSelfTest COMMAND ObriiVirtualIqHubControlSelfTest)
+
+    add_executable(ObriiVirtualIqHubNetworkSelfTest tools/virtual_iq_hub_network_selftest.cpp)
+    target_link_libraries(ObriiVirtualIqHubNetworkSelfTest PRIVATE ObriiOpenRadio Qt5::Core Qt5::Network)
+    if(MSVC)
+        target_compile_options(ObriiVirtualIqHubNetworkSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiDisplaySpectrumCodecSelfTest
+        tools/display_spectrum_codec_selftest.cpp
+        src/network/displayspectrumcodec.cpp)
+    target_include_directories(ObriiDisplaySpectrumCodecSelfTest PRIVATE src/network)
+    target_link_libraries(ObriiDisplaySpectrumCodecSelfTest PRIVATE Qt5::Core)
+    if(MSVC)
+        target_compile_options(ObriiDisplaySpectrumCodecSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiVirtualSignalSelfTest
+        tools/virtual_signal_transport_selftest.cpp
+        src/transmit/virtualtransmitterbackend.cpp
+        src/transmit/virtualtransmitterbackend.h)
+    target_include_directories(ObriiVirtualSignalSelfTest PRIVATE src src/openradio src/transmit)
+    target_link_libraries(ObriiVirtualSignalSelfTest PRIVATE ObriiOpenRadio Qt5::Core Qt5::Network)
+    if(MSVC)
+        target_compile_options(ObriiVirtualSignalSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiOpenRadioSelfTest tools/open_radio_selftest.cpp)
+    target_include_directories(ObriiOpenRadioSelfTest PRIVATE src/openradio)
+    target_link_libraries(ObriiOpenRadioSelfTest PRIVATE ObriiOpenRadio Qt5::Core)
+    if(MSVC)
+        target_compile_options(ObriiOpenRadioSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiInstrumentSweepSelfTest tools/instrument_sweep_selftest.cpp)
+    target_include_directories(ObriiInstrumentSweepSelfTest PRIVATE src/analyzer)
+    target_link_libraries(ObriiInstrumentSweepSelfTest PRIVATE ObriiMeasurementCore Qt5::Core)
+    if(MSVC)
+        target_compile_options(ObriiInstrumentSweepSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiAnalyzerInstrumentPlanSelfTest tools/analyzer_instrument_plan_selftest.cpp)
+    target_include_directories(ObriiAnalyzerInstrumentPlanSelfTest PRIVATE src/analyzer)
+    target_link_libraries(ObriiAnalyzerInstrumentPlanSelfTest PRIVATE ObriiMeasurementCore Qt5::Core)
+    if(MSVC)
+        target_compile_options(ObriiAnalyzerInstrumentPlanSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiAnalyzerFrameChannelSelfTest tools/analyzer_frame_channel_selftest.cpp)
+    target_include_directories(ObriiAnalyzerFrameChannelSelfTest PRIVATE src/analyzer)
+    target_link_libraries(ObriiAnalyzerFrameChannelSelfTest PRIVATE ObriiMeasurementCore Qt5::Core Qt5::Network)
+    if(MSVC)
+        target_compile_options(ObriiAnalyzerFrameChannelSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiSpectrumMosaicSelfTest tools/spectrum_mosaic_selftest.cpp)
+    target_include_directories(ObriiSpectrumMosaicSelfTest PRIVATE src/analyzer)
+    target_link_libraries(ObriiSpectrumMosaicSelfTest PRIVATE ObriiMeasurementCore Qt5::Core)
+    if(MSVC)
+        target_compile_options(ObriiSpectrumMosaicSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiFpvAutoScanSelfTest tools/fpv_autoscan_selftest.cpp
+        src/digital/fpvautoscancontroller.cpp)
+    target_include_directories(ObriiFpvAutoScanSelfTest PRIVATE src/digital)
+    if(MSVC)
+        target_compile_options(ObriiFpvAutoScanSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiExperimentBundleSelfTest tools/experiment_bundle_selftest.cpp
+        src/research/experimentbundle.cpp src/research/spectrumframerecorder.cpp)
+    target_include_directories(ObriiExperimentBundleSelfTest PRIVATE src/research src/core src/ui src/utils)
+    target_link_libraries(ObriiExperimentBundleSelfTest PRIVATE Qt5::Core Qt5::Gui)
+    if(MSVC)
+        target_compile_options(ObriiExperimentBundleSelfTest PRIVATE /utf-8)
+    endif()
+    add_executable(ObriiSpectrumPersistenceSelfTest tools/spectrum_persistence_selftest.cpp)
+    target_include_directories(ObriiSpectrumPersistenceSelfTest PRIVATE src/ui)
+    target_link_libraries(ObriiSpectrumPersistenceSelfTest PRIVATE Qt5::Core Qt5::Gui)
+
+    add_executable(ObriiReceiverRefreshSelfTest tools/receiver_refresh_selftest.cpp
+        src/utils/fobosdevicecatalog.cpp src/utils/receiverdeviceutils.cpp)
+    target_include_directories(ObriiReceiverRefreshSelfTest PRIVATE src/core src/utils)
+    target_link_libraries(ObriiReceiverRefreshSelfTest PRIVATE Qt5::Core)
+
+    add_executable(ObriiScienceSelfTest tools/science_selftest.cpp
+        src/research/tonalspectrum.cpp src/research/receivercalibrationtable.cpp
+        src/research/receivernoisebaseline.cpp
+        src/research/receiveryfactorcalibration.cpp
+        src/research/spectrumscienceanalyzer.cpp src/research/spectrumframerecorder.cpp
+        src/research/hdf5spectrumexport.cpp)
+    target_include_directories(ObriiScienceSelfTest PRIVATE src/research src/core src/ui src/utils)
+    target_link_libraries(ObriiScienceSelfTest PRIVATE Qt5::Core)
+
+    add_executable(ObriiReceiverNoiseSelfTest tools/receiver_noise_selftest.cpp
+        src/research/receivercalibrationtable.cpp
+        src/research/receivernoisebaseline.cpp
+        src/research/receiveryfactorcalibration.cpp)
+    target_include_directories(ObriiReceiverNoiseSelfTest PRIVATE src/research src/core)
+    target_link_libraries(ObriiReceiverNoiseSelfTest PRIVATE Qt5::Core)
+    if(OBRII_HDF5_INCLUDE_DIR)
+        target_include_directories(ObriiScienceSelfTest PRIVATE ${OBRII_HDF5_INCLUDE_DIR})
+        target_compile_definitions(ObriiScienceSelfTest PRIVATE OBRII_HAS_HDF5_HEADERS=1)
+    endif()
+
+    add_executable(ObriiPsk31SelfTest tools/psk31_selftest.cpp src/digital/psk31audiodecoder.cpp)
+    add_executable(ObriiSpaceEventsSelfTest tools/spaceevents_selftest.cpp
+        src/research/spaceeventsfeed.cpp src/research/spaceeventsfeed.h src/research/publicdatafetch.cpp
+        src/research/solarconditionswidget.cpp src/research/solarconditionswidget.h src/utils/appsettingsutils.cpp)
+    target_include_directories(ObriiSpaceEventsSelfTest PRIVATE src/research src/utils)
+    target_link_libraries(ObriiSpaceEventsSelfTest PRIVATE Qt5::Widgets Qt5::Network)
+    if(WIN32)
+        target_link_libraries(ObriiSpaceEventsSelfTest PRIVATE winhttp)
+    endif()
+    if(MSVC)
+        target_compile_options(ObriiSpaceEventsSelfTest PRIVATE /utf-8)
+    endif()
+    add_executable(ObriiExternalBackendSelfTest tools/external_backend_selftest.cpp
+        src/gnss/gnsssdrstream.cpp src/gnss/gnsssdrstream.h
+        src/gnss/gnsssdrpvtdialog.cpp src/gnss/gnsssdrpvtdialog.h
+        src/digital/lrptdecodedialog.cpp src/digital/lrptdecodedialog.h
+        src/core/iqbuffer.cpp src/audio/playbackmanager.cpp src/audio/playbackmanager.h src/utils/samplefileutils.cpp)
+    target_include_directories(ObriiExternalBackendSelfTest PRIVATE src/gnss src/digital src/core src/audio src/utils)
+    target_link_libraries(ObriiExternalBackendSelfTest PRIVATE Qt5::Widgets Qt5::Network)
+    if(MSVC)
+        target_compile_options(ObriiExternalBackendSelfTest PRIVATE /utf-8)
+    endif()
+    target_include_directories(ObriiPsk31SelfTest PRIVATE src/digital)
+    target_link_libraries(ObriiPsk31SelfTest PRIVATE Qt5::Core)
+    add_executable(ObriiDiagnosticLoggingSelfTest
+        tools/diagnostic_logging_selftest.cpp src/core/appdiagnostics.cpp)
+    target_include_directories(ObriiDiagnosticLoggingSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+    target_link_libraries(ObriiDiagnosticLoggingSelfTest PRIVATE Qt5::Core)
+    if(WIN32)
+        target_link_libraries(ObriiDiagnosticLoggingSelfTest PRIVATE psapi)
+    endif()
+
+    add_executable(ObriiPropagationSelfTest
+        tools/propagation_selftest.cpp
+        src/research/radiopropagation.cpp
+        src/research/maptilerterrain.cpp
+        src/research/propagationlabdialog.cpp src/research/propagationlabdialog.h
+        src/utils/appsettingsutils.cpp
+        src/research/solarconditionswidget.cpp src/research/solarconditionswidget.h
+        src/research/publicdatafetch.cpp src/research/spaceeventsfeed.cpp src/research/spaceeventsfeed.h
+        src/digital/ft8stationutils.cpp src/digital/ft8countrycatalog.cpp
+        src/gnss/qthmapwidget.cpp src/gnss/qthmapwidget.h src/gnss/qthlocator.cpp
+        src/app_resources.qrc)
+    target_include_directories(ObriiPropagationSelfTest PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/core
+        ${CMAKE_SOURCE_DIR}/src/research ${CMAKE_SOURCE_DIR}/src/digital ${CMAKE_SOURCE_DIR}/src/gnss)
+    target_include_directories(ObriiPropagationSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src/utils)
+    target_link_libraries(ObriiPropagationSelfTest PRIVATE ObriiItm Qt5::Widgets Qt5::Network)
+    if(FOBOS_ENABLE_HF_PREDICTION)
+        target_link_libraries(ObriiPropagationSelfTest PRIVATE $<LINK_ONLY:fobos_hf_prediction>)
+    endif()
+    if(WIN32)
+        target_link_libraries(ObriiPropagationSelfTest PRIVATE winhttp)
+    endif()
+    if(MSVC)
+        target_compile_options(ObriiPropagationSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiFftSnapshotSelfTest tools/fft_snapshot_selftest.cpp tools/fft_test_globals.cpp
+        src/core/fft.cpp src/core/fft.h src/core/gpufftbackend.cpp src/core/iqbuffer.cpp
+        src/core/computebudgetmanager.cpp src/core/fftplannermutex.cpp)
+    target_include_directories(ObriiFftSnapshotSelfTest PRIVATE src/core ${FFTW_INCLUDE_DIR})
+    target_link_libraries(ObriiFftSnapshotSelfTest PRIVATE Qt5::Core Qt5::Concurrent ${FFTW_FLOAT_LIBRARY})
+    if(MSVC)
+        target_compile_options(ObriiFftSnapshotSelfTest PRIVATE /utf-8)
+    else()
+        target_link_libraries(ObriiFftSnapshotSelfTest PRIVATE Threads::Threads)
+    endif()
+
+    add_executable(ObriiSpectrumComputeSelfTest tools/spectrum_compute_selftest.cpp tools/fft_test_globals.cpp
+        src/core/spectrumcomputesession.cpp src/core/dspstreammanager.cpp src/core/dspstreamprocessor.cpp src/core/dspiqcodec.cpp src/core/dspconnectionprobe.cpp
+        src/core/dspsourceidentity.cpp src/core/computebudgetmanager.cpp
+        src/core/fft.cpp src/core/fft.h src/core/gpufftbackend.cpp src/core/iqbuffer.cpp src/core/fftplannermutex.cpp
+        src/utils/remotespectrumworker.cpp src/utils/spectrumfftworker.cpp)
+    target_include_directories(ObriiSpectrumComputeSelfTest PRIVATE src/core src/utils ${FFTW_INCLUDE_DIR})
+    target_link_libraries(ObriiSpectrumComputeSelfTest PRIVATE Qt5::Core Qt5::Network Qt5::Concurrent ${FFTW_FLOAT_LIBRARY})
+    if(MSVC)
+        target_compile_options(ObriiSpectrumComputeSelfTest PRIVATE /utf-8)
+    else()
+        target_link_libraries(ObriiSpectrumComputeSelfTest PRIVATE Threads::Threads)
+    endif()
+
+    add_executable(ObriiDspStreamSelfTest tools/dsp_stream_selftest.cpp tools/dsp_stream_recorder_test.cpp tools/dsp_connection_probe_selftest.cpp
+        src/core/dspstreamprocessor.cpp src/core/dspiqcodec.cpp src/core/dspstreammanager.cpp src/core/dspconnectionprobe.cpp src/core/dspstreamrecorder.cpp src/core/fftplannermutex.cpp
+        src/core/spectrumcomputesession.cpp src/core/fft.cpp src/core/gpufftbackend.cpp src/core/iqbuffer.cpp
+        src/core/dspsourceidentity.cpp src/core/dspiqsourceregistry.cpp src/core/computebudgetmanager.cpp tools/fft_test_globals.cpp)
+    target_include_directories(ObriiDspStreamSelfTest PRIVATE src/core ${FFTW_INCLUDE_DIR})
+    target_link_libraries(ObriiDspStreamSelfTest PRIVATE Qt5::Core Qt5::Network Qt5::Concurrent ${FFTW_FLOAT_LIBRARY})
+    if(MSVC)
+        target_compile_options(ObriiDspStreamSelfTest PRIVATE /utf-8)
+    else()
+        target_link_libraries(ObriiDspStreamSelfTest PRIVATE Threads::Threads)
+    endif()
+    add_executable(ObriiFrequencyControlSelfTest tools/frequency_control_selftest.cpp
+        src/ui/frequencycontrol.cpp src/ui/frequencycontrol.h)
+    target_include_directories(ObriiFrequencyControlSelfTest PRIVATE src/ui)
+    target_link_libraries(ObriiFrequencyControlSelfTest PRIVATE Qt5::Widgets)
+    add_executable(ObriiLiveCenterRetuneSelfTest EXCLUDE_FROM_ALL tools/live_center_retune_selftest.cpp)
+    target_include_directories(ObriiLiveCenterRetuneSelfTest PRIVATE src/core)
+    if(MSVC)
+        target_compile_options(ObriiFrequencyControlSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiCoherentIqSelfTest
+        tools/coherent_iq_selftest.cpp
+        src/analyzer/multisdrliveiq.cpp
+        src/analyzer/multisdrsignalalignment.cpp
+        src/core/iqchannelizer.cpp
+        src/core/channelizerutils.cpp
+        src/core/coherentiqlive.cpp
+        src/core/fftplannermutex.cpp
+        src/core/coherentiqaligner.cpp
+        src/core/coherentiqaligner.h
+        src/core/coherentiqsession.cpp
+        src/core/coherentiqsession.h
+        src/core/dspiqsourceregistry.cpp
+        src/core/dspiqsourceregistry.h
+        src/core/dspsourceidentity.cpp
+        src/core/dspsourceidentity.h)
+    target_include_directories(ObriiCoherentIqSelfTest PRIVATE src/core src/analyzer)
+    target_link_libraries(ObriiCoherentIqSelfTest PRIVATE Qt5::Core)
+    if(NOT WIN32)
+        target_link_libraries(ObriiCoherentIqSelfTest PRIVATE Threads::Threads)
+    endif()
+    obrii_register_selftest(ObriiCoherentIqSelfTest)
+    if(MSVC)
+        target_compile_options(ObriiCoherentIqSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiNetworkControllerSelfTest
+        tools/network_controller_selftest.cpp
+        src/network/networkcontroller.cpp
+        src/network/networkcontroller.h)
+    target_include_directories(ObriiNetworkControllerSelfTest PRIVATE src/network)
+    target_link_libraries(ObriiNetworkControllerSelfTest PRIVATE Qt5::Core Qt5::Network)
+    if(MSVC)
+        target_compile_options(ObriiNetworkControllerSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiDspFlowSelfTest
+        tools/dsp_flow_selftest.cpp
+        tools/dsp_branch_selftest.cpp
+        tools/dsp_branch_audio_selftest.cpp
+        tools/dsp_branch_audio_queue_selftest.cpp
+        tools/dsp_branch_remote_selftest.cpp
+        tools/remote_vfo_selftest.cpp
+        src/network/networkcontroller.cpp src/network/networkcontroller.h
+        src/ui/dspflowpanel.cpp src/ui/dspflowpanel.h
+        src/transmit/dspboardsignal.cpp src/transmit/signallabgenerator.cpp
+        src/transmit/dspboardqpskreceiver.cpp
+        src/transmit/virtualtransmitterbackend.cpp src/cli/clivirtualiqsource.cpp
+        src/ui/dspbranchsettingswidget.cpp src/ui/dspbranchsettingswidget.h
+        src/ui/multivfowidget.cpp src/ui/multivfowidget.h
+        src/ui/dspresearchwidget.cpp
+        src/research/iqconstellationpreview.cpp
+        src/transmit/signallabconstellation3d.cpp
+        src/ui/finetunewidget.cpp src/ui/finetunewidget.h
+        src/ui/MyWaterfallWidget.cpp src/ui/MyWaterfallWidget.h
+        src/ui/waterfall3drenderer.cpp
+        src/core/iqbuffer.cpp
+        src/core/dspgraphmodel.cpp src/core/dspbranchengine.cpp
+        src/core/dspstreamprocessor.cpp src/core/dspiqcodec.cpp src/core/dspstreammanager.cpp src/core/dspconnectionprobe.cpp
+        src/core/dspstreamrecorder.cpp
+        src/core/dspsourceidentity.cpp src/core/dspiqsourceregistry.cpp src/core/computebudgetmanager.cpp
+        src/core/spectrumcomputesession.cpp src/core/fft.cpp src/core/gpufftbackend.cpp tools/fft_test_globals.cpp
+        src/ui/dspcomputedialog.cpp src/ui/dspcomputedialog.h
+        src/core/iqchannelizer.cpp src/core/channelizerutils.cpp
+        src/core/pfbchannelizer.cpp
+        src/audio/audioprocessor.cpp src/audio/audioprocessor.h
+        src/audio/remoteaudioplayer.cpp src/audio/remoteaudioplayer.h
+        src/audio/dspbranchaudiooutput.cpp
+        src/network/remotevfoservice.cpp src/network/remotevfoservice.h
+        src/network/remotewebserver.cpp src/network/remotewebserver.h
+        src/core/fftplannermutex.cpp
+        src/ui/audiofilterchainwidget.cpp src/audio/audiofilterchain.cpp
+        src/scan/scanvisualassembler.cpp)
+    get_target_property(OBRII_DSP_TEST_INCLUDES ObriiSDR INCLUDE_DIRECTORIES)
+    target_include_directories(ObriiDspFlowSelfTest PRIVATE ${OBRII_DSP_TEST_INCLUDES})
+    target_link_libraries(ObriiDspFlowSelfTest PRIVATE ObriiOpenRadio Qt5::Core Qt5::Gui Qt5::Widgets Qt5::Network Qt5::Concurrent ${FFTW_FLOAT_LIBRARY})
+    target_compile_definitions(ObriiDspFlowSelfTest PRIVATE OBRII_VFO_SELFTEST=1)
+    if(WIN32)
+        target_link_libraries(ObriiDspFlowSelfTest PRIVATE opengl32 winmm)
+    else()
+        target_link_libraries(ObriiDspFlowSelfTest PRIVATE OpenGL::GL Threads::Threads)
+        if(Qt5Multimedia_FOUND)
+            target_link_libraries(ObriiDspFlowSelfTest PRIVATE Qt5::Multimedia)
+            target_compile_definitions(ObriiDspFlowSelfTest PRIVATE FOBOSAPP_HAS_QT_AUDIO=1)
+        endif()
+    endif()
+    if(MSVC)
+        target_compile_options(ObriiDspFlowSelfTest PRIVATE /utf-8)
+        target_compile_options(ObriiDspFlowSelfTest PRIVATE /Zi)
+        target_link_options(ObriiDspFlowSelfTest PRIVATE /DEBUG)
+        target_link_libraries(ObriiDspFlowSelfTest PRIVATE dbghelp)
+    endif()
+
+    add_executable(ObriiExperimentReplaySelfTest
+        tools/experiment_replay_ui_selftest.cpp tools/fft_test_globals.cpp
+        src/research/spectrumframereplaydialog.cpp src/research/spectrumframereplaydialog.h
+        src/research/spectrumframerecorder.cpp src/research/experimentbundle.cpp
+        src/ui/MyGraphWidget.cpp src/ui/MyGraphWidget.h
+        src/ui/scalewidget.cpp src/ui/scalewidget.h
+        src/ui/frequencycontrol.cpp src/ui/frequencycontrol.h
+        src/ui/waterfall3dview.cpp src/ui/waterfall3dview.h src/ui/waterfall3drenderer.cpp
+        src/audio/playbackmanager.cpp src/audio/playbackmanager.h
+        src/audio/audioprocessor.cpp src/audio/audioprocessor.h
+        src/audio/remoteaudioplayer.cpp src/audio/remoteaudioplayer.h
+        src/audio/dspbranchaudiooutput.cpp src/audio/audiofilterchain.cpp
+        src/core/iqbuffer.cpp src/core/iqchannelizer.cpp src/core/channelizerutils.cpp
+        src/utils/samplefileutils.cpp)
+    target_include_directories(ObriiExperimentReplaySelfTest PRIVATE ${OBRII_DSP_TEST_INCLUDES})
+    target_link_libraries(ObriiExperimentReplaySelfTest PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets Qt5::Network Qt5::Concurrent ${FFTW_FLOAT_LIBRARY})
+    if(WIN32)
+        target_link_libraries(ObriiExperimentReplaySelfTest PRIVATE opengl32 winmm)
+    else()
+        target_link_libraries(ObriiExperimentReplaySelfTest PRIVATE OpenGL::GL Threads::Threads)
+        if(Qt5Multimedia_FOUND)
+            target_link_libraries(ObriiExperimentReplaySelfTest PRIVATE Qt5::Multimedia)
+            target_compile_definitions(ObriiExperimentReplaySelfTest PRIVATE FOBOSAPP_HAS_QT_AUDIO=1)
+        endif()
+    endif()
+    if(MSVC)
+        target_compile_options(ObriiExperimentReplaySelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiSpectrumPipelineSelfTest
+        tools/spectrum_pipeline_selftest.cpp
+        src/utils/spectrumdisplayreducer.cpp)
+    target_include_directories(ObriiSpectrumPipelineSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src/utils)
+
+    add_executable(ObriiAdcOverloadGuardSelfTest tools/adc_overload_guard_selftest.cpp)
+    target_include_directories(ObriiAdcOverloadGuardSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+
+    add_executable(ObriiSpurCalibrationSelfTest tools/spur_calibration_selftest.cpp)
+    if(EXISTS "${OBRII_LOCAL_IF_HEADER}")
+        target_compile_definitions(ObriiSpurCalibrationSelfTest PRIVATE OBRII_LOCAL_FOBOS_IF_HEADER="${OBRII_LOCAL_IF_HEADER}")
+    endif()
+    target_include_directories(ObriiSpurCalibrationSelfTest PRIVATE src/core src/backends)
+    target_link_libraries(ObriiSpurCalibrationSelfTest PRIVATE Qt5::Core)
+    add_executable(ObriiAudioLifecycleSelfTest tools/audio_lifecycle_selftest.cpp)
+    target_include_directories(ObriiAudioLifecycleSelfTest PRIVATE src/core)
+    target_link_libraries(ObriiAudioLifecycleSelfTest PRIVATE Qt5::Core)
+
+    add_executable(ObriiIqChannelizerSelfTest tools/iq_channelizer_selftest.cpp
+        src/core/iqchannelizer.cpp src/core/channelizerutils.cpp src/core/iqbuffer.cpp)
+    target_include_directories(ObriiIqChannelizerSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src/core ${CMAKE_SOURCE_DIR}/src/utils)
+    target_link_libraries(ObriiIqChannelizerSelfTest PRIVATE Qt5::Core)
+    target_compile_definitions(ObriiIqChannelizerSelfTest PRIVATE OBRII_IQBUFFER_SELFTEST=1)
+    if(NOT WIN32)
+        target_link_libraries(ObriiIqChannelizerSelfTest PRIVATE Threads::Threads)
+    endif()
+
+    add_executable(ObriiPfbChannelizerSelfTest tools/pfb_channelizer_selftest.cpp
+        src/core/pfbchannelizer.cpp src/core/iqchannelizer.cpp src/core/channelizerutils.cpp
+        src/core/fftplannermutex.cpp)
+    target_include_directories(ObriiPfbChannelizerSelfTest PRIVATE src/core ${FFTW_INCLUDE_DIR})
+    target_link_libraries(ObriiPfbChannelizerSelfTest PRIVATE Qt5::Core ${FFTW_FLOAT_LIBRARY})
+    add_executable(ObriiGnuRadioProtocolSelfTest tools/gnu_radio_protocol_selftest.cpp
+        src/core/dspstreamprocessor.cpp src/core/dspiqcodec.cpp src/core/dspsourceidentity.cpp src/core/fftplannermutex.cpp)
+    target_include_directories(ObriiGnuRadioProtocolSelfTest PRIVATE src/core ${FFTW_INCLUDE_DIR})
+    target_link_libraries(ObriiGnuRadioProtocolSelfTest PRIVATE Qt5::Core ${FFTW_FLOAT_LIBRARY})
+    if(MSVC)
+        target_compile_options(ObriiPfbChannelizerSelfTest PRIVATE /utf-8)
+        target_compile_options(ObriiGnuRadioProtocolSelfTest PRIVATE /utf-8)
+    else()
+        target_link_libraries(ObriiPfbChannelizerSelfTest PRIVATE Threads::Threads)
+        target_link_libraries(ObriiGnuRadioProtocolSelfTest PRIVATE Threads::Threads)
+    endif()
+
+    add_executable(ObriiWirelessDmrSelfTest
+        tools/wireless_dmr_selftest.cpp
+        src/wireless/wirelesspackettools.cpp
+        src/wireless/wirelesscaptureworker.cpp
+        src/wireless/wirelesscaptureworker.h
+        src/wireless/wirelesslabdialog.cpp
+        src/wireless/wirelesslabdialog.h
+        src/wireless/wirelesspacketdetails.cpp
+        src/wireless/wirelesspacketdetails.h
+        src/wireless/wifiphywidget.cpp
+        src/wireless/wifiphywidget.h
+        src/wireless/wifiliveiqworker.cpp
+        src/wireless/wifiliveiqworker.h
+        src/digital/dsdneobridge.cpp
+        src/digital/dsdneobridge.h
+        src/utils/dmrprivacyutils.cpp
+    )
+    target_include_directories(ObriiWirelessDmrSelfTest PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/core ${CMAKE_SOURCE_DIR}/src/wireless
+        ${CMAKE_SOURCE_DIR}/src/digital)
+    target_include_directories(ObriiWirelessDmrSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src/utils)
+    target_link_libraries(ObriiWirelessDmrSelfTest PRIVATE Qt5::Core Qt5::Widgets Qt5::Network)
+    if(MSVC)
+        target_compile_options(ObriiWirelessDmrSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiGopherDmrSelfTest
+        tools/gopher_dmr_selftest.cpp
+        src/digital/gophertrunkbridge.cpp src/digital/gophertrunkbridge.h
+        src/digital/dmrdecoder.cpp src/digital/dmrdecoder.h)
+    target_include_directories(ObriiGopherDmrSelfTest PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/core ${CMAKE_SOURCE_DIR}/src/digital)
+    target_link_libraries(ObriiGopherDmrSelfTest PRIVATE Qt5::Core Qt5::Network)
+    if(MSVC)
+        target_compile_options(ObriiGopherDmrSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiDmrPipelineSelfTest
+        tools/dmr_pipeline_selftest.cpp
+        src/audio/audioprocessor.cpp src/audio/audioprocessor.h
+        src/audio/audiofilterchain.cpp
+        src/audio/recordingmanager.cpp src/audio/recordingmanager.h
+        src/audio/playbackmanager.cpp src/audio/playbackmanager.h
+        src/core/iqbuffer.cpp src/core/iqchannelizer.cpp src/core/channelizerutils.cpp)
+    get_target_property(OBRII_DMR_TEST_INCLUDES ObriiSDR INCLUDE_DIRECTORIES)
+    target_include_directories(ObriiDmrPipelineSelfTest PRIVATE ${OBRII_DMR_TEST_INCLUDES})
+    target_link_libraries(ObriiDmrPipelineSelfTest PRIVATE Qt5::Core ${FFTW_FLOAT_LIBRARY})
+    if(WIN32)
+        target_link_libraries(ObriiDmrPipelineSelfTest PRIVATE winmm)
+    else()
+        target_link_libraries(ObriiDmrPipelineSelfTest PRIVATE Threads::Threads)
+    endif()
+    if(MSVC)
+        target_compile_options(ObriiDmrPipelineSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiDmrPrivacySelfTest
+        tools/dmr_privacy_selftest.cpp
+        src/digital/dmrprivacyprocessor.cpp src/utils/dmrprivacyutils.cpp
+        src/digital/dmrdecoder.cpp)
+    target_include_directories(ObriiDmrPrivacySelfTest PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/digital ${CMAKE_SOURCE_DIR}/src/utils ${CMAKE_SOURCE_DIR}/src/core)
+    target_compile_definitions(ObriiDmrPrivacySelfTest PRIVATE OBRII_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(ObriiDmrPrivacySelfTest PRIVATE Qt5::Core ObriiDmrCrypto)
+    if(MSVC)
+        target_compile_options(ObriiDmrPrivacySelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(FobosCwDecoderSelfTest
+        tools/cw_decoder_selftest.cpp
+        src/digital/cwaudiodecoder.cpp
+        src/digital/cwaudiodecoder.h
+    )
+    target_include_directories(FobosCwDecoderSelfTest PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/digital
+    )
+    target_link_libraries(FobosCwDecoderSelfTest PRIVATE Qt5::Core)
+    if(MSVC)
+        target_compile_options(FobosCwDecoderSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(FobosTransmitSelfTest
+        tools/transmit_waveform_selftest.cpp
+        src/digital/ft8stationutils.cpp
+        src/digital/ft8countrycatalog.cpp
+        src/app_resources.qrc
+        src/gnss/qthlocator.cpp
+        src/digital/ft8stationutils.h
+        src/transmit/transmitwaveformgenerator.cpp
+        src/transmit/transmitwaveformgenerator.h
+        src/transmit/signallabgenerator.cpp
+        src/transmit/signallabgenerator.h
+        src/transmit/dmrtransmitencoder.cpp
+        src/transmit/dmrtransmitencoder.h
+        src/digital/dmrvocoder.cpp
+        src/digital/dmrvocoder.h
+        src/transmit/transmitmediagenerator.cpp
+        src/transmit/transmitmediagenerator.h
+        src/transmit/transmitterbackend.cpp
+        src/transmit/transmitterbackend.h
+        src/digital/videoprocessor.cpp
+        src/digital/videoprocessor.h
+        third_party/ft8_lib/ft8/constants.c
+        third_party/ft8_lib/ft8/crc.c
+        third_party/ft8_lib/ft8/encode.c
+        third_party/ft8_lib/ft8/message.c
+        third_party/ft8_lib/ft8/text.c
+    )
+    target_include_directories(FobosTransmitSelfTest PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/gnss
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/core
+        ${CMAKE_SOURCE_DIR}/src/digital
+        ${CMAKE_SOURCE_DIR}/src/transmit
+        ${CMAKE_SOURCE_DIR}/src/utils
+        ${CMAKE_SOURCE_DIR}/third_party/ft8_lib
+        ${CMAKE_SOURCE_DIR}/FobosDMRVoiceBackend-gpl/include
+        ${FFTW_INCLUDE_DIR}
+    )
+    target_link_libraries(FobosTransmitSelfTest PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets ObriiDmrCrypto ${FFTW_FLOAT_LIBRARY})
+    if(NOT WIN32)
+        target_link_libraries(FobosTransmitSelfTest PRIVATE Threads::Threads)
+    endif()
+    if(MSVC)
+        target_compile_options(FobosTransmitSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(ObriiSignalLabSelfTest tools/signal_lab_selftest.cpp
+        src/transmit/signallabgenerator.cpp src/transmit/signallabpreview.cpp
+        src/transmit/signallabconstellation3d.cpp
+        src/research/iqconstellationpreview.cpp)
+    target_include_directories(ObriiSignalLabSelfTest PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/core ${CMAKE_SOURCE_DIR}/src/transmit ${CMAKE_SOURCE_DIR}/src/research ${FFTW_INCLUDE_DIR})
+    target_link_libraries(ObriiSignalLabSelfTest PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets ${FFTW_FLOAT_LIBRARY})
+    if(NOT WIN32)
+        target_link_libraries(ObriiSignalLabSelfTest PRIVATE Threads::Threads)
+    endif()
+    if(MSVC)
+        target_compile_options(ObriiSignalLabSelfTest PRIVATE /utf-8)
+    endif()
+
+    add_executable(FobosSstvDecoderSelfTest
+        tools/sstv_decoder_selftest.cpp
+        src/digital/videoprocessor.cpp
+        src/digital/videoprocessor.h
+        src/audio/audioprocessor.cpp
+        src/audio/audioprocessor.h
+        src/audio/audiofilterchain.cpp
+        src/core/iqbuffer.cpp
+        src/core/iqchannelizer.cpp
+        src/core/channelizerutils.cpp
+        src/transmit/transmitmediagenerator.cpp
+        src/transmit/transmitmediagenerator.h
+        src/transmit/transmitwaveformgenerator.cpp
+        src/transmit/transmitwaveformgenerator.h
+        src/transmit/transmitterbackend.h
+        third_party/ft8_lib/ft8/constants.c
+        third_party/ft8_lib/ft8/crc.c
+        third_party/ft8_lib/ft8/encode.c
+        third_party/ft8_lib/ft8/message.c
+        third_party/ft8_lib/ft8/text.c
+    )
+    target_include_directories(FobosSstvDecoderSelfTest PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/core
+        ${CMAKE_SOURCE_DIR}/src/digital
+        ${CMAKE_SOURCE_DIR}/src/audio
+        ${CMAKE_SOURCE_DIR}/src/transmit
+        ${CMAKE_SOURCE_DIR}/src/utils
+        ${CMAKE_SOURCE_DIR}/third_party/ft8_lib
+        ${FFTW_INCLUDE_DIR}
+    )
+    target_link_libraries(FobosSstvDecoderSelfTest PRIVATE
+        Qt5::Core Qt5::Gui Qt5::Widgets ${FFTW_FLOAT_LIBRARY})
+    if(WIN32)
+        target_link_libraries(FobosSstvDecoderSelfTest PRIVATE winmm)
+    else()
+        target_link_libraries(FobosSstvDecoderSelfTest PRIVATE Threads::Threads)
+    endif()
+    if(MSVC)
+        target_compile_options(FobosSstvDecoderSelfTest PRIVATE /utf-8)
+    endif()
+    obrii_register_selftest(ObriiNetworkControllerSelfTest)
+    obrii_register_selftest(ObriiSpectrumComputeSelfTest)
+    obrii_register_selftest(ObriiSpectrumPersistenceSelfTest)
+    if(WIN32)
+        obrii_register_selftest(ObriiDspFlowSelfTest)
+    endif()
+endif()
+
+if(WIN32)
+    target_compile_definitions(ObriiSDR PRIVATE FOBOSAPP_HAS_FFTW_THREADS=1)
+elseif(FFTW_FLOAT_THREADS_LIBRARY)
+    target_link_libraries(ObriiSDR PRIVATE ${FFTW_FLOAT_THREADS_LIBRARY})
+    target_compile_definitions(ObriiSDR PRIVATE FOBOSAPP_HAS_FFTW_THREADS=1)
+else()
+    message(STATUS "FFTW threads library not found; large FFT plans will remain single-threaded.")
+endif()
+
+if(FOBOS_HAS_MBELIB_NEO)
+    target_link_libraries(ObriiSDR PRIVATE mbe_neo::mbe_static)
+    target_compile_definitions(ObriiSDR PRIVATE FOBOSAPP_HAS_MBELIB_NEO=1)
+endif()
+
+if(WIN32)
+    target_link_libraries(ObriiSDR PRIVATE winmm opengl32 winhttp ole32)
+else()
+    target_link_libraries(ObriiSDR PRIVATE OpenGL::GL Threads::Threads)
+endif()
+
+if(Qt5Multimedia_FOUND)
+    target_link_libraries(ObriiSDR PRIVATE Qt5::Multimedia)
+    target_compile_definitions(ObriiSDR PRIVATE FOBOSAPP_HAS_QT_MULTIMEDIA=1)
+    if(NOT WIN32)
+        target_compile_definitions(ObriiSDR PRIVATE FOBOSAPP_HAS_QT_AUDIO=1)
+    endif()
+elseif(NOT WIN32)
+    message(WARNING "Qt5 Multimedia was not found. Linux audio playback will be disabled until the Qt Multimedia development package is installed.")
+endif()
+
+add_subdirectory(src/mesh)
+target_link_libraries(ObriiSDR PRIVATE ObriiMeshNode)
+target_link_libraries(ObriiCli PRIVATE ObriiMeshNode)
+if(WIN32 AND OBRII_RUNTIME_OUTPUT_DIR)
+    foreach(mesh_executable ObriiMeshDesigner ObriiMeshSim ObriiMeshNodeHost)
+        if(TARGET ${mesh_executable})
+            set_target_properties(${mesh_executable} PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY_RELEASE "${OBRII_RUNTIME_OUTPUT_DIR}")
+        endif()
+    endforeach()
+endif()
+
+install(TARGETS ObriiSDR ObriiIqHub ObriiCli ObriiCliModule ObriiCliGnssModule
+    ObriiCliPacketModule ObriiCliImageModule ObriiCliSpectrumModule
+    ObriiCliM17Module ObriiCliTxModule ObriiCliView RUNTIME DESTINATION bin)
+
+# Shared algorithms are statically linked: no DLL boundary or per-sample dispatch.
+add_library(ObriiFftTransformCore STATIC src/core/ffttransformcore.cpp src/core/ffttransformcore.h src/core/fftplanprofile.cpp)
+if(WIN32)
+    target_compile_definitions(ObriiFftTransformCore PRIVATE FOBOSAPP_HAS_FFTW_THREADS=1)
+elseif(FFTW_FLOAT_THREADS_LIBRARY)
+    target_compile_definitions(ObriiFftTransformCore PRIVATE FOBOSAPP_HAS_FFTW_THREADS=1)
+    target_link_libraries(ObriiFftTransformCore PUBLIC ${FFTW_FLOAT_THREADS_LIBRARY})
+endif()
+target_sources(ObriiSDR PRIVATE src/ui/ffttuningdialog.cpp)
+add_executable(ObriiFftTuningSelfTest EXCLUDE_FROM_ALL tools/fft_tuning_selftest.cpp src/core/fftplannermutex.cpp)
+target_link_libraries(ObriiFftTuningSelfTest PRIVATE ObriiFftTransformCore)
+if(WIN32 OR FFTW_FLOAT_THREADS_LIBRARY)
+    target_compile_definitions(ObriiFftTuningSelfTest PRIVATE OBRII_TUNING_TEST_THREADS=1)
+endif()
+add_executable(ObriiFftTuningUiSelfTest EXCLUDE_FROM_ALL tools/fft_tuning_ui_selftest.cpp src/ui/ffttuningdialog.cpp src/core/computebudgetmanager.cpp src/core/fftplannermutex.cpp)
+target_include_directories(ObriiFftTuningUiSelfTest PRIVATE src/ui src/core)
+target_link_libraries(ObriiFftTuningUiSelfTest PRIVATE ObriiFftTransformCore Qt5::Widgets)
+if(MSVC)
+    target_compile_options(ObriiFftTuningUiSelfTest PRIVATE /utf-8)
+endif()
+if(WIN32 AND OBRII_RUNTIME_OUTPUT_DIR)
+    add_test(NAME ObriiFftTuningSelfTest COMMAND ${CMAKE_COMMAND} -E env
+        "PATH=${OBRII_RUNTIME_OUTPUT_DIR};$ENV{PATH}"
+        $<TARGET_FILE:ObriiFftTuningSelfTest> $<TARGET_FILE:ObriiCli>)
+else()
+    add_test(NAME ObriiFftTuningSelfTest COMMAND ObriiFftTuningSelfTest $<TARGET_FILE:ObriiCli>)
+endif()
+set_tests_properties(ObriiFftTuningSelfTest PROPERTIES TIMEOUT 90)
+obrii_register_selftest(ObriiFftTuningUiSelfTest)
+target_include_directories(ObriiFftTransformCore PUBLIC src/core ${FFTW_INCLUDE_DIR})
+target_link_libraries(ObriiFftTransformCore PUBLIC Qt5::Core ${FFTW_FLOAT_LIBRARY})
+add_library(ObriiRecordingFormatCore STATIC src/core/recordingformatcore.cpp src/core/recordingformatcore.h)
+set_target_properties(ObriiFftTransformCore ObriiRecordingFormatCore
+    PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_include_directories(ObriiRecordingFormatCore PUBLIC src/core)
+target_link_libraries(ObriiRecordingFormatCore PUBLIC Qt5::Core)
+add_executable(ObriiFullIqRecordingSelfTest EXCLUDE_FROM_ALL
+    tools/full_iq_recording_selftest.cpp
+    src/core/iqchannelizer.cpp src/core/channelizerutils.cpp
+    src/digital/videoprocessor.cpp src/digital/videoprocessor.h
+    src/research/spectrumiqeventrecorder.cpp)
+target_include_directories(ObriiFullIqRecordingSelfTest PRIVATE src/core src/research src/utils src/digital)
+target_link_libraries(ObriiFullIqRecordingSelfTest PRIVATE ObriiRecordingFormatCore Qt5::Gui)
+if(MSVC)
+    target_compile_options(ObriiFullIqRecordingSelfTest PRIVATE /utf-8)
+endif()
+if(NOT WIN32)
+    target_link_libraries(ObriiFullIqRecordingSelfTest PRIVATE Threads::Threads)
+endif()
+obrii_register_selftest(ObriiFullIqRecordingSelfTest)
+add_executable(ObriiSharedFftCoreSelfTest EXCLUDE_FROM_ALL
+    tools/shared_fft_core_selftest.cpp tools/fft_test_globals.cpp
+    src/cli/clispectrummeter.cpp src/core/fft.cpp src/core/fft.h
+    src/core/gpufftbackend.cpp src/core/iqbuffer.cpp
+    src/core/computebudgetmanager.cpp src/core/fftplannermutex.cpp)
+target_include_directories(ObriiSharedFftCoreSelfTest PRIVATE src/core src/cli)
+target_link_libraries(ObriiSharedFftCoreSelfTest PRIVATE ObriiFftTransformCore Qt5::Concurrent)
+add_executable(ObriiSharedRecordingCoreSelfTest EXCLUDE_FROM_ALL
+    tools/shared_recording_core_selftest.cpp
+    src/audio/recordingmanager.cpp src/audio/recordingmanager.h
+    src/audio/playbackmanager.cpp src/audio/playbackmanager.h
+    src/research/spectrumiqeventrecorder.cpp src/research/spectrumiqeventrecorder.h
+    src/research/spectrumframerecorder.cpp src/research/spectrumframerecorder.h)
+target_include_directories(ObriiSharedRecordingCoreSelfTest PRIVATE src/core src/audio src/research)
+target_link_libraries(ObriiSharedRecordingCoreSelfTest PRIVATE ObriiRecordingFormatCore)
+if(NOT WIN32)
+    target_link_libraries(ObriiSharedFftCoreSelfTest PRIVATE Threads::Threads)
+endif()
+foreach(target ObriiSharedReceiverCoreSelfTest ObriiSharedFftCoreSelfTest ObriiSharedRecordingCoreSelfTest)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /utf-8)
+    endif()
+    obrii_register_selftest(${target})
+endforeach()
+foreach(target ObriiCli ObriiCliAsyncSpectrumSelfTest ObriiCliServicesTestCore
+        ObriiCliView ObriiCliSpectrumSelfTest ObriiSDR ObriiFftSnapshotSelfTest
+        ObriiSpectrumComputeSelfTest ObriiDspStreamSelfTest ObriiDspFlowSelfTest
+        ObriiAnalyzer ObriiCoherentIqSelfTest)
+    if(TARGET ${target})
+        target_link_libraries(${target} PRIVATE ObriiFftTransformCore)
+    endif()
+endforeach()
+foreach(target ObriiCli ObriiCliRuntimeRecordingSelfTest ObriiCliAudioSelfTest
+        ObriiCliServicesTestCore ObriiMeasurementCore ObriiSDR ObriiExperimentBundleSelfTest
+        ObriiScienceSelfTest ObriiExperimentReplaySelfTest ObriiDmrPipelineSelfTest)
+    if(TARGET ${target})
+        target_link_libraries(${target} PRIVATE ObriiRecordingFormatCore)
+    endif()
+endforeach()
+
+if(UNIX AND NOT APPLE)
+    install(FILES packaging/linux/99-fobos-sdr.rules
+            DESTINATION share/ObriiSDR/udev)
+    install(FILES packaging/icons/fobosapp.png
+            RENAME obriisdr.png
+            DESTINATION share/icons/hicolor/256x256/apps)
+    install(FILES packaging/linux/fobosapp.desktop.in
+            RENAME ObriiSDR.desktop
+            DESTINATION share/applications)
+endif()

@@ -1,0 +1,436 @@
+#include "audioprocessor.h"
+#include "recordingmanager.h"
+#include "playbackmanager.h"
+#include "iqbuffer.h"
+#include "fmphasediscriminator.h"
+#include <QCoreApplication>
+#include <QFileInfo>
+#include <QDir>
+#include <QElapsedTimer>
+#include <QtEndian>
+#include <iostream>
+#include <cstring>
+
+struct AudioProcessorTestAccess {
+    static void enqueueLivePcm(AudioProcessor &processor, short sample, std::size_t count) {
+        {
+            std::lock_guard<std::mutex> lock(processor.audioMutex);
+            processor.audioBuffer.insert(processor.audioBuffer.end(), count, sample);
+        }
+        processor.cv.notify_one();
+    }
+    static bool stopped(const AudioProcessor &processor) {
+        return !processor.running.load() && !processor.sdrWorker.joinable() && !processor.audioWorker.joinable();
+    }
+    static bool bufferEmpty(const AudioProcessor &processor) { return processor.audioBuffer.empty(); }
+    static bool outputIdle(const AudioProcessor &processor) {
+        for (int index = 0; index < NUM_BUFFERS; ++index)
+            if (!processor.bufferReady[index].load()) return false;
+        return true;
+    }
+    static std::uintptr_t outputHandle(const AudioProcessor &processor) {
+#ifdef _WIN32
+        return reinterpret_cast<std::uintptr_t>(processor.hWaveOut);
+#else
+        return 0;
+#endif
+    }
+    static void demod(AudioProcessor &processor, const std::vector<float> &iq,
+                      const RadioSettings &settings, std::vector<short> &pcm, int &rate) {
+        processor.processDmrIqDemodulatorBlock(iq, pcm, rate, settings);
+    }
+    static void analog(AudioProcessor &processor, const std::vector<float> &iq,
+                       const RadioSettings &settings, std::vector<short> &pcm) {
+        std::vector<short> unused;
+        int rate = 0;
+        processor.processDemodulatorBlock(iq, pcm, unused, rate, settings);
+    }
+};
+namespace {
+int failures = 0;
+void check(bool ok, const char *name) {
+    if (!ok) { std::cerr << "FAIL: " << name << '\n'; ++failures; }
+}
+void testLightweightFm() {
+    double maximumError = 0.0;
+    for (float amplitude : {1.0f, 0.01f, 1.0e-5f, 1.0e-12f, 1.0e-20f}) {
+        for (int i = 0; i < 10000; ++i) {
+            const double phase = i*0.071, delta = std::sin(i*0.003)*2.9;
+            const float a = float(std::cos(phase)*amplitude), b = float(std::sin(phase)*amplitude);
+            const float c = float(std::cos(phase+delta)*amplitude*0.37), d = float(std::sin(phase+delta)*amplitude*0.37);
+            const double actual = fmPhaseDifference(c, d, a, b);
+            maximumError = std::max(maximumError, std::abs(std::remainder(actual-delta, 6.283185307179586)));
+        }
+    }
+    check(maximumError < 1.0e-6, "Lightweight FM preserves phase across amplitude changes");
+    for (const int mode : {MOD_NFM, MOD_WFM}) {
+        RadioSettings s;
+        s.inputMode = INPUT_RF; s.modulationType = mode; s.sampleRate = 2048000;
+        s.centerFrequency = s.listeningFrequency = 145e6;
+        s.bandwidth = mode == MOD_NFM ? 12500 : 200000;
+        s.simplifiedAudioChannelizer = true;
+        const std::size_t count = 204800;
+        std::vector<float> iq(count*2U);
+        double phase = 0.0;
+        for (std::size_t n = 0; n < count; ++n) {
+            phase += 6.283185307179586*(mode == MOD_NFM ? 2000.0 : 30000.0)*std::sin(6.283185307179586*900*n/s.sampleRate)/s.sampleRate;
+            iq[2*n] = float(0.3*std::cos(phase)); iq[2*n+1] = float(0.3*std::sin(phase));
+        }
+        AudioProcessor whole, chunks;
+        whole.setLocalPlaybackEnabled(false); chunks.setLocalPlaybackEnabled(false);
+        std::vector<short> reference, result;
+        AudioProcessorTestAccess::analog(whole, iq, s, reference);
+        for (std::size_t start = 0; start < iq.size(); start += 8192) {
+            std::vector<float> block(iq.begin()+start, iq.begin()+std::min(iq.size(), start+8192));
+            std::vector<short> pcm;
+            AudioProcessorTestAccess::analog(chunks, block, s, pcm);
+            result.insert(result.end(), pcm.begin(), pcm.end());
+        }
+        int worst = 0;
+        if (result.size() == reference.size()) for (std::size_t n = 0; n < result.size(); ++n)
+            worst = std::max(worst, std::abs(int(result[n])-int(reference[n])));
+        check(reference.size() >= 4798 && reference.size() <= 4801 && result.size() == reference.size(), "Simplified FM retains duration and chunk sample counts");
+        check(worst <= 1, "Simplified FM chunking preserves PCM");
+    }
+    std::cout << "Lightweight FM maximum phase error " << maximumError << " rad\n";
+    struct Sample { float i, q, pi, pq, unitPi, unitPq; };
+    std::vector<Sample> samples(200000);
+    for (std::size_t n = 0; n < samples.size(); ++n) {
+        const double phase = n*0.071, delta = std::sin(n*0.03)*2.9;
+        const float gain = float(0.5+0.3*std::sin(n*0.023));
+        samples[n] = {float(gain*std::cos(phase+delta)), float(gain*std::sin(phase+delta)),
+            float(0.4*std::cos(phase)), float(0.4*std::sin(phase)), float(std::cos(phase)), float(std::sin(phase))};
+    }
+    volatile float checksum = 0.0f;
+    QElapsedTimer timer;
+    timer.start();
+    for (int repeat = 0; repeat < 4; ++repeat) for (const auto &s : samples) {
+        const float invMagnitude = 1.0f/std::sqrt(s.i*s.i+s.q*s.q);
+        const float i = s.i*invMagnitude, q = s.q*invMagnitude;
+        checksum += std::atan2(q*s.unitPi-i*s.unitPq, i*s.unitPi+q*s.unitPq);
+    }
+    const double referenceMs = timer.nsecsElapsed()/1.0e6;
+    timer.restart();
+    for (int repeat = 0; repeat < 4; ++repeat) for (const auto &s : samples)
+        checksum += fmPhaseDifference(s.i, s.q, s.pi, s.pq);
+    std::cout << "FM discriminator benchmark normalized=" << referenceMs << " ms, direct=" << timer.nsecsElapsed()/1.0e6 << " ms\n";
+}
+void testRecording() {
+    RecordingManager recorder;
+    RadioSettings settings;
+    settings.modulationType = MOD_DMR;
+    settings.sampleRate = 50e6;
+    QString error;
+    check(recorder.start(RecordingManager::Mode::ChannelIqWav, settings, &error), "record start");
+    const QString path = recorder.currentFilePath();
+    recorder.appendIqFrame(QByteArray(32, '\0'), 50e6, 16);
+    check(!QFileInfo::exists(path), "full int8 frame cannot become channel WAV");
+    recorder.appendIqFrame(QByteArray(64, '\0'), 192308, 16);
+    recorder.appendIqFrame(QByteArray(64, '\0'), 192308, 16);
+    recorder.appendIqFrame(QByteArray(64, '\0'), 384000, 16);
+    check(!recorder.isRecording(), "sample rate change stops rather than corrupts WAV");
+    PlaybackManager::WavInfo info;
+    check(PlaybackManager::readWavInfo(path, info, &error), "recorded WAV readable");
+    check(info.sampleRate == 192308 && info.channels == 2 && info.bitsPerSample == 16 &&
+          info.dataSize == 128, "recorded channel format and size");
+    QFile::remove(path);
+    QFile::remove(QFileInfo(path).absoluteDir().filePath(QFileInfo(path).completeBaseName() + ".json"));
+}
+void testStreamRestart(bool localAudio) {
+    AudioProcessor processor;
+    processor.setLocalPlaybackEnabled(localAudio);
+    RadioSettings settings;
+    settings.sampleRate = 50e6;
+    processor.configure(settings);
+    processor.startDemodulation();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const auto handle = AudioProcessorTestAccess::outputHandle(processor);
+#ifdef _WIN32
+    if (localAudio) check(handle != 0, "waveOut test device opened");
+#endif
+    processor.stopDemodulationForStreamRestart();
+    check(AudioProcessorTestAccess::stopped(processor) && AudioProcessorTestAccess::bufferEmpty(processor),
+          "stream restart joins workers and flushes PCM");
+    check(AudioProcessorTestAccess::outputHandle(processor) == handle, "stream restart retains audio device");
+    settings.sampleRate = 25e6;
+    processor.configure(settings);
+    processor.startDemodulation();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    check(AudioProcessorTestAccess::outputHandle(processor) == handle, "restarted audio reuses device");
+    processor.stopDemodulationForStreamRestart();
+    processor.stopDemodulation();
+    processor.stopDemodulation();
+    check(AudioProcessorTestAccess::stopped(processor) && AudioProcessorTestAccess::outputHandle(processor) == 0,
+          "ordinary Stop closes retained output and is idempotent");
+}
+void testLivePcmBuffering() {
+    IqBuffer::clear();
+    AudioProcessor processor;
+    processor.setLocalPlaybackEnabled(false);
+    RadioSettings settings;
+    settings.sampleRate = 2.4e6;
+    settings.modulationType = MOD_NFM;
+    processor.configure(settings);
+    std::atomic<int> frames{0};
+    std::atomic<bool> contentValid{true};
+    QObject::connect(&processor, &AudioProcessor::audioFrameReady, &processor,
+                     [&](const QByteArray &pcm) {
+        const int frameIndex = frames.load();
+        const short expected = frameIndex == 0 ? 101 : frameIndex == 1 ? 202 : 303;
+        if (pcm.size() != BUFFER_SIZE * int(sizeof(short))) contentValid.store(false);
+        for (int n = 0; n < pcm.size() / int(sizeof(short)); ++n) {
+            short value;
+            std::memcpy(&value, pcm.constData() + n * sizeof(short), sizeof(short));
+            if (value != expected) contentValid.store(false);
+        }
+        frames.fetch_add(1);
+    }, Qt::DirectConnection);
+    processor.startDemodulation();
+    AudioProcessorTestAccess::enqueueLivePcm(processor, 101, BUFFER_SIZE);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    check(frames.load() == 0, "live PCM waits for a jitter reserve before starting");
+    AudioProcessorTestAccess::enqueueLivePcm(processor, 202, BUFFER_SIZE);
+    const auto waitForFrames = [&](int target) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        while (frames.load() < target && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        return frames.load() >= target;
+    };
+    check(waitForFrames(2), "primed PCM output drains without changing frame cadence");
+    AudioProcessorTestAccess::enqueueLivePcm(processor, 303, BUFFER_SIZE);
+    check(waitForFrames(3), "already-primed network PCM does not wait for a second chunk");
+    processor.stopDemodulation();
+    check(contentValid.load() && frames.load() == 3, "PCM priming preserves every sample exactly once");
+    check(AudioProcessorTestAccess::stopped(processor), "Stop wakes and joins an idle PCM output worker");
+    IqBuffer::clear();
+}
+void testWaveOutRebuffering() {
+#ifdef _WIN32
+    IqBuffer::clear();
+    AudioProcessor processor;
+    RadioSettings settings;
+    settings.sampleRate = 2.4e6;
+    settings.modulationType = MOD_NFM;
+    processor.configure(settings);
+    std::atomic<int> frames{0};
+    QObject::connect(&processor, &AudioProcessor::audioFrameReady, &processor,
+                     [&](const QByteArray &) { frames.fetch_add(1); }, Qt::DirectConnection);
+    const auto waitUntil = [](const auto &predicate) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!predicate() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        return predicate();
+    };
+    processor.startDemodulation();
+    check(AudioProcessorTestAccess::outputHandle(processor) != 0, "rebuffer test opens waveOut");
+    AudioProcessorTestAccess::enqueueLivePcm(processor, 0, BUFFER_SIZE*2);
+    check(waitUntil([&] { return frames.load() >= 2; }), "initial waveOut reserve submitted");
+    check(waitUntil([&] { return AudioProcessorTestAccess::outputIdle(processor); }),
+          "waveOut completion callbacks release the submitted buffers");
+    AudioProcessorTestAccess::enqueueLivePcm(processor, 0, BUFFER_SIZE);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    check(frames.load() == 2, "waveOut starvation rebuilds the reserve instead of stuttering one chunk at a time");
+    AudioProcessorTestAccess::enqueueLivePcm(processor, 0, BUFFER_SIZE);
+    check(waitUntil([&] { return frames.load() >= 4; }), "waveOut resumes when its reserve is ready");
+    processor.stopDemodulation();
+    check(frames.load() == 4 && AudioProcessorTestAccess::stopped(processor),
+          "waveOut rebuffering preserves frame count and Stop joins the output worker");
+    IqBuffer::clear();
+#endif
+}
+void testDemodulator() {
+    RadioSettings settings;
+    settings.inputMode = INPUT_RF;
+    settings.sampleRate = 2.4e6;
+    settings.modulationType = MOD_DMR;
+    settings.centerFrequency = 145e6;
+    settings.listeningFrequency = settings.centerFrequency + 17000;
+    settings.dmrBasebandSampleRate = 24000;
+    std::vector<float> input(480000);
+    double phase = 0.0;
+    for (std::size_t n = 0; n < input.size() / 2; ++n) {
+        const double deviation = 1944.0 * std::sin(6.283185307179586 * 700.0 * n / settings.sampleRate);
+        phase += 6.283185307179586 * (17000.0 + deviation) / settings.sampleRate;
+        input[2*n] = float(std::cos(phase) * 0.2);
+        input[2*n+1] = float(std::sin(phase) * 0.2);
+    }
+    AudioProcessor full, chunks;
+    chunks.setDmrChannelIqEnabled(true);
+    std::size_t capturedPairs = 0;
+    QObject::connect(&chunks, &AudioProcessor::dmrChannelIqFrameReady, &chunks,
+        [&](const QByteArray &bytes, double rate, int pairs) {
+            check(rate == 200000 && bytes.size() == pairs * 4, "shared DMR channel IQ format");
+            capturedPairs += std::size_t(pairs);
+        });
+    std::vector<short> expected, output, joined;
+    int rate = 0;
+    AudioProcessorTestAccess::demod(full, input, settings, expected, rate);
+    check(rate == 24000 && expected.size() >= 2390 && expected.size() <= 2400, "DMR output duration");
+    for (std::size_t offset = 0; offset < input.size();) {
+        const std::size_t count = (std::min)(std::size_t(18422), input.size() - offset);
+        std::vector<float> part(input.begin() + offset, input.begin() + offset + count);
+        AudioProcessorTestAccess::demod(chunks, part, settings, output, rate);
+        joined.insert(joined.end(), output.begin(), output.end()); offset += count;
+    }
+    check(joined.size() == expected.size(), "DMR arbitrary block boundaries preserve sample count");
+    int worst = 0;
+    for (std::size_t n = 0; n < (std::min)(joined.size(), expected.size()); ++n)
+        worst = (std::max)(worst, std::abs(int(joined[n]) - int(expected[n])));
+    check(worst <= 3, "DMR arbitrary block boundaries preserve discriminator output");
+    check(capturedPairs == 20000, "shared DMR channel IQ contains every decimated sample");
+    chunks.setDmrChannelIqEnabled(false);
+    AudioProcessorTestAccess::demod(chunks, input, settings, output, rate);
+    check(capturedPairs == 20000, "disabled DMR capture does not emit IQ");
+    std::cout << "DMR chunk maxPcmError=" << worst << '\n';
+}
+void testDiscriminatorAmplitude() {
+    RadioSettings settings;
+    settings.inputMode = INPUT_RF;
+    settings.sampleRate = 192000;
+    settings.modulationType = MOD_DMR;
+    settings.centerFrequency = settings.listeningFrequency = 145e6;
+    settings.dmrBasebandSampleRate = 24000;
+    std::vector<float> referenceIq(38400);
+    double phase = 0.0;
+    for (std::size_t n = 0; n < referenceIq.size() / 2; ++n) {
+        phase += 6.283185307179586 * 1944.0 *
+                 std::sin(6.283185307179586 * 700.0 * n / settings.sampleRate) /
+                 settings.sampleRate;
+        referenceIq[2*n] = float(std::cos(phase) * 0.2);
+        referenceIq[2*n+1] = float(std::sin(phase) * 0.2);
+    }
+    AudioProcessor reference;
+    std::vector<short> expected;
+    int rate = 0;
+    AudioProcessorTestAccess::demod(reference, referenceIq, settings, expected, rate);
+    for (float scale : {0.0001f, 0.000001f, 0.00000001f}) {
+        auto iq = referenceIq;
+        for (float &value : iq) value *= scale;
+        AudioProcessor processor;
+        std::vector<short> actual;
+        AudioProcessorTestAccess::demod(processor, iq, settings, actual, rate);
+        check(actual.size() == expected.size(), "DMR amplitude preserves sample count");
+        int worst = 0;
+        for (std::size_t n = 0; n < (std::min)(actual.size(), expected.size()); ++n)
+            worst = (std::max)(worst, std::abs(int(actual[n]) - int(expected[n])));
+        std::cout << "DMR amplitude scale=" << scale << " maxPcmError=" << worst << '\n';
+        check(worst <= 3, "DMR discriminator preserves weak IQ phase");
+    }
+    AudioProcessor silence;
+    std::vector<short> pcm;
+    AudioProcessorTestAccess::demod(silence, std::vector<float>(38400, 0.0f), settings, pcm, rate);
+    check(pcm.size() >= 2390 && pcm.size() <= 2400 &&
+          std::all_of(pcm.begin(), pcm.end(), [](short value) { return value == 0; }),
+          "DMR zero IQ preserves silence and duration");
+}
+int benchmarkWideDmr() {
+    RadioSettings settings;
+    settings.inputMode = INPUT_RF;
+    settings.modulationType = MOD_DMR;
+    settings.centerFrequency = 145e6;
+    settings.listeningFrequency = 163.472e6;
+    settings.dmrBasebandSampleRate = 24000;
+    constexpr std::size_t pairsPerBlock = 262144;
+    constexpr int blocks = 240;
+    std::vector<float> iq(pairsPerBlock * 2);
+    std::vector<short> pcm;
+    for (double rate : {50e6, 80e6}) {
+        settings.sampleRate = rate;
+        double phase = 0.0;
+        for (std::size_t i = 0; i < pairsPerBlock; ++i) {
+            const double tone = 1944.0 * std::sin(6.283185307179586 * 700.0 * i / rate);
+            phase += 6.283185307179586 * (settings.listeningFrequency - settings.centerFrequency + tone) / rate;
+            iq[2 * i] = 0.015f * float(std::cos(phase));
+            iq[2 * i + 1] = 0.015f * float(std::sin(phase));
+        }
+        AudioProcessor processor;
+        QElapsedTimer timer;
+        timer.start();
+        std::vector<double> blockMs;
+        std::uint64_t checksum = 0;
+        std::size_t outputSamples = 0;
+        int outputRate = 0;
+        for (int block = 0; block < blocks; ++block) {
+            const auto start = timer.nsecsElapsed();
+            AudioProcessorTestAccess::demod(processor, iq, settings, pcm, outputRate);
+            blockMs.push_back((timer.nsecsElapsed() - start) / 1.0e6);
+            outputSamples += pcm.size();
+            for (short sample : pcm)
+                checksum = checksum * 31 + static_cast<std::uint16_t>(sample);
+        }
+        std::sort(blockMs.begin(), blockMs.end());
+        const double budget = 1000.0 * pairsPerBlock / rate;
+        std::cout << "DMR RF " << rate / 1e6 << " MS/s, block p50 " << blockMs[blocks / 2]
+                  << " ms, p95 " << blockMs[blocks * 95 / 100] << " ms, budget " << budget
+                  << " ms, PCM samples " << outputSamples << ", checksum " << checksum << '\n';
+        const double expectedSamples = blocks * pairsPerBlock * (24000.0 / rate);
+        check(outputRate == 24000 && std::abs(double(outputSamples) - expectedSamples) < 2,
+              "wide DMR retains output rate and duration");
+    }
+    return failures ? 1 : 0;
+}
+int inspectRecording(const QString &path, const QString &outputPath, int outputRate) {
+    PlaybackManager::WavInfo info;
+    QString error;
+    if (!PlaybackManager::readWavInfo(path, info, &error) || info.channels != 2) {
+        std::cerr << "Not a readable IQ WAV\n"; return 1;
+    }
+    QFile file(path), pcmFile(outputPath);
+    if (!file.open(QIODevice::ReadOnly) || !file.seek(qint64(info.dataOffset)) ||
+        !pcmFile.open(QIODevice::WriteOnly)) return 1;
+    RadioSettings settings = info.radioSettings;
+    settings.sampleRate = info.sampleRate;
+    settings.centerFrequency = settings.listeningFrequency;
+    settings.inputMode = INPUT_RF;
+    settings.modulationType = MOD_DMR;
+    settings.dmrBasebandSampleRate = outputRate;
+    AudioProcessor processor;
+    quint64 remaining = info.dataSize, inputPairs = 0, pcmSamples = 0, clipped = 0;
+    double power = 0.0;
+    QElapsedTimer timer; timer.start();
+    while (remaining > 0) {
+        const QByteArray bytes = file.read(qint64((std::min)(remaining, quint64(32768))));
+        if (bytes.isEmpty() || bytes.size() % 4 != 0) return 1;
+        remaining -= quint64(bytes.size());
+        std::vector<float> iq(std::size_t(bytes.size() / 2));
+        const auto *raw = reinterpret_cast<const uchar *>(bytes.constData());
+        for (int n = 0; n < bytes.size() / 2; ++n) {
+            const qint16 sample = qFromLittleEndian<qint16>(raw + 2*n);
+            clipped += std::abs(int(sample)) >= 32766;
+            iq[std::size_t(n)] = float(sample) / 32767.0f;
+            power += double(iq[std::size_t(n)]) * iq[std::size_t(n)];
+        }
+        inputPairs += iq.size() / 2;
+        std::vector<short> pcm;
+        int rate = 0;
+        AudioProcessorTestAccess::demod(processor, iq, settings, pcm, rate);
+        QByteArray output(int(pcm.size() * 2), '\0');
+        for (std::size_t n = 0; n < pcm.size(); ++n)
+            qToLittleEndian<qint16>(pcm[n], reinterpret_cast<uchar *>(output.data()) + 2*n);
+        if (pcmFile.write(output) != output.size()) return 1;
+        pcmSamples += pcm.size();
+    }
+    std::cout << "IQ rate=" << info.sampleRate << " pairs=" << inputPairs
+              << " duration=" << double(inputPairs) / info.sampleRate
+              << " rms=" << std::sqrt(power / (2 * inputPairs))
+              << " clippingPercent=" << 100.0 * clipped / (2 * inputPairs)
+              << " PCM rate=" << outputRate << " samples=" << pcmSamples
+              << " demodMs=" << timer.elapsed() << '\n';
+    return 0;
+}
+}
+int main(int argc, char **argv) {
+    QCoreApplication app(argc, argv);
+    if (app.arguments().contains(QStringLiteral("--benchmark-dmr"))) return benchmarkWideDmr();
+    if ((argc == 4 || argc == 5) && app.arguments()[1] == "--inspect-iq") {
+        const int rate = argc == 5 ? app.arguments()[4].toInt() : 24000;
+        if (rate != 24000 && rate != 48000) return 1;
+        return inspectRecording(app.arguments()[2], app.arguments()[3], rate);
+    }
+    testRecording(); testDemodulator(); testDiscriminatorAmplitude(); testLightweightFm();
+    testStreamRestart(app.arguments().contains(QStringLiteral("--waveout-restart")));
+    testLivePcmBuffering();
+    if (app.arguments().contains(QStringLiteral("--waveout-restart"))) testWaveOutRebuffering();
+    std::cout << "DMR pipeline failures=" << failures << '\n';
+    return failures ? 1 : 0;
+}

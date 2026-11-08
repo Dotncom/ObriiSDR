@@ -1,0 +1,8 @@
+[submodule "third_party/mbelib-neo"]
+	path = third_party/mbelib-neo
+	url = https://github.com/arancormonk/mbelib-neo.git
+	branch = main
+[submodule "third_party/softdmr"]
+	path = third_party/softdmr
+	url = https://github.com/hicaoc/softdmr.git
+	branch = main

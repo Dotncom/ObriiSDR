@@ -1,0 +1,7 @@
+{
+  "minHz": 100000000,
+  "maxHz": 101000000,
+  "thresholdDbfs": -70,
+  "hysteresisDb": 3,
+  "holdoffMs": 1000
+}

@@ -1,0 +1,206 @@
+{
+  "schema": "fobosapp-defaults",
+  "schemaVersion": 1,
+  "note": "Reference snapshot for 4.2 release checks. The application currently restores these defaults from code when local settings are missing, empty, or invalid.",
+  "frequencyPresets": {
+    "centerHz": {
+      "FM broadcast 100 MHz": 100000000,
+      "Airband 125 MHz": 125000000,
+      "VHF 145 MHz": 145000000,
+      "UHF 433 MHz": 433000000,
+      "LTE 700 downlink 780.5 MHz": 780500000,
+      "LTE 800 downlink 806 MHz": 806000000,
+      "GSM/LTE 900 MHz": 900000000,
+      "UMTS/LTE 1800 downlink 1842.5 MHz": 1842500000,
+      "UMTS/LTE 2100 downlink 2140 MHz": 2140000000,
+      "LTE 2600 downlink 2655 MHz": 2655000000,
+      "GNSS L1 compact center 1583 MHz": 1583000000,
+      "GNSS L1 band center 1584.5 MHz": 1584500000,
+      "GPS/Galileo L1 1575.42 MHz": 1575420000,
+      "BeiDou B1I 1561.098 MHz": 1561098000,
+      "GLONASS L1 center 1602 MHz": 1602000000,
+      "FPV 1.2 GHz": 1200000000,
+      "FPV 2.4 GHz": 2400000000,
+      "Experimental 7.0 GHz": 7000000000,
+      "Experimental 7.5 GHz": 7500000000
+    },
+    "listeningHz": {
+      "HF center 0 Hz": 0,
+      "HF 500 kHz": 500000,
+      "HF 1.25 MHz": 1250000,
+      "80 m 3.65 MHz": 3650000,
+      "40 m 7.05 MHz": 7050000,
+      "20 m FT8 14.074 MHz": 14074000,
+      "VHF 145 MHz": 145000000,
+      "UHF 433 MHz": 433000000,
+      "LTE 700 downlink 780.5 MHz": 780500000,
+      "LTE 800 downlink 806 MHz": 806000000,
+      "GSM/LTE 900 MHz": 900000000,
+      "UMTS/LTE 1800 downlink 1842.5 MHz": 1842500000,
+      "UMTS/LTE 2100 downlink 2140 MHz": 2140000000,
+      "LTE 2600 downlink 2655 MHz": 2655000000,
+      "GNSS L1 compact center 1583 MHz": 1583000000,
+      "GNSS L1 band center 1584.5 MHz": 1584500000,
+      "GPS/Galileo L1 1575.42 MHz": 1575420000,
+      "BeiDou B1I 1561.098 MHz": 1561098000,
+      "GLONASS L1 center 1602 MHz": 1602000000
+    },
+    "bandwidthHz": {
+      "CW 500 Hz": 500,
+      "SSB 2.7 kHz": 2700,
+      "FT8 3 kHz": 3000,
+      "AM 6 kHz": 6000,
+      "AM 10 kHz": 10000,
+      "NFM 12.5 kHz": 12500,
+      "DMR 12.5 kHz": 12500,
+      "WFM 200 kHz": 200000,
+      "SSTV 3 kHz": 3000,
+      "NOAA APT 40 kHz": 40000,
+      "WEFAX 3 kHz": 3000,
+      "LRPT 140 kHz": 140000,
+      "ATV 3 MHz": 3000000,
+      "ATV 5 MHz": 5000000,
+      "FPV 8 MHz": 8000000,
+      "FPV 10 MHz": 10000000,
+      "GNSS C/A 2.046 MHz": 2046000,
+      "GNSS raw 4.092 MHz": 4092000,
+      "GLONASS L1OF 9 MHz": 9000000,
+      "GNSS L1 survey 50 MHz": 50000000
+    }
+  },
+  "agileScanPresets": {
+    "Narrow DMR example": {
+      "rangesMhz": "430-432",
+      "stepMhz": 0.0125
+    },
+    "VHF DMR 160-174 coarse": {
+      "rangesMhz": "160-174",
+      "stepMhz": 0.1
+    },
+    "UHF DMR 400-470 coarse": {
+      "rangesMhz": "400-470",
+      "stepMhz": 0.5
+    },
+    "FPV 1.2/2.4 sparse": {
+      "rangesMhz": "1080-1360\\2300-2500",
+      "stepMhz": 5
+    },
+    "REB broad check 300/600/5800": {
+      "rangesMhz": "300-400\\600-1200\\5650-5950",
+      "stepMhz": 5
+    },
+    "REB 300-400 1MHz": {
+      "rangesMhz": "300-400",
+      "stepMhz": 1
+    },
+    "REB 600-1200 5MHz": {
+      "rangesMhz": "600-1200",
+      "stepMhz": 5
+    },
+    "REB 5.8GHz 5MHz": {
+      "rangesMhz": "5650-5950",
+      "stepMhz": 5
+    },
+    "Digital video sparse": {
+      "rangesMhz": "1080-1360\\2300-2500\\3200-3500\\4900-5925",
+      "stepMhz": 5
+    },
+    "Cellular LTE/3G downlinks sparse": {
+      "rangesMhz": "758-821\\925-960\\1805-1880\\2110-2170\\2620-2690",
+      "stepMhz": 10
+    },
+    "GNSS L1 1559-1610 50MHz": {
+      "rangesMhz": "1559-1610",
+      "stepMhz": 50
+    }
+  },
+  "standardScanPresets": {
+    "RF 100-300 by 50MHz": {
+      "centersMhz": "100, 150, 200, 250, 300",
+      "dwellMs": 120,
+      "settleMs": 40
+    },
+    "UHF broad 400-700 by 50MHz": {
+      "centersMhz": "400, 450, 500, 550, 600, 650, 700",
+      "dwellMs": 120,
+      "settleMs": 40
+    },
+    "Cellular LTE/3G downlinks": {
+      "centersMhz": "780.5, 942.5, 1842.5, 2140, 2655",
+      "dwellMs": 180,
+      "settleMs": 80
+    },
+    "GNSS L1 two-center 50MHz useful": {
+      "centersMhz": "1575.420000, 1625.420000",
+      "dwellMs": 300,
+      "settleMs": 80
+    }
+  },
+  "listeningScanPresets": {
+    "GNSS L1 main signals": {
+      "targetsMhz": "1561.098, 1575.420, 1602.000",
+      "dwellMs": 3000,
+      "settleMs": 100
+    },
+    "FT8 HF common": {
+      "targetsMhz": "1.840, 3.573, 7.074, 10.136, 14.074, 18.100, 21.074, 24.915, 28.074, 50.313",
+      "dwellMs": 5000,
+      "settleMs": 100
+    },
+    "Cellular LTE/3G anchors": {
+      "targetsMhz": "780.5, 806, 942.5, 1842.5, 2140, 2655",
+      "dwellMs": 3000,
+      "settleMs": 100
+    },
+    "GLONASS L1OF channels": {
+      "targetsMhz": "1598.0625, 1598.625, 1599.1875, 1599.750, 1600.3125, 1600.875, 1601.4375, 1602.000, 1602.5625, 1603.125, 1603.6875, 1604.250, 1604.8125, 1605.375",
+      "dwellMs": 2500,
+      "settleMs": 100
+    },
+    "GNSS L1 dense": {
+      "targetsMhz": "1561.098, 1575.420, 1598.0625, 1598.625, 1599.1875, 1599.750, 1600.3125, 1600.875, 1601.4375, 1602.000, 1602.5625, 1603.125, 1603.6875, 1604.250, 1604.8125, 1605.375",
+      "dwellMs": 2500,
+      "settleMs": 100
+    }
+  },
+  "bandMarkersMhz": [
+    { "label": "MW BC", "start": 0.5265, "end": 1.705, "amateur": false },
+    { "label": "SW 49m", "start": 5.9, "end": 6.2, "amateur": false },
+    { "label": "SW 41m", "start": 7.2, "end": 7.45, "amateur": false },
+    { "label": "SW 31m", "start": 9.4, "end": 9.9, "amateur": false },
+    { "label": "SW 25m", "start": 11.6, "end": 12.1, "amateur": false },
+    { "label": "SW 19m", "start": 15.1, "end": 15.8, "amateur": false },
+    { "label": "CB", "start": 26.965, "end": 27.405, "amateur": false },
+    { "label": "FM BC", "start": 87.5, "end": 108, "amateur": false },
+    { "label": "Air", "start": 118, "end": 137, "amateur": false },
+    { "label": "WX Sat", "start": 137, "end": 138, "amateur": false },
+    { "label": "Marine", "start": 156, "end": 162.05, "amateur": false },
+    { "label": "UHF Satcom", "start": 240, "end": 270, "amateur": false },
+    { "label": "TETRA", "start": 380, "end": 430, "amateur": false },
+    { "label": "PMR446", "start": 446, "end": 446.2, "amateur": false },
+    { "label": "ADS-B", "start": 1089.5, "end": 1090.5, "amateur": false },
+    { "label": "L-band Sat", "start": 1525, "end": 1660.5, "amateur": false },
+    { "label": "GNSS L1", "start": 1559, "end": 1610, "amateur": false },
+    { "label": "ISM 2.4", "start": 2400, "end": 2483.5, "amateur": false },
+    { "label": "FPV 5.8", "start": 5650, "end": 5925, "amateur": false },
+    { "label": "2200m", "start": 0.1357, "end": 0.1378, "amateur": true },
+    { "label": "630m", "start": 0.472, "end": 0.479, "amateur": true },
+    { "label": "160m", "start": 1.81, "end": 2, "amateur": true },
+    { "label": "80m", "start": 3.5, "end": 3.8, "amateur": true },
+    { "label": "60m", "start": 5.3515, "end": 5.3665, "amateur": true },
+    { "label": "40m", "start": 7, "end": 7.2, "amateur": true },
+    { "label": "30m", "start": 10.1, "end": 10.15, "amateur": true },
+    { "label": "20m", "start": 14, "end": 14.35, "amateur": true },
+    { "label": "17m", "start": 18.068, "end": 18.168, "amateur": true },
+    { "label": "15m", "start": 21, "end": 21.45, "amateur": true },
+    { "label": "12m", "start": 24.89, "end": 24.99, "amateur": true },
+    { "label": "10m", "start": 28, "end": 29.7, "amateur": true },
+    { "label": "6m", "start": 50, "end": 52, "amateur": true },
+    { "label": "4m", "start": 70, "end": 70.5, "amateur": true },
+    { "label": "2m", "start": 144, "end": 146, "amateur": true },
+    { "label": "70cm", "start": 430, "end": 440, "amateur": true },
+    { "label": "23cm", "start": 1240, "end": 1300, "amateur": true },
+    { "label": "13cm", "start": 2300, "end": 2450, "amateur": true },
+    { "label": "6cm", "start": 5650, "end": 5850, "amateur": true }
+  ]
+}

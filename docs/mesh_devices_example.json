@@ -1,0 +1,8 @@
+{
+  "format": "obrii-device-library",
+  "version": 1,
+  "devices": [
+    { "id": "local", "name": "Local Obrii", "kind": "local", "host": "", "user": "", "directory": "C:/ObriiSDR", "sshPort": 22 },
+    { "id": "pi5", "name": "Raspberry Pi 5", "kind": "ssh-posix", "host": "192.0.2.10", "user": "admin", "directory": "/opt/obrii/bin", "sshPort": 22 }
+  ]
+}

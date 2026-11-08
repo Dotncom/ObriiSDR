@@ -1,0 +1,17 @@
+SPDX-License-Identifier: GPL-2.0-or-later
+
+Fobos DMR Voice Backend GPL is distributed under GNU General Public License
+version 2 compatible terms.
+
+The current mbelib backend links to mbelib-neo, which is also distributed under
+GPL-2.0-or-later. The full GPL-2.0 license text is available in this checkout
+at:
+
+    ../third_party/mbelib-neo/LICENSE
+
+The optional OpenDMR backend links to ../third_party/softdmr, which is
+distributed under GPL-2.0 and contains attribution files for its mbelib-derived
+decoder and OP25 MBEEncoder-derived encoder sources.
+
+If this backend is distributed separately from the FobosAPP source tree, include
+a copy of the GNU General Public License version 2 text with the distribution.

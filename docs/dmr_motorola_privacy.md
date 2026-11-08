@@ -1,0 +1,104 @@
+# Native Motorola DMR Privacy (Beta)
+
+Select `Obrii SDR + mbelib` or `Obrii SDR + OpenDMR`, then choose an explicit
+key-selection mode:
+
+- `Fixed key` preserves the previous behavior: select `ARC4` or `AES-256`
+  and one existing KID from that algorithm's key table.
+- `Auto PI ALG/KID` reads the algorithm ID and KID from a CRC-validated
+  Privacy Indicator header and selects the exact matching saved ARC4 or
+  AES-256 key independently for each timeslot. The algorithm and KID controls
+  become read-only while the key tables remain editable.
+
+ARC4 requires exactly 10 HEX characters (40 bits), AES-256 exactly 64
+(256 bits), including leading zeroes. If automatic mode cannot find an exact
+`algorithm + KID` match, protected voice is muted. It never tries all keys,
+guesses a key, or performs brute force. Hytera Basic remains fixed-key only.
+
+The separate privacy processor runs after AMBE FEC and before all native
+vocoder candidates. Automatic PI-based selection currently applies to this
+native path. External DSD-neo/Gopher bursts remain unchanged and continue
+with the explicitly selected fixed key; the UI shows this limitation.
+DSD-neo ARC4/AES-256 and the working Gopher ARC4 path are not replaced.
+
+## Synchronization
+
+- CRC-validated PI headers provide the algorithm, KID and 32-bit MI.
+  BPTC corrects at most two channel bits; PI polarity is checked independently.
+- In fixed mode a nonzero selected KID must match a received PI KID. KID 0
+  permits any received ID, as in the existing Gopher path. In automatic mode
+  both the received algorithm and KID must match a saved key-table entry.
+  Late-entry-only recovery cannot discover a key because its fragments carry
+  MI, not KID; a valid PI must first establish the automatic key context.
+- A-F raw C3 fragments recover the next MI with extended Golay and CRC4.
+  That MI is committed after F, never to the current 18 voice frames.
+  Without PI, the initial superframe is muted and the next can be decoded.
+- Each slot has an independent RF anchor. Missing/bad AMBE frames still
+  consume their absolute ordinal; they cannot shift later keystream bytes.
+  A missing late-entry fragment leaves the LFSR prediction available.
+  A stale/out-of-order frame or an unverified long cadence gap is muted.
+- A is queued until its complete trailing payload has arrived, just like B-F.
+  A PCM block ending after sync must not drop the cipher's superframe anchor.
+- Trusted Voice LC service options identify clear traffic, which bypasses
+  the cipher even when a key is selected. EMB's PI bit alone is not used
+  to classify Motorola enhanced privacy as clear traffic.
+
+ARC4 uses key||MI in network byte order, RC4-drop256 and seven keystream
+bytes per 49-bit AMBE frame. AES-256 uses OFB with the 32-bit MI expanded
+to a 128-bit IV, discards one 16-byte block, then likewise advances seven
+bytes per frame (49 used bits plus seven padding bits). Canonical unciphered
+silence is preserved without changing the following frame's position.
+
+No raw encrypted 72-bit audio fallback is allowed while native privacy is
+active. Invalid keys, missing MI and PI algorithm/KID mismatches mute audio.
+The existing external ARC4 offset/layout experiments do not alter this native
+standard DMRA path. Select `No privacy` to bypass it without deleting keys.
+Legacy saved forwarding-checkbox values are ignored during settings import.
+The UI and DSP board identify the selected backend's decryption capabilities:
+native ARC4/AES-256, DSD-neo ARC4/AES-256, Gopher ARC4 only (no DMR AES).
+
+## Transmission
+
+The transmit dialog supports clear voice, Motorola ARC4 40-bit privacy and
+AES-256. Select DMR, choose the privacy mode and KID, and enter exactly 10
+ARC4 or 64 AES hexadecimal digits. The transmit key is stored in the local
+application settings for reuse, but is never printed in diagnostics.
+
+Protected calls set the Voice LC and EMB privacy indicators, send repeated
+CRC/BPTC-protected PI headers with a fresh random MI, and carry the next MI in
+the A-F late-entry fragments. Encryption is applied to the 49 AMBE payload
+bits before the 72-bit AMBE channel code is regenerated. This is important:
+XORing an already channel-coded frame is not compatible with DMR receivers.
+The transmitter advances the keystream by the absolute 18-frame superframe
+ordinal and rotates MI at each superframe boundary.
+
+Interoperability still depends on matching the radio's algorithm, KID, key,
+Color Code, time slot, call type and destination. AES operation may also
+depend on radio firmware and feature licensing. Use protected transmission
+only where the operator is authorized and local radio rules permit it.
+
+## Verification And Limits
+
+`ObriiDmrPrivacySelfTest` checks RFC 6229 RC4 and NIST SP800-38A AES-256-OFB
+vectors, plus all voice frames against independent Go standard-library ciphers
+and upstream Gopher BPTC/late-entry test helpers. Public synthetic fixtures are
+in tools/fixtures/dmr_motorola_vectors.json. Regenerate with the optional
+TestExportNativePrivacyVectors test and OBRII_NATIVE_VECTORS output path.
+
+The optional `--pcm-timing <private.pcm> 24000|48000` test checks recorded RF
+cadence and MI recovery using a dummy key. It does not prove intelligible
+speech from that recording. The user confirmed clean native Motorola ARC4
+speech and successful native AES-256 reception on 2026-10-12 after fixing lost
+A bursts at PCM boundaries. This verifies the tested radio/configuration, not
+every vendor, firmware or RF condition. Hytera remains an unverified beta.
+Synthetic 24/48 kHz PCM tests end blocks at sync and inside the trailing half
+of A, checking that exactly three frames arrive with their RF positions intact.
+
+Verbose diagnostics include mode, key width, PI/late-entry counts and reasons
+for muted frames. Transmit diagnostics include mode, KID and MI. They never
+print keys or decrypted AMBE. No network key upload, FFT/IQ processing or
+persistent decrypted recording is introduced.
+
+Protocol references: the existing Gopher adapter's verified DMRA timing,
+DSD's PI/late-entry/OFB conventions, and the [DSD-neo privacy documentation](https://github.com/arancormonk/dsd-neo/blob/main/docs/decryption-profiles.md).
+AES core: [tiny-AES-c](https://github.com/kokke/tiny-AES-c).

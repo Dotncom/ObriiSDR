@@ -1,0 +1,1263 @@
+#include <stdio.h>
+#include <string.h>
+#include <inttypes.h>
+#include <stdlib.h>
+#include <math.h>
+#include <float.h>
+#include <time.h>
+#include <unity/unity.h>
+#include "../m17.h"
+
+typedef struct
+{
+    float symbol;
+    uint16_t min0;
+    uint16_t max0;
+    uint16_t min1;
+    uint16_t max1;
+} slice_expect_t;
+
+static const slice_expect_t slice_cases[] =
+{
+    /* finite boundary */
+    { +FLT_MAX,  0x0000, 0x0000,   0xFFFF, 0xFFFF },
+    { -FLT_MAX,  0xFFFF, 0xFFFF,   0xFFFF, 0xFFFF },
+
+    /* very large finite */
+    { +30.0f,    0x0000, 0x0000,   0xFFFF, 0xFFFF },
+    { -30.0f,    0xFFFF, 0xFFFF,   0xFFFF, 0xFFFF },
+
+    /* outer constellation */
+    { +3.0f,     0x0000, 0x0000,   0xFFFF, 0xFFFF },
+    { -3.0f,     0xFFFF, 0xFFFF,   0xFFFF, 0xFFFF },
+
+    /* just below saturation */
+    { +2.999f,   0x0000, 0x0000,   0xFFD8, 0xFFFF },
+    { -2.999f,   0xFFFF, 0xFFFF,   0xFFD8, 0xFFFF },
+
+    /* middle */
+    { +2.0f,     0x0000, 0x0000,   0x7FFF, 0x7FFF },
+    { -2.0f,     0xFFFF, 0xFFFF,   0x7FFF, 0x7FFF },
+
+    /* inner */
+    { +1.0f,     0x0000, 0x0000,   0x0000, 0x0000 },
+    { -1.0f,     0xFFFE, 0xFFFF,   0x0000, 0x0000 },
+
+    /* near zero */
+    { +1e-6f,    0x7FFE, 0x7FFF,   0x0000, 0x0000 },
+    { -1e-6f,    0x7FFF, 0x8000,   0x0000, 0x0000 },
+
+    /* signed zero */
+    { +0.0f,     0x7FFF, 0x7FFF,   0x0000, 0x0000 },
+    { -0.0f,     0x7FFF, 0x7FFF,   0x0000, 0x0000 },
+
+    /* float pathologies :D */
+    {  NAN,      0xFFFF, 0xFFFF,   0xFFFF, 0xFFFF },
+    { +INFINITY, 0x0000, 0x0000,   0xFFFF, 0xFFFF },
+    { -INFINITY, 0xFFFF, 0xFFFF,   0xFFFF, 0xFFFF }
+};
+
+//this is run before every test
+void setUp(void)
+{
+	return;
+} 
+
+//this is run after every test
+void tearDown(void)
+{
+	return;
+}
+
+static void soft_logic_xor(void)
+{
+    TEST_ASSERT_EQUAL(0x0000, soft_bit_XOR(0x0000, 0x0000));
+    TEST_ASSERT_EQUAL(0x7FFE, soft_bit_XOR(0x0000, 0x7FFF)); //off by 1 is acceptable
+    TEST_ASSERT_EQUAL(0xFFFE, soft_bit_XOR(0x0000, 0xFFFF)); //off by 1 is acceptable
+
+    TEST_ASSERT_EQUAL(0x7FFE, soft_bit_XOR(0x7FFF, 0x0000)); //off by 1 is acceptable
+    TEST_ASSERT_EQUAL(0x7FFE, soft_bit_XOR(0x7FFF, 0x7FFF));
+    TEST_ASSERT_EQUAL(0x7FFF, soft_bit_XOR(0x7FFF, 0xFFFF));
+
+    TEST_ASSERT_EQUAL(0xFFFE, soft_bit_XOR(0xFFFF, 0x0000)); //off by 1 is acceptable
+    TEST_ASSERT_EQUAL(0x7FFF, soft_bit_XOR(0xFFFF, 0x7FFF));
+    TEST_ASSERT_EQUAL(0x0000, soft_bit_XOR(0xFFFF, 0xFFFF));
+}
+
+static void fill_symbols_from_table(float *symbols)
+{
+    const size_t n = sizeof(slice_cases) / sizeof(slice_cases[0]);
+
+    for (int i = 0; i < SYM_PER_PLD; i++)
+    {
+        symbols[i] = slice_cases[i % n].symbol;
+    }
+}
+
+static void symbol_to_dibit(void)
+{
+    float symbols[SYM_PER_PLD];
+    uint16_t soft[2*SYM_PER_PLD];
+
+    fill_symbols_from_table(symbols);
+    slice_symbols(soft, symbols);
+
+    const size_t n = sizeof(slice_cases) / sizeof(slice_cases[0]);
+
+    for (int i = 0; i < SYM_PER_PLD; i++)
+    {
+        const slice_expect_t *e = &slice_cases[i % n];
+
+        uint16_t s0 = soft[2*i];
+        uint16_t s1 = soft[2*i + 1];
+
+        TEST_ASSERT(s0 >= e->min0);
+        TEST_ASSERT(s0 <= e->max0);
+
+        TEST_ASSERT(s1 >= e->min1);
+        TEST_ASSERT(s1 <= e->max1);
+    }
+}
+
+/**
+ * @brief Apply errors to a soft-valued 24-bit logic vector.
+ * Errors are spread out evenly among num_errs bits.
+ * @param vect Input vector.
+ * @param start_pos 
+ * @param end_pos 
+ * @param num_errs Number of bits to apply errors to.
+ * @param sum_errs Sum of all errors (total).
+ */
+static void apply_errors(uint16_t vect[24], uint8_t start_pos, uint8_t end_pos, uint8_t num_errs, float sum_errs)
+{
+    if(end_pos<start_pos)
+    {
+        printf("ERROR: Invalid bit range.\nExiting.\n");
+        exit(1);
+    }
+
+    uint8_t bit_pos;
+    uint8_t num_bits=end_pos-start_pos+1;
+
+    if(num_errs>num_bits || num_bits>24 || num_errs>24 || sum_errs>num_errs) //too many errors or too wide range
+    {
+        printf("ERROR: Impossible combination of error value and number of bits.\nExiting.\n");
+        exit(1);
+    }
+
+    uint16_t val=roundf((float)0xFFFF*sum_errs/num_errs);
+    uint32_t err_loc=0;
+
+    for(uint8_t i=0; i<num_errs; i++)
+    {
+        //assure we didnt select the same bit more than once
+        do
+        {
+            bit_pos=start_pos+(rand()%num_bits);
+        }
+        while(err_loc&(1<<bit_pos));
+        
+        vect[bit_pos]^=val; //apply error
+        err_loc|=(1<<bit_pos);
+    }
+}
+
+static void golay_encode(void)
+{
+    uint16_t data=0x0800;
+
+    //single-bit data
+    for(uint8_t i=sizeof(encode_matrix)/sizeof(uint16_t)-1; i>0; i--)
+    {
+        TEST_ASSERT_EQUAL(((uint32_t)data<<12)|encode_matrix[i], golay24_encode(data));
+        data>>=1;
+    }
+
+    //test data vector
+    data=0x0D78;
+    TEST_ASSERT_EQUAL(0x0D7880FU, golay24_encode(data));
+}
+
+/**
+ * @brief Golay soft-decode one known codeword.
+ * 
+ */
+static void golay_soft_decode_clean(void)
+{
+    uint16_t vector[24];
+
+    //clean D78|80F
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+}
+
+//parity-only
+static void golay_soft_decode_flipped_parity_1(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 11, 1, 1.0);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_erased_parity_1(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 11, 1, 0.5);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_flipped_parity_2(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 11, 2, 2.0);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_erased_parity_2(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 11, 2, 1.0);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_flipped_parity_3(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 11, 3, 3.0);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_erased_parity_3(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 11, 3, 1.5);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+//7 nearly erased bits, all other bits reliable - decodable, like the data-half counterpart
+static void golay_soft_decode_erased_parity_3_5(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 11, 7, 3.5);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+//4 hard errors are exactly half the Hamming distance: the received word is then
+//equally distant from 6 codewords. Such ambiguous words must be rejected.
+static void golay_soft_decode_flipped_parity_4(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    vector[6]^=0xFFFF;
+    vector[7]^=0xFFFF;
+    vector[8]^=0xFFFF;
+    vector[11]^=0xFFFF;
+    TEST_ASSERT_EQUAL(0xFFFF, golay24_sdecode(vector));
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    vector[6]^=0xFFFF;
+    vector[7]^=0xFFFF;
+    vector[8]^=0xFFFF;
+    vector[9]^=0xFFFF;
+    TEST_ASSERT_EQUAL(0xFFFF, golay24_sdecode(vector));
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF; 
+}
+
+//5 nearly erased bits, all other bits reliable - decodable, like the data-half counterpart
+static void golay_soft_decode_erased_parity_5(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 11, 5, 2.5);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_flipped_parity_5(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 11, 5, 5.0);
+        TEST_ASSERT_NOT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+//data-only
+static void golay_soft_decode_flipped_data_1(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 12, 23, 1, 1.0);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_erased_data_1(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 12, 23, 1, 0.5);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_flipped_data_2(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 12, 23, 2, 2.0);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_erased_data_2(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 12, 23, 2, 1.0);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_flipped_data_3(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 12, 23, 3, 3.0);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_erased_data_3(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 12, 23, 3, 1.5);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_erased_data_3_5(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 12, 23, 7, 3.5);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+//4 hard errors are exactly half the Hamming distance: the received word is then
+//equally distant from 6 codewords. Such ambiguous words must be rejected.
+static void golay_soft_decode_flipped_data_4(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    vector[12]^=0xFFFF;
+    vector[13]^=0xFFFF;
+    vector[16]^=0xFFFF;
+    vector[22]^=0xFFFF;
+    TEST_ASSERT_EQUAL(0xFFFF, golay24_sdecode(vector));
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    vector[14]^=0xFFFF;
+    vector[16]^=0xFFFF;
+    vector[17]^=0xFFFF;
+    vector[20]^=0xFFFF;
+    TEST_ASSERT_EQUAL(0xFFFF, golay24_sdecode(vector));
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF; 
+}
+
+static void golay_soft_decode_corrupt_data_4_5(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    //4.5 errors - should be uncorrectable - WTF?
+    apply_errors(vector, 12, 23, 12, 4.5);
+    TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;  
+}
+
+static void golay_soft_decode_erased_data_5(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 12, 23, 5, 2.5);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_flipped_data_5(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 12, 23, 5, 5.0);
+        TEST_ASSERT_NOT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+//data+parity
+static void golay_soft_decode_flipped_1(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 23, 1, 1.0);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_erased_1(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 23, 1, 0.5);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_flipped_2(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 23, 2, 2.0);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_erased_2(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 23, 2, 1.0);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_flipped_3(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 23, 3, 3.0);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_erased_3(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 23, 3, 1.5);
+        TEST_ASSERT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+static void golay_soft_decode_erased_3_5(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    uint16_t success = 0;
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 23, 7, 3.5);
+        
+        if (golay24_sdecode(vector)==0x0D78)
+            success++;
+
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+
+    TEST_ASSERT(success > 50); //found experimentally
+}
+
+//4 hard errors are exactly half the Hamming distance: the received word is then
+//equally distant from 6 codewords. Such ambiguous words must be rejected.
+static void golay_soft_decode_flipped_4(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    vector[6]^=0xFFFF;
+    vector[7]^=0xFFFF;
+    vector[20]^=0xFFFF;
+    vector[23]^=0xFFFF;
+    TEST_ASSERT_EQUAL(0xFFFF, golay24_sdecode(vector));
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    vector[6]^=0xFFFF;
+    vector[7]^=0xFFFF;
+    vector[20]^=0xFFFF;
+    vector[23]^=0xFFFF;
+    TEST_ASSERT_EQUAL(0xFFFF, golay24_sdecode(vector));
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF; 
+}
+
+static void golay_soft_decode_erased_5(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    uint16_t success = 0;
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 23, 5, 2.5);
+        
+        if (golay24_sdecode(vector) == 0x0D78)
+            success++;
+
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+
+    TEST_ASSERT(success > 600); //found experimentally
+}
+
+static void golay_soft_decode_flipped_5(void)
+{
+    uint16_t vector[24]; //soft-logic 24-bit vector
+
+    //clean D78|80F to soft-logic data
+    for(uint8_t i=0; i<24; i++)
+        vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+
+    for(uint16_t j=0; j<1000; j++)
+    {
+        apply_errors(vector, 0, 23, 5, 5.0);
+        TEST_ASSERT_NOT_EQUAL(0x0D78, golay24_sdecode(vector));
+        for(uint8_t i=0; i<24; i++)
+            vector[23-i]=((0x0D7880F>>i)&1)*0xFFFF;
+    }
+}
+
+//Viterbi
+static void bits_to_soft(uint16_t *soft, const uint8_t *bits, size_t nbits)
+{
+    for (size_t i = 0; i < nbits; i++)
+        soft[i] = bits[i] ? 0xFFFF : 0x0000;
+}
+
+static void viterbi_stream_roundtrip_clean(void)
+{
+    uint8_t in_bits[4 + 16 + 144] = {0};  // trellis input
+    uint8_t payload[16];
+    uint8_t encoded_bits[272];
+    uint16_t soft_bits[272];
+    uint16_t fn = rand();
+
+    // frame number
+    for (int i = 0; i < 16; i++)
+        in_bits[4 + i] = (fn >> (15 - i)) & 1;
+
+    // payload
+    for (int i = 0; i < 16; i++)
+        payload[i] = rand();
+
+    for (int i = 0; i < 16; i++)
+        for (int j = 0; j < 8; j++)
+            in_bits[4 + 16 + i*8 + j] = (payload[i] >> (7 - j)) & 1;
+
+    conv_encode_stream_frame(encoded_bits, payload, fn);
+    bits_to_soft(soft_bits, encoded_bits, 272);
+
+    uint8_t decoded_bits[21] = {0};
+
+    viterbi_decode_punctured(
+        decoded_bits,
+        soft_bits,
+        puncture_pattern_2,
+        272,
+        sizeof(puncture_pattern_2)
+    );
+
+    // compare
+    for (int i = 0; i < 16 + 144; i++)
+    {
+        uint8_t expected = in_bits[4 + i];
+        uint8_t got =
+            (decoded_bits[(4 + i + 4) / 8] >> (7 - ((4 + i + 4) % 8))) & 1;
+
+        TEST_ASSERT_EQUAL(expected, got);
+    }
+}
+
+static void viterbi_stream_repeatability(void)
+{
+    uint8_t payload[16];
+    uint8_t encoded_bits[272];
+    uint16_t soft_bits[272];
+    uint8_t dec1[21] = {0}, dec2[21] = {0};
+    uint16_t fn = rand();
+
+    for (int i = 0; i < 16; i++)
+        payload[i] = rand();
+
+    conv_encode_stream_frame(encoded_bits, payload, fn);
+    bits_to_soft(soft_bits, encoded_bits, 272);
+
+    viterbi_decode_punctured(dec1, soft_bits, puncture_pattern_2, 272, sizeof(puncture_pattern_2));
+    viterbi_decode_punctured(dec2, soft_bits, puncture_pattern_2, 272, sizeof(puncture_pattern_2));
+
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(dec1, dec2, sizeof(dec1));
+}
+
+static void viterbi_stream_single_soft_error(void)
+{
+    uint8_t in_bits[4 + 16 + 144] = {0};  // trellis input
+    uint8_t payload[16];
+    uint8_t encoded_bits[272];
+    uint16_t soft_bits[272];
+    uint16_t fn = rand();
+
+    // frame number
+    for (int i = 0; i < 16; i++)
+        in_bits[4 + i] = (fn >> (15 - i)) & 1;
+
+    // payload
+    for (int i = 0; i < 16; i++)
+        payload[i] = rand();
+
+    for (int i = 0; i < 16; i++)
+        for (int j = 0; j < 8; j++)
+            in_bits[4 + 16 + i*8 + j] = (payload[i] >> (7 - j)) & 1;
+
+    conv_encode_stream_frame(encoded_bits, payload, fn);
+    bits_to_soft(soft_bits, encoded_bits, 272);
+
+    // apply error
+    soft_bits[14] ^= 0x7FFF;
+
+    uint8_t decoded_bits[21] = {0};
+
+    viterbi_decode_punctured(
+        decoded_bits,
+        soft_bits,
+        puncture_pattern_2,
+        272,
+        sizeof(puncture_pattern_2)
+    );
+
+    // compare
+    for (int i = 0; i < 16 + 144; i++)
+    {
+        uint8_t expected = in_bits[4 + i];
+        uint8_t got =
+            (decoded_bits[(4 + i + 4) / 8] >> (7 - ((4 + i + 4) % 8))) & 1;
+
+        TEST_ASSERT_EQUAL(expected, got);
+    }
+}
+
+static void viterbi_stream_burst_error(void)
+{
+    uint8_t in_bits[4 + 16 + 144] = {0};  // trellis input
+    uint8_t payload[16];
+    uint8_t encoded_bits[272];
+    uint16_t soft_bits[272];
+    uint16_t fn = rand();
+
+    // frame number
+    for (int i = 0; i < 16; i++)
+        in_bits[4 + i] = (fn >> (15 - i)) & 1;
+
+    // payload
+    for (int i = 0; i < 16; i++)
+        payload[i] = rand();
+
+    for (int i = 0; i < 16; i++)
+        for (int j = 0; j < 8; j++)
+            in_bits[4 + 16 + i*8 + j] = (payload[i] >> (7 - j)) & 1;
+
+    conv_encode_stream_frame(encoded_bits, payload, fn);
+    bits_to_soft(soft_bits, encoded_bits, 272);
+
+    // apply 5 burst erasures
+    uint16_t s = rand() % (272-5);
+    for (int i=s; i<s+5; i++)
+        soft_bits[i] = 0x7FFF;
+
+    uint8_t decoded_bits[21] = {0};
+
+    viterbi_decode_punctured(
+        decoded_bits,
+        soft_bits,
+        puncture_pattern_2,
+        272,
+        sizeof(puncture_pattern_2)
+    );
+
+    // compare
+    for (int i = 0; i < 16 + 144; i++)
+    {
+        uint8_t expected = in_bits[4 + i];
+        uint8_t got =
+            (decoded_bits[(4 + i + 4) / 8] >> (7 - ((4 + i + 4) % 8))) & 1;
+
+        TEST_ASSERT_EQUAL(expected, got);
+    }
+}
+
+static void viterbi_stream_excessive_errors(void)
+{
+    uint8_t payload[16];
+    uint8_t encoded_bits[272];
+    uint16_t soft_bits[272];
+    uint8_t decoded_bits[21] = {0};
+    uint16_t fn = rand();
+
+    for (int i = 0; i < 16; i++)
+        payload[i] = rand();
+
+    conv_encode_stream_frame(encoded_bits, payload, fn);
+    bits_to_soft(soft_bits, encoded_bits, 272);
+
+    for (int i = 0; i < 80; i++)
+        soft_bits[i] ^= 0xFFFF;
+
+    viterbi_decode_punctured(decoded_bits, soft_bits, puncture_pattern_2, 272, sizeof(puncture_pattern_2));
+
+    // expect mismatch
+    TEST_ASSERT_NOT_EQUAL(
+        0,
+        memcmp(payload, &decoded_bits[3], 16)
+    );
+}
+
+static void viterbi_stream_zero_cost(void)
+{
+    uint8_t payload[16];
+    uint8_t encoded_bits[272];
+    uint16_t soft_bits[272];
+    uint8_t decoded_bits[21] = {0};
+    uint16_t fn = rand();
+
+    for (int i = 0; i < 16; i++)
+        payload[i] = rand();
+
+    conv_encode_stream_frame(encoded_bits, payload, fn);
+    bits_to_soft(soft_bits, encoded_bits, 272);
+
+    uint32_t cost = viterbi_decode_punctured(
+        decoded_bits,
+        soft_bits,
+        puncture_pattern_2,
+        272,
+        sizeof(puncture_pattern_2)
+    );
+    
+    TEST_ASSERT(cost < 25); // punctured code is near-zero, but not quite zero :-)
+}
+
+static void lsf_encode_decode(void)
+{
+    lsf_t lsf_in, lsf_out;
+    float symbs[SYM_PER_FRA];
+
+    for(uint8_t i=0; i<sizeof(lsf_t); i++)
+        ((uint8_t*)&lsf_in)[i]=rand()%256;
+    
+    gen_frame(symbs, NULL, FRAME_LSF, &lsf_in, 0, 0);
+    decode_LSF(&lsf_out, &symbs[8]); // why does this return ~100?
+
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(&lsf_in, &lsf_out, sizeof(lsf_t));
+}
+
+static void str_encode_decode(void)
+{
+    uint8_t lich_in[5], lich_out[5];
+    uint8_t pld_in[16], pld_out[16];
+    uint8_t lich_cnt_in, lich_cnt_out;
+    uint16_t fn_in, fn_out;
+    lsf_t lsf_in;
+    float symbs[SYM_PER_FRA];
+
+    fn_in=rand()%0x10000U;
+    for(uint8_t i=0; i<sizeof(pld_in); i++)
+        pld_in[i]=rand()%256;
+    for(uint8_t i=0; i<sizeof(lsf_t); i++)
+        ((uint8_t*)&lsf_in)[i]=rand()%256;
+    lich_cnt_in=rand()%6;
+    for(uint8_t i=0; i<5; i++)
+        lich_in[i]=((uint8_t*)&lsf_in)[lich_cnt_in*5+i];
+
+    gen_frame(symbs, pld_in, FRAME_STR, &lsf_in, lich_cnt_in, fn_in);
+    decode_str_frame(pld_out, lich_out, &fn_out, &lich_cnt_out, &symbs[8]);
+
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(pld_in, pld_out, sizeof(pld_in));
+    TEST_ASSERT_EQUAL_UINT8(lich_cnt_in, lich_cnt_out);
+    TEST_ASSERT_EQUAL_UINT8(fn_in, fn_out);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(lich_in, lich_out, sizeof(lich_in));
+}
+
+static void pkt_encode_decode(void)
+{
+    uint8_t v_in[26], v_out[26]={0};
+    uint8_t fn, last;
+    float symbs[SYM_PER_FRA];
+
+    for(uint8_t i=0; i<26; i++)
+        v_in[i]=rand()%256;
+    v_in[25]&=0xFC;
+
+    gen_frame(symbs, v_in, FRAME_PKT, NULL, 0, 0);
+    decode_pkt_frame(v_out, &last, &fn, &symbs[8]);
+    v_out[25]=((uint16_t)last<<7)|(fn<<2);
+    
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(v_in, v_out, 26);
+}
+
+static void callsign_encode_decode(void)
+{
+    uint8_t v[6], ref[6];
+
+    memset(ref, 0xFF, 6);
+    encode_callsign_bytes(v, "@ALL");
+
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(v, ref, 6);
+
+    //source set to "N0CALL"
+    ref[0] = 0x00;
+    ref[1] = 0x00;
+    ref[2] = 0x4B;
+    ref[3] = 0x13;
+    ref[4] = 0xD1;
+    ref[5] = 0x06;
+    encode_callsign_bytes(v, "N0CALL");
+
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(v, ref, 6);
+}
+
+static void meta_position(void)
+{
+    lsf_t lsf = {0};
+    uint8_t data_source = rand()%0x10;
+    uint8_t station_type = rand()%0x10;
+	float lat = (rand()%2? -1 : 1) * (float)(rand()%9000)/100.0f; //printf("lat = %+.2f\n", lat);
+    float lon = (rand()%2? -1 : 1) * (float)(rand()%18000)/100.0f; //printf("lon = %+.2f\n", lon);
+    uint8_t flags = rand()%0x10;
+    float altitude = (rand()%10000) * 0.5;
+    uint16_t bearing = rand()%360;
+    float speed = (rand()%1000) * 0.5;
+    float radius = rand()%128;
+
+    set_LSF_meta_position(&lsf, data_source, station_type, lat, lon, flags, altitude, bearing, speed, radius);
+
+    uint8_t data_source_n = 0;
+    uint8_t station_type_n = 0;
+	float lat_n = 0.0f;
+    float lon_n = 0.0f;
+    uint8_t flags_n = 0;
+    float altitude_n = 0;
+    uint16_t bearing_n = 0;
+    float speed_n = 0;
+    float radius_n = 0;
+
+    int retval = get_LSF_meta_position(&data_source_n, &station_type_n, &lat_n, &lon_n, &flags_n, &altitude_n, &bearing_n, &speed_n, &radius_n, &lsf);
+
+    static const float radius_lut[8] =
+    {
+        1.0f, 2.0f, 4.0f, 8.0f,
+        16.0f, 32.0f, 64.0f, 128.0f
+    };
+
+    uint8_t q = 7;
+    for (uint8_t i = 0; i < 8; i++)
+    {
+        if (radius <= radius_lut[i])
+        {
+            q = i;
+            break;
+        }
+    }
+
+    TEST_ASSERT_EQUAL_INT8(0, retval);
+    TEST_ASSERT_EQUAL_UINT8(data_source, data_source_n);
+    TEST_ASSERT_EQUAL_UINT8(station_type, station_type_n);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, lat, lat_n);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, lon, lon_n);
+    TEST_ASSERT_EQUAL_UINT8(flags, flags_n);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, altitude, altitude_n);
+    TEST_ASSERT_EQUAL_UINT16(bearing, bearing_n);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, speed, speed_n);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, radius_lut[q], radius_n);
+}
+
+static void crc_checks(void)
+{
+    uint8_t testvec[256+2] = {0};
+    for(uint16_t i=0; i<256; i++)
+        testvec[i]=i;
+
+    /* known-good vectors */
+    TEST_ASSERT_EQUAL_UINT16(0xFFFF, CRC_M17((uint8_t*)"", 0));
+    TEST_ASSERT_EQUAL_UINT16(0x206E, CRC_M17((uint8_t*)"A", 1));
+    TEST_ASSERT_EQUAL_UINT16(0x772B, CRC_M17((uint8_t*)"123456789", 9));
+    TEST_ASSERT_EQUAL_UINT16(0x1C31, CRC_M17(testvec, 256));
+
+    /* known-good vector with CRC appended */
+    uint16_t crc = CRC_M17(testvec, 256);
+    testvec[256] = crc>>8;
+    testvec[257] = crc&0xFF;
+    TEST_ASSERT_EQUAL_UINT16(0x0000, CRC_M17(testvec, 256+2));
+
+    /* determinism */
+    uint16_t crc_ref = CRC_M17(testvec, 256);
+    uint16_t crc_rep = CRC_M17(testvec, 256);
+    TEST_ASSERT_EQUAL_UINT16(crc_ref, crc_rep);
+
+    /* single-bit corruption */
+    testvec[21] ^= 0x08;   /* flip 1 bit */
+    TEST_ASSERT_NOT_EQUAL(crc_ref, CRC_M17(testvec, 256));
+    testvec[21] ^= 0x08;   /* restore */
+
+    /* another single-bit corruption */
+    testvec[37] ^= 0x10;
+    TEST_ASSERT_NOT_EQUAL(crc_ref, CRC_M17(testvec, 256));
+    testvec[37] ^= 0x10;
+
+    /* multi-bit corruption (same byte) */
+    testvec[14] ^= 0x55;
+    TEST_ASSERT_NOT_EQUAL(crc_ref, CRC_M17(testvec, 256));
+    testvec[14] ^= 0x55;
+
+    /* multi-byte corruption */
+    testvec[100] ^= 0xFF;
+    testvec[101] ^= 0xFF;
+    TEST_ASSERT_NOT_EQUAL(crc_ref, CRC_M17(testvec, 256));
+    testvec[100] ^= 0xFF;
+    testvec[101] ^= 0xFF;
+}
+
+/**
+ * @brief The fused RX front-end must match slice + derandomize + deinterleave.
+ */
+static void fused_slice_derandomize_deinterleave(void)
+{
+    float symbs[SYM_PER_PLD];
+    uint16_t soft_bit[2*SYM_PER_PLD], ref[2*SYM_PER_PLD], fused[2*SYM_PER_PLD];
+
+    for(uint16_t n=0; n<1000; n++)
+    {
+        for(uint16_t i=0; i<SYM_PER_PLD; i++)
+            symbs[i] = 10.0f*(float)rand()/(float)RAND_MAX - 5.0f; //covers all slicer regions, incl. beyond +/-3
+
+        slice_symbols(soft_bit, symbs);
+        randomize_soft_bits(soft_bit);
+        reorder_soft_bits(ref, soft_bit);
+
+        slice_derandomize_deinterleave(fused, symbs);
+
+        TEST_ASSERT_EQUAL_UINT16_ARRAY(ref, fused, 2*SYM_PER_PLD);
+    }
+}
+
+int main(void)
+{
+    srand(time(NULL));
+
+	UNITY_BEGIN();
+
+    //soft logic arithmetic
+    RUN_TEST(soft_logic_xor);
+
+    //symbol to dibit
+    RUN_TEST(symbol_to_dibit);
+    RUN_TEST(fused_slice_derandomize_deinterleave);
+
+    //soft Golay
+    RUN_TEST(golay_encode);
+    RUN_TEST(golay_soft_decode_clean);
+
+    RUN_TEST(golay_soft_decode_erased_parity_1);
+    RUN_TEST(golay_soft_decode_flipped_parity_1);
+    RUN_TEST(golay_soft_decode_erased_parity_2);
+    RUN_TEST(golay_soft_decode_flipped_parity_2);
+    RUN_TEST(golay_soft_decode_erased_parity_3);
+    RUN_TEST(golay_soft_decode_flipped_parity_3);
+    RUN_TEST(golay_soft_decode_erased_parity_3_5);
+    RUN_TEST(golay_soft_decode_flipped_parity_4);
+    RUN_TEST(golay_soft_decode_erased_parity_5);
+    RUN_TEST(golay_soft_decode_flipped_parity_5);
+
+    RUN_TEST(golay_soft_decode_erased_data_1);
+    RUN_TEST(golay_soft_decode_flipped_data_1);
+    RUN_TEST(golay_soft_decode_erased_data_2);
+    RUN_TEST(golay_soft_decode_flipped_data_2);
+    RUN_TEST(golay_soft_decode_erased_data_3);
+    RUN_TEST(golay_soft_decode_flipped_data_3);
+    RUN_TEST(golay_soft_decode_erased_data_3_5);
+    RUN_TEST(golay_soft_decode_flipped_data_4);
+    RUN_TEST(golay_soft_decode_corrupt_data_4_5);
+    RUN_TEST(golay_soft_decode_erased_data_5);
+    RUN_TEST(golay_soft_decode_flipped_data_5);
+
+    RUN_TEST(golay_soft_decode_erased_1);
+    RUN_TEST(golay_soft_decode_flipped_1);
+    RUN_TEST(golay_soft_decode_erased_2);
+    RUN_TEST(golay_soft_decode_flipped_2);
+    RUN_TEST(golay_soft_decode_erased_3);
+    RUN_TEST(golay_soft_decode_flipped_3);
+    RUN_TEST(golay_soft_decode_erased_3_5);
+    RUN_TEST(golay_soft_decode_flipped_4);
+    RUN_TEST(golay_soft_decode_erased_5);
+    RUN_TEST(golay_soft_decode_flipped_5);
+
+    //Viterbi
+    RUN_TEST(viterbi_stream_roundtrip_clean);
+    RUN_TEST(viterbi_stream_repeatability);
+    RUN_TEST(viterbi_stream_single_soft_error);
+    RUN_TEST(viterbi_stream_burst_error);
+    RUN_TEST(viterbi_stream_excessive_errors);
+    RUN_TEST(viterbi_stream_zero_cost);
+
+    //packet frame encode-decode
+    RUN_TEST(lsf_encode_decode);
+    RUN_TEST(str_encode_decode);
+    RUN_TEST(pkt_encode_decode);
+
+    //callsign encode/decode
+    RUN_TEST(callsign_encode_decode);
+
+    //META field encode/decode
+    RUN_TEST(meta_position);
+
+    //CRC test vectors
+    RUN_TEST(crc_checks);
+
+    return UNITY_END();
+}

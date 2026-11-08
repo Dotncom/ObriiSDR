@@ -1,0 +1,106 @@
+param(
+    [string]$RuntimeDir = "build\runtime",
+    [string]$OutputDir = "release\ObriiSDR-lite-windows-x64",
+    [switch]$Force
+)
+
+$ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'firmware_privacy_guard.ps1')
+$Workspace = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+$WorkspacePrefix = $Workspace.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+
+function Assert-WorkspacePath([string]$Path) {
+    $full = [IO.Path]::GetFullPath((Join-Path $Workspace $Path))
+    if (-not $full.StartsWith($WorkspacePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Path is outside the workspace: $full"
+    }
+    $current = $full
+    while ($current -ne $Workspace) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Refusing a reparse point: $current"
+            }
+        }
+        $current = Split-Path -Parent $current
+    }
+    return $full
+}
+
+$runtime = Assert-WorkspacePath $RuntimeDir
+$output = Assert-WorkspacePath $OutputDir
+$releasePrefix = (Join-Path $Workspace 'release').TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+if (-not $output.StartsWith($releasePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Lite output must be inside release/: $output"
+}
+if (-not (Test-Path -LiteralPath $runtime -PathType Container)) {
+    throw "Runtime folder not found: $runtime"
+}
+$PublicFirmwareFiles = @(Get-ObriiPublicFirmwareManifest (Join-Path $runtime 'firmware/fobos') | ForEach-Object { 'firmware/fobos/' + $_ })
+if (Test-Path -LiteralPath $output) {
+    if (-not $Force -or -not (Test-Path -LiteralPath (Join-Path $output '.obrii-lite-generated'))) {
+        throw "Output exists. Rebuild only a generated lite folder with -Force: $output"
+    }
+    Remove-Item -LiteralPath $output -Recurse -Force
+}
+New-Item -ItemType Directory -Path $output -Force | Out-Null
+
+$files = @(
+    'ObriiFobosFirmware.exe',
+    'ObriiSDR.exe', 'ObriiCli.exe', 'ObriiCliView.exe', 'translations.json', 'LICENSE', 'THIRD_PARTY_LICENSES.txt',
+    'fobos.dll', 'fobos_sdr.dll', 'libfftw3f-3.dll', 'libusb-1.0.dll',
+    'Qt5Core.dll', 'Qt5Concurrent.dll', 'Qt5Gui.dll', 'Qt5Widgets.dll',
+    'Qt5Network.dll', 'Qt5SerialPort.dll', 'Qt5Multimedia.dll',
+    'MSVCP140.dll', 'MSVCP140_1.dll', 'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll',
+    'platforms/qwindows.dll', 'imageformats/qgif.dll', 'imageformats/qico.dll',
+    'imageformats/qjpeg.dll', 'imageformats/qtiff.dll', 'imageformats/qwebp.dll',
+    'audio/qtaudio_windows.dll', 'audio/qtaudio_wasapi.dll'
+)
+$files += $PublicFirmwareFiles
+if (Test-Path -LiteralPath (Join-Path $runtime 'fobos-compat')) {
+    $files += @('fobos-compat/fobos_stock.dll', 'fobos-compat/fobos_sdr_stock.dll', 'fobos-compat/usb-vendor.dll')
+}
+$optional = @(
+    'rtlsdr.dll', 'rtlsdr/rtlsdr.dll', 'rtlsdr/libusb-1.0.dll',
+    'hackrf/hackrf.dll', 'hackrf/libusb-1.0.dll', 'hackrf/pthreadVC3.dll',
+    'hackrf/COPYING-hackrf.txt', 'hackrf/COPYING-libusb.txt',
+    'hackrf/LICENSE-pthreads4w.txt', 'hackrf/NOTICE-pthreads4w.txt'
+)
+foreach ($relative in $files + $optional) {
+    $source = Assert-WorkspacePath (Join-Path $RuntimeDir $relative)
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        if ($files -contains $relative) { throw "Required lite runtime file missing: $relative" }
+        continue
+    }
+    $destination = Join-Path $output $relative
+    New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+    Copy-Item -LiteralPath $source -Destination $destination -Force
+    if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash) {
+        throw "Lite runtime copy failed verification: $relative"
+    }
+}
+Copy-Item -LiteralPath (Join-Path $Workspace 'docs/lite_windows_package.md') -Destination (Join-Path $output 'README-LITE.md')
+$publicDocs = @('mesh_vpn_discovery.md', 'fft_tuning.md', 'phosphor_contours.md', 'obrii_cli.md', 'cli_parity.md', 'shared_runtime_core.md',
+    'shared_fft_core.md', 'shared_recording_core.md', 'command_dispatcher.md',
+    'command_console.md', 'command_control_api.md', 'cli_doctor.md',
+    'cli_runtime_recording.md', 'cli_calibration.md', 'cli_digital_profiles.md',
+    'cli_remote_dsp.md', 'cli_web_service.md', 'cli_gnss.md', 'cli_live_tx.md',
+    'cli_research_tools.md', 'cli_dsp_graph_example.json', 'cli_multisdr_graph_example.json',
+    'cli_signal_lab_ofdm.json', 'cli_spectrum_monitor.json', 'cli_scan_example.json',
+    'cli_iq_trigger_example.json', 'virtual_iq_link_scenario.json')
+New-Item -ItemType Directory -Path (Join-Path $output 'docs') -Force | Out-Null
+foreach ($document in $publicDocs) {
+    Copy-Item -LiteralPath (Join-Path $Workspace ('docs/' + $document)) `
+        -Destination (Join-Path $output ('docs/' + $document)) -Force
+}
+if (Test-Path -LiteralPath (Join-Path $Workspace 'third_party/libm17/LICENSE')) {
+    $noticeDir = Join-Path $output 'licenses/libm17'
+    New-Item -ItemType Directory -Path $noticeDir -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $Workspace 'third_party/libm17/LICENSE') `
+        -Destination (Join-Path $noticeDir 'LICENSE.txt') -Force
+}
+Set-Content -LiteralPath (Join-Path $output '.obrii-lite-generated') -Value 'Generated by tools/package_windows_lite.ps1' -Encoding ascii
+Assert-ObriiPublicPackageTree -Root $output
+$bytes = (Get-ChildItem -LiteralPath $output -Recurse -File | Measure-Object -Property Length -Sum).Sum
+[pscustomobject]@{ Path = $output; Files = (Get-ChildItem -LiteralPath $output -Recurse -File).Count; MiB = [math]::Round($bytes / 1MB, 1) }

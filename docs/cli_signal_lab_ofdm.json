@@ -1,0 +1,14 @@
+{
+  "waveform": "ofdm",
+  "sampleRate": 48000,
+  "amplitude": 0.5,
+  "randomSeed": 7,
+  "ofdmFftSize": 256,
+  "ofdmActiveCarriers": 128,
+  "ofdmCyclicPrefix": 32,
+  "ofdmSymbolCount": 40,
+  "ofdmPilotSpacing": 16,
+  "ofdmConstellation": "qpsk",
+  "ofdmNullDc": true,
+  "ofdmEdgeWindowPercent": 2
+}

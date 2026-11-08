@@ -1,0 +1,28 @@
+{
+  "version": 8,
+  "blocks": [
+    {"id": "rx2", "type": "receiver_source"},
+    {"id": "ddc2", "type": "ddc_channelizer", "settings": {
+      "enabled": true, "receiverId": "multi-rx-2", "channelId": "rx0",
+      "frequencyHz": 145500000, "bandwidthHz": 12500,
+      "outputRateHz": 192000, "decimation": 0, "firTaps": 32
+    }},
+    {"id": "fft2", "type": "branch_fft", "settings": {
+      "fftLength": 2048, "refreshMs": 100, "window": 1
+    }},
+    {"id": "spectrum2", "type": "branch_spectrum"},
+    {"id": "demod2", "type": "branch_demodulator", "settings": {
+      "modulation": 1, "bandwidthHz": 12500, "lowPassHz": 3000
+    }},
+    {"id": "audio2", "type": "branch_audio_output", "settings": {
+      "enabled": true, "volume": 0.5
+    }}
+  ],
+  "connections": [
+    {"source": "rx2", "target": "ddc2"},
+    {"source": "ddc2", "target": "fft2"},
+    {"source": "fft2", "target": "spectrum2"},
+    {"source": "ddc2", "target": "demod2"},
+    {"source": "demod2", "target": "audio2"}
+  ]
+}

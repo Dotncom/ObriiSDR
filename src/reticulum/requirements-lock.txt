@@ -1,0 +1,6 @@
+# Resolved for Python 3.12 on Windows x64. Direct RNS API is pinned in requirements.txt.
+cffi==2.1.1
+cryptography==50.0.2
+pycparser==3.12
+pyserial==3.5
+rns==1.5.5
