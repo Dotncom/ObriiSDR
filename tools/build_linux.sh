@@ -75,7 +75,7 @@ Then install or build Linux libfobos/libfobos_sdr. Expected default layout:
   ${LOCAL_FOBOS_PREFIX}/lib/libfobos_sdr.so
 
 You can build that private copy with:
-  ./tools/prepare_fobos_linux.sh
+  ALLOW_UPSTREAM_FOBOS_CLONE=1 ./tools/prepare_fobos_linux.sh
 
 System-wide fallback layout:
   ${FOBOS_STANDARD_ROOT}/include/fobos.h

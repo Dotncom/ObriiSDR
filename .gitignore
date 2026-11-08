@@ -127,3 +127,6 @@ src.Fobos.example/
 
 # unused folders
 /shaders/
+
+# Optional locally supplied Fobos SDK source trees
+/third_party/patched/

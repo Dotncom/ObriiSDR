@@ -419,7 +419,8 @@ FOBOS_AGILE_ROOT=/path/to/libfobos_sdr \
 ./tools/build_linux.sh
 ```
 
-The Raspberry Pi source archive uses the official Standard and Agile SDKs.
+The public checkout and Raspberry Pi source archive use the official Standard
+and Agile SDKs.
 The helper installs them under `third_party/fobos-linux`. To download and
 build both libraries explicitly, run:
 
