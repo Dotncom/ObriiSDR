@@ -281,6 +281,9 @@ void YourClassName::loadPersistentSettings() {
     pendingSettings.simplifiedAudioChannelizer =
         settings.value("audio/simplifiedChannelizer",
                        pendingSettings.simplifiedAudioChannelizer).toBool();
+    useCorrectedFobosCommands = settings.value("receiver/useCorrectedFobosCommands", true).toBool();
+    fobosIfTestMode = (std::clamp)(settings.value("receiver/ifTestMode", 3).toInt(), 0, 3);
+    adcOverloadProtectionEnabled = settings.value("receiver/adcOverloadProtection", false).toBool();
     if (multiVfoWidget) {
         multiVfoWidget->setConfigurationJson(
             settings.value(QStringLiteral("multiVfo/configuration"), QStringLiteral("{\"version\":1,\"enabled\":false,\"channels\":[]}"))
@@ -634,6 +637,14 @@ void YourClassName::loadPersistentSettings() {
         agileScanPresets[QStringLiteral("FPV 3.3GHz sparse")] =
             agileScanPresetSpec(QStringLiteral("3200-3500"), 50.0);
     }
+    if (!agileScanPresets.contains(QStringLiteral("FPV 6GHz channels 6110-6890"))) {
+        agileScanPresets[QStringLiteral("FPV 6GHz channels 6110-6890")] =
+            agileScanPresetSpec(fpv6GhzScanTargetsMhz(6900.0), 20.0);
+    }
+    if (!agileScanPresets.contains(QStringLiteral("FPV 6GHz channels 6110-7210 (experimental)"))) {
+        agileScanPresets[QStringLiteral("FPV 6GHz channels 6110-7210 (experimental)")] =
+            agileScanPresetSpec(fpv6GhzScanTargetsMhz(7210.0), 20.0);
+    }
     if (!agileScanPresets.contains(QStringLiteral("GNSS L1 1559-1610 50MHz"))) {
         agileScanPresets[QStringLiteral("GNSS L1 1559-1610 50MHz")] =
             agileScanPresetSpec(QStringLiteral("1559-1610"), GNSS_USEFUL_STANDARD_SPAN_HZ / 1000000.0);
@@ -806,6 +817,9 @@ void YourClassName::loadPersistentSettings() {
     showAmateurBandMarkers = settings.value("display/amateurBandMarkers", showAmateurBandMarkers).toBool();
     compactBandMarkers = settings.value("display/compactBandMarkers", compactBandMarkers).toBool();
     spurSuppressionEnabled = settings.value("display/spurSuppressionEnabled", spurSuppressionEnabled).toBool();
+    spurDetectionThresholdDb = (std::clamp)(settings.value("display/spurThresholdDb", 6.0).toDouble(), 3.0, 30.0);
+    spurCalibrationProfile = SpurCalibrationProfile::fromJson(QJsonDocument::fromJson(
+        settings.value("display/spurCalibrationProfile").toByteArray()).object());
     diagnosticVerboseLogging =
         settings.value("diagnostics/verboseLogging",
                        fobosVerboseLoggingDefaultEnabled()).toBool();
@@ -850,6 +864,10 @@ void YourClassName::loadPersistentSettings() {
     }
     fftBackendPreference = normalizedFftBackendPreference(
         settings.value("ui/fftBackendPreference", fftBackendPreference).toInt());
+    if (spectrumUpdateSpin) {
+        const QSignalBlocker blocker(spectrumUpdateSpin);
+        spectrumUpdateSpin->setValue(spectrumUpdateIntervalMs);
+    }
     frequencyCalibrationOffsetHz =
         (std::clamp)(settings.value("calibration/frequencyOffsetHz",
                                     frequencyCalibrationOffsetHz).toDouble(),
@@ -865,7 +883,9 @@ void YourClassName::loadPersistentSettings() {
     receiverNoiseBaselineMode = (std::clamp)(
         settings.value("calibration/noiseBaselineMode", receiverNoiseBaselineMode).toInt(),
         static_cast<int>(ReceiverNoiseBaselineMode::Off),
-        static_cast<int>(ReceiverNoiseBaselineMode::ExcessPower));
+        static_cast<int>(ReceiverNoiseBaselineMode::WideShape));
+    receiverNoiseShapeWidthHz = (std::clamp)(settings.value("calibration/noiseShapeWidthHz", 150000.0).toDouble(), 50000.0, 2000000.0);
+    receiverNoiseShapeStrength = (std::clamp)(settings.value("calibration/noiseShapeStrength", 1.0).toDouble(), 0.0, 1.0);
     receiverNoiseBaselineTargetDb = (std::clamp)(
         settings.value("calibration/noiseBaselineTargetDb", receiverNoiseBaselineTargetDb).toDouble(),
         -220.0,
@@ -934,6 +954,10 @@ void YourClassName::loadPersistentSettings() {
                      WATERFALL_ROWS_PER_FRAME_MAX);
     if (waterfallWidget) {
         waterfallWidget->setRowsPerFrame(waterfallRowsPerFrame);
+    }
+    if (waterfallRowsSpin) {
+        const QSignalBlocker blocker(waterfallRowsSpin);
+        waterfallRowsSpin->setValue(waterfallRowsPerFrame);
     }
     spectrumDisplayMode = (std::clamp)(settings.value("ui/spectrumDisplayMode", 0).toInt(), 0, 1);
     spectrumPersistenceSeconds = settings.value("ui/spectrumPersistenceSeconds", 1.6).toDouble();
@@ -1209,6 +1233,10 @@ void YourClassName::loadPersistentSettings() {
                                     AGILE_LIVE_RETUNE_DEFAULT_COMMAND_INTERVAL_MS).toInt(),
                      AGILE_LIVE_RETUNE_MIN_COMMAND_INTERVAL_MS,
                      AGILE_LIVE_RETUNE_MAX_COMMAND_INTERVAL_MS);
+    agileContinuousRetuneEnabled = settings.value("ui/agileContinuousRetune", false).toBool();
+    const double retuneStep = settings.value("ui/agileContinuousRetuneStepPercent", 5.0).toDouble();
+    agileContinuousRetuneStepPercent = std::isfinite(retuneStep)
+        ? (std::clamp)(retuneStep, 0.1, 100.0) : 5.0;
     fineTuneScaleHoldMode = settings.value("ui/fineTuneScaleHoldMode", fineTuneScaleHoldMode).toBool();
     spectrumFrameBufferEnabled =
         settings.value("spectrumFrames/bufferEnabled", spectrumFrameBufferEnabled).toBool();
@@ -1564,6 +1592,8 @@ void YourClassName::flushPendingPersistentSettingsSave() {
 }
 
 void YourClassName::savePersistentSettings() {
+    // Sweep frequencies are temporary; never persist them as the user's tuning.
+    if (spurSweepActive) return;
     if (!persistentSettingsReady) {
         return;
     }
@@ -1931,6 +1961,9 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("display/amateurBandMarkers", showAmateurBandMarkers);
     settings.setValue("display/compactBandMarkers", compactBandMarkers);
     settings.setValue("display/spurSuppressionEnabled", spurSuppressionEnabled);
+    settings.setValue("display/spurThresholdDb", spurDetectionThresholdDb);
+    settings.setValue("display/spurCalibrationProfile",
+        QJsonDocument(spurCalibrationProfile.toJson()).toJson(QJsonDocument::Compact));
     settings.setValue("diagnostics/verboseLogging", diagnosticVerboseLogging);
     settings.setValue("recording/extendedMetadata", extendedRecordingMetadataEnabled);
     settings.beginWriteArray(QStringLiteral("display/spurMask"));
@@ -1958,6 +1991,8 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("calibration/amplitudeOffsetDb", amplitudeCalibrationOffsetDb);
     settings.setValue("calibration/tableEnabled", calibrationTableEnabled);
     settings.setValue("calibration/noiseBaselineMode", receiverNoiseBaselineMode);
+    settings.setValue("calibration/noiseShapeWidthHz", receiverNoiseShapeWidthHz);
+    settings.setValue("calibration/noiseShapeStrength", receiverNoiseShapeStrength);
     settings.setValue("calibration/noiseBaselineTargetDb", receiverNoiseBaselineTargetDb);
     settings.setValue("calibration/noiseBaselineCaptureFrames", receiverNoiseBaselineCaptureFrames);
     settings.setValue("calibration/yFactorApplyEnabled", receiverYFactorApplyEnabled);
@@ -2020,6 +2055,8 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("ui/spectrumPeakMeterStyle", spectrumPeakMeterStyle);
     settings.setValue("ui/showExtendedSpectrumInfo", showExtendedSpectrumInfo);
     settings.setValue("ui/agileLiveRetuneIntervalMs", agileLiveRetuneCommandIntervalMs);
+    settings.setValue("ui/agileContinuousRetune", agileContinuousRetuneEnabled);
+    settings.setValue("ui/agileContinuousRetuneStepPercent", agileContinuousRetuneStepPercent);
     settings.setValue("ui/fineTuneScaleHoldMode", fineTuneScaleHoldMode);
     settings.setValue("spectrumFrames/bufferEnabled", spectrumFrameBufferEnabled);
     settings.setValue("spectrumFrames/prebufferSeconds", spectrumFramePrebufferSeconds);
@@ -2032,6 +2069,9 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("audio/filterChainJson", pendingSettings.audioFilterChainJson);
     settings.setValue("audio/simplifiedChannelizer",
                       pendingSettings.simplifiedAudioChannelizer);
+    settings.setValue("receiver/useCorrectedFobosCommands", useCorrectedFobosCommands);
+    settings.setValue("receiver/ifTestMode", fobosIfTestMode);
+    settings.setValue("receiver/adcOverloadProtection", adcOverloadProtectionEnabled);
     settings.setValue("hfNoiseCancel/depth", pendingSettings.hfNoiseCancelDepth);
     settings.setValue("hfNoiseCancel/refGainDb", pendingSettings.hfNoiseCancelRefGainDb);
     settings.setValue("hfNoiseCancel/refDelayNs", pendingSettings.hfNoiseCancelRefDelayNs);

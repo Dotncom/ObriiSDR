@@ -7,6 +7,9 @@
 #include <QStringList>
 #include <QVector>
 
+#include <array>
+#include <complex>
+
 enum class AnalyzerInstrumentMode {
     TrackingGenerator,
     ScalarNetworkAnalyzer,
@@ -141,6 +144,9 @@ public:
     static double returnLossDb(double reflectionMagnitude);
     static double swrFromReflectionMagnitude(double reflectionMagnitude);
     static double reflectionMagnitudeFromReturnLoss(double returnLossDb);
+    static bool correctOnePort(const std::array<std::complex<double>, 3> &standards,
+                               const std::array<std::complex<double>, 3> &measuredStandards,
+                               std::complex<double> measuredDevice, std::complex<double> &corrected);
 };
 
 #endif

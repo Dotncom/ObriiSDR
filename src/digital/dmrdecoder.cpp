@@ -25,6 +25,7 @@ constexpr int DMR_SYMBOLS_BEFORE_SYNC = 54;
 constexpr int DMR_CACH_SYMBOLS = 12;
 constexpr int DMR_CANDIDATE_SYNC_SCORE = 23;
 constexpr int DMR_CONFIRMED_SYNC_SCORE = 24;
+constexpr int DMR_PI_MAX_SYNC_ERRORS = 2;
 constexpr int DMR_CANDIDATE_OUTER_SCORE = 16;
 constexpr int DMR_CONFIRMED_OUTER_SCORE = 16;
 constexpr int DMR_REPORTABLE_CANDIDATE_OUTER_SCORE = 20;
@@ -1138,6 +1139,7 @@ void DmrDecoder::reset() {
     selectedVoicePayloadSample = 0;
     lastObservedTimeslot = 0;
     lastForwardedDataBurstSample = 0;
+    nextPrivacyIndicatorSample = 0;
     lastVoiceService = VoiceServiceInfo();
     lastVoiceLcUserKey.clear();
     lastVoiceLcUserSample = 0;
@@ -1427,6 +1429,7 @@ DmrDecoder::Result DmrDecoder::processPcmFrame(const QByteArray &pcmData, int sa
 
     const int appendedSamples = pcmData.size() / static_cast<int>(sizeof(qint16));
     appendSamples(pcmData);
+    if (privacyIndicatorValidator) scanAndForwardDataBursts();
     processPendingVoiceEmb();
     const QString pendingDecodedText = takePendingDecodedMessages();
     SyncHit hit;
@@ -2890,6 +2893,12 @@ DmrDecoder::SlotTypeInfo DmrDecoder::decodeSlotTypeAroundSync(const SyncHit &hit
     }
     const std::array<float, 3> slicerRatios = {0.625f, 0.55f, 0.70f};
     const std::array<bool, 2> mapVariants = {true, false};
+    static const auto codewords = [] {
+        std::array<std::array<bool, 20>, 256> result{};
+        for (int data = 0; data < 256; ++data)
+            result[data] = golay208Codeword(data);
+        return result;
+    }();
 
     for (int timingOffset : timingOffsets) {
         const int relativeTimingOffset = timingOffset - samplesPerSymbol / 2;
@@ -2938,11 +2947,11 @@ DmrDecoder::SlotTypeInfo DmrDecoder::decodeSlotTypeAroundSync(const SyncHit &hit
                 int localBestData = 0;
                 int localBestErrors = 21;
                 for (int data = 0; data < 256; ++data) {
-                    const std::array<bool, 20> candidate = golay208Codeword(data);
-                    const int errors = bitDistance(received, candidate);
+                    const int errors = bitDistance(received, codewords[data]);
                     if (errors < localBestErrors) {
                         localBestErrors = errors;
                         localBestData = data;
+                        if (errors == 0) break;
                     }
                 }
 
@@ -2996,79 +3005,90 @@ void DmrDecoder::scanAndForwardDataBursts() {
     const quint64 bufferStartSample = totalSamples > sampleBuffer.size()
                                           ? totalSamples - static_cast<quint64>(sampleBuffer.size())
                                           : 0;
-    quint64 minimumSample = bufferStartSample;
+    const quint64 lead = DMR_SYMBOLS_BEFORE_SYNC * samplesPerSymbol;
+    const quint64 tail = (DMR_SYNC_SYMBOLS + DMR_SYMBOLS_BEFORE_SYNC) * samplesPerSymbol;
+    if (totalSamples < tail) return;
+    const quint64 lastSample = totalSamples - tail;
+    quint64 minimumSample = (std::max)(bufferStartSample + lead, nextPrivacyIndicatorSample);
+    // Scan each newly complete burst once, even while findBestSync follows voice.
+    nextPrivacyIndicatorSample = lastSample + 1;
     const quint64 duplicateGap =
         static_cast<quint64>(std::lround(0.020 * activeSampleRate));
     if (lastForwardedDataBurstSample > 0) {
         minimumSample = (std::max)(minimumSample, lastForwardedDataBurstSample + duplicateGap);
     }
-    const int phaseStep = (std::max)(1, (std::min)(4, samplesPerSymbol / 10));
-    std::vector<int> phaseCandidates;
-    phaseCandidates.reserve(samplesPerSymbol / phaseStep + 1);
-    for (int phase = 0; phase < samplesPerSymbol; phase += phaseStep) {
-        phaseCandidates.push_back(phase);
+    static const auto dataPatterns = [] {
+        std::array<quint32, std::size(DMR_SYNC_PATTERNS)> masks{};
+        for (std::size_t i = 0; i < masks.size(); ++i) {
+            const auto &pattern = DMR_SYNC_PATTERNS[i];
+            if (std::strcmp(pattern.kind, "data") != 0) continue;
+            for (int symbol = 0; symbol < DMR_SYNC_SYMBOLS; ++symbol)
+                masks[i] = (masks[i] << 1) | (pattern.symbols[symbol] == '3');
+        }
+        return masks;
+    }();
+    constexpr quint32 syncMask = (1u << DMR_SYNC_SYMBOLS) - 1;
+    quint64 failedPiSample = 0;
+    bool forwardedPi = false;
+    for (quint64 sample = minimumSample; sample <= lastSample; ++sample) {
+        const int start = static_cast<int>(sample - bufferStartSample);
+        std::array<float, DMR_SYNC_SYMBOLS> levels{};
+        for (int symbol = 0; symbol < DMR_SYNC_SYMBOLS; ++symbol)
+            levels[symbol] = averagedSymbolSample(sampleBuffer,
+                start + symbol * samplesPerSymbol + samplesPerSymbol / 2, samplesPerSymbol);
+        const auto bounds = std::minmax_element(levels.begin(), levels.end());
+        const float span = *bounds.second - *bounds.first;
+        if (span < 0.004f) continue;
+        const float center = (*bounds.first + *bounds.second) * 0.5f;
+        quint32 positive = 0, negative = 0;
+        int outer = 0;
+        for (float level : levels) {
+            positive = (positive << 1) | (level > center);
+            negative = (negative << 1) | (level < center);
+            outer += std::abs(level - center) > 0.55f * span * 0.5f;
+        }
+        if (outer < DMR_CONFIRMED_OUTER_SCORE || (positive | negative) != syncMask) continue;
+        for (std::size_t i = 0; i < dataPatterns.size(); ++i) {
+            const quint32 pattern = dataPatterns[i];
+            if (!pattern) continue;
+            const int normalErrors = qPopulationCount(positive ^ pattern);
+            const int invertedErrors = DMR_SYNC_SYMBOLS - normalErrors;
+            const int errors = (std::min)(normalErrors, invertedErrors);
+            if (errors > DMR_PI_MAX_SYNC_ERRORS) continue;
+            SyncHit hit;
+            hit.pattern = &DMR_SYNC_PATTERNS[i];
+            hit.score = DMR_SYNC_SYMBOLS - errors;
+            hit.errors = errors;
+            hit.outerScore = outer;
+            hit.phase = start % samplesPerSymbol;
+            hit.symbolIndex = start / samplesPerSymbol;
+            hit.inverted = invertedErrors < normalErrors;
+            hit.absoluteSample = sample;
+            const SlotTypeInfo slotType = decodeSlotTypeAroundSync(hit);
+            if (!slotType.decoded || slotType.dataType != 0) continue;
+            const CachInfo strictCach = decodeCachBeforeSync(hit, false);
+            const CachInfo cach = strictCach.decoded ? strictCach : decodeCachBeforeSync(hit, true);
+            if (queueDataBurstForBackend(hit, slotType, cach, &failedPiSample)) {
+                forwardedPi = true;
+                sample += duplicateGap - 1;
+                break;
+            }
+        }
     }
-
-    for (const int phase : phaseCandidates) {
-        const int maxStart = (static_cast<int>(sampleBuffer.size()) - phase) / samplesPerSymbol - DMR_SYNC_SYMBOLS;
-        if (maxStart < 0) {
-            continue;
-        }
-        for (int symbolStart = 0; symbolStart <= maxStart; ++symbolStart) {
-            const quint64 absoluteSample =
-                bufferStartSample + static_cast<quint64>(symbolStart * samplesPerSymbol + phase);
-            if (absoluteSample < minimumSample) {
-                continue;
-            }
-            for (const SyncPattern &pattern : DMR_SYNC_PATTERNS) {
-                if (std::strcmp(pattern.kind, "data") != 0) {
-                    continue;
-                }
-                for (const bool inverted : {false, true}) {
-                    const int startIndex = phase + symbolStart * samplesPerSymbol;
-                    int outerScore = 0;
-                    const int score = scoreSyncSymbols(sampleBuffer,
-                                                       startIndex,
-                                                       samplesPerSymbol,
-                                                       pattern.symbols,
-                                                       inverted,
-                                                       &outerScore);
-                    if (score < DMR_CONFIRMED_SYNC_SCORE ||
-                        outerScore < DMR_CONFIRMED_OUTER_SCORE) {
-                        continue;
-                    }
-
-                    SyncHit hit;
-                    hit.pattern = &pattern;
-                    hit.score = score;
-                    hit.errors = DMR_SYNC_SYMBOLS - score;
-                    hit.outerScore = outerScore;
-                    hit.phase = phase;
-                    hit.symbolIndex = symbolStart;
-                    hit.inverted = inverted;
-                    hit.qualityDb = syncQualityDb(score);
-                    hit.absoluteSample = absoluteSample;
-                    const SlotTypeInfo slotType = decodeSlotTypeAroundSync(hit);
-                    if (!slotType.decoded || slotType.dataType != 0) {
-                        continue;
-                    }
-                    const CachInfo strictCach = decodeCachBeforeSync(hit, false);
-                    const CachInfo cach = strictCach.decoded ? strictCach : decodeCachBeforeSync(hit, true);
-                    if (queueDataBurstForBackend(hit, slotType, cach)) {
-                        minimumSample = lastForwardedDataBurstSample + duplicateGap;
-                    }
-                }
-            }
-        }
+    if (failedPiSample != 0 && !forwardedPi && labLoggingEnabled()) {
+        qDebug() << "[DMR PI] candidate failed BPTC/CRC" << "sample" << failedPiSample;
     }
 }
 
 bool DmrDecoder::queueDataBurstForBackend(const SyncHit &hit,
                                           const SlotTypeInfo &slotType,
-                                          const CachInfo &cach) {
+                                          const CachInfo &cach,
+                                          quint64 *failedPiSample) {
+    const int minimumScore = privacyIndicatorValidator
+        ? DMR_SYNC_SYMBOLS - DMR_PI_MAX_SYNC_ERRORS : DMR_CONFIRMED_SYNC_SCORE;
     if (!hit.pattern ||
         std::strcmp(hit.pattern->kind, "data") != 0 ||
-        hit.score < DMR_CONFIRMED_SYNC_SCORE ||
+        hit.score < minimumScore ||
         !slotType.decoded ||
         slotType.dataType != 0) {
         return false;
@@ -3095,19 +3115,30 @@ bool DmrDecoder::queueDataBurstForBackend(const SyncHit &hit,
         return false;
     }
 
-    const VoicePayloadBits rawDataBurst =
-        decodeVoicePayloadAt(dataPayload,
-                             hit.inverted,
-                             slotType.timingOffset,
-                             static_cast<float>(slotType.slicerRatio),
-                             true,
-                             DMR_AMBE_LAYOUT_SPLIT36,
-                             0,
-                             true);
-    const QString dataDibits =
-        rawDataBurst.leftDibits +
-        rawDataBurst.syncDibits +
-        rawDataBurst.rightDibits;
+    const auto decodeDibits = [&](bool adaptive, float ratio) {
+        const auto raw = decodeVoicePayloadAt(dataPayload, hit.inverted, slotType.timingOffset,
+                                              ratio, adaptive, DMR_AMBE_LAYOUT_SPLIT36, 0, true);
+        return raw.leftDibits + raw.syncDibits + raw.rightDibits;
+    };
+    const float ratio = static_cast<float>(slotType.slicerRatio);
+    QString dataDibits = decodeDibits(true, ratio);
+    if (privacyIndicatorValidator && !privacyIndicatorValidator(dataDibits)) {
+        // Slot Type covers ten dibits. The best slicer for it need not be
+        // the best one for the full BPTC payload, so let the PI CRC decide.
+        QString recovered;
+        for (float fixedRatio : {0.625f, 0.55f, 0.70f}) {
+            const QString candidate = decodeDibits(false, fixedRatio);
+            if (candidate == dataDibits || !privacyIndicatorValidator(candidate)) continue;
+            recovered = candidate;
+            break;
+        }
+        if (recovered.isEmpty()) {
+            if (failedPiSample && *failedPiSample == 0 && hit.errors <= 1 && slotType.correctedErrors <= 1)
+                *failedPiSample = hit.absoluteSample;
+            return false;
+        }
+        dataDibits = recovered;
+    }
     if (dataDibits.size() != DMR_TRAFFIC_SYMBOLS) {
         return false;
     }
@@ -3133,7 +3164,7 @@ bool DmrDecoder::queueDataBurstForBackend(const SyncHit &hit,
         }
         return false;
     }
-    if (slotType.correctedErrors > 1) {
+    if (slotType.correctedErrors > 1 && !privacyIndicatorValidator) {
         if (labLoggingEnabled()) {
             qDebug() << "[DMR] drop data burst for GopherTrunk: weak slot type"
                      << "type" << slotType.dataTypeName
@@ -3185,11 +3216,12 @@ bool DmrDecoder::queueDataBurstForBackend(const SyncHit &hit,
     }
     lastForwardedDataBurstSample = hit.absoluteSample;
     if (labLoggingEnabled()) {
-        qDebug() << "[DMR] forwarding data burst to GopherTrunk"
+        qDebug() << "[DMR] forwarding data burst"
                  << "pattern" << hit.pattern->name
                  << "type" << slotType.dataTypeName
                  << "cc" << slotType.colorCode
                  << "errors" << slotType.correctedErrors
+                 << "syncErrors" << hit.errors
                  << "sample" << static_cast<qulonglong>(hit.absoluteSample)
                  << "ts" << timeslot
                  << "tsSource" << timeslotSource;

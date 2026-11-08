@@ -229,6 +229,7 @@ SpectrumFrameReplayDialog::SpectrumFrameReplayDialog(QWidget *parent, bool isola
     connect(openButton, &QPushButton::clicked, this, &SpectrumFrameReplayDialog::openRecordingFromDialog);
 
     playButton = new QPushButton(replayText("play", "Play"), this);
+    playButton->setObjectName(QStringLiteral("replayPlay"));
     playButton->setCheckable(true);
     connect(playButton, &QPushButton::toggled, this, [this](bool checked) {
         setPlaybackEnabled(checked);
@@ -373,6 +374,7 @@ SpectrumFrameReplayDialog::SpectrumFrameReplayDialog(QWidget *parent, bool isola
     });
 
     replayAudioCheckbox = new QCheckBox(replayText("audio", "Audio"), this);
+    replayAudioCheckbox->setObjectName(QStringLiteral("replayAudio"));
     replayAudioCheckbox->setToolTip(replayText("audio_checkbox_tooltip", "Play replay audio together with the main replay Play button"));
     connect(replayAudioCheckbox, &QCheckBox::toggled, this, [this](bool checked) {
         if (!checked) {
@@ -1221,6 +1223,9 @@ QJsonObject SpectrumFrameReplayDialog::experimentReplayState() const {
         {"firstStoredMagnitude", recording->frames.empty() || recording->frames.front().magnitudes.empty() ? QJsonValue() : QJsonValue(recording->frames.front().magnitudes.front())},
         {"frameCount", double(recording->frames.size())}, {"viewportRasterPixels", experimentViewportPixels},
         {"sharedRecordingBacking", experimentFrames && experimentFrames.get() == recording.get()},
+        {"iqPlaybackActive", localIqPlaybackActive},
+        {"iqPlaybackBytesPerSample", localIqPlaybackBytesPerSample},
+        {"iqPlaybackSampleRate", localIqPlaybackSampleRate},
         {"channelIqAvailable", replayIqSourceAvailable(ReplayIqSource::ChannelIq)},
         {"fullIqAvailable", replayIqSourceAvailable(ReplayIqSource::FullIq)}};
 }
@@ -1286,6 +1291,9 @@ void SpectrumFrameReplayDialog::adoptRecording(const QString &path, SpectrumFram
         linkedFullIqPath.chop(QStringLiteral(".fbspec").size());
         linkedFullIqPath += QStringLiteral("_full_iq_s8.iq8");
     }
+    QString fullIq16Path = linkedFullIqPath;
+    fullIq16Path.replace(QStringLiteral("_full_iq_s8.iq8"), QStringLiteral("_full_iq_s16.cs16"));
+    if (QFileInfo::exists(fullIq16Path)) linkedFullIqPath = fullIq16Path;
     replayListenFrequencyHz = isolatedExperiment ? experimentSettings.value("listeningFrequency").toDouble()
         : recording->metadata.value(QStringLiteral("listeningFrequency")).toDouble(0.0);
     if (replayListenFrequencyHz <= 0.0 && !recording->frames.empty()) {
@@ -2010,9 +2018,9 @@ void SpectrumFrameReplayDialog::startLocalIqPlayback() {
             return;
         }
         localIqPlaybackSampleRate = replayIqNominalSampleRate(source, sampleRate);
-        localIqPlaybackBytesPerSample = 2;
+        localIqPlaybackS16 = path.endsWith(QStringLiteral(".cs16"), Qt::CaseInsensitive);
+        localIqPlaybackBytesPerSample = localIqPlaybackS16 ? 4 : 2;
         localIqPlaybackDataSize = static_cast<quint64>(QFileInfo(path).size());
-        localIqPlaybackS16 = false;
         dataOffset = 0;
     }
     if (localIqPlaybackS16) {
@@ -2076,6 +2084,7 @@ void SpectrumFrameReplayDialog::startLocalIqPlayback() {
     const quint64 workerDataSize = localIqPlaybackDataSize;
     const int workerBytesPerSample = localIqPlaybackBytesPerSample;
     const bool workerS16 = localIqPlaybackS16;
+    const bool workerChannel = source == ReplayIqSource::ChannelIq;
     const double workerRawSampleRate = localIqPlaybackSampleRate;
     const double workerSeekSampleRate = localIqPlaybackSeekSampleRate;
     const double workerFeedSampleRate = localIqPlaybackFeedSampleRate;
@@ -2092,6 +2101,7 @@ void SpectrumFrameReplayDialog::startLocalIqPlayback() {
                                        workerDataSize,
                                        workerBytesPerSample,
                                        workerS16,
+                                       workerChannel,
                                        workerRawSampleRate,
                                        workerSeekSampleRate,
                                        workerFeedSampleRate,
@@ -2108,9 +2118,9 @@ void SpectrumFrameReplayDialog::startLocalIqPlayback() {
 
         constexpr int channelBlockSamples = kChannelIqReplaySamplesPerFrame;
         constexpr int fullBlockSamples = kFullIqReplaySamplesPerFrame;
-        const int blockSamples = workerS16 ? channelBlockSamples : fullBlockSamples;
+        const int blockSamples = workerChannel ? channelBlockSamples : fullBlockSamples;
         const double audioStartPrebufferSeconds =
-            workerS16 ? kReplayAudioPrebufferSeconds : kReplayRawFullIqPrebufferSeconds;
+            workerChannel ? kReplayAudioPrebufferSeconds : kReplayRawFullIqPrebufferSeconds;
         quint64 bytesRead = workerStartByteOffset;
         double audioRate = workerInitialAudioRate;
         bool audioStarted = false;
@@ -2168,7 +2178,7 @@ void SpectrumFrameReplayDialog::startLocalIqPlayback() {
 
                 bytesRead += static_cast<quint64>(frame.size());
                 const int sampleCount = frame.size() / workerBytesPerSample;
-                if (workerS16) {
+                if (workerChannel) {
                     floatScratch.clear();
                     appendIqS16LeToFloat(frame, sampleCount, floatScratch);
                     if (!floatScratch.empty()) {
@@ -2178,7 +2188,8 @@ void SpectrumFrameReplayDialog::startLocalIqPlayback() {
                     }
                 } else {
                     rawScratch.clear();
-                    appendIqS8ToFloat(frame, sampleCount, rawScratch);
+                    if (workerS16) appendIqS16LeToFloat(frame, sampleCount, rawScratch);
+                    else appendIqS8ToFloat(frame, sampleCount, rawScratch);
                     if (!rawScratch.empty()) {
                         audioRate = workerRawSampleRate;
                         IqBuffer::setSampleRateEstimate(audioRate);
@@ -2281,7 +2292,8 @@ void SpectrumFrameReplayDialog::startLocalIqPlayback() {
 
 void SpectrumFrameReplayDialog::startExperimentIqPlayback(const QString &path, quint64 dataOffset, quint64 byteOffset) {
     const auto settings = replaySettingsForSource(localIqPlaybackSampleRate);
-    const bool channel = localIqPlaybackS16;
+    const bool channel = selectedReplayIqSource() == ReplayIqSource::ChannelIq;
+    const bool s16 = localIqPlaybackS16;
     if (settings.modulationType > MOD_WFM || (channel && (settings.sampleRate < 48000 || settings.sampleRate > 2000000))) {
         linkedIqLabel->setText(replayText("experiment_audio_limit", "Isolated replay audio: AM/NFM/SAM/USB/LSB/DSB/CW/WFM; channel IQ 48 kS/s..2 MS/s."));
         localIqPlaybackActive = false; return;
@@ -2294,7 +2306,7 @@ void SpectrumFrameReplayDialog::startExperimentIqPlayback(const QString &path, q
     const int bytesPerSample = localIqPlaybackBytesPerSample;
     const double feedRate = localIqPlaybackFeedSampleRate, delay = localIqPlaybackStartDelaySeconds;
     localIqWorkerStop.store(false);
-    localIqWorkerThread = std::thread([this, output, generation, path, dataOffset, byteOffset, size, channel, bytesPerSample, settings, feedRate, delay] {
+    localIqWorkerThread = std::thread([this, output, generation, path, dataOffset, byteOffset, size, channel, s16, bytesPerSample, settings, feedRate, delay] {
         const auto fail = [this, generation](const QString &message) {
             QMetaObject::invokeMethod(this, [this, generation, message] {
                 if (experimentAudioGeneration == generation) { linkedIqLabel->setText(message); localIqPlaybackActive = false; }
@@ -2320,7 +2332,7 @@ void SpectrumFrameReplayDialog::startExperimentIqPlayback(const QString &path, q
                 if (bytes.size() != count || bytes.size()%bytesPerSample) { fail("Experiment IQ read failed or file changed"); return; }
                 position += quint64(bytes.size());
                 iq.clear();
-                if (channel) appendIqS16LeToFloat(bytes, bytes.size()/bytesPerSample, iq);
+                if (s16) appendIqS16LeToFloat(bytes, bytes.size()/bytesPerSample, iq);
                 else appendIqS8ToFloat(bytes, bytes.size()/bytesPerSample, iq);
                 auto audio = settings;
                 const std::vector<float> *input = &iq;
@@ -2445,7 +2457,10 @@ QString SpectrumFrameReplayDialog::replayIqSidecarPathForSource(ReplayIqSource s
         return QString();
     }
     if (source == ReplayIqSource::FullIq) {
-        if (path.endsWith(QStringLiteral("_full_iq_s8.iq8"))) {
+        if (path.endsWith(QStringLiteral("_full_iq_s16.cs16"))) {
+            path.chop(5);
+            path += QStringLiteral(".json");
+        } else if (path.endsWith(QStringLiteral("_full_iq_s8.iq8"))) {
             path.chop(QStringLiteral("_full_iq_s8.iq8").size());
             path += QStringLiteral("_full_iq_s8.json");
         } else {

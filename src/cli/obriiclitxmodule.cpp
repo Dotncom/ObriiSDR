@@ -8,6 +8,7 @@
 #include "uhdbackend.h"
 #include "virtualtransmitterbackend.h"
 #include "clilivetransmit.h"
+#include "kissvirtualtx.h"
 
 extern "C" {
 #include "ft8/constants.h"
@@ -25,8 +26,11 @@ extern "C" {
 #include <QJsonObject>
 #include <QMap>
 #include <QImageReader>
+#include <QHostAddress>
 #include <QPainter>
 #include <QSysInfo>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QThread>
 #include <QtEndian>
 
@@ -76,6 +80,78 @@ double number(const QString &text, bool *okay) {
     const double parsed = digits.toDouble(okay) * multiplier;
     if (!std::isfinite(parsed)) *okay = false;
     return parsed;
+}
+
+int runKissVirtualTx(QCoreApplication &app) {
+    QCommandLineParser parser;
+    parser.setApplicationDescription(QStringLiteral("ObriiCli module tx kiss PORT LOCAL_IQ_CHANNEL CENTER_HZ [--seconds N]"));
+    parser.addHelpOption();
+    parser.addOption({QStringLiteral("seconds"), QStringLiteral("Optional session duration"), QStringLiteral("N"), QStringLiteral("0")});
+    parser.addPositionalArgument(QStringLiteral("port"), QStringLiteral("Local KISS TCP port"));
+    parser.addPositionalArgument(QStringLiteral("channel"), QStringLiteral("Local virtual IQ channel"));
+    parser.addPositionalArgument(QStringLiteral("center"), QStringLiteral("Virtual IQ center frequency"));
+    parser.process(app.arguments().mid(2));
+    const auto args = parser.positionalArguments();
+    if (args.size() != 3) return fail(parser.applicationDescription());
+    bool portOk = false, centerOk = false, durationOk = false;
+    const int port = args[0].toInt(&portOk);
+    const QString channel = args[1].trimmed();
+    const double center = number(args[2], &centerOk);
+    const double duration = parser.value(QStringLiteral("seconds")).toDouble(&durationOk);
+    if (!portOk || port < 1 || port > 65535 || channel.isEmpty() || channel.size() > 128 ||
+        !centerOk || center < 100e3 || center > 7250e6 || !durationOk || !std::isfinite(duration) ||
+        duration < 0 || duration > 86400)
+        return fail(QStringLiteral("Invalid port, local IQ channel, center frequency or duration"));
+
+    QTcpServer server;
+    if (!server.listen(QHostAddress::LocalHost, static_cast<quint16>(port))) return fail(server.errorString());
+    KissVirtualTx tx;
+    tx.enable(channel, center);
+    int clients = 0;
+    quint64 rejected = 0;
+    QObject::connect(&server, &QTcpServer::newConnection, &tx, [&] {
+        while (auto *socket = server.nextPendingConnection()) {
+            if (clients >= 16) {
+                socket->abort();
+                socket->deleteLater();
+                continue;
+            }
+            ++clients;
+            socket->setReadBufferSize(16 * 1024);
+            auto consume = [&, socket, decoder = KissStreamDecoder{}]() mutable {
+                QStringList errors;
+                const auto frames = decoder.push(socket->readAll(), &errors);
+                rejected += errors.size();
+                for (const auto &frame : frames)
+                    if (!tx.enqueue(frame, nullptr)) ++rejected;
+            };
+            consume();
+            QObject::connect(socket, &QTcpSocket::readyRead, &tx, std::move(consume));
+            QObject::connect(socket, &QTcpSocket::disconnected, &tx, [&, socket] {
+                --clients;
+                socket->deleteLater();
+            });
+        }
+    });
+    QObject::connect(&tx, &KissVirtualTx::sent, &app, [&](int bytes) {
+        report({{"ok", true}, {"event", "sent"}, {"frameBytes", bytes}, {"rejected", double(rejected)}});
+    });
+    QObject::connect(&tx, &KissVirtualTx::failed, &app, [&](const QString &error) {
+        fail(error);
+        app.exit(1);
+    });
+    interrupted = false;
+    std::signal(SIGINT, interruptHandler);
+    std::signal(SIGTERM, interruptHandler);
+    QTimer stop;
+    QObject::connect(&stop, &QTimer::timeout, &app, [&] {
+        if (interrupted) app.quit();
+    });
+    stop.start(100);
+    if (duration > 0) QTimer::singleShot(qMax(1, qRound(duration * 1000)), &app, &QCoreApplication::quit);
+    report({{"ok", true}, {"event", "ready"}, {"address", "127.0.0.1"}, {"port", port},
+            {"virtualIqChannel", channel}, {"centerHz", center}, {"rate", 48000}});
+    return app.exec();
 }
 
 bool loadLabPreset(const QString &path, SignalLabConfiguration *configuration,
@@ -237,6 +313,8 @@ TxGenerationResult generateFt4(const TxConfiguration &configuration, const QStri
 
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
+    if (app.arguments().value(1) == QStringLiteral("tx") && app.arguments().value(2) == QStringLiteral("kiss"))
+        return runKissVirtualTx(app);
     if (app.arguments().size() >= 3 && app.arguments()[1] == QStringLiteral("tx") &&
         QStringList{QStringLiteral("microphone"), QStringLiteral("manual-cw"), QStringLiteral("microphones"), QStringLiteral("control")}.contains(app.arguments()[2]))
         return runCliLiveTransmit(app);

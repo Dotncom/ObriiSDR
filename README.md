@@ -4,7 +4,11 @@ Obrii SDR is a wideband SDR receiver and research workstation, optimized first
 for RigExpert Fobos SDR hardware while also supporting additional receiver
 backends.
 The current packaged release is Windows-first, with active Linux/Raspberry Pi
-support and a separately maintained Android USB/network client. Version 8.2.0
+support and a separately maintained Android USB/network client. Version 9.0.0
+adds the Fobos firmware updater and Dual receiver support, improves DMR and
+receiver controls, and adds live coherent IQ in Multi-SDR. See
+`docs/release_notes_9.0.0.md` for package contents and qualification limits.
+Version 8.2.0
 adds saved VPN discovery addresses, bounded TCP fallback, an optional node
 directory, isolated live mesh topology changes, and experimental EU868 LoRaWAN
 1.1 and Class B/C simulation. It also fixes GCC/ARM mesh build portability.
@@ -87,7 +91,7 @@ Remove API keys, private coordinates and other sensitive data from any attachmen
 
 ## Windows Release Package
 
-Release 7.0.0 provides Full and Lite packages for both Windows x64 and
+Release 9.0.0 provides Full and Lite packages for both Windows x64 and
 Raspberry/Linux source. Lite uses the same UI and omits optional large research
 backends; on Raspberry build it with `BUILD_LITE=1 ./tools/build_linux.sh`.
 No Wireless add-on or Android package is uploaded with this release.
@@ -97,7 +101,7 @@ The add-on contains the portable GNU Radio
 Wi-Fi and Wireshark tools; to enable them, run `Install-Wireless-AddOn.ps1` beside
 `ObriiSDR.exe` or extract the add-on into that same folder. See
 `docs/wireless_addon.md`. Npcap is not bundled.
-Extract the Linux source with `tar -xzf ObriiSDR-v8.2.0-raspberry-source.tar.gz`;
+Extract the Linux source with `tar -xzf ObriiSDR-v9.0.0-raspberry-source.tar.gz`;
 the build/run shell scripts have executable permissions. Android packages are
 maintained and released separately.
 
@@ -360,7 +364,7 @@ sudo ./tools/install_deps_debian.sh
 sudo cp packaging/linux/99-fobos-sdr.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo udevadm trigger
-./tools/prepare_fobos_linux.sh
+ALLOW_UPSTREAM_FOBOS_CLONE=1 ./tools/prepare_fobos_linux.sh
 ./tools/build_linux.sh
 ./tools/run_linux.sh
 ```
@@ -379,7 +383,7 @@ Then build the app and the optional backend modules:
 
 ```bash
 sudo ./tools/install_deps_debian.sh
-./tools/prepare_fobos_linux.sh
+ALLOW_UPSTREAM_FOBOS_CLONE=1 ./tools/prepare_fobos_linux.sh
 ./tools/build_linux.sh
 cmake -S FobosDMRVoiceBackend-gpl -B build/fobos-dmr-voice-backend-gpl \
   -DCMAKE_BUILD_TYPE=Release
@@ -415,24 +419,17 @@ FOBOS_AGILE_ROOT=/path/to/libfobos_sdr \
 ./tools/build_linux.sh
 ```
 
-`tools/prepare_fobos_linux.sh` builds the vendored Fobos source trees shipped
-with the project and installs both Linux libraries into
-`third_party/fobos-linux`:
-
-- `third_party/patched/libfobos`
-- `third_party/patched/libfobos-sdr-agile`
-
-The standard tree is the patched `libfobos` source used by Obrii SDR, so Linux
-builds do not silently fall back to the official upstream version. If the
-vendored trees are missing, the script stops with an error. For a deliberate
-upstream experiment only, run:
+The Raspberry Pi source archive uses the official Standard and Agile SDKs.
+The helper installs them under `third_party/fobos-linux`. To download and
+build both libraries explicitly, run:
 
 ```bash
 ALLOW_UPSTREAM_FOBOS_CLONE=1 ./tools/prepare_fobos_linux.sh
 ```
 
-That clone path is intentionally opt-in because it may not contain the stability
-fixes expected by this application.
+The official SDKs provide standard receiver functions. Optional IF table
+editing and the patched Windows USB runtime are available with the corresponding
+Obrii build and libraries.
 
 Optional local install after a successful Linux build:
 

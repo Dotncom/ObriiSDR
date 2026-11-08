@@ -1741,7 +1741,7 @@ void TransmitDialog::startTransmission() {
 }
 
 void TransmitDialog::startLaboratoryTransmission(
-    const SignalLabGenerationResult &result) {
+    const SignalLabGenerationResult &result, double centerHz) {
     if (!result.ok()) {
         setStatus(text(QStringLiteral("Signal laboratory has no valid IQ waveform"),
                        QString::fromUtf8(u8"Лабораторія сигналів не має коректного IQ-сигналу")),
@@ -1789,6 +1789,7 @@ void TransmitDialog::startLaboratoryTransmission(
     bandwidthLimitedIq.clear();
 
     TxConfiguration configuration = configurationFromUi();
+    if (centerHz >= 0.0) configuration.frequencyHz = centerHz;
     configuration.sampleRate = result.sampleRate;
     configuration.level = 1.0f;
     configuration.signalBandwidthHz = result.occupiedBandwidthHz;

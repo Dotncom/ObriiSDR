@@ -10,7 +10,7 @@
 
 class CommandDispatcher {
 public:
-    enum class Access { Read, Control, Files, Transmit };
+    enum class Access { Read, Control, Files, Transmit, Local };
     struct Context {
         QString origin = QStringLiteral("local");
         bool allowControl = false;

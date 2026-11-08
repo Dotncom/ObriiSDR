@@ -35,8 +35,12 @@ int getFobosStandardApiInfoSafely(char *libVersion, char *driverVersion);
 int getFobosAgileApiInfoSafely(char *libVersion, char *driverVersion);
 int getFobosStandardDeviceCountSafely();
 int getFobosAgileDeviceCountSafely();
-int openFobosDeviceSafely(fobos_dev_t **dev, uint32_t index);
-int openFobosAgileDeviceSafely(fobos_sdr_dev_t **dev, uint32_t index);
+int openFobosDeviceSafely(fobos_dev_t **dev, uint32_t index, const char *stockSerial = nullptr);
+int openFobosAgileDeviceSafely(fobos_sdr_dev_t **dev, uint32_t index, const char *stockSerial = nullptr);
+bool isObriiDualFirmware(const QString &hardware, const QString &firmware);
+bool fobosStockLibraryAvailable(FobosApiKind kind);
+bool activeFobosUsesStockLibrary();
+int setObriiDualUsbProfile(const QString &serial, FobosApiKind kind);
 int getFobosBoardInfoSafely(fobos_dev_t *dev,
                             char *hwRevision,
                             char *firmwareVersion,
@@ -51,6 +55,7 @@ int getFobosAgileBoardInfoSafely(fobos_sdr_dev_t *dev,
                                  char *serial);
 int getFobosSampleRatesSafely(fobos_dev_t *dev, double *values, unsigned int *count);
 int getFobosAgileSampleRatesSafely(fobos_sdr_dev_t *dev, double *values, unsigned int *count);
+bool fobosAgileSupportsRf80(fobos_sdr_dev_t *dev);
 void logFobosApiInfo();
 int closeFobosDeviceSafely(fobos_dev_t *dev);
 int resetFobosDeviceSafely(fobos_dev_t *dev);
@@ -67,6 +72,22 @@ int setFobosAgileClockSourceSafely(fobos_sdr_dev_t *dev, int value);
 int setFobosAgileDirectSamplingSafely(fobos_sdr_dev_t *dev, unsigned int enabled);
 int setFobosAgileSampleRateSafely(fobos_sdr_dev_t *dev, double value);
 int setFobosAgileFrequencySafely(fobos_sdr_dev_t *dev, double value);
+int getFobosAgileIfModeSafely(fobos_sdr_dev_t *dev, unsigned int *mode, unsigned int *state = nullptr);
+int setFobosAgileIfModeSafely(fobos_sdr_dev_t *dev, unsigned int mode);
+int getFobosAgileIfTestModeSafely(fobos_sdr_dev_t *dev, unsigned int *mode, unsigned int *state = nullptr,
+    unsigned int *row3IfMhz = nullptr, unsigned int *capabilities = nullptr);
+int setFobosAgileIfTestModeSafely(fobos_sdr_dev_t *dev, unsigned int mode);
+// ABI of the optional diagnostics exports. The standard SDK headers need not declare them.
+struct FobosStreamMetrics {
+    uint32_t abiVersion, structBytes, generation, transfers;
+    uint32_t dmaBlocks, headerDisagreements, orderErrors, iqChangesWithinTransfer;
+    uint32_t iqOrientationTransitions, shortTransfers, componentsInspected;
+    uint32_t railComponents, nearRailComponents, minCode, maxCode;
+    uint32_t lastIqSwap, lastFirstOrder, modeFlags, inspectionStrideComplex, reserved;
+};
+struct FobosDeviceMetrics { uint32_t words[24]; };
+int getFobosAgileStreamMetricsSafely(fobos_sdr_dev_t *dev, FobosStreamMetrics *metrics);
+int getFobosAgileDeviceMetricsSafely(fobos_sdr_dev_t *dev, FobosDeviceMetrics *metrics);
 int setFobosAgileLnaGainSafely(fobos_sdr_dev_t *dev, unsigned int value);
 int setFobosAgileVgaGainSafely(fobos_sdr_dev_t *dev, unsigned int value);
 int setFobosAgileAutoBandwidthSafely(fobos_sdr_dev_t *dev, double value);
@@ -93,6 +114,21 @@ int readFobosAgileAsyncSafely(fobos_sdr_dev_t *dev,
                               void *ctx,
                               uint32_t bufferCount,
                               uint32_t blockSamples);
+int getActiveFobosIfModeSafely(unsigned int *mode, unsigned int *state = nullptr);
+int setActiveFobosIfModeSafely(unsigned int mode);
+int getActiveFobosIfPlanSafely(unsigned int *mode, unsigned int *state = nullptr,
+    unsigned int *actualIfMhz = nullptr, unsigned int *capabilities = nullptr);
+int setActiveFobosIfPlanSafely(unsigned int mode);
+int getActiveFobosReceiverConfigSafely(unsigned int *words,unsigned int bytes=64);
+int getActiveFobosIfTableSafely(unsigned int *frame,unsigned int *bytes);
+int setActiveFobosIfTableSafely(const unsigned int *frame,unsigned int bytes);
+int resetActiveFobosIfTableSafely();
+int setActiveFobosStreamMetadataSafely(unsigned int enabled,unsigned int settleBlocks);
+int setActiveFobosMixerBiasSafely(unsigned int code);
+int setActiveFobosDmaCountSafely(unsigned int count);
+int getActiveFobosRffcRegistersSafely(unsigned short *registers,unsigned int bytes=64);
+int getFobosAgileMetadataMetricsSafely(fobos_sdr_dev_t *dev,unsigned int *words,unsigned int bytes=128);
+int getFobosAgileConfiguredRateSafely(fobos_sdr_dev_t *dev,double *actual);
 int setActiveClockSourceSafely(int value);
 int setActiveDirectSamplingSafely(unsigned int enabled);
 int setActiveSampleRateSafely(double value, double *actual);

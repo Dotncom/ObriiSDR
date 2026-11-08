@@ -10,11 +10,14 @@
 #include <QVector>
 #include <QSet>
 
-enum class DspLinkKind { Control, Settings, Vfo, Iq, Spectrum, Audio, Documentation, Invalid };
+enum class DspLinkKind { Control, Settings, Vfo, Iq, Spectrum, Audio, Carrier, Payload, LabIq, DecodedPayload, Documentation, Invalid };
 constexpr int DspMaxBranches = 8;
 DspLinkKind dspLinkKind(const QString &sourceType, const QString &targetType);
 QString dspLinkDescription(DspLinkKind kind, bool ukrainian);
 bool dspIsBranchType(const QString &type);
+bool dspIsSignalBlock(const QString &type);
+DspSourceIdentity dspSignalSource(const QString &blockId);
+DspSourceIdentity dspPacketBranchSource(const QString &blockId);
 
 struct DspBranchFftConfig {
     QString id;
@@ -39,6 +42,8 @@ struct DspBranchConfig {
     bool external = false;
     bool iqConsumer = false;
     int iqSamples = 4096;
+    QString packetDecoderId;
+    double packetSymbolRate = 1200.0;
     QVector<DspBranchFftConfig> ffts;
     QString demodulatorId;
     QString audioOutputId;

@@ -4,6 +4,38 @@
 
 #include <algorithm>
 #include <cmath>
+
+const QVector<double> &fpv6GhzVideoFrequenciesMhz() {
+    // User-supplied channel list; retain the irregular channels as well as the 20 MHz grid.
+    static const QVector<double> frequencies = {
+        6110, 6115, 6130, 6150, 6170, 6190, 6210, 6230,
+        6250, 6265, 6270, 6290, 6310, 6330, 6350, 6370,
+        6390, 6410, 6425, 6430, 6450, 6470, 6490, 6510,
+        6530, 6550, 6570, 6585, 6590, 6610, 6630, 6650,
+        6670, 6690, 6710, 6730, 6745, 6750, 6770, 6790,
+        6810, 6830, 6850, 6870, 6890, 6905, 6910, 6930,
+        6950, 6970, 6990, 7010, 7030, 7050, 7065, 7070,
+        7090, 7110, 7130, 7150, 7170, 7185, 7190, 7210
+    };
+    return frequencies;
+}
+
+QString fpv6GhzFrequencyPresetName(double frequencyMhz) {
+    return frequencyMhz > 6900.0
+               ? QStringLiteral("FPV video %1 MHz (experimental)").arg(frequencyMhz, 0, 'f', 0)
+               : QStringLiteral("FPV video %1 MHz").arg(frequencyMhz, 0, 'f', 0);
+}
+
+QString fpv6GhzScanTargetsMhz(double maximumMhz) {
+    QStringList channels;
+    for (double mhz : fpv6GhzVideoFrequenciesMhz()) {
+        if (mhz <= maximumMhz) {
+            channels.append(QString::number(mhz, 'f', 0));
+        }
+    }
+    return channels.join(QLatin1Char(','));
+}
+
 QString agileScanPresetSpec(const QString &rangesMhz, double stepMhz) {
     return QStringLiteral("%1\t%2").arg(rangesMhz.trimmed(),
                                       QString::number(stepMhz, 'f', 6));
@@ -122,8 +154,11 @@ QStringList defaultCenterFrequencyPresetOrder() {
           << QStringLiteral("FPV 1.2 GHz")
           << QStringLiteral("FPV 1.3 GHz")
           << QStringLiteral("FPV 2.4 GHz")
-          << QStringLiteral("FPV 3.3 GHz")
-          << QStringLiteral("Experimental 7.0 GHz")
+          << QStringLiteral("FPV 3.3 GHz");
+    for (double mhz : fpv6GhzVideoFrequenciesMhz()) {
+        order << fpv6GhzFrequencyPresetName(mhz);
+    }
+    order << QStringLiteral("Experimental 7.0 GHz")
           << QStringLiteral("Experimental 7.5 GHz");
     return order;
 }
@@ -169,6 +204,9 @@ QStringList defaultListeningFrequencyPresetOrder() {
           << QStringLiteral("FPV 1.3 GHz")
           << QStringLiteral("FPV 2.4 GHz")
           << QStringLiteral("FPV 3.3 GHz");
+    for (double mhz : fpv6GhzVideoFrequenciesMhz()) {
+        order << fpv6GhzFrequencyPresetName(mhz);
+    }
     return order;
 }
 
@@ -213,6 +251,8 @@ QStringList defaultAgileScanPresetOrder() {
           << QStringLiteral("FPV 1.1-1.3 common")
           << QStringLiteral("FPV 1.2/2.4 sparse")
           << QStringLiteral("FPV 3.3GHz sparse")
+          << QStringLiteral("FPV 6GHz channels 6110-6890")
+          << QStringLiteral("FPV 6GHz channels 6110-7210 (experimental)")
           << QStringLiteral("GNSS L1 1559-1610 50MHz");
     return order;
 }

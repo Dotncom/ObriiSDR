@@ -1,5 +1,14 @@
 # Changelog
 
+## 9.0.0 - 2026-11-08
+
+- Added Obrii Dual receiver support and a Windows firmware updater for qualified Fobos HW 3.0.0 images.
+- Improved Fobos Start/Stop, USB-library switching, live tuning, and receiver diagnostics.
+- Added configurable spur calibration, separate wideband noise correction, and ADC overload protection.
+- Added live coherent IQ in Multi-SDR with a virtual pair and an experimental signal-alignment mode for two Fobos receivers.
+- Improved DMR receive synchronization, automatic PI key selection, and resynchronization with a selected key.
+- Improved simultaneous IQ capture and video decode, and expanded the Analyzer, DSP Flow, and virtual radio tools.
+
 ## 8.2.0 - 2026-11-03
 
 - Include the Debian/Raspberry Codec2 development dependency needed by M17 voice.
@@ -41,7 +50,7 @@
   submitting timing context, preventing early timer callbacks from dropping frames.
 - Distributed mesh ports: independent RX/TX bindings, per-link DATA/IQ bearers,
   bounded isolated queues, shared AFSK/LoRa PHY, native Meshtastic and Reticulum
-  adapters, local private protocol state and credential-free project exports.
+  adapters, protocol state stored locally and credential-free project exports.
 - Optional read-only radio ingress uses the running RX stream and shared DDC;
   a separately authorized, expiring RF egress reuses native UHD/HackRF backends.
   Physical RF interoperability and duplex timing still require hardware tests.

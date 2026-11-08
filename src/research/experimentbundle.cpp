@@ -41,7 +41,9 @@ const QString YFactorName = QStringLiteral("receiver_y_factor.csv");
 const QStringList Names{SpectrumName, QStringLiteral("recording_channel_iq.wav"),
     QStringLiteral("recording_channel_iq.json"), QStringLiteral("recording_full_iq_s8.iq8"),
     QStringLiteral("recording_full_iq_s8.json"), QStringLiteral("recording_full_iq_s8.sigmf-meta"),
-    NoiseBaselineName, YFactorName};
+    NoiseBaselineName, YFactorName,
+    QStringLiteral("recording_full_iq_s16.cs16"), QStringLiteral("recording_full_iq_s16.json"),
+    QStringLiteral("recording_full_iq_s16.sigmf-meta")};
 
 void check(bool condition, const char *message) {
     if (!condition) throw std::runtime_error(message);
@@ -357,18 +359,21 @@ QJsonObject scientific(const QJsonObject &input) {
 QJsonObject metadata(const QJsonObject &input, int kind) {
     auto out = numbers(input, "version targetBins scalePercent clockSource inputMode centerFrequency actualFrequency listeningFrequency "
         "sourceSampleRate bandwidth modulationType fftLength fftWindowType lnaGain vgaGain sampleRate bytesWritten firstFrameUtcMs "
-        "lastFrameUtcMs spectrumFirstFrameUtcMs spectrumOffsetMs durationUtcSeconds effectiveSampleRate gaps droppedSamples droppedBlocks");
+        "lastFrameUtcMs spectrumFirstFrameUtcMs spectrumOffsetMs durationUtcSeconds effectiveSampleRate gaps droppedSamples droppedBlocks "
+        "inputGain sampleScale sampleCount durationSamplesSeconds");
     out["app"] = "ObriiSDR";
-    out["format"] = kind == 0 ? "fobos_spectrum_frames" : kind == 1 ? "channel_iq_wav_s16le" : "full_iq_raw_s8_interleaved";
+    out["format"] = kind == 0 ? "fobos_spectrum_frames" : kind == 1 ? "channel_iq_wav_s16le" :
+                    kind == 3 ? "full_iq_raw_s16le_interleaved" : "full_iq_raw_s8_interleaved";
+    if (kind == 3) out["sampleEncoding"] = "ci16_le";
     utc(out, input, "recordedAtUtc"); utc(out, input, "recordedAtLocal");
     if (input.value("scientificMetadata").isObject()) out["scientificMetadata"] = scientific(input.value("scientificMetadata").toObject());
-    if (kind) out["filePath"] = Names[kind == 1 ? 1 : 3];
+    if (kind) out["filePath"] = Names[kind == 1 ? 1 : kind == 3 ? 8 : 3];
     return out;
 }
-QJsonObject sigmf(const QJsonObject &input) {
+QJsonObject sigmf(const QJsonObject &input, bool sixteen = false) {
     auto global = numbers(input.value("global").toObject(), "core:sample_rate core:offset");
-    global["core:datatype"] = "ci8"; global["core:version"] = "1.0.0";
-    global["core:recorder"] = "Obrii SDR"; global["core:dataset"] = Names[3];
+    global["core:datatype"] = sixteen ? "ci16_le" : "ci8"; global["core:version"] = "1.0.0";
+    global["core:recorder"] = "Obrii SDR"; global["core:dataset"] = Names[sixteen ? 8 : 3];
     QJsonObject out{{"global", global}};
     for (const auto &key : {"captures", "annotations"}) {
         QJsonArray clean; const auto values = input.value(key).toArray();
@@ -510,8 +515,9 @@ File *find(std::vector<File> &files, const QString &name) {
     return nullptr;
 }
 void validateCompanions(std::vector<File> &files, bool exporting) {
-    for (int kind = 1; kind <= 2; ++kind) {
-        auto *data = find(files, Names[kind == 1 ? 1 : 3]); auto *sidecar = find(files, Names[kind == 1 ? 2 : 4]);
+    for (int kind = 1; kind <= 3; ++kind) {
+        const int index = kind == 1 ? 1 : kind == 3 ? 8 : 3;
+        auto *data = find(files, Names[index]); auto *sidecar = find(files, Names[index + 1]);
         check(bool(data) == bool(sidecar), "IQ data and timing sidecar must both be present");
         if (!data) continue;
         const auto original = json(*sidecar->source); sidecar->clean = metadata(original, kind);
@@ -520,7 +526,7 @@ void validateCompanions(std::vector<File> &files, bool exporting) {
         const auto rate = original.value("sampleRate").toDouble();
         const auto count = original.value("bytesWritten").toDouble(-1);
         const qint64 payload = data->size - (kind == 1 ? 44 : 0);
-        check(std::isfinite(rate) && rate > 0 && payload > 0 && payload % (kind == 1 ? 4 : 2) == 0 &&
+        check(std::isfinite(rate) && rate > 0 && payload > 0 && payload % (kind == 2 ? 2 : 4) == 0 &&
             count == double(payload), "Incomplete IQ recording or invalid byte count/sample rate");
         if (kind == 1) {
             auto &f = *data->source; check(f.seek(0), "Cannot seek IQ WAV"); const auto header = f.read(44);
@@ -536,11 +542,11 @@ void validateCompanions(std::vector<File> &files, bool exporting) {
                 "IQ WAV was not finalized or has incompatible sample geometry");
         }
     }
-    if (auto *meta = find(files, Names[5])) {
-        check(find(files, Names[3]) != nullptr, "SigMF metadata has no linked IQ data");
-        const auto original = json(*meta->source); meta->clean = sigmf(original);
-        check(original.value("global").toObject().value("core:datatype") == "ci8" &&
-            meta->clean.value("global").toObject().value("core:sample_rate") == find(files, Names[4])->clean.value("sampleRate"),
+    for (int index : {3, 8}) if (auto *meta = find(files, Names[index + 2])) {
+        check(find(files, Names[index]) != nullptr, "SigMF metadata has no linked IQ data");
+        const auto original = json(*meta->source); meta->clean = sigmf(original, index == 8);
+        check(original.value("global").toObject().value("core:datatype") == (index == 8 ? "ci16_le" : "ci8") &&
+            meta->clean.value("global").toObject().value("core:sample_rate") == find(files, Names[index + 1])->clean.value("sampleRate"),
             "SigMF data type or sample rate disagrees with IQ sidecar");
         check(exporting || original == meta->clean, "Bundle SigMF metadata is not sanitized");
     }
@@ -663,6 +669,11 @@ bool write(const QString &destinationDirectory, const QString &recordingPath, co
         for (int i = 0; i < suffixes.size(); ++i) {
             const QFileInfo info(base + suffixes[i]);
             if (info.exists() || info.isSymLink()) add(files, Names[i+1], info.absoluteFilePath());
+        }
+        const QStringList full16Suffixes{"_full_iq_s16.cs16", "_full_iq_s16.json", "_full_iq_s16.sigmf-meta"};
+        for (int i = 0; i < full16Suffixes.size(); ++i) {
+            const QFileInfo info(base + full16Suffixes[i]);
+            if (info.exists() || info.isSymLink()) add(files, Names[i+8], info.absoluteFilePath());
         }
         validateCompanions(files, true); work.total = totalSize(files); work.advance(0);
         check(destinationInfo.dir().mkdir(destinationInfo.fileName()), "Cannot create new bundle directory");

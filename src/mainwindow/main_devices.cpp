@@ -289,6 +289,7 @@ QString YourClassName::formatFobosDeviceLabel(const FobosDeviceInfo &info) const
 }
 
 void YourClassName::requestUsbDeviceRefresh() {
+    if (dualFobosSwitchPending) return;
     if (isNetworkClientMode()) {
         sendRemoteControlCommand(QStringLiteral("requestServerState"));
         return;
@@ -307,7 +308,7 @@ void YourClassName::requestUsbDeviceRefresh() {
 }
 
 void YourClassName::continueUsbDeviceRefresh() {
-    if (closeShutdownInProgress || isNetworkClientMode() || !isIdle() ||
+    if (closeShutdownInProgress || dualFobosSwitchPending || isNetworkClientMode() || !isIdle() ||
         (processor && processor->isRunning())) {
         usbDeviceRefreshTimer->stop();
         return;
@@ -490,6 +491,75 @@ FobosDeviceInfo YourClassName::selectedFobosDeviceInfo() const {
     fallback.nativeIndex = std::max(0, selected);
     fallback.label = QString("Standard device #%1").arg(fallback.nativeIndex);
     return fallback;
+}
+
+void YourClassName::selectDualFobosLibrary(FobosApiKind kind, bool stock) {
+    if (dualFobosSwitchPending || closeShutdownInProgress || !isIdle() || deviceOpened ||
+        (processor && processor->isRunning()) || isNetworkClientMode() || isExternalReceiverBackendSelected()) return;
+    const FobosDeviceInfo selected = selectedFobosDeviceInfo();
+    if (!selected.present || selected.serial.isEmpty() ||
+        !isObriiDualFirmware(selected.hardwareRevision, selected.firmwareVersion) ||
+        (stock && !fobosStockLibraryAvailable(kind))) return;
+    const bool previousStock = dualFobosStockLibrary.value(selected.serial);
+    if (kind == selected.apiKind && stock == previousStock) return;
+
+    const bool uk = uiLanguage == QStringLiteral("uk");
+    if (hasActiveFobosDevice() && !closeFobosSession(false)) {
+        dualFobosSwitchStatus = uk ? QStringLiteral("Фобос не підтвердив закриття USB-сеансу.")
+                                  : QStringLiteral("Fobos did not confirm USB session closure.");
+        return;
+    }
+    if (usbDeviceRefreshTimer) usbDeviceRefreshTimer->stop();
+    dualFobosSwitchPending = true;
+    dualFobosSwitchStatus = uk ? QStringLiteral("Очікування USB-профілю…") : QStringLiteral("Waiting for USB profile…");
+    updateUiForRunState();
+    const int result = kind == selected.apiKind ? FOBOS_ERR_OK : setObriiDualUsbProfile(selected.serial, kind);
+    if (result != FOBOS_ERR_OK) {
+        dualFobosSwitchPending = false;
+        dualFobosSwitchStatus = (uk ? QStringLiteral("Помилка команди USB (%1).")
+                                    : QStringLiteral("USB command failed (%1).")).arg(result);
+        requestUsbDeviceRefresh();
+        updateUiForRunState();
+        return;
+    }
+
+    auto *retry = new QTimer(this);
+    retry->setInterval(300);
+    connect(retry, &QTimer::timeout, this, [this, retry, serial = selected.serial, kind, stock, previousStock, uk,
+                                         attempts = 0]() mutable {
+        if (closeShutdownInProgress) { retry->deleteLater(); return; }
+        refreshFobosDeviceList();
+        const auto match = std::find_if(availableFobosDevices.cbegin(), availableFobosDevices.cend(),
+            [&serial, kind](const FobosDeviceInfo &info) {
+                return info.present && info.serial == serial && info.apiKind == kind &&
+                    isObriiDualFirmware(info.hardwareRevision, info.firmwareVersion);
+            });
+        if (match == availableFobosDevices.cend() && ++attempts < 20) return;
+        retry->stop();
+        retry->deleteLater();
+        dualFobosSwitchPending = false;
+        if (match == availableFobosDevices.cend()) {
+            dualFobosSwitchStatus = uk ? QStringLiteral("Фобос не з'явився у вибраному USB-профілі.")
+                                      : QStringLiteral("Fobos did not reappear in the selected USB profile.");
+            requestUsbDeviceRefresh();
+        } else {
+            pendingSettings.deviceIndex = static_cast<int>(match - availableFobosDevices.cbegin());
+            dualFobosStockLibrary.insert(serial, stock);
+            rebuildReceiverDeviceCombo();
+            rebuildReceiverModeChoices();
+            updateReceiverSpecificControls();
+            if (prepareFobosSessionFromSettings(QStringLiteral("Dual firmware library selection"))) {
+                dualFobosSwitchStatus.clear();
+            } else {
+                dualFobosStockLibrary.insert(serial, previousStock);
+                dualFobosSwitchStatus = uk ? QStringLiteral("Вибрана бібліотека не відкрила Фобос.")
+                                          : QStringLiteral("The selected library could not open Fobos.");
+                requestUsbDeviceRefresh();
+            }
+        }
+        updateUiForRunState();
+    });
+    retry->start();
 }
 
 bool YourClassName::isRtlTcpSelected() const {

@@ -11,6 +11,7 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
@@ -26,6 +27,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace {
 QDoubleSpinBox *frequencySpin(QWidget *parent, double value) {
@@ -36,6 +38,13 @@ QDoubleSpinBox *frequencySpin(QWidget *parent, double value) {
     spin->setSuffix(QStringLiteral(" Hz"));
     spin->setValue(value);
     return spin;
+}
+
+std::complex<double> jsonComplex(const QJsonValue &value) {
+    const auto parts = value.toArray();
+    const double invalid = std::numeric_limits<double>::quiet_NaN();
+    if (parts.size() != 2) return {invalid, invalid};
+    return {parts.at(0).toDouble(invalid), parts.at(1).toDouble(invalid)};
 }
 }
 AnalyzerInstrumentDialog::AnalyzerInstrumentDialog(bool ukrainianUi, QWidget *parent)
@@ -183,6 +192,10 @@ AnalyzerInstrumentDialog::AnalyzerInstrumentDialog(bool ukrainianUi, QWidget *pa
         "Ці прапорці лише фіксують виконані процедури; вони не створюють калібрувальні коефіцієнти. Майбутній апаратний адаптер має додати виміряну таблицю коефіцієнтів та ідентифікатор оснастки."), calibrationPage);
     calibrationWarning->setWordWrap(true);
     calibrationLayout->addWidget(calibrationWarning);
+    auto *correctButton = new QPushButton(text("Correct recorded S11 (Open / Short / Load)…",
+                                              "Скоригувати записаний S11 (Open / Short / Load)…"), calibrationPage);
+    connect(correctButton, &QPushButton::clicked, this, &AnalyzerInstrumentDialog::correctReflectionFile);
+    calibrationLayout->addWidget(correctButton);
     calibrationLayout->addStretch();
     tabs->addTab(calibrationPage, text("Calibration", "Калібрування"));
 
@@ -279,6 +292,61 @@ AnalyzerInstrumentDialog::AnalyzerInstrumentDialog(bool ukrainianUi, QWidget *pa
 
     restoreLastPlan();
     updateValidation();
+}
+
+void AnalyzerInstrumentDialog::correctReflectionFile() {
+    const QString path = QFileDialog::getOpenFileName(this,
+        text("Open complex reflection measurements", "Відкрити комплексні виміри відбиття"), {}, QStringLiteral("JSON (*.json)"));
+    if (path.isEmpty()) return;
+    QFile input(path);
+    constexpr qint64 MaxBytes = 2 * 1024 * 1024;
+    QJsonDocument data;
+    if (input.open(QIODevice::ReadOnly) && input.size() <= MaxBytes) {
+        const QByteArray bytes = input.read(MaxBytes + 1);
+        if (bytes.size() <= MaxBytes) data = QJsonDocument::fromJson(bytes);
+    }
+    const auto points = data.object().value(QStringLiteral("points")).toArray();
+    if (points.isEmpty() || points.size() > 8192) {
+        QMessageBox::warning(this, windowTitle(), text("Expected a JSON file with 1–8192 points (up to 2 MiB).",
+                                                      "Очікується JSON із 1–8192 точками, до 2 МіБ."));
+        return;
+    }
+    QJsonArray results;
+    double previous = 0.0;
+    for (const auto &value : points) {
+        const auto point = value.toObject();
+        const double hz = point.value(QStringLiteral("frequencyHz")).toDouble();
+        const auto standards = point.value(QStringLiteral("standards")).toArray();
+        const auto measured = point.value(QStringLiteral("measuredStandards")).toArray();
+        std::complex<double> gamma;
+        if (hz <= previous || !std::isfinite(hz) || standards.size() != 3 || measured.size() != 3 ||
+            !AnalyzerInstrumentPlanner::correctOnePort(
+                {jsonComplex(standards.at(0)), jsonComplex(standards.at(1)), jsonComplex(standards.at(2))},
+                {jsonComplex(measured.at(0)), jsonComplex(measured.at(1)), jsonComplex(measured.at(2))},
+                jsonComplex(point.value(QStringLiteral("measuredDevice"))), gamma)) {
+            QMessageBox::warning(this, windowTitle(),
+                text("Invalid frequency or singular calibration at point %1.",
+                     "Некоректна частота або вироджене калібрування в точці %1.").arg(results.size() + 1));
+            return;
+        }
+        const double magnitude = std::abs(gamma);
+        results.append(QJsonObject{
+            {QStringLiteral("frequencyHz"), hz},
+            {QStringLiteral("s11"), QJsonArray{gamma.real(), gamma.imag()}},
+            {QStringLiteral("returnLossDb"), AnalyzerInstrumentPlanner::returnLossDb(magnitude)},
+            {QStringLiteral("swr"), AnalyzerInstrumentPlanner::swrFromReflectionMagnitude(magnitude)},
+            {QStringLiteral("swrFinite"), magnitude < 1.0}});
+        previous = hz;
+    }
+    const QString destination = QFileDialog::getSaveFileName(this,
+        text("Save corrected reflection", "Зберегти скориговане відбиття"), {}, QStringLiteral("JSON (*.json)"));
+    if (destination.isEmpty()) return;
+    QSaveFile output(destination);
+    const QByteArray bytes = QJsonDocument(QJsonObject{{QStringLiteral("schemaVersion"), 1},
+        {QStringLiteral("format"), QStringLiteral("obrii-one-port-reflection")},
+        {QStringLiteral("points"), results}}).toJson(QJsonDocument::Indented);
+    if (!output.open(QIODevice::WriteOnly) || output.write(bytes) != bytes.size() || !output.commit())
+        QMessageBox::warning(this, windowTitle(), output.errorString());
 }
 
 AnalyzerInstrumentDialog::~AnalyzerInstrumentDialog() {

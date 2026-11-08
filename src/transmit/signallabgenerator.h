@@ -1,6 +1,7 @@
 #ifndef SIGNALLABGENERATOR_H
 #define SIGNALLABGENERATOR_H
 
+#include <QByteArray>
 #include <QString>
 #include <QVector>
 
@@ -69,6 +70,7 @@ struct SignalLabConfiguration {
     SignalLabConstellation ofdmConstellation = SignalLabConstellation::Qpsk;
     bool ofdmNullDc = true;
     double ofdmEdgeWindowPercent = 2.0;
+    QByteArray payload;
 };
 
 struct SignalLabGenerationResult {
@@ -91,10 +93,13 @@ struct SignalLabGenerationResult {
 
 class SignalLabGenerator {
 public:
+    static double rootRaisedCosine(double symbolTime, double rolloff);
     static SignalLabGenerationResult generate(const SignalLabConfiguration &configuration);
     static QVector<std::complex<float>> matchedSymbols(const SignalLabGenerationResult &result,
                                                        int maximumPoints = 2500,
                                                        QVector<int> *sampleIndices = nullptr);
+    static QVector<std::complex<float>> matchedSymbolBlock(const SignalLabGenerationResult &result,
+                                                            int firstSymbol, int symbolCount);
     static QString waveformName(SignalLabWaveform waveform);
     static QString constellationName(SignalLabConstellation constellation);
     static QString sweepModeName(SignalLabSweepMode mode);

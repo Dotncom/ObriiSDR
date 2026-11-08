@@ -132,6 +132,21 @@ int main(int argc, char **argv) {
                    1.2222222222222223) < 1.0e-12,
           QStringLiteral("SWR calculation"));
 
+    using Complex = std::complex<double>;
+    const std::array<Complex, 3> standards{{{0.99, 0.05}, {-0.94, -0.11}, {0.015, -0.02}}};
+    const Complex expected{0.22, -0.34};
+    const auto measure = [](Complex gamma) {
+        return (Complex{0.08, -0.02} + Complex{0.62, 0.15} * gamma) /
+               (1.0 + Complex{0.07, -0.13} * gamma);
+    };
+    std::array<Complex, 3> readings{{measure(standards[0]), measure(standards[1]), measure(standards[2])}};
+    Complex corrected;
+    check(AnalyzerInstrumentPlanner::correctOnePort(standards, readings, measure(expected), corrected) &&
+              std::abs(corrected - expected) < 1e-12, QStringLiteral("complex Open/Short/Load correction"));
+    readings.fill(readings[0]);
+    check(!AnalyzerInstrumentPlanner::correctOnePort(standards, readings, measure(expected), corrected),
+          QStringLiteral("singular Open/Short/Load calibration must be rejected"));
+
     QTextStream(stdout) << "Analyzer instrument plan self-test: "
                         << (failures == 0 ? "PASS" : "FAIL") << '\n';
     return failures == 0 ? 0 : 1;

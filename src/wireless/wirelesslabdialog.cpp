@@ -193,7 +193,9 @@ WirelessLabDialog::WirelessLabDialog(bool uk, QWidget *parent)
     auto *wireshark = new QPushButton(QStringLiteral("Wireshark"), this);
     auto *exportButton = new QPushButton(text("Export CSV", "Експорт CSV"), this);
     auto *clearButton = new QPushButton(text("Clear", "Очистити"), this);
-    for (auto *button : {openButton, captureButton, stopButton, wireshark, exportButton, clearButton})
+    auto *usrp = new QPushButton(text("USRP lab", "Стенд USRP"), this);
+    connect(usrp, &QPushButton::clicked, this, &WirelessLabDialog::usrpLabRequested);
+    for (auto *button : {openButton, captureButton, stopButton, wireshark, exportButton, clearButton, usrp})
         commands->addWidget(button);
     commands->addStretch();
     audioCheckbox = new QCheckBox(text("Audio", "Аудіо"), this);

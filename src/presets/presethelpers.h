@@ -70,6 +70,10 @@ QStringList defaultAgileScanPresetOrder();
 QStringList defaultStandardScanPresetOrder();
 QStringList defaultListeningScanPresetOrder();
 
+const QVector<double> &fpv6GhzVideoFrequenciesMhz();
+QString fpv6GhzFrequencyPresetName(double frequencyMhz);
+QString fpv6GhzScanTargetsMhz(double maximumMhz);
+
 QVector<double> parseAgileScanFrequenciesMhz(const QString &rangesMhz,
                                              double stepMhz,
                                              QString *error);

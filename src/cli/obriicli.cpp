@@ -19,6 +19,7 @@
 #include "clignsssession.h"
 #include "cliresearchtools.h"
 #include "clidoctor.h"
+#include "clijsonrequest.h"
 #include "cliruntimerecorder.h"
 #include "iqbuffer.h"
 #include "clitextdecoder.h"
@@ -32,6 +33,7 @@
 #include "fobosreceivercore.h"
 #include "recordingformatcore.h"
 #include "commanddispatcher.h"
+#include "usrplabjob.h"
 #include "commandcontrolserver.h"
 #include "clicommandadapter.h"
 #include "../mesh/meshnodecli.h"
@@ -100,6 +102,42 @@ void printJson(const QJsonObject &object) {
 int fail(const QString &message) {
     QTextStream err(stderr);
     err << message << Qt::endl;
+    return 1;
+}
+
+int runUsrpLab(const QStringList &words) {
+    if (words == QStringList{QStringLiteral("--help")}) {
+        QTextStream(stdout) << "usrp status | contracts | wifi-loopback | lte-zmq | gsm-demo\n"
+                               "usrp gsm-decode FILE ARFCN [PDCH_TS]\n"
+                               "usrp gsm-replay MAC.jsonl ARFCN CONTEXT_DIR\n"
+                               "usrp umts-decode FILE RATE [OFFSET_HZ [cf32|cs16|ci8 [START_SAMPLE]]]\n";
+        return 0;
+    }
+    const auto request = UsrpLabJob::arguments(words);
+    if (request.isEmpty()) return fail(QStringLiteral("Invalid USRP job arguments. Use usrp --help."));
+    UsrpLabJob job;
+    QEventLoop loop;
+    QObject::connect(&job, &UsrpLabJob::completed, &loop, &QEventLoop::quit);
+    interrupted = 0;
+    std::signal(SIGINT, interruptHandler);
+    std::signal(SIGTERM, interruptHandler);
+    QTimer cancel;
+    QObject::connect(&cancel, &QTimer::timeout, &loop, [&] {
+        if (!interrupted) return;
+        job.command({{"action", "cancel"}});
+        cancel.stop();
+    });
+    auto reply = job.command(request);
+    if (reply.value("active").toBool()) {
+        cancel.start(100);
+        loop.exec();
+        reply = job.status();
+    }
+    if (reply.contains("lastResult")) reply = reply.value("lastResult").toObject();
+    printJson(reply);
+    if (reply.value("ok").toBool()) return 0;
+    if (reply.value("status").toString() == QStringLiteral("BLOCKED")) return 2;
+    if (reply.value("status").toString() == QStringLiteral("CANCELLED")) return 130;
     return 1;
 }
 
@@ -1000,19 +1038,10 @@ QJsonObject sendViewRequest(const QString &id, const QJsonObject &request) {
     if (!socket.waitForConnected(400))
         return {{QStringLiteral("ok"), false},
                 {QStringLiteral("error"), QStringLiteral("View is not running: %1").arg(id)}};
-    socket.write(QJsonDocument(request).toJson(QJsonDocument::Compact) + '\n');
-    if (!socket.waitForBytesWritten(1000))
-        return {{QStringLiteral("ok"), false},
-                {QStringLiteral("error"), QStringLiteral("View did not accept the command")}};
-    QElapsedTimer timeout;
-    timeout.start();
-    while (!socket.canReadLine()) {
-        const int remaining = 1500 - static_cast<int>(timeout.elapsed());
-        if (remaining <= 0 || !socket.waitForReadyRead(remaining))
-            return {{QStringLiteral("ok"), false},
-                    {QStringLiteral("error"), QStringLiteral("View did not reply")}};
-    }
-    return QJsonDocument::fromJson(socket.readLine(8192)).object();
+    const CliJsonReply reply = exchangeCliJson(socket, request, 1000, 1500, 8192);
+    if (!reply.error.isEmpty())
+        return {{QStringLiteral("ok"), false}, {QStringLiteral("error"), reply.error}};
+    return QJsonDocument::fromJson(reply.line).object();
 }
 
 int viewCommand(const QStringList &args, const QCommandLineParser &parser) {
@@ -1736,20 +1765,11 @@ int remoteCommand(const QString &host, quint16 port, const QStringList &words, c
     QTcpSocket socket;
     socket.connectToHost(host, port);
     if (!socket.waitForConnected(3000)) return fail(socket.errorString());
-    socket.write(QJsonDocument(command).toJson(QJsonDocument::Compact) + '\n');
-    if (!socket.waitForBytesWritten(3000))
-        return fail(QStringLiteral("Control server did not reply"));
-    QElapsedTimer timeout;
-    timeout.start();
-    while (!socket.canReadLine()) {
-        const int remaining = 3000 - static_cast<int>(timeout.elapsed());
-        if (remaining <= 0 || !socket.waitForReadyRead(remaining))
-            return fail(QStringLiteral("Control server did not reply"));
-    }
+    const CliJsonReply reply = exchangeCliJson(socket, command, 3000, 3000, 4 * 1024 * 1024);
+    if (!reply.error.isEmpty()) return fail(reply.error);
     QTextStream out(stdout);
-    const QByteArray response = socket.readLine(4 * 1024 * 1024).trimmed();
-    out << response << Qt::endl;
-    return QJsonDocument::fromJson(response).object().value(QStringLiteral("ok")).toBool() ? 0 : 1;
+    out << reply.line << Qt::endl;
+    return QJsonDocument::fromJson(reply.line).object().value(QStringLiteral("ok")).toBool() ? 0 : 1;
 }
 
 struct RunOptions {
@@ -4247,6 +4267,7 @@ int runComputeService(QCoreApplication &app, const QString &path, double duratio
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("ObriiCli"));
+    if (app.arguments().value(1) == QLatin1String("usrp")) return runUsrpLab(app.arguments().mid(2));
     if(app.arguments().value(1)==QLatin1String("fft-tune")) {
         auto args=app.arguments();args.removeAt(1);return runFftTuningCommand(args);
     }
@@ -4261,6 +4282,7 @@ int main(int argc, char **argv) {
         return runLocalModule(app, QStringLiteral("ObriiCliTxModule"), 2);
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Headless SDR receiver. Commands: devices, rates, doctor [REQUEST.json], run [--serve|--preset FILE], client, research FILE.json, calibration FILE.json, preset list DIR|inspect|summary FILE, experiment inspect|summary|results|trace|measure|zero FILE, module list|start|status|stop|snapshot|tx|gnss, control commands|audit|request FILE.json|agent start [PORT]|agent status|agent control on/off|agent stop|status|metrics|record|spectrum|trace|traces|measure|tone|digital|filters|vfo|scan|trigger|quality|zero|multisdr|graph|gnss|research|preset|experiment|mode|demod|bandwidth|audio|start|stop|quit|tune|listen|gain, view open|set|status|snapshot|close."));
+    parser.setApplicationDescription(parser.applicationDescription() + QStringLiteral(" Local USRP jobs: usrp --help."));
     parser.addHelpOption();
     const auto option = [&parser](const QString &name, const QString &description, const QString &value, const QString &fallback) {
         parser.addOption(QCommandLineOption(name, description, value, fallback));

@@ -55,6 +55,7 @@ public:
                            double audioFrequencyHz, int slotParity);
     bool startPreparedFt8Automatically(QString *error = nullptr);
     void cancelAutomaticFt8();
+    void startLaboratoryTransmission(const SignalLabGenerationResult &result, double centerHz = -1.0);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -80,7 +81,6 @@ private:
     void loadSettings();
     void saveSettings() const;
     void startTransmission();
-    void startLaboratoryTransmission(const SignalLabGenerationResult &result);
     void pumpVirtualIq();
     void stopTransmission(const QString &reason = QString());
     void startTextSimulation(const TxConfiguration &configuration);

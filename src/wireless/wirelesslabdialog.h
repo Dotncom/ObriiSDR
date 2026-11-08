@@ -40,6 +40,7 @@ signals:
     void audioEnabledRequested(bool enabled);
     void liveIqActiveChanged(bool active);
     void spectrumUpdateIntervalRequested(int intervalMs);
+    void usrpLabRequested();
 protected:
     void closeEvent(QCloseEvent *event) override;
     void showEvent(QShowEvent *event) override;

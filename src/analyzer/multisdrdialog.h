@@ -16,6 +16,7 @@
 
 class AnalyzerSpectrumWidget;
 class AnalyzerWaterfallPreview;
+class MultiSdrLiveIq;
 class QCheckBox;
 class QCloseEvent;
 class QComboBox;
@@ -24,6 +25,7 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QSpinBox;
+class QTimer;
 
 class MultiSdrDialog final : public QDialog {
     Q_OBJECT
@@ -33,7 +35,7 @@ public:
     ~MultiSdrDialog() override;
     void consumePrimaryFrame(const AnalyzerSpectrumFrame &frame);
     void setPrimaryRunning(bool running);
-    void setPrimaryConfiguration(double centerHz, double sampleRateHz, int fftLength);
+    void setPrimaryConfiguration(double centerHz, double sampleRateHz, int fftLength, bool fixedRf);
     bool mainMosaicFrame(AnalyzerSpectrumFrame &frame) const;
     void setMainViewMode(int mode);
     void focusAdjacentMainReceiver(int direction);
@@ -89,12 +91,17 @@ private:
     void invalidateCoherentCalibration(const QString &reason = {});
     void calibrateCoherentGroup();
     void saveCoherentSnapshot();
+    void startCoherentLive(bool virtualPair, bool alignBySignal = false);
+    void stopCoherentLive(const QString &reason = {});
+    void updateCoherentLivePreview();
+    void displayPreviewFrame(const AnalyzerSpectrumFrame &frame);
     QString text(const char *english, const char *ukrainian) const;
     QString frequencyText(double hz) const;
 
     bool ukrainian = false;
     bool hostPrimary = false;
     bool primaryRunning = false;
+    bool primaryFixedRf = false;
     bool restoringSettings = false;
     std::atomic<int> audioSourceIndex{0};
     double pendingSynchronizedPrimaryCenterHz = std::numeric_limits<double>::quiet_NaN();
@@ -128,6 +135,15 @@ private:
     QPushButton *coherentCalibrateButton = nullptr;
     QPushButton *coherentSaveButton = nullptr;
     QLabel *coherentStatusLabel = nullptr;
+    QLabel *coherentLiveStatus = nullptr;
+    QPushButton *coherentLiveButton = nullptr;
+    QPushButton *coherentVirtualButton = nullptr;
+    QPushButton *coherentSignalButton = nullptr;
+    QTimer *coherentLiveTimer = nullptr;
+    std::unique_ptr<MultiSdrLiveIq> coherentLive;
+    quint64 coherentPreviewSequence = 0;
+    bool coherentVirtualActive = false;
+    bool coherentSignalActive = false;
     QVector<CoherentIqCalibration> coherentCalibrations;
     std::vector<float> mosaicFrequencies;
     std::vector<float> mosaicLevels;

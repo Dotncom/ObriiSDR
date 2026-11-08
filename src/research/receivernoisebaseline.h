@@ -11,7 +11,8 @@
 enum class ReceiverNoiseBaselineMode {
     Off = 0,
     RelativeFloor = 1,
-    ExcessPower = 2
+    ExcessPower = 2,
+    WideShape = 3
 };
 
 struct ReceiverNoiseBaselineKey {
@@ -23,6 +24,7 @@ struct ReceiverNoiseBaselineKey {
     double amplitudeOffsetDb = 0.0;
     bool calibrationTableEnabled = false;
     int calibrationPointCount = 0;
+    QString hardwareIdentity;
 
     bool matches(const ReceiverNoiseBaselineKey &other) const;
     QString description() const;
@@ -49,7 +51,7 @@ public:
         Rejected
     };
 
-    void beginCapture(const ReceiverNoiseBaselineKey &key, int targetFrames);
+    void beginCapture(const ReceiverNoiseBaselineKey &key, int targetFrames, int storedBins = 32768);
     CaptureResult addFrame(const std::vector<float> &frequencies,
                            const std::vector<float> &levelsDb,
                            const ReceiverNoiseBaselineKey &key);
@@ -64,18 +66,20 @@ public:
                std::vector<float> &levelsDb,
                const ReceiverNoiseBaselineKey &key,
                ReceiverNoiseBaselineMode mode,
-               double targetFloorDb) const;
-    bool hasMatchingProfile(const ReceiverNoiseBaselineKey &key) const;
-    ReceiverNoiseBaselineProfile matchingProfile(const ReceiverNoiseBaselineKey &key) const;
+               double targetFloorDb, double shapeWidthHz = 150000.0, double shapeStrength = 1.0) const;
+    bool hasMatchingProfile(const ReceiverNoiseBaselineKey &key, bool wideShape = false) const;
+    ReceiverNoiseBaselineProfile matchingProfile(const ReceiverNoiseBaselineKey &key, bool wideShape = false) const;
     int profileCount() const { return profiles.size(); }
-    bool clearMatching(const ReceiverNoiseBaselineKey &key);
+    bool clearMatching(const ReceiverNoiseBaselineKey &key, bool wideShape = false);
     void clearAll();
 
     QByteArray serialize() const;
     bool deserialize(const QByteArray &encoded, QString *error = nullptr);
 
 private:
-    int matchingProfileIndex(const ReceiverNoiseBaselineKey &key) const;
+    int matchingProfileIndex(const ReceiverNoiseBaselineKey &key, bool wideShape = false) const;
+    void invalidateShapeCache() { shapeCacheIndex = -1; }
+    void prepareShapeCache(int index, double widthHz) const;
     void finishCapture();
 
     QVector<ReceiverNoiseBaselineProfile> profiles;
@@ -87,6 +91,12 @@ private:
     double captureMaximumFrequencyHz = 0.0;
     QVector<double> capturePowerSum;
     QVector<double> capturePowerSquareSum;
+    int captureStoredBins = 32768;
+    int captureSourceBins = 0;
+    mutable int shapeCacheIndex = -1;
+    mutable double shapeCacheWidthHz = 0;
+    mutable QVector<float> shapeCacheDb;
+    mutable double shapeCacheFloorDb = 0;
     QString status;
 };
 

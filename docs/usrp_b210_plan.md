@@ -18,8 +18,8 @@ clocking or RF front end may differ from an Ettus B210.
   a missing Soapy/UHD module therefore cannot regress those receivers.
 - Obrii SDR now has an optional native UHD C-API RX path: channel selection,
   RX gain/antenna, rate/frequency configuration, CF32 streaming and live
-  retuning. It is not yet hardware-validated on the Kintex-7 clone; TX and
-  shared two-channel ownership are still pending.
+  retuning. Explicit UHD TX uses a separate session. Clone validation and
+  shared RX/TX ownership are pending.
 
 ## Hardware validation stage
 
@@ -45,9 +45,9 @@ Do not auto-flash or silently replace UHD images from Obrii SDR.
 
 On first hardware access, run `uhd_find_devices` and `uhd_usrp_probe` with the
 vendor-recommended UHD/image combination. Then test one RX channel at a low
-rate, retuning and Stop/Start, before dual-channel or high-rate work. The
-native adapter currently selects the first discovered USRP; multiple-device
-selection and common RX/TX ownership remain future work.
+rate, retuning and Stop/Start, before dual-channel or high-rate work. Verify
+the selected device index against the probed serial when several USRPs are
+present.
 
 1. Validate the native UHD RX transport with the clone's vendor image, then
    add firmware/FPGA compatibility reporting and bounded RX/TX queues.
@@ -77,3 +77,33 @@ selection and common RX/TX ownership remain future work.
 All large IQ queues and optional measurement workers stay outside the basic
 receiver/audio path, so Raspberry Pi operation remains unaffected while these
 features are disabled.
+
+## UMTS RX qualification with the B210 clone
+
+1. Identify the USB device with `uhd_find_devices`. Run `uhd_usrp_probe`
+   with the vendor-recommended UHD and FPGA image. Record the actual
+   serial, reported channels, clock source and antenna names. Keep the
+   vendor image and local Vivado project together for comparison. This
+   checkout has an XC7K325T project at
+   `B210_Project_Firmwire/B210_Project_Firmwire.xpr` and an existing
+   `B210_Project_Firmwire/B210_Project_Firmwire.runs/impl_1/b200.bin`.
+   Confirm the image against the delivered clone before using it.
+2. Select one RX channel and a known W-CDMA downlink carrier. Record a
+   short capture with the native UHD backend. Use the rate and center
+   frequency from the recording metadata when replaying it. Start with
+   a low RX gain and inspect clipping, overflows and actual sample rate.
+
+```powershell
+# Set these to the verified carrier and clone image before running.
+ObriiCli --backend uhd --rx-channel 0 --rate 7680000 --freq $CarrierHz --gain-db 10 --seconds 1 --fpga-image $VendorFpgaImage --output b210-umts.cf32
+ObriiCli usrp umts-decode b210-umts.cf32 7680000
+```
+
+3. Record the synchronization outcome separately from BCH CRC and MIB.
+   Repeat on disjoint portions of a capture and after Stop/Start. The
+   console and DSP-board job can replay the same file for comparison.
+   [USRP file replay](usrp_software_lab.md)
+4. For bidirectional qualification, use a conducted, attenuated setup
+   or a shielded test enclosure with an independent UMTS peer and lab
+   subscriber context. Qualify timed RX/TX and channel ownership before
+   measuring RRC/NAS or IP interoperability.

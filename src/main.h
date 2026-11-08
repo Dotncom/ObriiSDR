@@ -43,6 +43,9 @@
 #include <QApplication>
 #include <QDateTime>
 #include <QCoreApplication>
+#include "core/adcoverloadguard.h"
+#include "core/spurcalibrationprofile.h"
+#include "core/spurlinecalibrator.h"
 #include <QDebug>
 #include <cmath>
 #include <algorithm>
@@ -52,6 +55,7 @@
 #include <QRadioButton>
 #include <QButtonGroup>
 #include <QElapsedTimer>
+#include <QDeadlineTimer>
 #include <QUdpSocket>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -138,6 +142,7 @@ class FFTResult;
 class SpectrumFftWorker;
 class FineTuneScaleWidget;
 class QDialog;
+class QProgressBar;
 class QFile;
 class QStackedWidget;
 class QToolButton;
@@ -252,7 +257,8 @@ private slots:
     void updateSpectrumFrameRecordingStatus(const QString &status);
     bool spectrumEventIqProducerNeeded() const;
     bool spectrumEventIqChannelized() const;
-    void handleSpectrumEventIqFrame(const QByteArray &iqData, double sampleRate, int sampleCount, bool channelized);
+    void handleSpectrumEventIqFrame(const QByteArray &iqData, double sampleRate, int sampleCount, bool channelized,
+                                     qint64 capturedUtcMs = 0);
     void startPlayback();
     void stopPlayback();
     void refreshPlaybackFiles();
@@ -289,6 +295,7 @@ private:
     void continueUsbDeviceRefresh();
     QString formatFobosDeviceLabel(const FobosDeviceInfo &info) const;
     FobosDeviceInfo selectedFobosDeviceInfo() const;
+    void selectDualFobosLibrary(FobosApiKind kind, bool stock);
     bool isRtlTcpSelected() const;
     bool isRtlSdrNativeSelected() const;
     int selectedRtlSdrNativeIndex() const;
@@ -326,7 +333,7 @@ private:
                                                                bool publishIqSnapshot,
                                                                bool emitIqFrames) const;
     void showVirtualSignalRxSettings();
-    bool restartStreamForHardwareChange();
+    bool restartStreamForHardwareChange(bool forceFrequencyApply = false);
     void abandonFobosSessionWithoutClose(const char *reason);
     bool openFobosSession();
     bool closeFobosSession(bool clearIq = true);
@@ -425,15 +432,21 @@ private:
     void selectDmrHunterCandidate(int direction);
     void tuneDmrHunterCandidateIndex(int index);
     void startSpurCalibration();
+    QJsonObject spurCalibrationContext() const;
+    void advanceSpurCalibration();
+    void endSpurCalibration(const QString &error = QString());
     void clearSpurMask();
     void updateSpurCalibration(const std::vector<float> &frequencies,
                                const std::vector<float> &magnitudes,
-                               double centerFrequency);
+                               double centerFrequency, uint64_t epoch, uint64_t endFloatCount);
     void finishSpurCalibration();
     void applySpurSuppression(const std::vector<float> &frequencies,
                               std::vector<float> &magnitudes,
                               double centerFrequency) const;
     void updateSpurSuppressionStatus();
+    void syncSpectrumProcessingControls();
+    void updateFobosIntegrity(const QVariantMap &metrics);
+    void refreshReceiverInfoOverlays();
     void updateGnssSpurWatch(const std::vector<float> &frequencies,
                              const std::vector<float> &magnitudes,
                              double centerFrequency);
@@ -606,7 +619,7 @@ private:
     void connectDataProcessorSignals();
     void applyServerLocalOutputPolicy();
     bool applyCenterFrequencyToHardwareIfNeeded(const RadioSettings &previousSettings, const char *reason);
-    bool applyLiveAgileCenterRetune(uint64_t generation, const QString &reason);
+    bool applyLiveAgileCenterRetune(uint64_t generation, const QString &reason, double targetHz = 0.0);
     void resetNetworkIqReceptionState(bool clearGraph, bool clearWaterfall, bool restartAudioPrebuffer);
     void loadPersistentSettings();
     void savePersistentSettings();
@@ -657,6 +670,7 @@ private:
     void processVideoSnapshotFrame();
     void updateVideoProcessorMode();
     RadioSettings audioProcessorSettings() const;
+    RadioSettings liveReceiverSettings() const;
     RadioSettings spectrumProcessingSettings() const;
     RecordingManager::Mode selectedRecordingMode() const;
     bool isChannelIqRecordingActive() const;
@@ -1133,6 +1147,9 @@ private:
     double networkSpectrumFrameMaxFrequency = 0.0;
     int networkSpectrumFrameFftLength = 0;
     QVector<FobosDeviceInfo> availableFobosDevices;
+    QHash<QString, bool> dualFobosStockLibrary;
+    bool dualFobosSwitchPending = false;
+    QString dualFobosSwitchStatus;
     QTimer *usbDeviceRefreshTimer = nullptr;
     int usbDeviceRefreshPassesRemaining = 0;
     QStringList remoteReceiverDeviceLabels;
@@ -1215,6 +1232,8 @@ private:
     ReceiverNoiseBaseline receiverNoiseBaseline;
     int receiverNoiseBaselineMode = static_cast<int>(ReceiverNoiseBaselineMode::Off);
     double receiverNoiseBaselineTargetDb = -120.0;
+    double receiverNoiseShapeWidthHz = 150000.0;
+    double receiverNoiseShapeStrength = 1.0;
     int receiverNoiseBaselineCaptureFrames = 64;
     QElapsedTimer receiverNoiseBaselineCaptureTimer;
     ReceiverYFactorCalibration receiverYFactorCalibration;
@@ -1231,6 +1250,28 @@ private:
     int waterfallDisplayMode = static_cast<int>(MyWaterfallWidget::DisplayMode::Waterfall2D);
     int multiSdrViewMode = 0;
     bool alternativeInterfaceMode = false;
+    bool useCorrectedFobosCommands = true;
+    int fobosIfTestMode = 3; // 0 native,1 IF2350,2 IF2450,3 auto table; capability gated.
+    bool adcOverloadProtectionEnabled = false;
+    void refreshFobosIfStatus();
+    void logStoppedFobosDeviceMetrics();
+    void openFobosIfEditor();
+    bool applyStoredFobosIfRules(bool *changed);
+    QWidget *createFobosRuntimeControls(QWidget *parent);
+    bool applyFobosRuntimeSettings();
+    QVector<quint32> fobosActiveIfRulesFrame;
+    bool fobosCustomIfRulesActive=false;
+    unsigned int fobosActiveMixerBiasCode=0;
+    bool fobosTuneRequiresRestart = false;
+    bool fobosRawLiveTune = false;
+    QLabel *fobosMetadataStatusLabel=nullptr;
+    QLabel *fobosIfStatusLabel = nullptr;
+    QLabel *adcOverloadStatusLabel = nullptr;
+    AdcOverloadGuard adcOverloadGuard;
+    QElapsedTimer adcProtectionClock, fobosDeviceMetricsTimer, fobosStoppedMetricsTimer;
+    quint64 adcProtectionEpoch = 0;
+    int adcProtectionVga = -1;
+    double adcProtectionCenterHz = 0;
     bool waterfall3DAlternativeView = false;
     bool alternativeSpectrumGradientFill = false;
     int alternativeSpectrumGradientOpacity = 70;
@@ -1428,12 +1469,6 @@ private:
     mutable double scanMeasurementOverlayCacheFirstHz = std::numeric_limits<double>::quiet_NaN();
     mutable double scanMeasurementOverlayCacheLastHz = std::numeric_limits<double>::quiet_NaN();
 
-    struct SpurMaskEntry {
-        double offsetHz = 0.0;
-        double widthHz = 0.0;
-        float prominenceDb = 0.0f;
-        int hits = 0;
-    };
     struct SpurCalibrationBin {
         double offsetWeightedSum = 0.0;
         double weightSum = 0.0;
@@ -1450,6 +1485,30 @@ private:
     QMap<qint64, GnssSpurWatchBin> gnssSpurWatchBins;
     bool spurSuppressionEnabled = false;
     bool spurCalibrationActive = false;
+    bool spurSweepActive = false;
+    double spurDetectionThresholdDb = 6.0;
+    ReceiverNoiseBaseline spurSweepNoiseBaseline;
+    SpurLineCalibrator spurLineCalibrator;
+    QComboBox *fftWindowCombo = nullptr;
+    QComboBox *fftBackendCombo = nullptr;
+    QComboBox *displayReductionCombo = nullptr;
+    SpurCalibrationProfile spurCalibrationProfile;
+    SpurCalibrationProfile spurSweepProfile;
+    QVector<double> spurSweepCenters;
+    int spurSweepIndex = -1;
+    SpurCalibrationFrameGate spurFrameGate;
+    QElapsedTimer spurPointClock;
+    QElapsedTimer spurSettlingClock;
+    QJsonObject spurSweepContext;
+    RadioSettings spurSettingsBeforeSweep;
+    bool spurWasRunning = false;
+    bool spurAudioWasEnabled = false;
+    QString spurSweepError;
+    QPointer<QLabel> spurSweepLabel;
+    QPointer<QProgressBar> spurSweepProgress;
+    QPointer<QDialog> spurSweepDialog;
+    QSpinBox *spectrumUpdateSpin = nullptr;
+    QSpinBox *waterfallRowsSpin = nullptr;
     int spurCalibrationFramesDone = 0;
     int spurCalibrationTargetFrames = 32;
     double spurCalibrationBinHz = 0.0;
@@ -1576,6 +1635,8 @@ private:
     int qthMapOverlayMode = 1;
     QVector<qth::UserMarker> qthUserMarkers;
     std::atomic_bool videoIqFramePending{false};
+    std::shared_ptr<IqFrameQueueBudget> videoIqQueueBudget =
+        std::make_shared<IqFrameQueueBudget>(8LL * 1024 * 1024);
     bool momentaryRecordingActive = false;
     QJsonObject activeRecordingLabMetadata;
     bool offlineIqPlaybackActive = false;
@@ -1587,6 +1648,7 @@ private:
     int volumePercent = 100;
     QElapsedTimer networkSpectrumFrameTimer;
     QElapsedTimer liveRetuneSettleTimer;
+    QDeadlineTimer liveRetuneFrameDeadline;
     QElapsedTimer standardScanDwellTimer;
     QElapsedTimer listeningScanDwellTimer;
     QElapsedTimer listeningScanSettleTimer;
@@ -1594,8 +1656,15 @@ private:
     uint64_t liveCenterRetuneGeneration = 0;
     uint64_t queuedLiveCenterRetuneGeneration = 0;
     QString queuedLiveCenterRetuneReason;
+    QThread *liveCenterRetuneThread = nullptr;
+    QThread *fobosCommandThread = nullptr;
+    QObject *fobosCommandWorker = nullptr;
+    bool liveRetuneDeferredHardwareChange = false;
     QElapsedTimer agileLiveRetuneCommandTimer;
     int agileLiveRetuneCommandIntervalMs = 120;
+    bool agileContinuousRetuneEnabled = false;
+    double agileContinuousRetuneStepPercent = 5.0;
+    QElapsedTimer agileLiveRetuneInputClock;
     QElapsedTimer persistentSettingsLastSaveTimer;
     bool persistentSettingsSaveDeferred = false;
     bool persistentSettingsSaveInProgress = false;

@@ -88,6 +88,8 @@ public:
                              int fftWindowType);
     void setFpsOverlayEnabled(bool enabled);
     void setExtendedInfoOverlayEnabled(bool enabled);
+    void setReceiverStatusText(const QString &text);
+    void updateReceiverStatusOverlay();
     void setAreaMeasurementEnabled(bool enabled);
     void setPauseControlVisible(bool visible);
     void setDisplayPaused(bool paused);
@@ -230,6 +232,7 @@ private:
     bool scanSegmentMarkersVisible = true;
     bool fpsOverlayEnabled = false;
     bool extendedInfoOverlayEnabled = false;
+    QString receiverStatusText;
     std::vector<float> scienceMaxHoldData;
     std::vector<float> scienceMinHoldData;
     std::vector<float> scienceAverageData;

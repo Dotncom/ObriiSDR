@@ -4,6 +4,7 @@
 #include "dspcomputedialog.h"
 #include "dspresearchwidget.h"
 #include "dspbranchengine.h"
+#include "dspiqsourceregistry.h"
 #include "finetunewidget.h"
 #include "MyWaterfallWidget.h"
 #include "appsettingsutils.h"
@@ -12,12 +13,17 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QBuffer>
 #include <QComboBox>
 #include <QCheckBox>
 #include <QColor>
 #include <QContextMenuEvent>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDoubleSpinBox>
+#include <QFileDialog>
+#include <QFormLayout>
+#include <QFutureWatcher>
 #include <QGraphicsPathItem>
 #include <QGraphicsProxyWidget>
 #include <QGraphicsRectItem>
@@ -29,6 +35,7 @@
 #include <QHash>
 #include <QInputDialog>
 #include <QImage>
+#include <QImageReader>
 #include <QElapsedTimer>
 #include <QFrame>
 #include <QJsonArray>
@@ -44,10 +51,13 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPathStroker>
+#include <QPixmap>
 #include <QPointer>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegion>
 #include <QResizeEvent>
+#include <QSaveFile>
 #include <QScrollBar>
 #include <QSet>
 #include <QSettings>
@@ -55,6 +65,7 @@
 #include <QShowEvent>
 #include <QStyle>
 #include <QStyleOptionGraphicsItem>
+#include <QStackedWidget>
 #include <cstring>
 #include <QTimer>
 #include <QToolButton>
@@ -63,6 +74,7 @@
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <QtMath>
+#include <QtConcurrent/QtConcurrentRun>
 
 #include <algorithm>
 #include <array>
@@ -89,6 +101,247 @@ constexpr int kBoardHistorySteps = 100;
 constexpr qint64 kBoardHistoryBytes = 16 * 1024 * 1024;
 constexpr int kWorkspacePlotLeftMargin = 42;
 constexpr int kWorkspacePlotRightMargin = 8;
+
+struct BoardSignalRun {
+    SignalLabGenerationResult signal;
+    std::shared_ptr<const DspBoardDecodedPayload> received;
+};
+
+bool boardProxyHasFocus(const QGraphicsScene *scene) {
+    for (auto *item = scene ? scene->focusItem() : nullptr; item; item = item->parentItem()) {
+        if (dynamic_cast<QGraphicsProxyWidget *>(item)) return true;
+    }
+    return false;
+}
+
+class BoardSignalControls final : public QWidget {
+public:
+    BoardSignalControls(const QString &type, std::function<void(const QJsonObject &)> edit,
+                        std::function<void(bool)> run) : edit_(std::move(edit)) {
+        auto *form = new QFormLayout(this);
+        form->setContentsMargins(0, 0, 0, 0);
+        auto label = [&](const char *en, const char *uk) {
+            auto *widget = new QLabel(this);
+            translate(widget, en, uk);
+            return widget;
+        };
+        auto number = [&](const char *key, const char *en, const char *uk,
+                          double low, double high, double fallback, int decimals) {
+            auto *spin = new QDoubleSpinBox(this);
+            spin->setRange(low, high);
+            spin->setDecimals(decimals);
+            spin->setKeyboardTracking(false);
+            form->addRow(label(en, uk), spin);
+            const QString name = QString::fromLatin1(key);
+            loaders_.append([spin, name, fallback](const QJsonObject &s) {
+                const QSignalBlocker blocker(spin);
+                spin->setValue(s.value(name).toDouble(fallback));
+            });
+            connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+                    [this, name](double value) { updateSetting(name, value); });
+        };
+        if (type == "lab_carrier") {
+            number("offset", "Offset, Hz", "Зсув, Гц", -1e6, 1e6, 0, 1);
+            number("amplitude", "Amplitude", "Амплітуда", 0.01, 1, 0.7, 2);
+        } else if (type == "lab_modulator") {
+            auto *mode = new QComboBox(this);
+            mode->addItem("CW", "carrier");
+            mode->addItem("Tone / DSB", "tone");
+            mode->addItem("Noise", "noise");
+            mode->addItem("AM (WAV)", "am");
+            mode->addItem("FM (WAV)", "fm");
+            mode->addItem("BPSK", "bpsk");
+            mode->addItem("QPSK", "qpsk");
+            mode->addItem("Packet QPSK", "packet_qpsk");
+            translations_.append([mode](bool ukrainian) {
+                mode->setItemText(mode->findData("packet_qpsk"),
+                                  ukrainian ? QStringLiteral("Пакетний QPSK") : QStringLiteral("Packet QPSK"));
+            });
+            mode->addItem("16-QAM", "qam16");
+            mode->addItem("2-FSK", "fsk");
+            mode->addItem("2-GFSK", "gfsk");
+            form->addRow(label("Upper input: carrier · Lower input: data",
+                               "Верхній вхід: носійна · Нижній: дані"));
+            form->addRow(label("Mode", "Режим"), mode);
+            loaders_.append([mode](const QJsonObject &s) {
+                const QSignalBlocker blocker(mode);
+                mode->setCurrentIndex(std::max(0, mode->findData(s.value("mode").toString("carrier"))));
+            });
+            connect(mode, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                    [this, mode](int) { updateSetting("mode", mode->currentData().toString()); });
+            number("tone", "Tone, Hz", "Тон, Гц", 1, 1e6, 1000, 1);
+            number("symbols", "Symbols/s", "Символів/с", 1, 900000, 1200, 1);
+            number("deviation", "Deviation, Hz", "Девіація, Гц", 1, 999999, 2500, 1);
+        } else if (type == "lab_iq") {
+            number("rate", "Samples/s", "Відліків/с", 8000, 2000000, 48000, 0);
+            number("duration", "Duration, s", "Тривалість, с", 0.01, 30, 1, 2);
+            number("centerHz", "RF center, Hz", "Центр RF, Гц", 0, 8000e6, 100e6, 0);
+            auto *start = new QPushButton(this);
+            auto *stop = new QPushButton(this);
+            translate(start, "Run I/Q", "Запустити I/Q");
+            translate(stop, "Stop", "Стоп");
+            form->addRow(start, stop);
+            connect(start, &QPushButton::clicked, this, [run]() { run(true); });
+            connect(stop, &QPushButton::clicked, this, [run]() { run(false); });
+        } else if (type == "lab_tx") {
+            auto *start = new QPushButton(this);
+            translate(start, "Prepare transmission", "Підготувати передачу");
+            form->addRow(start);
+            connect(start, &QPushButton::clicked, this, [run]() { run(true); });
+        } else if (type == "lab_packet_decoder" || type == "lab_received") {
+            if (type == "lab_packet_decoder")
+                number("symbols", "RX symbols/s", "Символів RX/с", 100, 96000, 1200, 2);
+            receiveStatus_ = new QLabel(this);
+            receiveStatus_->setTextFormat(Qt::PlainText);
+            receiveStatus_->setWordWrap(true);
+            receiveStatus_->setFixedHeight(42);
+            form->addRow(receiveStatus_);
+            if (type == "lab_received") {
+                receivePreview_ = new QStackedWidget(this);
+                receivePreview_->setFixedHeight(90);
+                receivedText_ = new QPlainTextEdit(receivePreview_);
+                receivedText_->setReadOnly(true);
+                receivedText_->setObjectName(QStringLiteral("dspReceivedText"));
+                receivedImage_ = new QLabel(receivePreview_);
+                receivedImage_->setObjectName(QStringLiteral("dspReceivedImage"));
+                receivedImage_->setAlignment(Qt::AlignCenter);
+                receivePreview_->addWidget(receivedText_);
+                receivePreview_->addWidget(receivedImage_);
+                form->addRow(receivePreview_);
+                saveReceived_ = new QPushButton(this);
+                translate(saveReceived_, "Save received data…", "Зберегти отримані дані…");
+                form->addRow(saveReceived_);
+                connect(saveReceived_, &QPushButton::clicked, this, [this]() { saveReceivedPayload(); });
+            }
+        } else {
+            auto *line = new QLineEdit(this);
+            const QString key = type == "lab_text" ? QStringLiteral("text") : QStringLiteral("path");
+            line->setMaxLength(key == "text" ? 65536 : 4096);
+            loaders_.append([line, key](const QJsonObject &s) {
+                const QSignalBlocker blocker(line);
+                line->setText(s.value(key).toString());
+                if (key == "path") line->setToolTip(line->text());
+            });
+            connect(line, &QLineEdit::editingFinished, this, [this, line, key]() {
+                if (line->isModified()) updateSetting(key, line->text());
+            });
+            if (key == "text") {
+                form->addRow(label("UTF-8", "UTF-8"), line);
+            } else {
+                form->addRow(line);
+                auto *browse = new QPushButton(this);
+                translate(browse, "Choose file…", "Обрати файл…");
+                form->addRow(browse);
+                connect(browse, &QPushButton::clicked, this, [this, line, type]() {
+                    QString filter;
+                    if (type == "lab_audio") filter = QStringLiteral("PCM16 WAV (*.wav)");
+                    if (type == "lab_image") filter = QStringLiteral("Images (*.png *.jpg *.jpeg *.bmp *.webp *.gif)");
+                    if (type == "lab_cf32") filter = QStringLiteral("CF32LE (*.cf32 *.iq)");
+                    const QString path = QFileDialog::getOpenFileName(window(),
+                        ukrainian_ ? QStringLiteral("Файл джерела") : QStringLiteral("Source file"),
+                        line->text(), filter);
+                    if (!path.isEmpty()) updateSetting("path", path);
+                });
+            }
+        }
+    }
+
+    void setSettings(const QJsonObject &settings) {
+        if (settings == settings_) return;
+        settings_ = settings;
+        for (const auto &load : loaders_) load(settings_);
+    }
+
+    void setLanguage(bool ukrainian) {
+        ukrainian_ = ukrainian;
+        for (const auto &apply : translations_) apply(ukrainian);
+        updateReceiveStatus();
+    }
+
+    void setReceived(std::shared_ptr<const DspBoardDecodedPayload> payload) {
+        if (received_ == payload) return;
+        received_ = std::move(payload);
+        updateReceiveStatus();
+        if (!receivePreview_) return;
+        receivedText_->clear();
+        receivedImage_->clear();
+        receivePreview_->setCurrentWidget(receivedText_);
+        if (!received_ || !received_->ok()) return;
+        if (received_->type == DspBoardPayloadType::Text) {
+            receivedText_->setPlainText(QString::fromUtf8(received_->bytes));
+        } else if (received_->type == DspBoardPayloadType::Image) {
+            QBuffer input;
+            input.setData(received_->bytes);
+            input.open(QIODevice::ReadOnly);
+            QImageReader reader(&input);
+            const auto size = reader.size();
+            if (size.isValid() && size.width() <= 8192 && size.height() <= 8192 &&
+                qint64(size.width()) * size.height() <= 16 * 1024 * 1024) {
+                reader.setScaledSize(size.scaled(250, 86, Qt::KeepAspectRatio));
+                const auto image = reader.read();
+                if (!image.isNull()) {
+                    receivedImage_->setPixmap(QPixmap::fromImage(image));
+                    receivePreview_->setCurrentWidget(receivedImage_);
+                }
+            }
+        }
+    }
+
+private:
+    void updateReceiveStatus() {
+        if (!receiveStatus_) return;
+        if (saveReceived_) saveReceived_->setEnabled(received_ && received_->ok());
+        if (!received_) {
+            receiveStatus_->setText(ukrainian_ ? QStringLiteral("Очікування пакета") : QStringLiteral("Waiting for a packet"));
+        } else if (!received_->ok()) {
+            receiveStatus_->setText(received_->error);
+        } else {
+            const QString bytes = (ukrainian_ ? QStringLiteral("Отримано %1 Б") : QStringLiteral("Received %1 bytes"))
+                                      .arg(received_->bytes.size());
+            receiveStatus_->setText(received_->fileName.isEmpty() ? bytes : bytes + QStringLiteral(" · ") + received_->fileName);
+        }
+        receiveStatus_->setToolTip(receiveStatus_->text());
+    }
+
+    void saveReceivedPayload() {
+        const auto payload = received_;
+        if (!payload || !payload->ok()) return;
+        QString name = payload->fileName;
+        if (name.isEmpty() || name == "." || name == "..")
+            name = payload->type == DspBoardPayloadType::Text ? QStringLiteral("received.txt") : QStringLiteral("received.bin");
+        const auto path = QFileDialog::getSaveFileName(window(),
+            ukrainian_ ? QStringLiteral("Зберегти отримані дані") : QStringLiteral("Save received data"), name);
+        if (path.isEmpty()) return;
+        QSaveFile file(path);
+        if (!file.open(QIODevice::WriteOnly) || file.write(payload->bytes) != payload->bytes.size() || !file.commit())
+            QMessageBox::warning(window(), ukrainian_ ? QStringLiteral("Помилка збереження") : QStringLiteral("Save failed"), file.errorString());
+    }
+
+    template <class Widget>
+    void translate(Widget *widget, const char *en, const char *uk) {
+        translations_.append([widget, en, uk](bool ukrainian) {
+            widget->setText(QString::fromUtf8(ukrainian ? uk : en));
+        });
+    }
+
+    void updateSetting(const QString &key, const QJsonValue &value) {
+        QJsonObject updated = settings_;
+        updated.insert(key, value);
+        edit_(updated);
+    }
+
+    bool ukrainian_ = false;
+    QJsonObject settings_{{QStringLiteral("_initial"), true}};
+    QVector<std::function<void(bool)>> translations_;
+    QVector<std::function<void(const QJsonObject &)>> loaders_;
+    std::function<void(const QJsonObject &)> edit_;
+    QLabel *receiveStatus_ = nullptr;
+    QStackedWidget *receivePreview_ = nullptr;
+    QPlainTextEdit *receivedText_ = nullptr;
+    QLabel *receivedImage_ = nullptr;
+    QPushButton *saveReceived_ = nullptr;
+    std::shared_ptr<const DspBoardDecodedPayload> received_;
+};
 
 QColor workspaceSpectrumColor(float value) {
     value = std::clamp(std::isfinite(value) ? value : 0.0f, 0.0f, 1.0f);
@@ -2311,6 +2564,8 @@ QColor blockColor(const QString &type) {
 }
 
 bool typeHasInput(const QString &type) {
+    if (dspIsSignalBlock(type)) return type == "lab_modulator" || type == "lab_iq" || type == "lab_tx" ||
+                                       type == "lab_packet_decoder" || type == "lab_received";
     static const QSet<QString> noInput = {
         QStringLiteral("receiver_source"), QStringLiteral("iq_source"), QStringLiteral("network_input"),
         QStringLiteral("run_control"), QStringLiteral("enable_control"), QStringLiteral("frequency_control"),
@@ -2320,6 +2575,7 @@ bool typeHasInput(const QString &type) {
         QStringLiteral("gpio"), QStringLiteral("transmitter"), QStringLiteral("presets"),
         QStringLiteral("calibration"), QStringLiteral("spectrum_replay"),
         QStringLiteral("wireless_lab"),
+        QStringLiteral("usrp_lab"),
         QStringLiteral("open_radio_lab"),
         QStringLiteral("radio_propagation"),
         QStringLiteral("application_settings")
@@ -2328,6 +2584,7 @@ bool typeHasInput(const QString &type) {
 }
 
 bool typeHasOutput(const QString &type) {
+    if (type == "lab_tx" || type == "lab_received") return false;
     if (type == QStringLiteral("branch_audio_output")) return false;
     if (type == QStringLiteral("branch_spectrum") || type == QStringLiteral("branch_waterfall")) return false;
     if (type.startsWith(QStringLiteral("research_")) ||
@@ -2340,6 +2597,7 @@ bool typeHasOutput(const QString &type) {
         QStringLiteral("spectrum_measurement"), QStringLiteral("zoom_spectrum"), QStringLiteral("zero_span"),
         QStringLiteral("research_analysis"), QStringLiteral("oscilloscope_view"),
         QStringLiteral("wireless_lab"),
+        QStringLiteral("usrp_lab"),
         QStringLiteral("open_radio_lab"),
         QStringLiteral("radio_propagation"),
         QStringLiteral("constellation_view"), QStringLiteral("eye_diagram_view"),
@@ -2363,6 +2621,10 @@ bool typeHasOutput(const QString &type) {
 
 QStringList allBlockTypes() {
     return {QStringLiteral("run_control"), QStringLiteral("enable_control"),
+            QStringLiteral("lab_carrier"), QStringLiteral("lab_modulator"), QStringLiteral("lab_text"),
+            QStringLiteral("lab_audio"), QStringLiteral("lab_image"), QStringLiteral("lab_file"),
+            QStringLiteral("lab_cf32"), QStringLiteral("lab_iq"), QStringLiteral("lab_tx"),
+            QStringLiteral("lab_packet_decoder"), QStringLiteral("lab_received"),
             QStringLiteral("receiver_source"), QStringLiteral("iq_source"),
             QStringLiteral("network_input"), QStringLiteral("playback"),
             QStringLiteral("frequency_control"), QStringLiteral("fine_tune_control"),
@@ -2397,6 +2659,7 @@ QStringList allBlockTypes() {
             QStringLiteral("zoom_spectrum"), QStringLiteral("zoom_density"), QStringLiteral("zero_span"),
             QStringLiteral("research_analysis"), QStringLiteral("research_interference"),
             QStringLiteral("wireless_lab"),
+            QStringLiteral("usrp_lab"),
             QStringLiteral("open_radio_lab"),
             QStringLiteral("radio_propagation"),
             QStringLiteral("research_statistics"), QStringLiteral("research_iq"),
@@ -2427,6 +2690,7 @@ bool isFilterBlockType(const QString &type) {
 }
 
 QString blockCategory(const QString &type) {
+    if (dspIsSignalBlock(type)) return QStringLiteral("lab_signal");
     if (type == QStringLiteral("branch_spectrum") || type == QStringLiteral("branch_waterfall")) return QStringLiteral("visualization");
     if (isFilterBlockType(type)) return QStringLiteral("filters");
     if (type.contains(QStringLiteral("scan")) || type.contains(QStringLiteral("hunter")))
@@ -2446,7 +2710,7 @@ QString blockCategory(const QString &type) {
         return QStringLiteral("measurement");
     if (type == QStringLiteral("decoder") || type == QStringLiteral("dmr_decoder") ||
         type == QStringLiteral("cw_decoder") || type == QStringLiteral("sstv_decoder") ||
-        type == QStringLiteral("open_radio_lab") ||
+        type == QStringLiteral("open_radio_lab") || type == QStringLiteral("usrp_lab") ||
         type.startsWith(QStringLiteral("digital_"))) return QStringLiteral("digital");
     if (type.startsWith(QStringLiteral("gnss_")) || type == QStringLiteral("qth_map"))
         return QStringLiteral("navigation");
@@ -2459,6 +2723,7 @@ QString blockCategory(const QString &type) {
 }
 
 QString categoryTitle(const QString &category, bool ukrainian) {
+    if (category == QStringLiteral("lab_signal")) return ukrainian ? QStringLiteral("Генерація і передача I/Q") : QStringLiteral("I/Q generation and transmission");
     if (category == QStringLiteral("signal_path")) return ukrainian ? QStringLiteral("Тракт сигналу") : QStringLiteral("Signal path");
     if (category == QStringLiteral("filters")) return ukrainian ? QStringLiteral("Аудіофільтри") : QStringLiteral("Audio filters");
     if (category == QStringLiteral("scanning")) return ukrainian ? QStringLiteral("Сканування і пошук") : QStringLiteral("Scanning and hunting");
@@ -2643,15 +2908,22 @@ public:
         typeFont.setPointSizeF(std::max(7.0, typeFont.pointSizeF() - 1.0));
         painter->setFont(typeFont);
         painter->setPen(QColor(151, 161, 174));
-        if (!isVisualBlock()) {
+        if (!isVisualBlock() && !signalControls_) {
             painter->drawText(QRectF(12.0, 43.0, blockWidth() - 24.0, 17.0),
                               Qt::AlignCenter | Qt::TextSingleLine, type_.toUpper());
         }
 
         painter->setPen(QPen(QColor(219, 226, 234), 1.0));
         if (hasInput()) {
-            painter->setBrush(QColor(87, 181, 255));
-            painter->drawEllipse(inputPort(), kPortRadius, kPortRadius);
+            if (type_ == "lab_modulator") {
+                painter->setBrush(QColor(236, 180, 95));
+                painter->drawEllipse(inputPort(DspLinkKind::Carrier), kPortRadius, kPortRadius);
+                painter->setBrush(QColor(130, 214, 157));
+                painter->drawEllipse(inputPort(DspLinkKind::Payload), kPortRadius, kPortRadius);
+            } else {
+                painter->setBrush(QColor(87, 181, 255));
+                painter->drawEllipse(inputPort(), kPortRadius, kPortRadius);
+            }
         }
         if (hasOutput()) {
             if (isVerticalControlSource()) {
@@ -2690,11 +2962,13 @@ public:
                researchProxy_->contains(researchProxy_->mapFromScene(scenePosition));
     }
     qreal blockWidth() const {
+        if (signalControls_) return 292.0;
         if (type_ == QStringLiteral("fine_tune_control")) return kFineTuneBlockWidth;
         if (isVisualBlock()) return visualWidth_;
         return isMiniControlBlock() ? kMiniBlockWidth : kBlockWidth;
     }
     qreal blockHeight() const {
+        if (signalControls_) return signalControls_->height() + 52.0;
         if (type_ == QStringLiteral("fine_tune_control")) return kFineTuneBlockHeight;
         if (isVisualBlock()) return visualHeight_;
         return isMiniControlBlock() ? kMiniBlockHeight : kBlockHeight;
@@ -2721,8 +2995,25 @@ public:
         update();
     }
     QJsonObject settings() const { return settings_; }
+    void installSignalControls(bool ukrainian, std::function<void(const QJsonObject &)> edit,
+                               std::function<void(bool)> run) {
+        signalControls_ = new BoardSignalControls(type_, std::move(edit), std::move(run));
+        signalControls_->setLanguage(ukrainian);
+        signalControls_->setSettings(settings_);
+        signalControls_->setFixedSize(268, signalControls_->sizeHint().height());
+        auto *proxy = new QGraphicsProxyWidget(this);
+        proxy->setWidget(signalControls_);
+        proxy->setPos(12, 43);
+    }
+    void setSignalLanguage(bool ukrainian) {
+        if (signalControls_) signalControls_->setLanguage(ukrainian);
+    }
+    void setReceivedPacket(const std::shared_ptr<const DspBoardDecodedPayload> &payload) {
+        if (signalControls_) signalControls_->setReceived(payload);
+    }
     void setSettings(const QJsonObject &settings) {
         settings_ = settings;
+        if (signalControls_) signalControls_->setSettings(settings);
         const bool managedWorkspaceGroup =
             isWorkspaceDisplayBlock() &&
             settings_.value(QStringLiteral("workspaceGroupLayout")).toBool(false);
@@ -2760,11 +3051,15 @@ public:
     }
     bool hasInput() const { return typeHasInput(type_); }
     bool hasOutput() const { return typeHasOutput(type_); }
-    QPointF inputPort() const { return QPointF(0.0, blockHeight() * 0.5); }
+    QPointF inputPort(DspLinkKind kind = DspLinkKind::Invalid) const {
+        if (kind == DspLinkKind::Carrier) return QPointF(0, 55);
+        if (kind == DspLinkKind::Payload) return QPointF(0, 89);
+        return QPointF(0.0, blockHeight() * 0.5);
+    }
     QPointF outputPort() const { return QPointF(blockWidth(), blockHeight() * 0.5); }
     QPointF controlTopPort() const { return QPointF(blockWidth() * 0.5, 0.0); }
     QPointF controlBottomPort() const { return QPointF(blockWidth() * 0.5, blockHeight()); }
-    QPointF inputScenePos() const { return mapToScene(inputPort()); }
+    QPointF inputScenePos(DspLinkKind kind) const { return mapToScene(inputPort(kind)); }
     QPointF outputScenePos() const { return mapToScene(outputPort()); }
     QPointF controlOutputScenePos(const QPointF &targetPosition) const {
         return mapToScene(targetPosition.y() < sceneBoundingRect().center().y() ? controlTopPort() : controlBottomPort());
@@ -2772,8 +3067,9 @@ public:
     QPointF controlInputScenePos(const QPointF &sourcePosition) const {
         return mapToScene(sourcePosition.y() < sceneBoundingRect().center().y() ? controlTopPort() : controlBottomPort());
     }
-    bool inputContains(const QPointF &pos) const {
-        return hasInput() && QLineF(inputScenePos(), pos).length() <= kPortRadius + 10.0;
+    bool inputContains(const QPointF &pos, DspLinkKind kind) const {
+        return hasInput() && kind != DspLinkKind::Invalid &&
+               QLineF(inputScenePos(kind), pos).length() <= kPortRadius + 10.0;
     }
     bool outputContains(const QPointF &pos) const {
         if (!hasOutput()) return false;
@@ -3242,6 +3538,7 @@ private:
     bool customTitle_ = false;
     bool controlActive_ = false;
     QString controlLabel_;
+    BoardSignalControls *signalControls_ = nullptr;
     FineTuneScaleWidget *fineTuneWidget_ = nullptr;
     QGraphicsProxyWidget *fineTuneProxy_ = nullptr;
     MiniVfoDisplay *miniVfoDisplay_ = nullptr;
@@ -3307,7 +3604,7 @@ public:
             path.cubicTo(from + QPointF(0.0, direction), to - QPointF(0.0, direction), to);
         } else {
             const QPointF from = mapFromScene(source_->outputScenePos());
-            const QPointF to = mapFromScene(target_->inputScenePos());
+            const QPointF to = mapFromScene(target_->inputScenePos(dspLinkKind(source_->blockType(), target_->blockType())));
             const qreal bend = std::max<qreal>(45.0, qAbs(to.x() - from.x()) * 0.45);
             path.moveTo(from);
             path.cubicTo(from + QPointF(bend, 0.0), to - QPointF(bend, 0.0), to);
@@ -3318,6 +3615,8 @@ public:
             kind == DspLinkKind::Settings ? QColor(78, 202, 151) :
             kind == DspLinkKind::Spectrum ? QColor(244, 184, 70) :
             kind == DspLinkKind::Audio ? QColor(92, 220, 151) :
+            kind == DspLinkKind::Carrier ? QColor(236, 180, 95) :
+            (kind == DspLinkKind::Payload || kind == DspLinkKind::DecodedPayload) ? QColor(130, 214, 157) :
             kind == DspLinkKind::Documentation ? QColor(125, 133, 145) : QColor(104, 188, 255);
         if ((kind == DspLinkKind::Iq && target_->blockType() == QStringLiteral("fft")) ||
             (kind == DspLinkKind::Spectrum && source_->blockType() == QStringLiteral("fft"))) {
@@ -3434,9 +3733,7 @@ protected:
     void keyPressEvent(QKeyEvent *event) override {
         // Proxy editors must keep their own text/value undo stack.
         QWidget *focus = QApplication::focusWidget();
-        bool canvasFocus = !focus || focus == this || focus == viewport();
-        for (auto *item = scene() ? scene()->focusItem() : nullptr; item; item = item->parentItem())
-            if (dynamic_cast<QGraphicsProxyWidget *>(item)) canvasFocus = false;
+        const bool canvasFocus = (!focus || focus == this || focus == viewport()) && !boardProxyHasFocus(scene());
         if (canvasFocus &&
             (event->matches(QKeySequence::Undo) || event->matches(QKeySequence::Redo) ||
              (event->key() == Qt::Key_Y && event->modifiers() == Qt::ControlModifier) ||
@@ -3445,7 +3742,7 @@ protected:
             event->accept();
             return;
         }
-        if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
+        if (canvasFocus && event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
             spacePressed_ = true;
             if (!panning_) setCursor(Qt::OpenHandCursor);
             event->accept();
@@ -3455,7 +3752,7 @@ protected:
     }
 
     void keyReleaseEvent(QKeyEvent *event) override {
-        if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
+        if (spacePressed_ && event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
             spacePressed_ = false;
             if (!panning_) unsetCursor();
             event->accept();
@@ -3682,6 +3979,7 @@ public:
     std::function<void(const QString &)> changed;
     std::function<void(const QString&, const QPointF&)> addRequested;
     std::function<void(const QString&, const QString&)> activated;
+    std::function<void(const QString&, const QString&, bool)> signalRunRequested;
     std::function<void(const QString&, const QString&, const QString&, const QString&)> controlTriggered;
     std::function<void(double)> fineTuneDelta;
     std::function<void(int)> workspaceScale;
@@ -3770,6 +4068,13 @@ public:
         auto *block = new DspBlockItem(resolvedId, type, resolvedTitle, customTitle,
                                        [this](double deltaHz) { if (fineTuneDelta) fineTuneDelta(deltaHz); },
                                        vfoIndex, workspaceCallbacks);
+        if (dspIsSignalBlock(type)) {
+            block->installSignalControls(ukrainian, [this, resolvedId](const QJsonObject &settings) {
+                setBlockSettings(resolvedId, settings);
+            }, [this, type, resolvedId](bool run) {
+                if (signalRunRequested) signalRunRequested(type, resolvedId, run);
+            });
+        }
         addItem(block);
         frameRoutesDirty_ = true;
         if (block->isWorkspaceDisplayBlock()) {
@@ -3814,6 +4119,7 @@ public:
                      edge->source()->blockType() == source->blockType())) oldInputs.append(edge);
             } else if (!edge->isControlConnection() && edge->target() == target) {
                 const auto existingKind = dspLinkKind(edge->source()->blockType(), target->blockType());
+                if (target->blockType() == "lab_modulator" && kind != existingKind) continue;
                 const bool workspaceView = target->blockType() == QStringLiteral("workspace_spectrum") ||
                                            target->blockType() == QStringLiteral("workspace_waterfall");
                 // Widget settings and main spectrum frames occupy different input roles.
@@ -4500,6 +4806,7 @@ public:
              !isWorkspaceDisplaySettingsType(block->blockType()) &&
              block->blockType() != QStringLiteral("vfo_spectrum") &&
              block->blockType() != QStringLiteral("vfo_waterfall") &&
+             !dspIsSignalBlock(block->blockType()) &&
              !dspIsBranchType(block->blockType()) &&
              !block->blockType().startsWith(QStringLiteral("workspace_")))) {
             return false;
@@ -4552,7 +4859,8 @@ public:
         }
         std::sort(liveSinks.begin(), liveSinks.end());
         for (int i = visible.branches.size()-1; i >= 0; --i)
-            if (!visible.branches[i].iqConsumer && !visible.branches[i].audioEnabled && visible.branches[i].ffts.isEmpty()) visible.branches.removeAt(i);
+            if (!visible.branches[i].iqConsumer && !visible.branches[i].audioEnabled && visible.branches[i].ffts.isEmpty() &&
+                (visible.branches[i].packetDecoderId.isEmpty() || visible.branches[i].external)) visible.branches.removeAt(i);
         visible.executionKey += liveSinks.join(QLatin1Char('|')).toUtf8();
         return visible;
     }
@@ -4688,6 +4996,47 @@ public:
         return nullptr;
     }
 
+    QSet<DspBlockItem *> boardPacketDecoders(const QString &sourceId) const {
+        QSet<DspBlockItem *> decoders;
+        for (auto *item : items()) {
+            const auto *edge = dynamic_cast<DspConnectionItem *>(item);
+            if (edge && edge->source()->id() == sourceId && edge->target()->blockType() == "lab_packet_decoder")
+                decoders.insert(edge->target());
+        }
+        return decoders;
+    }
+
+    void updateBoardPacketViews(const QString &sourceId,
+                                const std::shared_ptr<const DspBoardDecodedPayload> &payload,
+                                const QVector<DspBoardPacketRoute> &liveRoutes,
+                                const QHash<QString, std::shared_ptr<const DspBoardDecodedPayload>> &livePackets) {
+        QHash<DspBlockItem *, std::shared_ptr<const DspBoardDecodedPayload>> decoders;
+        if (payload)
+            for (auto *decoder : boardPacketDecoders(sourceId)) decoders.insert(decoder, payload);
+        for (const auto &route : liveRoutes) {
+            const auto packet = livePackets.value(route.decoderId);
+            if (!packet) continue;
+            for (auto *decoder : boardPacketDecoders(route.branchId)) {
+                if (decoder->id() == route.decoderId && decoder->settings().value("symbols").toDouble(1200) == route.symbolRate)
+                    decoders.insert(decoder, packet);
+            }
+        }
+        QHash<DspBlockItem *, std::shared_ptr<const DspBoardDecodedPayload>> outputs;
+        const auto sceneItems = items();
+        if (!decoders.isEmpty()) {
+            for (auto *item : sceneItems) {
+                const auto *edge = dynamic_cast<DspConnectionItem *>(item);
+                if (edge && decoders.contains(edge->source()) && edge->target()->blockType() == "lab_received")
+                    outputs.insert(edge->target(), decoders.value(edge->source()));
+            }
+        }
+        for (auto *item : sceneItems) {
+            auto *block = dynamic_cast<DspBlockItem *>(item);
+            if (block && (block->blockType() == "lab_packet_decoder" || block->blockType() == "lab_received"))
+                block->setReceivedPacket(block->blockType() == "lab_packet_decoder" ? decoders.value(block) : outputs.value(block));
+        }
+    }
+
     DspBlockItem *vfoChannelForBlock(const QString &blockId) const {
         DspBlockItem *block = blockById(blockId);
         if (!block) return nullptr;
@@ -4759,6 +5108,7 @@ public:
         if (!standardTitle) return;
         for (QGraphicsItem *item : items()) {
             auto *block = dynamic_cast<DspBlockItem*>(item);
+            if (block) block->setSignalLanguage(ukrainian);
             if (block && !block->customTitle()) {
                 QString title = standardTitle(block->blockType());
                 if (block->blockType() == QStringLiteral("vfo_channel") && block->vfoIndex() >= 0) {
@@ -5173,6 +5523,10 @@ protected:
     }
 
     void keyPressEvent(QKeyEvent *event) override {
+        if (boardProxyHasFocus(this)) {
+            QGraphicsScene::keyPressEvent(event);
+            return;
+        }
         if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
             deleteSelection();
             event->accept();
@@ -5276,7 +5630,7 @@ protected:
             menu.addSeparator();
         }
         QMenu *add = menu.addMenu(ukrainian ? QStringLiteral("Додати блок") : QStringLiteral("Add block"));
-        const QStringList categories = {QStringLiteral("signal_path"), QStringLiteral("filters"),
+        const QStringList categories = {QStringLiteral("signal_path"), QStringLiteral("lab_signal"), QStringLiteral("filters"),
                                         QStringLiteral("scanning"), QStringLiteral("visualization"),
                                         QStringLiteral("measurement"), QStringLiteral("digital"),
                                         QStringLiteral("navigation"), QStringLiteral("io_tools")};
@@ -6388,15 +6742,16 @@ private:
     }
 
     DspBlockItem *blockAtInput(const QPointF &pos, DspBlockItem *source) const {
+        if (!source) return nullptr;
         const QList<QGraphicsItem *> sceneItems = items(Qt::DescendingOrder);
         for (QGraphicsItem *item : sceneItems) {
             auto *block = dynamic_cast<DspBlockItem *>(item);
             if (!block || block == source) continue;
-            if (source && source->isVerticalControlSource()) {
+            if (source->isVerticalControlSource()) {
                 if (block->controlInputContains(pos, source->blockType()) ||
                     (acceptsControlType(block->blockType(), source->blockType()) &&
                      block->bodyContainsScenePoint(pos))) return block;
-            } else if (block->inputContains(pos)) {
+            } else if (block->inputContains(pos, dspLinkKind(source->blockType(), block->blockType()))) {
                 return block;
             }
         }
@@ -6661,7 +7016,12 @@ DspFlowPanel::DspFlowPanel(QWidget *parent) : QDialog(parent, Qt::Window) {
         if (workspaceMode_) scene_->prepareNewBlockForWorkspace(block, position);
         emit blockCreated(type, block->id());
     };
-    scene_->activated = [this](const QString &type, const QString &id) { emit blockActivated(type, id); };
+    scene_->activated = [this](const QString &type, const QString &id) {
+        if (!dspIsSignalBlock(type)) emit blockActivated(type, id);
+    };
+    scene_->signalRunRequested = [this](const QString &type, const QString &id, bool run) {
+        requestBoardSignal(type, id, run);
+    };
     scene_->controlTriggered = [this](const QString &controlType, const QString &controlId,
                                       const QString &targetType, const QString &targetId) {
         emit controlTriggered(controlType, controlId, targetType, targetId);
@@ -7206,6 +7566,12 @@ bool DspFlowPanel::setConfigurationJson(const QString &json) {
             }
         }
     }
+    stopBoardSignal();
+    updatePacketWorker(nullptr);
+    livePacketRoutes_.clear();
+    livePackets_.clear();
+    boardDecoded_.reset();
+    boardDecodedRequest_ = {};
     loading_ = true;
     bool loaded = false;
     if (!json.trimmed().isEmpty()) loaded = scene_->loadConfiguration(json);
@@ -7236,7 +7602,10 @@ bool DspFlowPanel::setConfigurationJson(const QString &json) {
     return loaded;
 }
 
-DspFlowPanel::~DspFlowPanel() { branchEngine_.reset(); }
+DspFlowPanel::~DspFlowPanel() {
+    stopBoardSignal();
+    branchEngine_.reset();
+}
 
 void DspFlowPanel::setBranchSourceContext(const RadioSettings &settings, bool running, int updateMs, int overlapPercent) {
     if (!running || settings.simplifiedAudioChannelizer) {
@@ -7319,8 +7688,155 @@ void DspFlowPanel::stopBranchRecording(const QString &id) {
 }
 bool DspFlowPanel::branchRecordingRequested(const QString &id) const { return branchRecordings_.contains(id); }
 
+void DspFlowPanel::requestBoardSignal(const QString &type, const QString &id, bool run) {
+    if (!run) {
+        if (boardSignalRequest_.sourceId() == id) {
+            stopBoardSignal();
+            statusLabel_->setText(ukrainian_ ? QStringLiteral("Потік I/Q зупинено") : QStringLiteral("I/Q stream stopped"));
+        }
+        return;
+    }
+    if (boardSignalPreparing_) {
+        statusLabel_->setText(ukrainian_ ? QStringLiteral("Триває підготовка I/Q") : QStringLiteral("Preparing I/Q"));
+        return;
+    }
+    const bool transmit = type == "lab_tx";
+    const auto graph = QJsonDocument::fromJson(configurationJson().toUtf8()).object();
+    const auto request = resolveDspBoardSignal(graph, id);
+    if (!request.error.isEmpty()) {
+        statusLabel_->setText(request.error);
+        return;
+    }
+    const bool decode = !transmit && !scene_->boardPacketDecoders(request.sourceId()).isEmpty();
+    if (!transmit && !decode && branchSource_.simplifiedAudioChannelizer) {
+        statusLabel_->setText(ukrainian_ ? QStringLiteral("Вимкніть спрощений режим для гілок DSP") :
+                                          QStringLiteral("Turn off simplified mode to run DSP branches"));
+        return;
+    }
+    if (!transmit) {
+        stopBoardSignal();
+        boardDecoded_.reset();
+        boardDecodedRequest_ = {};
+        refreshPacketViews();
+        boardSignalRequest_ = request;
+    }
+    const auto revision = boardSignalRevision_;
+    boardSignalPreparing_ = true;
+    statusLabel_->setText(ukrainian_ ? QStringLiteral("Підготовка I/Q…") : QStringLiteral("Preparing I/Q…"));
+    auto *watcher = new QFutureWatcher<BoardSignalRun>(this);
+    connect(watcher, &QFutureWatcher<BoardSignalRun>::finished, this,
+            [this, watcher, request, id, transmit, revision]() {
+        boardSignalPreparing_ = false;
+        watcher->deleteLater();
+        const auto graph = QJsonDocument::fromJson(configurationJson().toUtf8()).object();
+        if (!isVisible() || !(request == resolveDspBoardSignal(graph, id)) ||
+            (!transmit && revision != boardSignalRevision_)) return;
+        const auto run = watcher->result();
+        const auto &result = run.signal;
+        if (!result.ok()) {
+            if (!transmit) stopBoardSignal();
+            statusLabel_->setText(result.error);
+            return;
+        }
+        statusLabel_->setText(result.summary);
+        if (transmit) {
+            emit laboratoryTransmissionRequested(result, request.centerHz());
+            return;
+        }
+        boardSignal_ = result;
+        boardDecoded_ = run.received;
+        if (boardDecoded_) boardDecodedRequest_ = request;
+        refreshPacketViews();
+        if (!branchSource_.simplifiedAudioChannelizer)
+            statusLabel_->setText((ukrainian_ ? QStringLiteral("Циклічний I/Q | ") : QStringLiteral("Looping I/Q | ")) + result.summary);
+        boardSignalClock_.start();
+        refreshBranches();
+    });
+    watcher->setFuture(QtConcurrent::run([request, decode]() {
+        BoardSignalRun run;
+        run.signal = generateDspBoardSignal(request);
+        if (decode && run.signal.ok())
+            run.received = std::make_shared<DspBoardDecodedPayload>(decodeDspBoardPacket(run.signal));
+        return run;
+    }));
+}
+
+void DspFlowPanel::stopBoardSignal() {
+    ++boardSignalRevision_;
+    if (boardSignal_.ok()) DspIqSourceRegistry::instance().clear(dspSignalSource(boardSignalRequest_.sourceId()));
+    boardSignalRequest_ = {};
+    boardSignal_ = {};
+    boardSignalClock_.invalidate();
+    boardSignalSamplesSent_ = 0;
+}
+
+void DspFlowPanel::publishBoardSignal() {
+    if (!boardSignal_.ok()) return;
+    const qint64 due = qint64(boardSignalClock_.elapsed()) * boardSignal_.sampleRate / 1000;
+    const qint64 maxChunk = boardSignal_.sampleRate / 20;
+    const bool late = due - boardSignalSamplesSent_ > maxChunk;
+    if (late) boardSignalSamplesSent_ = due - maxChunk;
+    const int count = int(due - boardSignalSamplesSent_);
+    if (count <= 0) return;
+    const auto source = dspSignalSource(boardSignalRequest_.sourceId());
+    const int offset = int(boardSignalSamplesSent_ % boardSignal_.iq.size());
+    const auto *data = boardSignal_.iq.constData();
+    const int tail = boardSignal_.iq.size() - offset;
+    const std::complex<float> *chunk = data + offset;
+    QVector<std::complex<float>> wrapped;
+    if (count > tail) {
+        wrapped.resize(count);
+        std::copy_n(chunk, tail, wrapped.begin());
+        int filled = tail;
+        while (filled < count) {
+            const int next = std::min(count - filled, int(boardSignal_.iq.size()));
+            std::copy_n(data, next, wrapped.begin() + filled);
+            filled += next;
+        }
+        chunk = wrapped.constData();
+    }
+    DspIqSourceRegistry::instance().publish(source, reinterpret_cast<const float *>(chunk),
+        std::size_t(count) * 2, boardSignal_.sampleRate, boardSignalRequest_.centerHz(), late);
+    boardSignalSamplesSent_ = due;
+}
+
+void DspFlowPanel::refreshPacketViews() {
+    scene_->updateBoardPacketViews(boardDecodedRequest_.sourceId(), boardDecoded_, livePacketRoutes_, livePackets_);
+}
+
+void DspFlowPanel::updatePacketWorker(const DspGraphPlan *activePlan) {
+    QVector<DspBoardPacketRoute> routes;
+    if (activePlan && isVisible() && !isMinimized()) {
+        for (const auto &branch : activePlan->branches) {
+            if (branch.enabled && !branch.external && !branch.packetDecoderId.isEmpty())
+                routes.append({branch.packetDecoderId, branch.id, branch.packetSymbolRate});
+        }
+    }
+    if (!routes.isEmpty() && routes != livePacketRoutes_) {
+        for (const auto &previous : livePacketRoutes_)
+            if (!routes.contains(previous)) livePackets_.remove(previous.decoderId);
+        for (const auto &route : routes) {
+            if (livePackets_.contains(route.decoderId)) continue;
+            auto waiting = std::make_shared<DspBoardDecodedPayload>();
+            waiting->error = ukrainian_ ? QStringLiteral("Пошук преамбули QPSK") : QStringLiteral("Searching for QPSK preamble");
+            livePackets_.insert(route.decoderId, std::move(waiting));
+        }
+        livePacketRoutes_ = routes;
+        refreshPacketViews();
+    }
+    if (!packetWorker_ && !routes.isEmpty()) packetWorker_ = std::make_unique<DspBoardPacketWorker>();
+    if (!packetWorker_) return;
+    packetWorker_->configure(routes);
+    const auto packets = packetWorker_->takePackets();
+    for (auto it = packets.cbegin(); it != packets.cend(); ++it)
+        livePackets_.insert(it.key(), std::make_shared<DspBoardDecodedPayload>(it.value()));
+    if (!packets.isEmpty()) refreshPacketViews();
+}
+
 void DspFlowPanel::refreshBranches() {
-    if (branchSource_.simplifiedAudioChannelizer || !branchSourceRunning_) {
+    if (boardSignal_.ok() && (!isVisible() || branchSource_.simplifiedAudioChannelizer)) stopBoardSignal();
+    if (branchSource_.simplifiedAudioChannelizer || (!branchSourceRunning_ && !boardSignal_.ok())) {
+        updatePacketWorker(nullptr);
         if (branchEngine_) branchEngine_->configure(branchPlan_, branchSource_, false);
         if (branchAudioOutput_) branchAudioOutput_->setActiveSinks({});
         return;
@@ -7335,6 +7851,7 @@ void DspFlowPanel::refreshBranches() {
             (ukrainian_ ? QStringLiteral("Гілки DSP зупинено: ") : QStringLiteral("DSP branches stopped: ")) + branchPlan_.errors.join(QStringLiteral("; ")));
     }
     if (branchPlan_.branches.isEmpty()) {
+        updatePacketWorker(nullptr);
         const auto ids = branchRecordings_.keys();
         for (const auto &id : ids) stopBranchRecording(id);
         if (branchEngine_) branchEngine_->configure(branchPlan_, branchSource_, false);
@@ -7342,10 +7859,24 @@ void DspFlowPanel::refreshBranches() {
         return;
     }
     auto plan = scene_->visibleBranchPlan(branchPlan_);
+    const auto laboratorySource = dspSignalSource(boardSignalRequest_.sourceId());
+    for (int i = plan.branches.size() - 1; i >= 0; --i) {
+        const auto &source = plan.branches[i].source;
+        const bool laboratory = source.receiverId == QStringLiteral("board-iq");
+        if (laboratory ? (!boardSignal_.ok() || source != laboratorySource) : !branchSourceRunning_) {
+            plan.executionKey += QByteArray("|inactive:") + plan.branches[i].id.toUtf8();
+            plan.branches.removeAt(i);
+        }
+    }
     const auto recordingIds = branchRecordings_.keys();
     for (const auto &id : recordingIds) {
         const auto original = std::find_if(branchPlan_.branches.begin(), branchPlan_.branches.end(), [&id](const auto &b) { return b.id == id && b.enabled; });
-        if (original == branchPlan_.branches.end()) { stopBranchRecording(id); continue; }
+        if (original == branchPlan_.branches.end() ||
+            (original->source.receiverId == QStringLiteral("board-iq")
+                 ? (!boardSignal_.ok() || original->source != laboratorySource) : !branchSourceRunning_)) {
+            stopBranchRecording(id);
+            continue;
+        }
         auto activeBranch = std::find_if(plan.branches.begin(), plan.branches.end(), [&id](const auto &b) { return b.id == id; });
         if (activeBranch == plan.branches.end()) { auto copy = *original; copy.ffts.clear(); copy.iqConsumer = true; plan.branches.append(copy); }
         else activeBranch->iqConsumer = true;
@@ -7354,11 +7885,12 @@ void DspFlowPanel::refreshBranches() {
     bool enabled = false;
     QSet<QString> audioSinks;
     for (const auto &b : plan.branches) if (b.enabled) {
-        if (b.iqConsumer || b.audioEnabled || !b.ffts.isEmpty()) enabled = true;
+        if (b.iqConsumer || b.audioEnabled || !b.ffts.isEmpty() || (!b.external && !b.packetDecoderId.isEmpty())) enabled = true;
         if (b.audioEnabled) audioSinks.insert(b.audioOutputId);
     }
-    const bool active = enabled && !branchSource_.simplifiedAudioChannelizer && branchSourceRunning_ &&
+    const bool active = enabled &&
         ((isVisible() && !isMinimized()) || !branchRecordings_.isEmpty() || !audioSinks.isEmpty());
+    updatePacketWorker(active ? &plan : nullptr);
     if (!branchAudioOutput_ && !audioSinks.isEmpty()) {
         branchAudioOutput_ = std::make_shared<DspBranchAudioOutput>();
         if (branchEngine_) {
@@ -7378,6 +7910,7 @@ void DspFlowPanel::refreshBranches() {
     }
     if (!branchEngine_) return;
     branchEngine_->configure(plan, branchSource_, active);
+    if (active) publishBoardSignal();
     for (const auto &frame : branchEngine_->takeFrames()) scene_->applyBranchFrame(branchPlan_, frame);
 }
 
@@ -7473,6 +8006,7 @@ void DspFlowPanel::resizeEvent(QResizeEvent *event) {
 }
 
 void DspFlowPanel::closeEvent(QCloseEvent *event) {
+    stopBoardSignal();
     if (saveTimer_ && saveTimer_->isActive()) saveTimer_->stop();
     if (!loading_ && scene_) emit configurationChanged(configurationJson());
     if (workspaceMode_) {
@@ -7590,7 +8124,7 @@ void DspFlowPanel::rebuildAddMenu() {
         delete addMenu_;
     }
     addMenu_ = new QMenu(addButton_);
-    const QStringList categories = {QStringLiteral("signal_path"), QStringLiteral("filters"),
+    const QStringList categories = {QStringLiteral("signal_path"), QStringLiteral("lab_signal"), QStringLiteral("filters"),
                                     QStringLiteral("scanning"), QStringLiteral("visualization"),
                                     QStringLiteral("measurement"), QStringLiteral("digital"),
                                     QStringLiteral("navigation"), QStringLiteral("io_tools")};
@@ -7609,7 +8143,19 @@ void DspFlowPanel::scheduleConfigurationChanged() {
     if (loading_) return;
     branchPlanDirty_ = true;
     QHash<QString, QString> filters;
-    const auto blocks = QJsonDocument::fromJson(configurationJson().toUtf8()).object().value(QStringLiteral("blocks")).toArray();
+    const auto graph = QJsonDocument::fromJson(configurationJson().toUtf8()).object();
+    if (!boardSignalRequest_.sourceId().isEmpty() &&
+        !(boardSignalRequest_ == resolveDspBoardSignal(graph, boardSignalRequest_.sourceId())))
+        stopBoardSignal();
+    const bool hadPacketResults = boardDecoded_ || !livePackets_.isEmpty();
+    if (boardDecoded_) {
+        if (!(boardDecodedRequest_ == resolveDspBoardSignal(graph, boardDecodedRequest_.sourceId()))) {
+            boardDecoded_.reset();
+            boardDecodedRequest_ = {};
+        }
+    }
+    if (hadPacketResults) refreshPacketViews();
+    const auto blocks = graph.value(QStringLiteral("blocks")).toArray();
     for (const auto &value : blocks) {
         const auto block = value.toObject();
         const auto type = block.value(QStringLiteral("type")).toString();
@@ -7633,6 +8179,17 @@ void DspFlowPanel::addBlock(const QString &type) {
 }
 
 QString DspFlowPanel::blockTitle(const QString &type) const {
+    if (type == "lab_carrier") return ukrainian_ ? QStringLiteral("Носійна") : QStringLiteral("Carrier");
+    if (type == "lab_modulator") return ukrainian_ ? QStringLiteral("Модулятор") : QStringLiteral("Modulator");
+    if (type == "lab_text") return ukrainian_ ? QStringLiteral("Текст") : QStringLiteral("Text source");
+    if (type == "lab_audio") return ukrainian_ ? QStringLiteral("Аудіо WAV") : QStringLiteral("WAV audio");
+    if (type == "lab_image") return ukrainian_ ? QStringLiteral("Дані зображення") : QStringLiteral("Image bytes");
+    if (type == "lab_file") return ukrainian_ ? QStringLiteral("Дані файлу") : QStringLiteral("File bytes");
+    if (type == "lab_cf32") return ukrainian_ ? QStringLiteral("Файл I/Q CF32LE") : QStringLiteral("CF32LE I/Q file");
+    if (type == "lab_iq") return ukrainian_ ? QStringLiteral("Потік I/Q") : QStringLiteral("I/Q stream");
+    if (type == "lab_tx") return ukrainian_ ? QStringLiteral("Вихід TX") : QStringLiteral("TX output");
+    if (type == "lab_packet_decoder") return ukrainian_ ? QStringLiteral("Декодер пакетів QPSK") : QStringLiteral("QPSK packet decoder");
+    if (type == "lab_received") return ukrainian_ ? QStringLiteral("Отримані дані") : QStringLiteral("Received data");
     if (type == QStringLiteral("ddc_channelizer")) return ukrainian_ ? QStringLiteral("DDC каналізатор") : QStringLiteral("DDC channelizer");
     if (type == QStringLiteral("pfb_channelizer")) return ukrainian_ ? QStringLiteral("PFB банк каналів") : QStringLiteral("PFB channel bank");
     if (type == QStringLiteral("branch_demodulator")) return ukrainian_ ? QStringLiteral("Демодулятор гілки") : QStringLiteral("Branch demodulator");
@@ -7707,6 +8264,7 @@ QString DspFlowPanel::blockTitle(const QString &type) const {
     if (type == QStringLiteral("zero_span")) return QStringLiteral("Zero-span");
     if (type == QStringLiteral("research_analysis")) return ukrainian_ ? QStringLiteral("Дослідницький аналіз") : QStringLiteral("Research analysis");
     if (type == QStringLiteral("wireless_lab")) return ukrainian_ ? QStringLiteral("Бездротова лабораторія (бета)") : QStringLiteral("Wireless lab (beta)");
+    if (type == QStringLiteral("usrp_lab")) return ukrainian_ ? QStringLiteral("Програмний стенд USRP") : QStringLiteral("USRP software lab");
     if (type == QStringLiteral("open_radio_lab")) return ukrainian_ ? QStringLiteral("Відкрите радіо") : QStringLiteral("Open radio");
     if (type == QStringLiteral("radio_propagation")) return ukrainian_ ? QStringLiteral("Радіопоширення / КХ") : QStringLiteral("Radio propagation / HF");
     if (type == QStringLiteral("research_interference")) return ukrainian_ ? QStringLiteral("Гребінки та завади") : QStringLiteral("Interference and combs");

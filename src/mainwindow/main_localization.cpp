@@ -209,6 +209,10 @@ void YourClassName::applyUiLanguage() {
     setComboItemText(spectrumDisplayModeCombo, 0, QStringLiteral("spectrum_display_line"), QStringLiteral("Line spectrum"));
     setComboItemText(spectrumPersistenceStyleCombo, 0, QStringLiteral("spectrum_persistence_classic"), QStringLiteral("Classic"));
     setComboItemText(spectrumPersistenceStyleCombo, 1, QStringLiteral("spectrum_persistence_contours"), QStringLiteral("Contours"));
+    if (spectrumPersistenceTimeSpin) spectrumPersistenceTimeSpin->setToolTip(uiText(
+        QStringLiteral("spectrum_persistence_time_tooltip"), QStringLiteral("Afterglow memory of recent spectra.")));
+    if (spectrumPersistenceIntensitySpin) spectrumPersistenceIntensitySpin->setToolTip(uiText(
+        QStringLiteral("spectrum_persistence_intensity_tooltip"), QStringLiteral("Display brightness, independent of receiver gain.")));
     if (spectrumPersistenceStyleCombo) spectrumPersistenceStyleCombo->setToolTip(uiText(
         QStringLiteral("spectrum_persistence_style_tooltip"),
         QStringLiteral("Contours keeps raw amplitude states and sharpens density vertically. Classic uses amplitude smoothing. Line spectrum smoothing is independent.")));
@@ -441,8 +445,8 @@ void YourClassName::applyUiLanguage() {
                      QStringLiteral("Spectrum + Channel IQ"));
     setComboItemText(spectrumEventModeCombo,
                      2,
-                     QStringLiteral("spectrum_event_full_iq"),
-                     QStringLiteral("Spectrum + Full IQ short"));
+                     QStringLiteral("spectrum_event_full_iq16"),
+                     QStringLiteral("Spectrum + Full IQ 16-bit"));
     if (spectrumFrameRecordButton) {
         spectrumFrameRecordButton->setToolTip(uiText(
             QStringLiteral("spectrum_rec_tooltip"),
@@ -763,6 +767,15 @@ void YourClassName::applyUiLanguage() {
     updateAgileScanControls();
     updateScanMeasurementStatus();
     updateSpurSuppressionStatus();
+    syncSpectrumProcessingControls();
+    if (spectrumUpdateSpin) {
+        spectrumUpdateSpin->setSpecialValueText(uiText("auto", "Auto"));
+        spectrumUpdateSpin->setToolTip(uiText("spectrum_update_interval_tooltip", "Spectrum and waterfall update interval. Auto keeps the FFT-dependent default."));
+    }
+    if (waterfallRowsSpin) {
+        waterfallRowsSpin->setSuffix(uiLanguage == QStringLiteral("uk") ? QStringLiteral(" рядків/кадр") : QStringLiteral(" rows/frame"));
+        waterfallRowsSpin->setToolTip(uiText("waterfall_speed_tooltip", "Visual waterfall scroll speed. Higher values move more rows per FFT frame without increasing FFT load."));
+    }
     updateVideoProcessorMode();
     updateDigitalDecoderMode();
     updateNetworkButtonText();

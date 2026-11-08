@@ -111,6 +111,16 @@ int main(int argc, char **argv) {
         !check(second.size() == 1, "KISS stream did not emit one frame") ||
         !check(second.front().port == 3 && second.front().payload == ax25, "KISS round trip mismatch"))
         return 3;
+    stream.reset();
+    const auto sharedDelimiter = stream.push(kiss + kiss.mid(1));
+    if (!check(sharedDelimiter.size() == 2 && sharedDelimiter.last().payload == ax25,
+               "KISS lost the frame after a shared delimiter")) return 3;
+    stream.reset();
+    stream.push(kiss.left(1) + QByteArray(9000, 'x'));
+    QStringList kissErrors;
+    const auto afterOversized = stream.push(kiss, &kissErrors);
+    if (!check(kissErrors.size() == 1 && afterOversized.size() == 1 &&
+               afterOversized.first().payload == ax25, "KISS did not recover after an oversized frame")) return 3;
 
     QByteArray callsign;
     if (!check(M17Adapter::encodeCallsign(QStringLiteral("N0CALL"), &callsign, &error), "M17 callsign encode failed") ||

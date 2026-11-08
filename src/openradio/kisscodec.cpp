@@ -5,6 +5,7 @@ constexpr quint8 Fend = 0xC0;
 constexpr quint8 Fesc = 0xDB;
 constexpr quint8 Tfend = 0xDC;
 constexpr quint8 Tfesc = 0xDD;
+constexpr int MaximumEscapedFrame = 2 * (1 + 4094);
 
 void setError(QString *error, const QString &value) {
     if (error) *error = value;
@@ -84,28 +85,34 @@ bool KissCodec::decode(const QByteArray &wireFrame, KissFrame *frame, QString *e
 }
 
 QList<KissFrame> KissStreamDecoder::push(const QByteArray &bytes, QStringList *errors) {
-    buffer += bytes;
     QList<KissFrame> frames;
-    for (;;) {
-        int begin = buffer.indexOf(static_cast<char>(Fend));
-        if (begin < 0) {
-            if (buffer.size() > 1024 * 1024) buffer.clear();
-            break;
+    for (char byte : bytes) {
+        if (static_cast<quint8>(byte) == Fend) {
+            if (oversized) {
+                if (errors) errors->push_back(QStringLiteral("KISS frame exceeds the size limit"));
+            } else if (!buffer.isEmpty()) {
+                KissFrame frame;
+                QString error;
+                if (KissCodec::decode(buffer, &frame, &error)) frames.push_back(frame);
+                else if (errors) errors->push_back(error);
+            }
+            buffer.clear();
+            oversized = false;
+            inFrame = true; // The delimiter can close one frame and open the next.
+        } else if (inFrame && !oversized) {
+            if (buffer.size() == MaximumEscapedFrame) {
+                buffer.clear();
+                oversized = true;
+            } else {
+                buffer.append(byte);
+            }
         }
-        if (begin > 0) buffer.remove(0, begin);
-        const int end = buffer.indexOf(static_cast<char>(Fend), 1);
-        if (end < 0) break;
-        const QByteArray candidate = buffer.left(end + 1);
-        buffer.remove(0, end + 1);
-        if (candidate.size() <= 2) continue;
-        KissFrame frame;
-        QString error;
-        if (KissCodec::decode(candidate, &frame, &error)) frames.push_back(frame);
-        else if (errors) errors->push_back(error);
     }
     return frames;
 }
 
 void KissStreamDecoder::reset() {
     buffer.clear();
+    inFrame = false;
+    oversized = false;
 }

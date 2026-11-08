@@ -14,6 +14,8 @@
 #include "spectrumdisplayreducer.h"
 #include "tuningutils.h"
 #include "zerospandialog.h"
+#include "core/spectrumordering.h"
+#include "appsettingsutils.h"
 
 #include <QDebug>
 #include <QDateTime>
@@ -24,6 +26,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -361,8 +364,8 @@ void YourClassName::populateSampleRates() {
             return;
         }
         const QVector<double> defaultRates = {
-            8000000.0, 10000000.0, 12500000.0, 16000000.0, 20000000.0,
-            25000000.0, 32000000.0, 40000000.0, 50000000.0, 80000000.0
+            80000000.0, 50000000.0, 40000000.0, 32000000.0, 25000000.0,
+            20000000.0, 16000000.0, 12500000.0, 10000000.0, 8000000.0
         };
         for (const double rate : defaultRates) {
             sampleBox->addItem(formatSampleRate(rate), rate);
@@ -429,9 +432,17 @@ void YourClassName::populateSampleRates() {
         addDefaultSampleRates();
         return;
     }
+    const bool agileHfOnly80 = sampleRateApiKind == FobosApiKind::Agile &&
+        std::find(sampleRates, sampleRates + count, 80000000.0) != sampleRates + count &&
+        !fobosAgileSupportsRf80(static_cast<fobos_sdr_dev_t *>(sampleRateDevice));
+    std::sort(sampleRates, sampleRates + count, std::greater<double>{});
     sampleBox->clear();
     for (unsigned int i = 0; i < count; ++i) {
+        const bool agileHf80 = agileHfOnly80 && sampleRates[i] == 80000000.0;
+        if (agileHf80 && pendingSettings.inputMode == INPUT_RF) continue;
         QString formattedRate = formatSampleRate(sampleRates[i]);
+        if (agileHf80)
+            formattedRate += uiLanguage == QStringLiteral("uk") ? QStringLiteral(" (КХ)") : QStringLiteral(" (HF)");
         sampleBox->addItem(formattedRate, sampleRates[i]);
     }
     int selectedIndex = sampleBox->findData(pendingSettings.sampleRate);
@@ -697,6 +708,11 @@ bool YourClassName::buildHfInterferenceBaselineVisual(const std::vector<float> &
 }
 
 void YourClassName::updateSpectrum() {
+    // While a continuous RAW command is pending, spectrumProcessingSettings()
+    // still uses the confirmed center. Its completion clears the old IQ epoch.
+    const bool continuousRawTune = agileContinuousRetuneEnabled && fobosRawLiveTune;
+    if ((liveCenterRetuneThread && !continuousRawTune) ||
+        (!agileContinuousRetuneEnabled && queuedLiveCenterRetuneGeneration != 0)) return;
     if (!fftResult) {
         return;
     }
@@ -869,7 +885,9 @@ void YourClassName::updateSpectrum() {
                             : (fullMinFrequency + fullMaxFrequency) * 0.5;
     }
     visibleCenter = (std::clamp)(visibleCenter, fullMinFrequency, fullMaxFrequency);
-    if (!multiSdrViewportManaged) spectrumDisplayCenterHz = visibleCenter;
+    if (!multiSdrViewportManaged &&
+        !(agileContinuousRetuneEnabled && queuedLiveCenterRetuneGeneration != 0))
+        spectrumDisplayCenterHz = visibleCenter;
 
     double frameMinFrequency = visibleCenter - visibleSpan * 0.5;
     frameMinFrequency = (std::clamp)(frameMinFrequency,
@@ -1083,7 +1101,10 @@ void YourClassName::updateSpectrum() {
         scanCenterAfterFft = activeStandardScanFrequencies.at(scanIndexAfterFft);
     }
 
-    updateSpurCalibration(spectrumFrequencies, spectrumMagnitudes, spectrumSettings.centerFrequency);
+    updateSpurCalibration(spectrumFrequencies, spectrumMagnitudes, spectrumSettings.centerFrequency,
+                          fftBlockMetadata.epoch, fftBlockMetadata.totalFloatCount);
+    const auto noiseCaptureLevels = (receiverNoiseBaseline.isCapturing() || receiverYFactorCalibration.isCapturing())
+        ? spectrumInFrequencyOrder(spectrumMagnitudes) : std::vector<float>{};
     applySpurSuppression(spectrumFrequencies, spectrumMagnitudes, spectrumSettings.centerFrequency);
     updateGnssSpurWatch(spectrumFrequencies, spectrumMagnitudes, spectrumSettings.centerFrequency);
     updateScanMeasurement(spectrumFrequencies, spectrumMagnitudes);
@@ -1104,7 +1125,7 @@ void YourClassName::updateSpectrum() {
             receiverNoiseBaselineCaptureTimer.restart();
             const ReceiverNoiseBaseline::CaptureResult captureResult =
                 receiverNoiseBaseline.addFrame(spectrumFrequencies,
-                                               spectrumMagnitudes,
+                                               noiseCaptureLevels,
                                                noiseBaselineKey);
             if (captureResult == ReceiverNoiseBaseline::CaptureResult::Completed) {
                 saveReceiverNoiseBaselineProfiles();
@@ -1119,7 +1140,7 @@ void YourClassName::updateSpectrum() {
             receiverYFactorCaptureTimer.restart();
             const ReceiverYFactorCalibration::CaptureResult captureResult =
                 receiverYFactorCalibration.addFrame(spectrumFrequencies,
-                                                    spectrumMagnitudes,
+                                                    noiseCaptureLevels,
                                                     noiseBaselineKey);
             if (captureResult == ReceiverYFactorCalibration::CaptureResult::Completed) {
                 saveReceiverYFactorProfiles();
@@ -1656,7 +1677,7 @@ void YourClassName::updateSpectrum() {
                                             receiverNoiseDisplayFrame.levels,
                                             noiseBaselineKey,
                                             static_cast<ReceiverNoiseBaselineMode>(receiverNoiseBaselineMode),
-                                            receiverNoiseBaselineTargetDb)) {
+                                            receiverNoiseBaselineTargetDb, receiverNoiseShapeWidthHz, receiverNoiseShapeStrength)) {
                 visiblePreparedFrame = &receiverNoiseDisplayFrame;
             }
         }
@@ -1789,6 +1810,12 @@ void YourClassName::updateSpectrum() {
                     }
                 }
 
+                // Batched FFT rows bypass the newest spectrum's correction path.
+                // Apply the same calibrated mask before reducing waterfall bins.
+                applySpurSuppression(spectrumFrequencies,
+                                     historyRow.magnitudes,
+                                     spectrumSettings.centerFrequency);
+
                 const std::vector<float> *historyVisual = &historyRow.magnitudes;
                 if (isDirectInputMode(spectrumSettings.inputMode) &&
                     buildHfInterferenceBaselineVisual(spectrumFrequencies,
@@ -1818,7 +1845,7 @@ void YourClassName::updateSpectrum() {
                         historyDisplayFrame.levels,
                         noiseBaselineKey,
                         static_cast<ReceiverNoiseBaselineMode>(receiverNoiseBaselineMode),
-                        receiverNoiseBaselineTargetDb);
+                        receiverNoiseBaselineTargetDb, receiverNoiseShapeWidthHz, receiverNoiseShapeStrength);
                 }
                 if (historyDisplayFrame.levels.empty()) {
                     continue;
@@ -1853,6 +1880,13 @@ void YourClassName::updateSpectrum() {
         if (presentMainWaterfall) {
             waterfallWidget->setScanSegments(renderScanSegments);
             waterfallWidget->setScanSegmentMarkersVisible(renderScanMarkers);
+        }
+        if (!liveRetuneFrameDeadline.hasExpired() && !visiblePreparedFrame->levels.empty() &&
+            ((refreshAuxiliaryUi && presentMainSpectrum) || (updateWaterfallFrame && presentMainWaterfall))) {
+            liveRetuneFrameDeadline.setRemainingTime(0);
+            if (queuedLiveCenterRetuneGeneration != 0 && agileLiveRetuneTimer) {
+                agileLiveRetuneTimer->start(0);
+            }
         }
         if (profileDisplayFrame) {
             const qint64 afterWidgetsNs = displayProfileTimer.nsecsElapsed();

@@ -1,11 +1,15 @@
 #include "main.h"
 #include "wirelesslabdialog.h"
 #include "dataprocessor.h"
+#include "../wireless/usrplabdialog.h"
 
 void YourClassName::openWirelessLab() {
     if (!wirelessLabDialog) {
         wirelessLabDialog = new WirelessLabDialog(
             normalizedUiLanguage(uiLanguage) == QStringLiteral("uk"), this);
+        connect(wirelessLabDialog, &WirelessLabDialog::usrpLabRequested, this, [this] {
+            showUsrpLabDialog(this, normalizedUiLanguage(uiLanguage) == QStringLiteral("uk"));
+        });
         connect(wirelessLabDialog, &WirelessLabDialog::frequencyRequested,
                 this, [this](double frequency) {
             if (frequencyControl) {

@@ -21,12 +21,19 @@ running. The Digital Audio panel's **Open Radio** button opens the manual lab.
   decoder accepts demodulated 48 kHz mono PCM and forwards FCS-valid frames to
   KISS TCP clients on localhost, default port 8001. It does not run when disabled.
 
-KISS transports AX.25 bytes; it is not an RF waveform. The AFSK1200 path runs
-only on explicit WAV import/export or explicit live KISS RX. KISS TX injection
-is not connected to the transmitter yet; incoming KISS bytes are discarded.
-This is not yet a bidirectional TNC or real-air interoperability claim.
-G3RUH-style modems still need a separate optional DSP branch. KISS data
-frames conventionally omit the HDLC FCS.
+- Optional virtual TX in the same GUI tab. Start KISS RX, enter the local
+  virtual IQ channel and center frequency, then select **Enable virtual TX**.
+  Connect your KISS client to `127.0.0.1:8001` (or the selected port). Send
+  port 0 data commands containing AX.25 UI frames with at most 256 information
+  bytes. Omit the FCS. The AFSK1200 modulator adds it and publishes 48 kS/s
+  narrow FM IQ to a listening local virtual receiver or IQ hub.
+
+The virtual TX queue holds up to 16 waiting frames. Disabling TX, stopping KISS
+or closing the lab discards queued frames. If the virtual receiver connection
+fails during TX, the app disables TX and shows the error. In CLI, the RX module
+and `ObriiCli module tx kiss 8002 obrii-virtual-iq 144.8M` use separate ports.
+The TX command listens on loopback and writes 48 kS/s IQ to local IPC. RF PTT
+and G3RUH still require separate integration.
 
 ### M17
 
@@ -111,6 +118,8 @@ For a static link-topology experiment, add
 `--scenario docs/virtual_iq_link_scenario.json`. The JSON has `version: 1`, a boolean
 `defaultRoute` and a `links` array. Each link names `tx` and `rx`, with optional
 `enabled` (default true), `delayMs` (0..60000) and `gainDb` (-120..60).
+In sample-mix mode an optional `frequencyOffsetHz` adds a signed baseband shift
+strictly within ±Fs/2. Its phase is tied to the mix timeline across frames.
 `defaultRoute: false` delivers only explicitly listed links; true retains the
 old fan-out and lets a link override or disable one pair. Name RX endpoints
 with `--rx student-a@127.0.0.1:17661` and

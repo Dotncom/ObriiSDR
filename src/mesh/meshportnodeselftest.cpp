@@ -254,7 +254,7 @@ void nativeLoRa(){
     Rig rig;for(const auto &id:{"A","B","C"})rig.add(id);
     QJsonArray nodes;for(int index=0;index<3;++index)nodes.append(node(QString(QChar('A'+index)),ports("radio","radio"),nativeConfiguration(0x100u+quint32(index))));
     const QJsonArray links{link("A","B","iq","radio","radio"),link("B","C","iq","radio","radio"),link("C","B","iq","radio","radio"),link("B","A","iq","radio","radio")};
-    require(rig.configure({{"nodes",nodes},{"links",links}}),"real Meshtastic adapters configure through local private profiles");
+    require(rig.configure({{"nodes",nodes},{"links",links}}),"real Meshtastic adapters configure through locally stored profiles");
     const auto payload=QByteArray::fromHex("004e41544956452d4c6f5261ff");
     const auto sent=rig.call(0,{{"op","protocol"},{"args",QJsonObject{{"op","send"},{"destination",258},{"payloadBase64",QString::fromLatin1(payload.toBase64())},{"reliable",true}}}});
     const auto nativeId=scalar(sent.value("protocolReply").toObject().value("nativeId"));

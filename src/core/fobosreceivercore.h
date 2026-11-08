@@ -68,8 +68,12 @@ public:
         if (api_ == FobosApiKind::Standard)
             return setFobosSampleRateSafely(standard(), requested, actual);
         const int result = setFobosAgileSampleRateSafely(agile(), requested);
-        if (result == 0 && actual) *actual = requested;
-        return result;
+        if (result != 0) return result;
+        double configured=requested;
+        const int probe=getFobosAgileConfiguredRateSafely(agile(),&configured);
+        if(probe!=0 && probe!=FOBOS_ERR_UNSUPPORTED)return probe;
+        if(actual)*actual=configured;
+        return 0;
     }
     int frequency(double requested, double *actual) const {
         if (!native_) return FOBOS_ERR_NOT_OPEN;

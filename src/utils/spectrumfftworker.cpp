@@ -222,6 +222,7 @@ void SpectrumFftWorker::run() {
             const std::uint64_t hopFloats = (std::max)(overlapHopFloats, intervalFloats);
             const bool sameTimeline = batchWaterfallRows &&
                                       iqStats.epoch == lastProducedEpoch &&
+                                      iqStats.totalFloatCount >= lastProducedEndFloatCount &&
                                       settings.fftLength == lastProducedFftLength &&
                                       std::abs(settings.sampleRate - lastProducedSampleRate) < 0.5 &&
                                       updateIntervalMs == lastProducedUpdateIntervalMs &&
@@ -293,6 +294,14 @@ void SpectrumFftWorker::run() {
                 lastProducedEndFloatCount = frameEnd;
             }
 
+            // A reset or a snapshot discontinuity can invalidate historical
+            // endpoints while live IQ/audio continue. Recover from the newest
+            // complete snapshot rather than waiting for another manual retune.
+            if (!frame.valid && iqStats.snapshotSize >= fftFloats) {
+                frame.valid = fft->storeFFTResults(settings, frame.frequencies,
+                    frame.magnitudes, &frame.referenceMagnitudes, &frame.metadata, 0);
+                if (frame.valid) lastProducedEndFloatCount = frame.metadata.totalFloatCount;
+            }
             lastProducedEpoch = iqStats.epoch;
             lastProducedFftLength = settings.fftLength;
             lastProducedSampleRate = settings.sampleRate;

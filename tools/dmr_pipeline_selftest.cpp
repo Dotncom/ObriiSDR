@@ -323,6 +323,52 @@ void testDiscriminatorAmplitude() {
           std::all_of(pcm.begin(), pcm.end(), [](short value) { return value == 0; }),
           "DMR zero IQ preserves silence and duration");
 }
+int benchmarkWideDmr() {
+    RadioSettings settings;
+    settings.inputMode = INPUT_RF;
+    settings.modulationType = MOD_DMR;
+    settings.centerFrequency = 145e6;
+    settings.listeningFrequency = 163.472e6;
+    settings.dmrBasebandSampleRate = 24000;
+    constexpr std::size_t pairsPerBlock = 262144;
+    constexpr int blocks = 240;
+    std::vector<float> iq(pairsPerBlock * 2);
+    std::vector<short> pcm;
+    for (double rate : {50e6, 80e6}) {
+        settings.sampleRate = rate;
+        double phase = 0.0;
+        for (std::size_t i = 0; i < pairsPerBlock; ++i) {
+            const double tone = 1944.0 * std::sin(6.283185307179586 * 700.0 * i / rate);
+            phase += 6.283185307179586 * (settings.listeningFrequency - settings.centerFrequency + tone) / rate;
+            iq[2 * i] = 0.015f * float(std::cos(phase));
+            iq[2 * i + 1] = 0.015f * float(std::sin(phase));
+        }
+        AudioProcessor processor;
+        QElapsedTimer timer;
+        timer.start();
+        std::vector<double> blockMs;
+        std::uint64_t checksum = 0;
+        std::size_t outputSamples = 0;
+        int outputRate = 0;
+        for (int block = 0; block < blocks; ++block) {
+            const auto start = timer.nsecsElapsed();
+            AudioProcessorTestAccess::demod(processor, iq, settings, pcm, outputRate);
+            blockMs.push_back((timer.nsecsElapsed() - start) / 1.0e6);
+            outputSamples += pcm.size();
+            for (short sample : pcm)
+                checksum = checksum * 31 + static_cast<std::uint16_t>(sample);
+        }
+        std::sort(blockMs.begin(), blockMs.end());
+        const double budget = 1000.0 * pairsPerBlock / rate;
+        std::cout << "DMR RF " << rate / 1e6 << " MS/s, block p50 " << blockMs[blocks / 2]
+                  << " ms, p95 " << blockMs[blocks * 95 / 100] << " ms, budget " << budget
+                  << " ms, PCM samples " << outputSamples << ", checksum " << checksum << '\n';
+        const double expectedSamples = blocks * pairsPerBlock * (24000.0 / rate);
+        check(outputRate == 24000 && std::abs(double(outputSamples) - expectedSamples) < 2,
+              "wide DMR retains output rate and duration");
+    }
+    return failures ? 1 : 0;
+}
 int inspectRecording(const QString &path, const QString &outputPath, int outputRate) {
     PlaybackManager::WavInfo info;
     QString error;
@@ -375,6 +421,7 @@ int inspectRecording(const QString &path, const QString &outputPath, int outputR
 }
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
+    if (app.arguments().contains(QStringLiteral("--benchmark-dmr"))) return benchmarkWideDmr();
     if ((argc == 4 || argc == 5) && app.arguments()[1] == "--inspect-iq") {
         const int rate = argc == 5 ? app.arguments()[4].toInt() : 24000;
         if (rate != 24000 && rate != 48000) return 1;

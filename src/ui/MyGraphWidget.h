@@ -42,6 +42,7 @@ public:
                              int fftWindowType);
     void setFpsOverlayEnabled(bool enabled);
     void setExtendedInfoOverlayEnabled(bool enabled);
+    void setReceiverStatusText(const QString &text);
     void setAnalogPeakMeterEnabled(bool enabled);
     void setAnalogPeakMeterStyle(int style);
     void setAnalogPeakMeterTarget(double frequencyHz, bool valid);
@@ -167,6 +168,7 @@ private:
     int metadataFftWindowType = 0;
     bool fpsOverlayEnabled = false;
     bool extendedInfoOverlayEnabled = false;
+    QString receiverStatusText;
     bool analogPeakMeterEnabled = false;
     int analogPeakMeterStyle = 0;
     bool analogPeakMeterTargetValid = false;

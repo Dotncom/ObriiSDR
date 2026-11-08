@@ -15,6 +15,10 @@ endif()
 find_package(Qt5 REQUIRED COMPONENTS Core Network Gui Concurrent)
 find_package(Qt5 COMPONENTS Multimedia QUIET)
 find_package(Qt5 COMPONENTS Widgets QUIET)
+add_library(ObriiUsrpLabCore STATIC
+    "${OBRII_ROOT}/src/core/usrplabjob.cpp" "${OBRII_ROOT}/src/core/usrplabjob.h")
+target_include_directories(ObriiUsrpLabCore PUBLIC "${OBRII_ROOT}/src/core")
+target_link_libraries(ObriiUsrpLabCore PUBLIC Qt5::Core)
 add_library(ObriiCommandCore STATIC "${OBRII_ROOT}/src/core/commanddispatcher.cpp")
 target_include_directories(ObriiCommandCore PUBLIC "${OBRII_ROOT}/src/core")
 target_link_libraries(ObriiCommandCore PUBLIC Qt5::Core)
@@ -288,6 +292,8 @@ endif()
 
 add_executable(ObriiCliTxModule
     clilivetransmit.cpp clilivetransmit.h climicrophonecapture.cpp climicrophonecapture.h
+    "${OBRII_ROOT}/src/openradio/kissvirtualtx.cpp" "${OBRII_ROOT}/src/openradio/kissvirtualtx.h"
+    "${OBRII_ROOT}/src/openradio/kisscodec.cpp" "${OBRII_ROOT}/src/openradio/kisscodec.h"
     "${OBRII_ROOT}/src/transmit/windowsmicrophonecapture.cpp"
     "${OBRII_ROOT}/src/transmit/windowsmicrophonecapture.h"
     obriiclitxmodule.cpp
@@ -386,7 +392,7 @@ add_library(ObriiRecordingFormatCore STATIC "${OBRII_ROOT}/src/core/recordingfor
 set_target_properties(ObriiFftTransformCore ObriiRecordingFormatCore PROPERTIES AUTOMOC OFF)
 target_include_directories(ObriiRecordingFormatCore PUBLIC "${OBRII_ROOT}/src/core")
 target_link_libraries(ObriiRecordingFormatCore PUBLIC Qt5::Core)
-target_link_libraries(ObriiCli PRIVATE ObriiFftTransformCore ObriiRecordingFormatCore ObriiCommandNetwork)
+target_link_libraries(ObriiCli PRIVATE ObriiFftTransformCore ObriiRecordingFormatCore ObriiCommandNetwork ObriiUsrpLabCore)
 if(TARGET ObriiCliView)
     target_link_libraries(ObriiCliView PRIVATE ObriiFftTransformCore)
 endif()

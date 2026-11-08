@@ -5,24 +5,37 @@
 #include "MyWaterfallWidget.h"
 #include "iqbuffer.h"
 #include "dspcomputedialog.h"
+#include "dspiqsourceregistry.h"
+#include "dspboardqpskreceiver.h"
+#include "../src/cli/clivirtualiqsource.h"
+#include "virtualtransmitterbackend.h"
 #include "audiofilterchainwidget.h"
 #include "appsettingsutils.h"
 
 #include <QApplication>
+#include <QBuffer>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QEvent>
+#include <QCryptographicHash>
+#include <QDir>
+#include <QFile>
 #include <QGraphicsScene>
 #include <QGraphicsSceneMouseEvent>
 #include <QGraphicsPathItem>
+#include <QGraphicsProxyWidget>
 #include <QGraphicsView>
+#include <QImage>
 #include <QFontDatabase>
 #include <QJsonDocument>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QPixmap>
 #include <QPointer>
+#include <QSaveFile>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QScrollArea>
@@ -36,9 +49,12 @@
 #include <QMouseEvent>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QUuid>
 
 #include <iostream>
+#include <array>
 #include <cmath>
+#include <random>
 #include <stdexcept>
 #ifdef _MSC_VER
 #include <windows.h>
@@ -61,6 +77,9 @@ struct DspFlowHistoryTestAccess {
     static QByteArray snapshot(const DspFlowPanel &panel) { return panel.captureBoardHistory(); }
     static void separateEdit(DspFlowPanel &panel) { panel.historyMergeTimer_.invalidate(); }
     static int count(const DspFlowPanel &panel) { return panel.boardHistory_.size(); }
+    static std::shared_ptr<const DspBoardDecodedPayload> receivedPacket(const DspFlowPanel &panel, const QString &decoderId) {
+        return panel.livePackets_.value(decoderId);
+    }
     static qint64 bytes(const DspFlowPanel &panel) {
         qint64 bytes = 0;
         for (const auto &entry : panel.boardHistory_) bytes += entry.board.size() + entry.filters.size();
@@ -150,6 +169,429 @@ QJsonObject mainFftBoard(bool sourceConnected = true, bool viewsConnected = true
 
 QString graphJson(const QJsonObject &graph) {
     return QString::fromUtf8(QJsonDocument(graph).toJson(QJsonDocument::Compact));
+}
+
+void testBoardSignalPath() {
+    QJsonArray blocks{
+        QJsonObject{{"id", "carrier"}, {"type", "lab_carrier"}, {"x", 0}, {"y", 0}},
+        QJsonObject{{"id", "text"}, {"type", "lab_text"}, {"x", 0}, {"y", 120},
+                    {"settings", QJsonObject{{"text", "Obrii"}}}},
+        QJsonObject{{"id", "mod"}, {"type", "lab_modulator"}, {"x", 330},
+                    {"settings", QJsonObject{{"mode", "bpsk"}}}},
+        QJsonObject{{"id", "iq"}, {"type", "lab_iq"}, {"x", 660}},
+        QJsonObject{{"id", "tx"}, {"type", "lab_tx"}, {"x", 660}, {"y", 220}},
+        QJsonObject{{"id", "ddc"}, {"type", "ddc_channelizer"}, {"x", 990},
+                    {"settings", QJsonObject{{"enabled", true}, {"outputRateHz", 24000}}}},
+        QJsonObject{{"id", "fft"}, {"type", "branch_fft"}, {"x", 1200}},
+        QJsonObject{{"id", "spectrum"}, {"type", "branch_spectrum"}, {"x", 1410}}};
+    QJsonArray edges;
+    const auto wire = [&](const char *from, const char *to) {
+        edges.append(QJsonObject{{"source", from}, {"target", to}});
+    };
+    wire("carrier", "mod");
+    wire("text", "mod");
+    wire("mod", "iq");
+    wire("iq", "tx");
+    wire("iq", "ddc");
+    wire("ddc", "fft");
+    wire("fft", "spectrum");
+    QJsonObject graph{{"version", 8}, {"blocks", blocks}, {"connections", edges}};
+
+    DspFlowPanel panel;
+    panel.resize(1200, 650);
+    require(panel.setConfigurationJson(graphJson(graph)), "Laboratory board load failed");
+    panel.show();
+    QApplication::processEvents();
+    const auto restored = QJsonDocument::fromJson(panel.configurationJson().toUtf8()).object();
+    const auto request = resolveDspBoardSignal(restored, "iq");
+    require(request.error.isEmpty() && !request.payload.isEmpty(), "Board lost either the carrier or payload wire");
+    require(resolveDspBoardSignal(restored, "tx") == request, "TX did not resolve the same I/Q chain");
+    const auto generated = generateDspBoardSignal(request);
+    require(generated.ok() && generated.iq.size() == 48000, "Board text modulation failed");
+    require(panel.setBlockSettings("text", {{"text", "Other"}}), "Inline payload settings were rejected");
+    const auto edited = QJsonDocument::fromJson(panel.configurationJson().toUtf8()).object();
+    const auto different = generateDspBoardSignal(resolveDspBoardSignal(edited, "iq"));
+    require(different.ok() && different.iq != generated.iq, "Changing payload did not change the signal");
+    const auto source = dspSignalSource("iq");
+    const auto plan = compileDspGraph(edited);
+    require(plan.errors.isEmpty() && plan.branches.size() == 1 && plan.branches[0].source == source,
+            "DDC was not bound to the board I/Q source");
+    auto *view = panel.findChild<QGraphicsView *>();
+    require(view != nullptr, "Laboratory board view missing");
+    view->fitInView(view->scene()->itemsBoundingRect().adjusted(-25, -25, 25, 25), Qt::KeepAspectRatio);
+    QPushButton *run = nullptr;
+    QPushButton *stop = nullptr;
+    QPushButton *prepareTx = nullptr;
+    for (auto *item : view->scene()->items()) {
+        auto *proxy = dynamic_cast<QGraphicsProxyWidget *>(item);
+        if (!proxy || !proxy->widget()) continue;
+        for (auto *button : proxy->widget()->findChildren<QPushButton *>()) {
+            if (button->text() == "Run I/Q") run = button;
+            if (button->text() == "Stop") stop = button;
+            if (button->text() == "Prepare transmission") prepareTx = button;
+        }
+    }
+    require(run && stop && prepareTx, "Inline I/Q controls missing");
+    run->click();
+    DspIqSourceSnapshot snapshot;
+    QElapsedTimer deadline;
+    deadline.start();
+    while (deadline.elapsed() < 2000) {
+        QApplication::processEvents();
+        if (DspIqSourceRegistry::instance().snapshotSince(source, 0, 0, 4096, snapshot) &&
+            panel.branchStatus("fft").startsWith("Fs ")) break;
+        QThread::msleep(5);
+    }
+    require(!snapshot.iq.empty() && snapshot.sampleRateHz == 48000 && snapshot.centerHz == 100e6,
+            "Board did not publish I/Q without a running receiver");
+    require(panel.branchStatus("fft").startsWith("Fs "), "Laboratory signal did not reach the branch FFT");
+    stop->click();
+    require(!DspIqSourceRegistry::instance().snapshotSince(source, 0, 0, 4096, snapshot),
+            "Stopping the board source left stale I/Q in the registry");
+    bool txPrepared = false;
+    QObject::connect(&panel, &DspFlowPanel::laboratoryTransmissionRequested, &panel,
+                     [&](const SignalLabGenerationResult &result, double center) {
+        txPrepared = result.iq == different.iq && center == 100e6;
+    });
+    prepareTx->click();
+    deadline.restart();
+    while (!txPrepared && deadline.elapsed() < 2000) {
+        QApplication::processEvents();
+        QThread::msleep(5);
+    }
+    require(txPrepared, "TX output did not prepare the graph's samples and RF center");
+
+    QTemporaryDir media;
+    require(media.isValid(), "Unable to create board test media directory");
+    const auto writeMedia = [&](const QString &name, const QByteArray &bytes) {
+        QFile file(media.filePath(name));
+        require(file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size(), "Unable to write board test media");
+        return file.fileName();
+    };
+    const QString wav = writeMedia("tone.wav", QByteArray::fromHex(
+        "524946462c00000057415645666d74201000000001000100401f0000803e000002001000"
+        "646174610800000000000040000000c0"));
+    auto audioRequest = request;
+    audioRequest.modulator["settings"] = QJsonObject{{"mode", "am"}};
+    audioRequest.payload = QJsonObject{{"type", "lab_audio"}, {"settings", QJsonObject{{"path", wav}}}};
+    const auto audio = generateDspBoardSignal(audioRequest);
+    require(audio.ok() && audio.iq.size() == 24 && audio.iq[6].real() > audio.iq[0].real(),
+            "PCM16 WAV did not drive AM amplitude");
+    const QString cf32 = writeMedia("sample.cf32", QByteArray::fromHex("0000003f000080be"));
+    auto fileRequest = request;
+    fileRequest.modulator = QJsonObject{{"type", "lab_cf32"}, {"settings", QJsonObject{{"path", cf32}}}};
+    const auto imported = generateDspBoardSignal(fileRequest);
+    require(imported.ok() && imported.iq.size() == 1 && imported.iq.front() == std::complex<float>(0.5f, -0.25f),
+            "CF32LE import did not preserve the complex sample");
+
+    auto packetRequest = request;
+    packetRequest.modulator["settings"] = QJsonObject{{"mode", "packet_qpsk"}};
+    packetRequest.carrier["settings"] = QJsonObject{{"offset", 4300}, {"amplitude", 0.3}};
+    const QString message = QString::fromUtf8("Привіт, DSP!");
+    packetRequest.payload["settings"] = QJsonObject{{"text", message}};
+    auto packetSignal = generateDspBoardSignal(packetRequest);
+    const auto packetText = decodeDspBoardPacket(packetSignal);
+    require(packetText.ok() && packetText.type == DspBoardPayloadType::Text &&
+            packetText.bytes == message.toUtf8(), "QPSK packet did not recover UTF-8 from shifted I/Q");
+    auto corrupted = packetSignal;
+    const int corruptStart = 116 * corrupted.samplesPerSymbol;
+    for (int i = corruptStart; i < corruptStart + 8 * corrupted.samplesPerSymbol; ++i)
+        corrupted.iq[i] = -corrupted.iq[i];
+    require(decodeDspBoardPacket(corrupted).error == QStringLiteral("Packet integrity check failed"),
+            "Decoder accepted a packet with corrupted samples");
+    packetSignal.iq.resize(52 * packetSignal.samplesPerSymbol);
+    require(!decodeDspBoardPacket(packetSignal).ok() && !decodeDspBoardPacket(generated).ok(),
+            "Decoder accepted truncated or unframed I/Q");
+
+    QBuffer imageBuffer;
+    QImage image(2, 1, QImage::Format_RGB32);
+    image.fill(Qt::red);
+    require(imageBuffer.open(QIODevice::WriteOnly) && image.save(&imageBuffer, "PNG"), "Cannot create packet test image");
+    const QByteArray imageBytes = imageBuffer.data();
+    const QString imagePath = writeMedia("pixel.png", imageBytes);
+    packetRequest.payload = QJsonObject{{"type", "lab_image"}, {"settings", QJsonObject{{"path", imagePath}}}};
+    const auto packetImage = decodeDspBoardPacket(generateDspBoardSignal(packetRequest));
+    require(packetImage.ok() && packetImage.type == DspBoardPayloadType::Image &&
+            packetImage.fileName == "pixel.png" && packetImage.bytes == imageBytes,
+            "QPSK packet did not recover original image bytes and name");
+    QByteArray binary;
+    for (int i = 0; i < 12000; ++i) binary.append(char(i % 256));
+    const QString binaryPath = writeMedia("payload.bin", binary);
+    packetRequest.iq["settings"] = QJsonObject{{"rate", 192000}, {"duration", 1}};
+    packetRequest.modulator["settings"] = QJsonObject{{"mode", "packet_qpsk"}, {"symbols", 64000}};
+    packetRequest.payload = QJsonObject{{"type", "lab_file"}, {"settings", QJsonObject{{"path", binaryPath}}}};
+    const auto fileBurst = generateDspBoardSignal(packetRequest);
+    const auto packetFile = decodeDspBoardPacket(fileBurst);
+    require(packetFile.ok() && packetFile.type == DspBoardPayloadType::File &&
+            packetFile.fileName == "payload.bin" && packetFile.bytes == binary,
+            "QPSK packet did not recover the complete binary file");
+
+    auto rxRequest = request;
+    rxRequest.modulator["settings"] = QJsonObject{{"mode", "packet_qpsk"}, {"symbols", 1200}};
+    rxRequest.payload["settings"] = QJsonObject{{"text", message}};
+    const auto burst = generateDspBoardSignal(rxRequest);
+    require(burst.ok(), "Could not generate live QPSK test burst");
+    DspBoardQpskReceiver receiver;
+    double receivedRate = 9600;
+    constexpr double Tau = 6.2831853071795864769;
+    std::mt19937 noise(199);
+    std::normal_distribution<float> gaussian(0, 0.029f);
+    std::vector<float> received;
+    const auto append = [&](int count, double offset, const SignalLabGenerationResult *signal) {
+        for (int i = 0; i < count; ++i) {
+            std::complex<float> sample{};
+            if (signal) {
+                const double position = (i - 0.47) * signal->sampleRate / receivedRate * 1.0008;
+                if (position >= 0 && position + 1 < signal->iq.size()) {
+                    const int index = int(position);
+                    sample = signal->iq[index] + float(position - index) * (signal->iq[index + 1] - signal->iq[index]);
+                    sample *= std::polar(0.6f, float(1.3 + Tau * offset * i / receivedRate));
+                }
+            }
+            received.push_back(sample.real() + gaussian(noise));
+            received.push_back(sample.imag() + gaussian(noise));
+        }
+    };
+    append(381, 0, nullptr);
+    append(2800, 145, &burst);
+    append(219, 0, nullptr);
+    append(2800, -420, &burst);
+    QVector<DspBoardDecodedPayload> livePackets;
+    for (std::size_t i = 0; i < received.size() / 2; i += 137) {
+        const auto count = std::min<std::size_t>(137, received.size() / 2 - i);
+        livePackets += receiver.feed(received.data() + i * 2, count, receivedRate, 1200);
+    }
+    require(livePackets.size() == 2 && livePackets[0].bytes == message.toUtf8() &&
+            livePackets[1].bytes == message.toUtf8(), "Streaming QPSK acquisition or tracking failed");
+
+    const QByteArray driftFile = binary.left(2048);
+    const QString driftPath = writeMedia("clock.bin", driftFile);
+    rxRequest.payload = QJsonObject{{"type", "lab_file"}, {"settings", QJsonObject{{"path", driftPath}}}};
+    rxRequest.iq["settings"] = QJsonObject{{"duration", 8}};
+    const auto longBurst = generateDspBoardSignal(rxRequest);
+    require(longBurst.ok(), "Could not generate long QPSK tracking test");
+    received.clear();
+    append(913, 0, nullptr);
+    append(75000, 212, &longBurst);
+    receiver.reset();
+    livePackets.clear();
+    for (std::size_t i = 0; i < received.size() / 2; i += 1021) {
+        const auto count = std::min<std::size_t>(1021, received.size() / 2 - i);
+        livePackets += receiver.feed(received.data() + i * 2, count, receivedRate, 1200);
+    }
+    require(livePackets.size() == 1 && livePackets[0].bytes == driftFile,
+            "Live decoder lost symbol timing during a long packet");
+
+    receivedRate = 192000;
+    received.clear();
+    append(187, 0, nullptr);
+    append(156000, -6000, &fileBurst);
+    receiver.reset();
+    livePackets.clear();
+    for (std::size_t i = 0; i < received.size() / 2; i += 1093) {
+        const auto count = std::min<std::size_t>(1093, received.size() / 2 - i);
+        livePackets += receiver.feed(received.data() + i * 2, count, receivedRate, 64000);
+    }
+    require(livePackets.size() == 1 && livePackets[0].bytes == binary,
+            "Live decoder did not recover the high-rate file at three samples per symbol");
+
+    blocks = {blocks[0], blocks[1], blocks[2], blocks[3]};
+    blocks.append(QJsonObject{{"id", "decode"}, {"type", "lab_packet_decoder"}, {"x", 990}});
+    blocks.append(QJsonObject{{"id", "received"}, {"type", "lab_received"}, {"x", 1320}});
+    edges = {edges[0], edges[1], edges[2]};
+    wire("iq", "decode");
+    wire("decode", "received");
+    graph["blocks"] = blocks;
+    graph["connections"] = edges;
+    require(panel.setConfigurationJson(graphJson(graph)), "Packet decoder graph did not load");
+    require(panel.setBlockSettings("mod", {{"mode", "packet_qpsk"}}) &&
+            panel.setBlockSettings("text", {{"text", message}}), "Cannot configure board packet source");
+    run = nullptr;
+    QPlainTextEdit *receivedText = nullptr;
+    QPushButton *save = nullptr;
+    for (auto *item : view->scene()->items()) {
+        auto *proxy = dynamic_cast<QGraphicsProxyWidget *>(item);
+        if (!proxy || !proxy->widget()) continue;
+        if (auto *preview = proxy->widget()->findChild<QPlainTextEdit *>("dspReceivedText"))
+            receivedText = preview;
+        for (auto *button : proxy->widget()->findChildren<QPushButton *>()) {
+            if (button->text() == "Run I/Q") run = button;
+            if (button->text() == QString::fromUtf8("Save received data…")) save = button;
+        }
+    }
+    require(run && receivedText && save && !save->isEnabled(), "Packet output controls did not start idle");
+    run->click();
+    deadline.restart();
+    while (receivedText->toPlainText() != message && deadline.elapsed() < 2000) {
+        QApplication::processEvents();
+        QThread::msleep(5);
+    }
+    require(receivedText->toPlainText() == message && save->isEnabled(),
+            "Wired packet did not reach the board output without a physical receiver");
+    require(panel.setBlockSettings("text", {{"text", "Changed"}}) && receivedText->toPlainText().isEmpty() &&
+            !save->isEnabled(), "Editing the packet source left a stale receive result");
+
+    auto imageBlock = blocks[1].toObject();
+    imageBlock["type"] = "lab_image";
+    imageBlock["settings"] = QJsonObject{{"path", imagePath}};
+    blocks[1] = imageBlock;
+    graph["blocks"] = blocks;
+    require(panel.setConfigurationJson(graphJson(graph)) &&
+            panel.setBlockSettings("mod", {{"mode", "packet_qpsk"}}), "Cannot configure board image source");
+    run = nullptr;
+    QLabel *preview = nullptr;
+    for (auto *item : view->scene()->items()) {
+        auto *proxy = dynamic_cast<QGraphicsProxyWidget *>(item);
+        if (!proxy || !proxy->widget()) continue;
+        if (auto *imageLabel = proxy->widget()->findChild<QLabel *>("dspReceivedImage"))
+            preview = imageLabel;
+        for (auto *button : proxy->widget()->findChildren<QPushButton *>())
+            if (button->text() == "Run I/Q") run = button;
+    }
+    require(run && preview && preview->pixmap(Qt::ReturnByValue).isNull(), "Image output did not start empty");
+    run->click();
+    deadline.restart();
+    while (preview->pixmap(Qt::ReturnByValue).isNull() && deadline.elapsed() < 2000) {
+        QApplication::processEvents();
+        QThread::msleep(5);
+    }
+    const auto thumbnail = preview->pixmap(Qt::ReturnByValue).toImage();
+    require(!thumbnail.isNull() && thumbnail.pixelColor(0, 0) == QColor(Qt::red),
+            "Wired image was not rendered from the received bytes");
+
+    const QJsonArray receiverBlocks{
+        QJsonObject{{"id", "rx"}, {"type", "receiver_source"}},
+        QJsonObject{{"id", "ddc"}, {"type", "ddc_channelizer"}, {"x", 220},
+            {"settings", QJsonObject{{"enabled", true}, {"frequencyHz", 100010000},
+                {"bandwidthHz", 4500}, {"outputRateHz", 12000}, {"firTaps", 128}}}},
+        QJsonObject{{"id", "decode"}, {"type", "lab_packet_decoder"}, {"x", 440}},
+        QJsonObject{{"id", "received"}, {"type", "lab_received"}, {"x", 770}}};
+    edges = {};
+    wire("rx", "ddc");
+    wire("ddc", "decode");
+    wire("decode", "received");
+    graph["blocks"] = receiverBlocks;
+    graph["connections"] = edges;
+    require(panel.setConfigurationJson(graphJson(graph)), "Cannot configure receiver-to-QPSK graph");
+    receivedText = nullptr;
+    for (auto *item : view->scene()->items()) {
+        auto *proxy = dynamic_cast<QGraphicsProxyWidget *>(item);
+        if (!proxy || !proxy->widget()) continue;
+        if (auto *output = proxy->widget()->findChild<QPlainTextEdit *>("dspReceivedText")) receivedText = output;
+    }
+    require(receivedText, "Live QPSK output widget is missing");
+    RadioSettings hardware;
+    hardware.inputMode = INPUT_RF;
+    hardware.centerFrequency = hardware.listeningFrequency = 100000000;
+    hardware.sampleRate = burst.sampleRate;
+    IqBuffer::clear(51000);
+    IqBuffer::setSampleRateEstimate(hardware.sampleRate);
+    panel.setBranchSourceContext(hardware, true);
+    deadline.restart();
+    while (deadline.elapsed() < 150) {
+        QApplication::processEvents();
+        QThread::msleep(5);
+    }
+    VirtualSignalEndpoint endpoint;
+    endpoint.localName = QStringLiteral("obrii-qpsk-test-%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    CliVirtualIqSource virtualReceiver;
+    VirtualTransmitterBackend virtualTransmitter;
+    virtualTransmitter.setEndpoint(endpoint);
+    QString transportError;
+    require(virtualReceiver.start(endpoint, quint32(hardware.sampleRate), qint64(hardware.centerFrequency),
+                                  4 * 1024 * 1024, &transportError), qPrintable(transportError));
+    TxConfiguration txConfiguration;
+    txConfiguration.sampleRate = int(hardware.sampleRate);
+    txConfiguration.frequencyHz = hardware.centerFrequency;
+    require(virtualTransmitter.start(txConfiguration, &transportError), qPrintable(transportError));
+    IqBuffer::BlockMetadata metadata;
+    metadata.valid = true;
+    metadata.centerFrequencyHz = hardware.centerFrequency;
+    unsigned int receivedSamples = 0;
+    bool published = true;
+    virtualReceiver.onDataAvailable = [&] {
+        std::array<float, 4096> iq{};
+        while (const auto count = virtualReceiver.read(iq.data(), unsigned(iq.size() / 2))) {
+            if (virtualReceiver.takeDiscontinuity()) IqBuffer::clear();
+            published &= IqBuffer::publish(iq.data(), count * 2, false, true, 0, &metadata);
+            receivedSamples += count;
+        }
+    };
+    const auto transmit = [&](const SignalLabGenerationResult &signal, int prefix, double offset) {
+        require(signal.ok(), qPrintable(signal.error));
+        QVector<std::complex<float>> wideIq(prefix + signal.iq.size());
+        for (int i = 0; i < signal.iq.size(); ++i) {
+            const float phase = float(0.9 + Tau * (10000 + offset) * i / hardware.sampleRate);
+            wideIq[prefix + i] = signal.iq[i] * std::polar(1.0f, phase);
+        }
+        constexpr int chunkSamples = 2048;
+        for (int i = 0; i < wideIq.size(); i += chunkSamples) {
+            const int count = std::min(chunkSamples, wideIq.size() - i);
+            require(virtualTransmitter.writeIq(wideIq.constData() + i, count, &transportError), qPrintable(transportError));
+            QApplication::processEvents();
+            QThread::msleep(3);
+        }
+        require(virtualTransmitter.drain(1000, &transportError), qPrintable(transportError));
+        return wideIq.size();
+    };
+    const QString benchDirectory = qEnvironmentVariable("OBRII_QPSK_BENCH_DIR");
+    const auto readFixture = [](const QString &path) {
+        QFile file(path);
+        require(file.open(QIODevice::ReadOnly), "Cannot open virtual TX fixture");
+        return file.readAll();
+    };
+    const QString expectedText = benchDirectory.isEmpty() ? message :
+        QString::fromUtf8(readFixture(QDir(benchDirectory).filePath("tx-text.txt")));
+    rxRequest.iq["settings"] = QJsonObject{{"duration", 1}};
+    rxRequest.payload = QJsonObject{{"type", "lab_text"}, {"settings", QJsonObject{{"text", expectedText}}}};
+    const int textSamples = transmit(generateDspBoardSignal(rxRequest), 1800, 145);
+    deadline.restart();
+    while (receivedText->toPlainText() != expectedText && deadline.elapsed() < 2500) {
+        QApplication::processEvents();
+        QThread::msleep(5);
+    }
+    require(receivedText->toPlainText() == expectedText, "Virtual receiver/DDC graph did not deliver the QPSK text");
+    const QByteArray recoveredText = receivedText->toPlainText().toUtf8();
+
+    const QString testFile = benchDirectory.isEmpty() ? writeMedia("loopback.bin", binary.left(96)) :
+        QDir(benchDirectory).filePath("tx-payload.bin");
+    const QByteArray expected = readFixture(testFile);
+    rxRequest.payload = QJsonObject{{"type", "lab_file"}, {"settings", QJsonObject{{"path", testFile}}}};
+    const auto filePacket = generateDspBoardSignal(rxRequest);
+    const int fileSamples = transmit(filePacket, 2173, -205);
+    std::shared_ptr<const DspBoardDecodedPayload> receivedFile;
+    deadline.restart();
+    while (deadline.elapsed() < 2500) {
+        QApplication::processEvents();
+        receivedFile = DspFlowHistoryTestAccess::receivedPacket(panel, "decode");
+        if (receivedFile && receivedFile->ok() && receivedFile->type == DspBoardPayloadType::File) break;
+        QThread::msleep(5);
+    }
+    const QString expectedName = benchDirectory.isEmpty() ? QStringLiteral("loopback.bin") : QStringLiteral("tx-payload.bin");
+    require(receivedFile && receivedFile->ok() && receivedFile->type == DspBoardPayloadType::File &&
+            receivedFile->bytes == expected && receivedFile->fileName == expectedName,
+            "Virtual receiver/DDC graph did not recover the file byte for byte");
+    const auto transport = virtualReceiver.status();
+    require(published && receivedSamples == unsigned(textSamples + fileSamples) &&
+            transport.value("droppedSamples").toInt() == 0 && transport.value("rejected").toInt() == 0,
+            "Virtual transport dropped or rejected QPSK samples");
+    if (!benchDirectory.isEmpty()) {
+        const auto saveRecovered = [&](const QString &name, const QByteArray &bytes) {
+            QSaveFile output(QDir(benchDirectory).filePath(name));
+            require(output.open(QIODevice::WriteOnly) && output.write(bytes) == bytes.size() && output.commit(),
+                    "Could not save the data recovered by the board");
+        };
+        saveRecovered("rx-text.txt", recoveredText);
+        saveRecovered("rx-payload.bin", receivedFile->bytes);
+    }
+    std::cout << "Virtual QPSK: " << transport.value("frames").toInt() << " frames, "
+              << receivedSamples << " I/Q samples, text verified, file " << receivedFile->bytes.size()
+              << " bytes SHA-256 " << QCryptographicHash::hash(receivedFile->bytes, QCryptographicHash::Sha256).toHex().constData()
+              << '\n';
+    virtualTransmitter.stop();
+    panel.setBranchSourceContext(hardware, false);
+    panel.close();
+    IqBuffer::clear();
 }
 
 QJsonObject mainFftAliasBoard(bool bindingIds = false) {
@@ -1137,6 +1579,7 @@ int main(int argc, char **argv) {
         testBoard();
         testLazyWorkspaceWaterfall();
         testMainFftGraph();
+        testBoardSignalPath();
         testMainFftBoardRouting();
         testMainFftAliases();
         testMainFftAliasDelivery();

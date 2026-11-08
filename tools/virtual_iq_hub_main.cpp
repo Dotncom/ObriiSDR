@@ -225,23 +225,30 @@ int main(int argc, char **argv) {
         const QJsonValue enabled = link.value(QStringLiteral("enabled"));
         const QJsonValue delay = link.value(QStringLiteral("delayMs"));
         const QJsonValue gain = link.value(QStringLiteral("gainDb"));
+        const QJsonValue frequencyOffset = link.value(QStringLiteral("frequencyOffsetHz"));
         if ((!legacySourceId(source) && !virtualSignalValidNodeId(source)) ||
             !hub.subscriberIds().contains(target) || seenLinks.contains(pair) ||
             (!enabled.isUndefined() && !enabled.isBool()) ||
             (!delay.isUndefined() && (!delay.isDouble() || delay.toDouble() != delay.toInt(-1))) ||
-            (!gain.isUndefined() && !gain.isDouble())) {
-            std::fprintf(stderr, "Invalid or duplicate IQ hub link (tx/rx/enabled/delayMs/gainDb)\n");
+            (!gain.isUndefined() && !gain.isDouble()) ||
+            (!frequencyOffset.isUndefined() && !frequencyOffset.isDouble()) ||
+            (!mixing && frequencyOffset.toDouble() != 0.0)) {
+            std::fprintf(stderr, "Invalid or duplicate IQ hub link (frequencyOffsetHz requires mix mode)\n");
             return 2;
         }
         VirtualIqLinkSettings linkSettings;
         linkSettings.enabled = enabled.toBool(true);
         linkSettings.delayMs = delay.toInt(0);
         linkSettings.gainDb = static_cast<float>(gain.toDouble(0.0));
-        if (!hub.setLink(source, target, linkSettings) ||
-            (mixing && !medium.setLink(source, target, linkSettings))) {
-            std::fprintf(stderr, "IQ hub link exceeds delay/gain limits or mix buffer cannot hold its delay\n");
+        auto mixedLink = linkSettings;
+        mixedLink.frequencyOffsetHz = frequencyOffset.toDouble();
+        if (!hub.canSetLink(source, target, linkSettings) ||
+            (mixing && !medium.canSetLink(source, target, mixedLink))) {
+            std::fprintf(stderr, "IQ hub link exceeds delay, gain or mix frequency limits\n");
             return 2;
         }
+        hub.setLink(source, target, linkSettings);
+        if (mixing) medium.setLink(source, target, mixedLink);
         seenLinks.insert(pair);
     }
 

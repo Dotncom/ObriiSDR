@@ -162,6 +162,20 @@ inputs before allocating memory. Plan import checks the format version and
 instrument mode; plan and session-template saves use atomic replacement and
 report write failures.
 
+For existing complex reflection measurements, use **Calibration → Correct
+recorded S11 (Open / Short / Load)**. The input is a JSON object with a `points`
+array sorted by `frequencyHz`. Each complex value is `[real, imag]` and each
+standard array is ordered Open, Short, Load. An ideal-standard example is
+
+```json
+{"points":[{"frequencyHz":150000000,"standards":[[1,0],[-1,0],[0,0]],"measuredStandards":[[0.7,0],[-0.5,0],[0.1,0]],"measuredDevice":[0.25,0]}]}
+```
+
+Use the characterized standards at each frequency for physical measurements.
+The saved JSON contains complex `s11`, `returnLossDb` and `swr` per point. A
+non-finite metric is `null`. The operation uses the supplied measurements and
+does not start RF or capture calibration data.
+
 The current Windows bundle contains UHD command-line/runtime components used by
 the wireless toolchain, but not a SoapyUHD device module. A future USRP can be
 used through this acquisition path once a matching SoapyUHD module is deployed;

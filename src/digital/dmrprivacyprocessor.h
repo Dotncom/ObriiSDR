@@ -10,7 +10,7 @@
 
 class DmrPrivacyProcessor {
 public:
-    enum class Outcome { Bypassed, Applied, Silence, InvalidKey, Unaligned, InvalidPayload, MissingMi, KeyMismatch };
+    enum class Outcome { Bypassed, Applied, Silence, InvalidKey, Unaligned, InvalidPayload, MissingMi, KeyMismatch, MissingPi };
     struct Statistics {
         quint64 applied = 0;
         quint64 silence = 0;
@@ -19,6 +19,7 @@ public:
         quint64 invalidPayload = 0;
         quint64 missingMi = 0;
         quint64 keyMismatch = 0;
+        quint64 missingPi = 0;
         quint64 piAccepted = 0;
         quint64 piRejected = 0;
         quint64 lateEntryAccepted = 0;
@@ -32,6 +33,7 @@ public:
     void resetVoiceAlignment() { slotContexts = {}; }
     bool isActive() const { return active; }
     int keyBits() const { return configuredKeyBits; }
+    static bool isValidPi(const QString &dibits);
     bool observePi(const QString &dibits, int timeslot, quint64 sample);
     Outcome process(DmrAmbePayload &payload);
     void processVoiceFrames(std::vector<DmrAmbePayload> &payloads,

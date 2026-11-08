@@ -23,6 +23,7 @@ QString accessName(CommandDispatcher::Access access) {
     case CommandDispatcher::Access::Control: return QStringLiteral("control");
     case CommandDispatcher::Access::Files: return QStringLiteral("files");
     case CommandDispatcher::Access::Transmit: return QStringLiteral("transmit");
+    case CommandDispatcher::Access::Local: return QStringLiteral("local");
     default: return QStringLiteral("read");
     }
 }
@@ -125,7 +126,8 @@ bool CommandDispatcher::addStandard(const QString &name, Handler handler) {
 
 bool CommandDispatcher::allowed(Access access, const Context &context) const {
     return access == Access::Read || (access == Access::Control && context.allowControl) ||
-        (access == Access::Files && context.allowFiles) || (access == Access::Transmit && context.allowTransmit);
+        (access == Access::Files && context.allowFiles) || (access == Access::Transmit && context.allowTransmit) ||
+        (access == Access::Local && context.origin == QLatin1String("human"));
 }
 
 QString CommandDispatcher::validate(const QJsonObject &arguments, const QJsonObject &definition) const {

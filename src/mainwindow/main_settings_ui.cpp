@@ -28,6 +28,7 @@ extern float sensitivity;
 extern float contrast;
 extern bool colorf;
 void YourClassName::updateUiFromPendingSettings() {
+    syncSpectrumProcessingControls();
     if (comboBox) {
         comboBox->blockSignals(true);
         const int deviceComboValue =
@@ -584,4 +585,29 @@ void YourClassName::updateUiFromPendingSettings() {
     settingRange();
     updateDigitalDecoderMode();
     updateVideoProcessorMode();
+}
+
+void YourClassName::syncSpectrumProcessingControls() {
+    auto fill = [this](QComboBox *combo, int selected, const QStringList &keys, const QStringList &fallbacks) {
+        if (!combo) return;
+        const QSignalBlocker blocker(combo);
+        for (int i = 0; i < combo->count() && i < keys.size(); ++i)
+            combo->setItemText(i, uiText(keys.at(i), fallbacks.at(i)));
+        combo->setCurrentIndex((std::max)(0, combo->findData(selected)));
+    };
+    fill(fftWindowCombo, normalizedFftWindowType(pendingSettings.fftWindowType),
+        {"fft_window_rectangular", "fft_window_hann", "fft_window_hamming", "fft_window_blackman_harris", "fft_window_flat_top"},
+        {"Rectangular", "Hann", "Hamming", "Blackman-Harris", "Flat-top"});
+    fill(fftBackendCombo, normalizedFftBackendPreference(fftBackendPreference),
+        {"fft_backend_auto", "fft_backend_cpu", "fft_backend_gpu"},
+        {"Auto (benchmark CPU/GPU)", "CPU FFTW", "GPU VkFFT (experimental)"});
+#ifndef FOBOSAPP_HAS_VKFFT
+    if (fftBackendCombo) fftBackendCombo->setItemText(2, uiText("fft_backend_gpu_unavailable", "GPU VkFFT (not included in this build)"));
+#endif
+    fill(displayReductionCombo, spectrumDisplayReductionMode,
+        {"display_reduction_peak", "display_reduction_average_db", "display_reduction_average_power", "display_reduction_sample", "display_reduction_minimum"},
+        {"Peak (preserve narrow signals)", "Average in dB", "Average linear power (RMS)", "Center sample", "Minimum"});
+    if (fftWindowCombo) fftWindowCombo->setToolTip(uiText("fft_window_tooltip", "FFT window applied before the transform."));
+    if (fftBackendCombo) fftBackendCombo->setToolTip(uiText("fft_backend_tooltip", "Auto benchmarks CPU and GPU FFT backends."));
+    if (displayReductionCombo) displayReductionCombo->setToolTip(uiText("display_reduction_tooltip", "How groups of FFT bins are reduced to screen pixels."));
 }

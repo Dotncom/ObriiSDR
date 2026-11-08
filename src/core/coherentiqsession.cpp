@@ -1,5 +1,6 @@
 #include "coherentiqsession.h"
 
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -18,7 +19,7 @@
 #include <limits>
 
 namespace {
-constexpr int SchemaVersion = 1;
+constexpr int SchemaVersion = 2;
 constexpr std::size_t MaximumSources = 8;
 constexpr std::size_t MaximumFloatsPerSource = 2U * 1024U * 1024U;
 
@@ -27,6 +28,10 @@ QString number(std::uint64_t value) { return QString::number(value); }
 bool finiteIq(const std::vector<float> &iq) {
     return !iq.empty() && !(iq.size() & 1U) && iq.size() <= MaximumFloatsPerSource &&
            std::all_of(iq.begin(), iq.end(), [](float value) { return std::isfinite(value); });
+}
+
+QString payloadHash(const QByteArray &bytes) {
+    return QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
 }
 QByteArray encodeCf32Le(const std::vector<float> &iq) {
     QByteArray bytes;
@@ -130,6 +135,8 @@ bool CoherentIqSession::write(
     QSet<QString> identities;
     for (const auto &source : sources) {
         if (!source.source.isValid() || !finiteIq(source.iq) ||
+            source.endComplexSample < source.startComplexSample ||
+            source.endComplexSample - source.startComplexSample != source.iq.size() / 2U ||
             !std::isfinite(source.sampleRateHz) || source.sampleRateHz <= 0.0 ||
             !std::isfinite(source.centerHz) || identities.contains(source.source.key())) {
             error = QStringLiteral("Invalid, duplicate or oversized coherent IQ source");
@@ -162,6 +169,7 @@ bool CoherentIqSession::write(
             {QStringLiteral("source"), source.source.key()},
             {QStringLiteral("file"), fileName},
             {QStringLiteral("format"), QStringLiteral("CF32LE")},
+            {QStringLiteral("sha256"), payloadHash(bytes)},
             {QStringLiteral("complexSamples"), number(source.iq.size() / 2U)},
             {QStringLiteral("epoch"), number(source.epoch)},
             {QStringLiteral("startComplexSample"), number(source.startComplexSample)},
@@ -218,32 +226,57 @@ bool CoherentIqSession::read(
     const QJsonDocument document = QJsonDocument::fromJson(manifest.readAll(), &parseError);
     const QJsonObject root = document.object();
     const QJsonArray entries = root.value(QStringLiteral("sources")).toArray();
+    const int version = root.value(QStringLiteral("schemaVersion")).toInt();
     if (parseError.error != QJsonParseError::NoError || !document.isObject() ||
-        root.value(QStringLiteral("schemaVersion")).toInt() != SchemaVersion ||
+        (version != 1 && version != SchemaVersion) ||
         root.value(QStringLiteral("format")).toString() != QStringLiteral("obrii-coherent-iq-session") ||
-        entries.size() < 2 || entries.size() > int(MaximumSources)) {
+        entries.size() < 2 || entries.size() > int(MaximumSources) ||
+        root.value(QStringLiteral("sourceCount")).toInt() != entries.size()) {
         error = QStringLiteral("Unsupported coherent-session manifest");
         return false;
     }
     const QDir directory = QFileInfo(manifestPath).absoluteDir();
     QSet<QString> identities;
+    QSet<QString> filenames;
+    std::vector<DspIqSourceSnapshot> verifiedSources;
+    verifiedSources.reserve(entries.size());
     for (const QJsonValue &entryValue : entries) {
         const QJsonObject entry = entryValue.toObject();
         DspIqSourceSnapshot source;
         const QString fileName = entry.value(QStringLiteral("file")).toString();
+        const QString filenameKey = fileName.toCaseFolded();
         if (!identity(entry.value(QStringLiteral("source")).toString(), source.source) ||
-            identities.contains(source.source.key()) || QFileInfo(fileName).fileName() != fileName ||
+            identities.contains(source.source.key()) || filenames.contains(filenameKey) ||
+            !fileName.endsWith(QStringLiteral(".cf32")) || fileName.contains(QLatin1Char('/')) ||
+            fileName.contains(QLatin1Char('\\')) || fileName.contains(QLatin1Char(':')) ||
             entry.value(QStringLiteral("format")).toString() != QStringLiteral("CF32LE")) {
             error = QStringLiteral("Invalid source identity or IQ filename in manifest");
             return false;
         }
         identities.insert(source.source.key());
-        QFile data(directory.filePath(fileName));
-        const qint64 expectedBytes = entry.value(QStringLiteral("complexSamples")).toString().toLongLong() * 8;
-        if (expectedBytes <= 0 || expectedBytes > qint64(MaximumFloatsPerSource * sizeof(float)) ||
-            !data.open(QIODevice::ReadOnly) || data.size() != expectedBytes ||
-            !decodeCf32Le(data.readAll(), source.iq)) {
+        filenames.insert(filenameKey);
+        std::uint64_t expectedSamples = 0;
+        const QFileInfo payload(directory.filePath(fileName));
+        if (!parseU64(entry.value(QStringLiteral("complexSamples")), expectedSamples) ||
+            expectedSamples == 0 || expectedSamples > MaximumFloatsPerSource / 2U ||
+            !payload.isFile() || payload.isSymLink()) {
             error = QStringLiteral("Invalid or incomplete coherent IQ payload");
+            return false;
+        }
+        const qint64 expectedBytes = static_cast<qint64>(expectedSamples * 2U * sizeof(float));
+        QFile data(payload.filePath());
+        const QByteArray bytes = data.open(QIODevice::ReadOnly) && data.size() == expectedBytes
+            ? data.read(expectedBytes + 1) : QByteArray{};
+        if (bytes.size() != expectedBytes) {
+            error = QStringLiteral("Invalid or incomplete coherent IQ payload");
+            return false;
+        }
+        if (version == SchemaVersion && entry.value(QStringLiteral("sha256")).toString() != payloadHash(bytes)) {
+            error = QStringLiteral("Coherent IQ SHA-256 mismatch: %1").arg(fileName);
+            return false;
+        }
+        if (!decodeCf32Le(bytes, source.iq)) {
+            error = QStringLiteral("Invalid coherent IQ samples: %1").arg(fileName);
             return false;
         }
         if (!parseU64(entry.value(QStringLiteral("epoch")), source.epoch) ||
@@ -265,12 +298,12 @@ bool CoherentIqSession::read(
         source.normalizedFullScale = entry.value(QStringLiteral("normalizedFullScale")).toDouble(1.0);
         source.endFloatCount = source.iq.size();
         if (!std::isfinite(source.sampleRateHz) || source.sampleRateHz <= 0.0 ||
-            !std::isfinite(source.centerHz) ||
+            !std::isfinite(source.centerHz) || source.endComplexSample < source.startComplexSample ||
             source.endComplexSample - source.startComplexSample != source.iq.size() / 2U) {
             error = QStringLiteral("Inconsistent coherent source metadata");
             return false;
         }
-        sources.push_back(std::move(source));
+        verifiedSources.push_back(std::move(source));
     }
     for (const QJsonValue &value : root.value(QStringLiteral("calibrations")).toArray()) {
         const QJsonObject object = value.toObject();
@@ -296,6 +329,7 @@ bool CoherentIqSession::read(
             std::isfinite(calibration.coherence) && calibration.coherence >= 0.10;
         if (calibration.valid) calibrations.push_back(calibration);
     }
+    sources = std::move(verifiedSources);
     return true;
 }
 

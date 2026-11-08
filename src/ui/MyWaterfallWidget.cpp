@@ -316,6 +316,7 @@ void MyWaterfallWidget::mousePressEvent(QMouseEvent *event) {
 }
 
 void MyWaterfallWidget::mouseMoveEvent(QMouseEvent *event) {
+    updateReceiverStatusOverlay();
     if (alternativeInterfaceMode) {
         alternativeSpectrumHoverVisible = alternativeSpectrumPlotRect().contains(event->pos());
         alternativeSpectrumHoverPos = event->pos();
@@ -464,6 +465,7 @@ void MyWaterfallWidget::mouseDoubleClickEvent(QMouseEvent *event) {
 
 void MyWaterfallWidget::leaveEvent(QEvent *event) {
     alternativeSpectrumHoverVisible = false;
+    if (!frequencySliceMouseActive && !spectrumFrameSliceMouseActive) hideSliceOverlay();
     update();
     QOpenGLWidget::leaveEvent(event);
 }
@@ -1057,11 +1059,35 @@ void MyWaterfallWidget::setAreaMeasurementEnabled(bool enabled) {
     update();
 }
 
+void MyWaterfallWidget::setReceiverStatusText(const QString &text) {
+    if (receiverStatusText == text) return;
+    receiverStatusText = text;
+    if (extendedInfoOverlayEnabled && sliceDetailsOverlayLabel) {
+        if (frequencySliceMouseActive || spectrumFrameSliceMouseActive)
+            updateSliceOverlay(sliceOverlayAnchor);
+        else updateReceiverStatusOverlay();
+    }
+}
+
+void MyWaterfallWidget::updateReceiverStatusOverlay() {
+    if (!sliceDetailsOverlayLabel || frequencySliceMouseActive || spectrumFrameSliceMouseActive) return;
+    if (!extendedInfoOverlayEnabled || receiverStatusText.isEmpty() || !underMouse()) {
+        sliceDetailsOverlayLabel->hide();
+        return;
+    }
+    sliceDetailsOverlayLabel->setText(receiverStatusText);
+    sliceDetailsOverlayLabel->adjustSize();
+    sliceDetailsOverlayLabel->show();
+    sliceDetailsOverlayLabel->raise();
+    positionInfoOverlays();
+}
+
 void MyWaterfallWidget::setExtendedInfoOverlayEnabled(bool enabled) {
     if (extendedInfoOverlayEnabled == enabled) {
         return;
     }
     extendedInfoOverlayEnabled = enabled;
+    updateReceiverStatusOverlay();
     if (!enabled && sliceDetailsOverlayLabel) {
         sliceDetailsOverlayLabel->hide();
     } else if (frequencySliceMouseActive || spectrumFrameSliceMouseActive) {
@@ -2558,6 +2584,10 @@ void MyWaterfallWidget::updateSliceOverlay(const QPoint &anchor) {
         return;
     }
 
+    if (extendedInfoOverlayEnabled && !receiverStatusText.isEmpty()) {
+        if (!detailsText.isEmpty()) detailsText += QLatin1Char('\n');
+        detailsText += receiverStatusText;
+    }
     sliceOverlayAnchor = anchor;
     sliceOverlayLabel->setText(text);
     sliceOverlayLabel->adjustSize();

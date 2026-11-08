@@ -12,6 +12,7 @@
 #include <limits>
 
 namespace {
+constexpr double Tau = 6.2831853071795864769;
 void setError(QString *error, const QString &message) {
     if (error) *error = message;
 }
@@ -53,6 +54,7 @@ bool VirtualIqMedium::canSetLink(const QString &sourceId, const QString &subscri
         settings.delayMs < 0 || settings.delayMs > 60000 ||
         !std::isfinite(settings.gainDb) || settings.gainDb < -120.0f ||
         settings.gainDb > 60.0f ||
+        !std::isfinite(settings.frequencyOffsetHz) || std::abs(settings.frequencyOffsetHz) >= 0.5 * settings_.sampleRate ||
         (settings.enabled && requiredSamples > bufferedSamples)) return false;
     return true;
 }
@@ -111,7 +113,7 @@ bool VirtualIqMedium::publish(const QString &sourceId, const VirtualSignalFrame 
         const float gain = explicitLink ? std::pow(10.0f, link.gainDb / 20.0f) : 1.0f;
         const qint64 start = baseIndex + roundedSamples(static_cast<qint64>(delayMs) * 1000000LL,
                                                          settings_.sampleRate);
-        addToSubscriber(&subscriber, sourceId, sessionId, frame, iq, start, gain);
+        addToSubscriber(&subscriber, sourceId, sessionId, frame, iq, start, gain, link.frequencyOffsetHz);
     }
     if (error) error->clear();
     return true;
@@ -119,7 +121,8 @@ bool VirtualIqMedium::publish(const QString &sourceId, const VirtualSignalFrame 
 
 void VirtualIqMedium::addToSubscriber(Subscriber *subscriber, const QString &sourceId,
                                       const QString &sessionId, const VirtualSignalFrame &frame,
-                                      const QVector<float> &iq, qint64 startIndex, float gain) {
+                                      const QVector<float> &iq, qint64 startIndex, float gain,
+                                      double frequencyOffsetHz) {
     const qint64 count = iq.size() / 2;
     const qint64 endIndex = startIndex + count;
     if (!subscriber->initialized) {
@@ -142,6 +145,10 @@ void VirtualIqMedium::addToSubscriber(Subscriber *subscriber, const QString &sou
         subscriber->counters.lateSamples += static_cast<quint64>((std::min)(endIndex, firstAllowed) - startIndex);
         subscriber->discontinuity = true;
     }
+    const bool shift = frequencyOffsetHz != 0.0;
+    const double anglePerSample = Tau * frequencyOffsetHz / settings_.sampleRate;
+    const double stepRe = shift ? std::cos(anglePerSample) : 1.0;
+    const double stepIm = shift ? std::sin(anglePerSample) : 0.0;
     for (qint64 index = (std::max)(startIndex, firstAllowed); index < endIndex;) {
         const qint64 blockIndex = floorBlock(index, settings_.blockSamples);
         if (!subscriber->blocks.contains(blockIndex) &&
@@ -163,6 +170,10 @@ void VirtualIqMedium::addToSubscriber(Subscriber *subscriber, const QString &sou
         block.discontinuity |= frame.discontinuity;
         const qint64 blockStart = blockIndex * settings_.blockSamples;
         const qint64 until = (std::min)(endIndex, blockStart + settings_.blockSamples);
+        // Derive phase from the shared sample timeline so frame boundaries do not reset it.
+        const double phase = shift ? std::remainder(index * anglePerSample, Tau) : 0.0;
+        double oscillatorRe = shift ? std::cos(phase) * gain : gain;
+        double oscillatorIm = shift ? std::sin(phase) * gain : 0.0;
         for (; index < until; ++index) {
             const int dest = static_cast<int>(index - blockStart);
             const int src = static_cast<int>(index - startIndex);
@@ -171,8 +182,18 @@ void VirtualIqMedium::addToSubscriber(Subscriber *subscriber, const QString &sou
                 ++subscriber->counters.overlapSamples;
             }
             block.occupied[dest] = 1;
-            block.iq[dest * 2] += iq[src * 2] * gain;
-            block.iq[dest * 2 + 1] += iq[src * 2 + 1] * gain;
+            const float re = iq[src * 2];
+            const float im = iq[src * 2 + 1];
+            if (shift) {
+                block.iq[dest * 2] += static_cast<float>(re * oscillatorRe - im * oscillatorIm);
+                block.iq[dest * 2 + 1] += static_cast<float>(re * oscillatorIm + im * oscillatorRe);
+                const double nextRe = oscillatorRe * stepRe - oscillatorIm * stepIm;
+                oscillatorIm = oscillatorRe * stepIm + oscillatorIm * stepRe;
+                oscillatorRe = nextRe;
+            } else {
+                block.iq[dest * 2] += re * gain;
+                block.iq[dest * 2 + 1] += im * gain;
+            }
         }
     }
     subscriber->counters.bufferedBlocks = subscriber->blocks.size();

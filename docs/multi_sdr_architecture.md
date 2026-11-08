@@ -64,7 +64,7 @@ implemented behind an explicit opt-in switch:
 - every subscribed source publishes stream epoch, monotonically increasing
   complex-sample position, host timestamp, clock-group ID, lock/timestamp flags,
   native ADC bit depth and native sample format together with normalized FC32;
-- no extra primary or auxiliary IQ copy is made while coherent capture is off;
+- coherent processing subscribes to and copies IQ only during capture or live mode;
 - every RX can declare internal/master/external clock role, a physical clock
   group and optional hardware-start synchronization;
 - a bounded one-shot calibration estimates integer and fractional sample delay,
@@ -77,17 +77,51 @@ implemented behind an explicit opt-in switch:
 - after successful calibration, **Save IQ snapshot** writes every participating
   source plus one atomic JSON manifest. The session keeps epochs, 64-bit sample
   positions, timestamps, clock metadata, native ADC format and calibration;
+- version 2 manifests record a SHA-256 for every CF32LE payload. Replay rejects
+  damaged or incomplete sessions before exposing any source. Version 1 files
+  still open with the legacy length and metadata checks;
 - the shared session core can restore those snapshots and combine them as the
   reference stream, best-SNR source, equal average or noise-weighted MRC. It
   weights measured signal/noise and calibration, never nominal ADC width.
 
-This does **not** yet enable live coherent concatenation. A common clock alone
-does not align sample zero, and Fobos does not expose trustworthy hardware
-timestamps or a clock-lock detector through the current API. The UI therefore
-keeps joining locked until correlation succeeds at one common center and sample
-rate. Snapshot alignment and offline MRC are implemented; actual live coherent
-stitching, coherent demodulation and beamforming remain hardware-validation work
-for clock-wired Fobos/HackRF and the future B210.
+### Live coherent IQ
+
+In **Multi-SDR → Coherent receiver group → Test virtual pair**, two virtual
+receivers produce a common broadband calibration signal at 145.5 MHz and
+48 kS/s. The second source has an 11-sample delay, 73° phase offset, and 0.65×
+gain. The Multi-SDR preview shows the combined spectrum and waterfall. In
+**DSP Flow**, select **Coherent IQ (Multi-SDR)** as the DDC's IQ source and
+select RX channel 0. For the virtual pair, enter 145.5 MHz as the DDC center
+and 48 kS/s as the output rate, and disable following the main VFO.
+DSP Flow uses its usual branch conditions: main reception must be active and
+the simplified audio channelizer disabled. The Multi-SDR preview can run the
+virtual pair on its own.
+
+**Start live coherent IQ** uses the running receivers in the
+Multi-SDR group, with the selected RX as the reference. Live mode requires a
+single center frequency, a common rate up to 192 kS/s, and a verified shared
+sample timeline. It corrects delay, phase and gain before averaging, with a
+live delay search capped at ±512 samples. The
+session stops on a discontinuity, loss of clock lock, or loss of coherence.
+A receiver that publishes only its own sample counter cannot enter this mode.
+The current Fobos API exposes no verified shared sample timeline. Hardware
+validation and the corresponding backend support are separate work.
+
+**Align by signal (Fobos)** is a separate software mode for two receivers
+using the existing Agile or Standard IQ APIs. Set both RF inputs to the same
+center and 8 MS/s, switch off scanning and span auto-alignment, connect the
+shared 10 MHz reference, and feed the same modulated signal within about
+±47 kHz of the center. Select the reference receiver, start both, and click
+**Align by signal (Fobos)**. The spectrum, waterfall and DDC source use the
+combined 125 kS/s channel. Set the DDC output rate to 125 kS/s or lower.
+
+The software compares a short window against about ±98 ms of relative
+arrival skew. A pure tone can measure phase drift but cannot establish a
+unique delay. If correlation, phase or stream continuity fails, the
+combined output pauses and starts a fresh epoch after reacquisition.
+The status **Aligned by signal** describes an estimate from received IQ.
+The stock USB stream can conceal a loss that is too small to detect from
+the signal. Hardware clock lock and shared sample numbering are separate.
 
 ## Thread and process assessment
 

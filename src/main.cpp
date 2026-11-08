@@ -1,5 +1,8 @@
 #include "main.h"
+#include "core/fobosifselection.h"
 #include "ffttuningguard.h"
+#include "core/audiolifecycle.h"
+#include "ffttuningdialog.h"
 #include "commanddispatcher.h"
 #include "commandconsoledialog.h"
 #include "commandcontrolserver.h"
@@ -28,6 +31,7 @@
 #include "scanvisualutils.h"
 #include "gnssserialutils.h"
 #include "tuningutils.h"
+#include "core/livecenterretune.h"
 #include "zoomspectrumdialog.h"
 #include "zoomdensitydialog.h"
 #include "transmitdialog.h"
@@ -447,8 +451,8 @@ YourClassName::YourClassName(QWidget *parent)
                      QStringLiteral("Alphabet:"));
     cwDecoderAlphabetCombo = new QComboBox(cwDecoderControlsWidget);
     cwDecoderAlphabetCombo->addItem(QStringLiteral("English / International"), 0);
-    cwDecoderAlphabetCombo->addItem(QString::fromUtf8(u8"Українська"), 1);
-    cwDecoderAlphabetCombo->addItem(QString::fromUtf8(u8"English + Українська"), 2);
+    cwDecoderAlphabetCombo->addItem(QString::fromUtf8(u8"РЈРєСЂР°С—РЅСЃСЊРєР°"), 1);
+    cwDecoderAlphabetCombo->addItem(QString::fromUtf8(u8"English + РЈРєСЂР°С—РЅСЃСЊРєР°"), 2);
     cwDecoderAlphabetCombo->setCurrentIndex(2);
     cwDecoderLayout->addWidget(cwToneLabel, 0, 0);
     cwDecoderLayout->addWidget(cwDecoderToneSpin, 0, 1);
@@ -923,6 +927,12 @@ YourClassName::YourClassName(QWidget *parent)
     clkBox->addItem("External", 1);
 
     processor = new DataProcessor( this);
+    connect(qApp, &QCoreApplication::aboutToQuit, this, [this]() {
+        if (hasActiveFobosDevice() && processor && processor->isRunning()) {
+            qInfo() << "[FobosLifecycle] Application quit with a running USB reader; requesting Stop";
+            processor->requestStop();
+        }
+    });
     audioProcessor = new AudioProcessor(this);
     digitalDecoderThread = new QThread(this);
     digitalDecoderThread->setObjectName(QStringLiteral("DigitalDecoderThread"));
@@ -1102,6 +1112,8 @@ YourClassName::YourClassName(QWidget *parent)
     spectrumPersistenceTimeSpin->setDecimals(1);
     spectrumPersistenceTimeSpin->setSingleStep(0.1);
     spectrumPersistenceTimeSpin->setKeyboardTracking(false);
+    spectrumPersistenceTimeSpin->setToolTip(uiText(QStringLiteral("spectrum_persistence_time_tooltip"),
+        QStringLiteral("Longer afterglow retains more spectrum history; shorter afterglow follows changes faster.")));
     auto *persistenceIntensityLabel = new QLabel(this);
     markTranslatable(persistenceIntensityLabel, QStringLiteral("spectrum_persistence_intensity"), QStringLiteral("Intensity:"));
     spectrumPersistenceIntensitySpin = new QSpinBox(this);
@@ -1109,6 +1121,8 @@ YourClassName::YourClassName(QWidget *parent)
     spectrumPersistenceIntensitySpin->setSuffix(QStringLiteral("%"));
     spectrumPersistenceIntensitySpin->setSingleStep(10);
     spectrumPersistenceIntensitySpin->setKeyboardTracking(false);
+    spectrumPersistenceIntensitySpin->setToolTip(uiText(QStringLiteral("spectrum_persistence_intensity_tooltip"),
+        QStringLiteral("Display brightness of accumulated traces, independent of receiver gain.")));
     persistenceControlsLayout->addRow(persistenceTimeLabel, spectrumPersistenceTimeSpin);
     persistenceControlsLayout->addRow(persistenceIntensityLabel, spectrumPersistenceIntensitySpin);
     auto *persistenceThresholdLabel = new QLabel(this);
@@ -1627,8 +1641,8 @@ YourClassName::YourClassName(QWidget *parent)
     spectrumEventModeCombo->addItem(uiText(QStringLiteral("spectrum_event_channel_iq"),
                                            QStringLiteral("Spectrum + Channel IQ")),
                                     1);
-    spectrumEventModeCombo->addItem(uiText(QStringLiteral("spectrum_event_full_iq"),
-                                           QStringLiteral("Spectrum + Full IQ short")),
+    spectrumEventModeCombo->addItem(uiText(QStringLiteral("spectrum_event_full_iq16"),
+                                           QStringLiteral("Spectrum + Full IQ 16-bit")),
                                     2);
     spectrumEventModeCombo->setToolTip(uiText(
         QStringLiteral("spectrum_event_mode_tooltip"),
@@ -1814,12 +1828,12 @@ YourClassName::YourClassName(QWidget *parent)
     markTranslatable(zoomSpectrumButton,
                      QStringLiteral("zoom_spectrum"),
                      QStringLiteral("Zoom spectrum"));
-    zoomSpectrumButton->setToolTip(QString::fromUtf8(u8"Відкрити швидкий вузькосмуговий аналіз для діапазону, виділеного мишею на спектрі"));
+    zoomSpectrumButton->setToolTip(QString::fromUtf8(u8"Р’С–РґРєСЂРёС‚Рё С€РІРёРґРєРёР№ РІСѓР·СЊРєРѕСЃРјСѓРіРѕРІРёР№ Р°РЅР°Р»С–Р· РґР»СЏ РґС–Р°РїР°Р·РѕРЅСѓ, РІРёРґС–Р»РµРЅРѕРіРѕ РјРёС€РµСЋ РЅР° СЃРїРµРєС‚СЂС–"));
     zoomDensityButton = new QPushButton(QStringLiteral("Density"), this);
     markTranslatable(zoomDensityButton,
                      QStringLiteral("zoom_density"),
                      QStringLiteral("Density"));
-    zoomDensityButton->setToolTip(QString::fromUtf8(u8"Відкрити окремий графік щільності для смуги, виділеної мишею на спектрі"));
+    zoomDensityButton->setToolTip(QString::fromUtf8(u8"Р’С–РґРєСЂРёС‚Рё РѕРєСЂРµРјРёР№ РіСЂР°С„С–Рє С‰С–Р»СЊРЅРѕСЃС‚С– РґР»СЏ СЃРјСѓРіРё, РІРёРґС–Р»РµРЅРѕС— РјРёС€РµСЋ РЅР° СЃРїРµРєС‚СЂС–"));
     
     QLabel *clockSourceLabel = new QLabel("Clock:", this);
     markTranslatable(clockSourceLabel, QStringLiteral("clock"), QStringLiteral("Clock:"));
@@ -2017,7 +2031,7 @@ YourClassName::YourClassName(QWidget *parent)
         QStringLiteral("Suppress calibrated internal receiver spurs in spectrum, waterfall and spectrum measurements")));
     spurSuppressionCheckbox->setChecked(spurSuppressionEnabled);
     spurCalibrateButton = new QPushButton("Calibrate", spectrumMeasurementBox);
-    markTranslatable(spurCalibrateButton, QStringLiteral("cal"), QStringLiteral("Calibrate"));
+    markTranslatable(spurCalibrateButton, QStringLiteral("spur_calibrate_full"), QStringLiteral("Calibrate full RF range..."));
     spurCalibrateButton->setToolTip(uiText(
         QStringLiteral("cal_tooltip"),
         QStringLiteral("Calibrate stable narrow spurs with a 50 ohm load connected")));
@@ -2352,7 +2366,8 @@ YourClassName::YourClassName(QWidget *parent)
             }, Qt::DirectConnection);
             multiSdrDialog->setPrimaryConfiguration(pendingSettings.centerFrequency,
                                                     pendingSettings.sampleRate,
-                                                    pendingSettings.fftLength);
+                                                    pendingSettings.fftLength,
+                                                    pendingSettings.inputMode == INPUT_RF && !agileScanEnabled && !standardScanEnabled);
             multiSdrDialog->setMainViewMode(multiSdrViewMode);
             multiSdrDialog->setPrimaryRunning(isRunningOrTransitioning());
         }
@@ -2386,7 +2401,10 @@ YourClassName::YourClassName(QWidget *parent)
     spurSuppressionPanelLayout->setSpacing(2);
     spurSuppressionPanelLayout->addLayout(spurSuppressionLayout);
     spurSuppressionPanelLayout->addWidget(spurSuppressionStatusLabel);
-    spectrumMeasurementLayout->addLayout(spurSuppressionPanelLayout);
+    // Persistent controls still back the DSP-flow links; visible controls live in Settings.
+    auto *hiddenSpurControls = new QWidget(this);
+    hiddenSpurControls->setLayout(spurSuppressionPanelLayout);
+    hiddenSpurControls->hide();
     spectrumMeasurementLayout->addWidget(receiverCalibrationBox);
 
     agileScanLayout->addLayout(agileScanPresetLayout);
@@ -3245,6 +3263,10 @@ YourClassName::YourClassName(QWidget *parent)
     fpvHunterControls->addPreset(QStringLiteral("FPV 1.2/1.3"), QStringLiteral("1080-1360\t5.000000"));
     fpvHunterControls->addPreset(QStringLiteral("FPV 2.4"), QStringLiteral("2300-2500\t5.000000"));
     fpvHunterControls->addPreset(QStringLiteral("FPV 3.3"), QStringLiteral("3200-3500\t5.000000"));
+    fpvHunterControls->addPreset(QStringLiteral("FPV 6GHz channels 6110-6890"),
+                                 agileScanPresetSpec(fpv6GhzScanTargetsMhz(6900.0), 20.0));
+    fpvHunterControls->addPreset(QStringLiteral("FPV 6GHz channels 6110-7210 (experimental)"),
+                                 agileScanPresetSpec(fpv6GhzScanTargetsMhz(7210.0), 20.0));
     fpvHunterControls->addPreset(QStringLiteral("All FPV sparse"), QStringLiteral("1080-1360\\2300-2500\\3200-3500\\5650-5925\t5.000000"));
     fpvHunterControls->setCandidateNavigationVisible(true);
     fpvHunterControls->setFollowVisible(true);
@@ -3460,50 +3482,38 @@ YourClassName::YourClassName(QWidget *parent)
     prepareReceiverCombo(fftComboBox);
     prepareReceiverCombo(sampleBox);
 
-    QGridLayout *receiverLeftColumnLayout = new QGridLayout();
-    receiverLeftColumnLayout->setContentsMargins(0, 0, 0, 0);
-    receiverLeftColumnLayout->setHorizontalSpacing(4);
-    receiverLeftColumnLayout->setVerticalSpacing(2);
-    QGridLayout *receiverRightColumnLayout = new QGridLayout();
-    receiverRightColumnLayout->setContentsMargins(0, 0, 0, 0);
-    receiverRightColumnLayout->setHorizontalSpacing(4);
-    receiverRightColumnLayout->setVerticalSpacing(2);
+    // Keep complete FFT sizes readable at the dock's minimum width. Two
+    // side-by-side forms left only a few digits visible in the editable combo.
+    QGridLayout *receiverRowsLayout = new QGridLayout();
+    receiverRowsLayout->setContentsMargins(0, 0, 0, 0);
+    receiverRowsLayout->setHorizontalSpacing(4);
+    receiverRowsLayout->setVerticalSpacing(3);
     for (QLabel *label : {clockSourceLabel, inputModeLabel, fftLabel, sampleRateLabel}) {
         if (label) label->setMinimumWidth(0);
     }
-    receiverLeftColumnLayout->addWidget(clockSourceLabel, 0, 0);
-    receiverLeftColumnLayout->addWidget(clkBox, 0, 1);
-    receiverLeftColumnLayout->addWidget(inputModeLabel, 1, 0);
-    receiverLeftColumnLayout->addWidget(modeBox, 1, 1);
-    receiverLeftColumnLayout->addWidget(fftBinWidthModeCheckbox, 2, 0, 1, 2);
-    receiverLeftColumnLayout->setColumnStretch(1, 1);
-
-    receiverRightColumnLayout->addWidget(fftLabel, 0, 0);
-    receiverRightColumnLayout->addWidget(fftComboBox, 0, 1);
-    receiverRightColumnLayout->addWidget(sampleRateLabel, 1, 0);
-    receiverRightColumnLayout->addWidget(sampleBox, 1, 1);
-    receiverRightColumnLayout->addWidget(fftBinWidthSpin, 2, 0, 1, 2);
-    receiverRightColumnLayout->setColumnStretch(1, 1);
+    receiverRowsLayout->addWidget(clockSourceLabel, 0, 0);
+    receiverRowsLayout->addWidget(clkBox, 0, 1);
+    receiverRowsLayout->addWidget(inputModeLabel, 1, 0);
+    receiverRowsLayout->addWidget(modeBox, 1, 1);
+    receiverRowsLayout->addWidget(sampleRateLabel, 2, 0);
+    receiverRowsLayout->addWidget(sampleBox, 2, 1);
+    auto *fftSizeLayout = new QGridLayout();
+    fftSizeLayout->setContentsMargins(0, 0, 0, 0);
+    fftSizeLayout->addWidget(fftLabel, 0, 0);
+    fftSizeLayout->addWidget(fftComboBox, 0, 1);
+    fftSizeLayout->setColumnStretch(1, 1);
+    auto *fftBinWidthRow = new QHBoxLayout();
+    fftBinWidthRow->setContentsMargins(0, 0, 0, 0);
+    fftBinWidthRow->setSpacing(4);
+    fftBinWidthRow->addWidget(fftBinWidthModeCheckbox);
+    fftBinWidthRow->addWidget(fftBinWidthSpin, 1);
+    fftSizeLayout->addLayout(fftBinWidthRow, 1, 0, 1, 2);
+    receiverRowsLayout->setColumnStretch(1, 1);
 
     fftBinWidthModeCheckbox->setMinimumWidth(0);
-    fftBinWidthModeCheckbox->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    fftBinWidthModeCheckbox->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     fftBinWidthSpin->setMinimumWidth(0);
     fftBinWidthSpin->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-
-    QWidget *receiverLeftColumn = new QWidget(this);
-    receiverLeftColumn->setLayout(receiverLeftColumnLayout);
-    receiverLeftColumn->setMinimumWidth(0);
-    receiverLeftColumn->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-    QWidget *receiverRightColumn = new QWidget(this);
-    receiverRightColumn->setLayout(receiverRightColumnLayout);
-    receiverRightColumn->setMinimumWidth(0);
-    receiverRightColumn->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-
-    QHBoxLayout *receiverRowsLayout = new QHBoxLayout();
-    receiverRowsLayout->setContentsMargins(0, 0, 0, 0);
-    receiverRowsLayout->setSpacing(4);
-    receiverRowsLayout->addWidget(receiverLeftColumn, 1);
-    receiverRowsLayout->addWidget(receiverRightColumn, 1);
 
     QVBoxLayout *fineTuneLayout = new QVBoxLayout();
     fineTuneLayout->setSpacing(2);
@@ -3752,13 +3762,131 @@ YourClassName::YourClassName(QWidget *parent)
     receiverSection.contentLayout->addLayout(deviceButtonLayout);
     receiverSection.contentLayout->addWidget(comboBox);
     receiverSection.contentLayout->addLayout(receiverControlLayout);
+    fftWindowCombo = new QComboBox(this);
+    fftWindowCombo->addItem(uiText(QStringLiteral("fft_window_rectangular"), QStringLiteral("Rectangular")),
+                            FFT_WINDOW_RECTANGULAR);
+    fftWindowCombo->addItem(uiText(QStringLiteral("fft_window_hann"), QStringLiteral("Hann")),
+                            FFT_WINDOW_HANN);
+    fftWindowCombo->addItem(uiText(QStringLiteral("fft_window_hamming"), QStringLiteral("Hamming")),
+                            FFT_WINDOW_HAMMING);
+    fftWindowCombo->addItem(uiText(QStringLiteral("fft_window_blackman_harris"), QStringLiteral("Blackman-Harris")),
+                            FFT_WINDOW_BLACKMAN_HARRIS);
+    fftWindowCombo->addItem(uiText(QStringLiteral("fft_window_flat_top"), QStringLiteral("Flat-top")),
+                            FFT_WINDOW_FLAT_TOP);
+    const int fftWindowIndex = fftWindowCombo->findData(
+        normalizedFftWindowType(pendingSettings.fftWindowType));
+    fftWindowCombo->setCurrentIndex(fftWindowIndex >= 0 ? fftWindowIndex : 0);
+    fftWindowCombo->setToolTip(uiText(
+        QStringLiteral("fft_window_tooltip"),
+        QStringLiteral("FFT window applied before the transform. Hann is a good general-purpose choice; Blackman-Harris suppresses leakage near strong signals; Flat-top improves amplitude accuracy but widens RBW.")));
+
+    fftBackendCombo = new QComboBox(this);
+    fftBackendCombo->addItem(uiText(QStringLiteral("fft_backend_auto"),
+                                     QStringLiteral("Auto (benchmark CPU/GPU)")),
+                             FFT_BACKEND_AUTO);
+    fftBackendCombo->addItem(uiText(QStringLiteral("fft_backend_cpu"),
+                                     QStringLiteral("CPU FFTW")),
+                             FFT_BACKEND_CPU_FFTW);
+    fftBackendCombo->addItem(uiText(QStringLiteral("fft_backend_gpu"),
+                                     QStringLiteral("GPU VkFFT (experimental)")),
+                             FFT_BACKEND_GPU_VKFFT);
+    const int fftBackendIndex = fftBackendCombo->findData(
+        normalizedFftBackendPreference(fftBackendPreference));
+    fftBackendCombo->setCurrentIndex(fftBackendIndex >= 0 ? fftBackendIndex : 0);
+    fftBackendCombo->setToolTip(uiText(
+        QStringLiteral("fft_backend_tooltip"),
+        QStringLiteral("Auto benchmarks FFTW and Vulkan VkFFT for large transforms and keeps the faster backend. Every GPU error falls back to FFTW without stopping reception.")));
+#ifndef FOBOSAPP_HAS_VKFFT
+    fftBackendCombo->setItemText(
+        fftBackendCombo->findData(FFT_BACKEND_GPU_VKFFT),
+        uiText(QStringLiteral("fft_backend_gpu_unavailable"),
+               QStringLiteral("GPU VkFFT (not included in this build)")));
+#endif
+
+    fftWindowCombo->setObjectName(QStringLiteral("receiverFftWindow"));
+    fftBackendCombo->setObjectName(QStringLiteral("receiverFftBackend"));
+    auto *fftSettings = new QGridLayout;
+    fftSettings->setColumnStretch(0, 1);
+    fftSettings->setColumnStretch(1, 1);
+    for (auto *combo : {fftWindowCombo, fftBackendCombo}) {
+        combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        combo->setMinimumContentsLength(8);
+        combo->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    }
+    auto *windowLabel = new QLabel(this);
+    markTranslatable(windowLabel, "fft_window", "FFT window");
+    auto *backendLabel = new QLabel(this);
+    markTranslatable(backendLabel, "fft_backend", "FFT backend");
+    fftSettings->addWidget(windowLabel, 0, 0);
+    fftSettings->addWidget(backendLabel, 0, 1);
+    fftSettings->addWidget(fftWindowCombo, 1, 0);
+    fftSettings->addWidget(fftBackendCombo, 1, 1);
+    auto *fftTuneButton = new QPushButton(this);
+    markTranslatable(fftTuneButton, "fft_tuning", "FFT tuning...");
+    fftSettings->addWidget(fftTuneButton, 2, 0, 1, 2);
+    connect(fftTuneButton, &QPushButton::clicked, this, [this] {
+        showFftTuningDialog(this, pendingSettings.fftLength,
+            normalizedUiLanguage(uiLanguage) == QStringLiteral("uk"), [this] {
+                return isRunningOrTransitioning() || spurSweepActive ||
+                    (playbackManager && playbackManager->isPlaying()) ||
+                    (multiSdrDialog && multiSdrDialog->anyReceiverRunning()) ||
+                    (spectrumFftWorker && (spectrumFftWorker->workOutstanding() || spectrumFftWorker->workExecuting()));
+            });
+    });
+    connect(fftWindowCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] {
+        pendingSettings.fftWindowType = normalizedFftWindowType(fftWindowCombo->currentData().toInt());
+        savePersistentSettings();
+    });
+    connect(fftBackendCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] {
+        fftBackendPreference = normalizedFftBackendPreference(fftBackendCombo->currentData().toInt());
+        savePersistentSettings();
+    });
+
     receiverSection.contentLayout->addLayout(gainLabelLayout);
     receiverSection.contentLayout->addLayout(gainSliderLayout);
+    adcOverloadStatusLabel = new QLabel(this);
+    markTranslatable(adcOverloadStatusLabel,QStringLiteral("adc_status_idle"),QStringLiteral("ADC: stopped"));
+    adcOverloadStatusLabel->setObjectName(QStringLiteral("adcOverloadStatusLabel"));
+    fobosIfStatusLabel = new QLabel(uiText("fobos_if_actual_unavailable", "Effective IF: unavailable"),this);
+    fobosIfStatusLabel->setObjectName(QStringLiteral("fobosActualIf"));
+    fobosIfStatusLabel->setWordWrap(true);
+    fobosMetadataStatusLabel=new QLabel(uiText("fobos_metadata_waiting","IQ metadata: waiting"),this);
+    fobosMetadataStatusLabel->setObjectName(QStringLiteral("fobosMetadataStatus"));
+    fobosMetadataStatusLabel->setWordWrap(true);
+
+    auto *ifStatusTimer = new QTimer(this);
+    ifStatusTimer->setInterval(1000);
+    connect(ifStatusTimer,&QTimer::timeout,this,&YourClassName::refreshFobosIfStatus);
+    ifStatusTimer->start();
+
+    auto guiHeartbeatClock = std::make_shared<QElapsedTimer>();
+    guiHeartbeatClock->start();
+    auto *guiHeartbeat = new QTimer(this);
+    guiHeartbeat->setInterval(100);
+    connect(guiHeartbeat, &QTimer::timeout, this, [this, guiHeartbeatClock] {
+        const qint64 gapMs = guiHeartbeatClock->restart();
+        if (fobosVerboseLoggingEnabled() && gapMs >= 350) {
+            qDebug() << "[GUI latency] eventLoopGapMs" << gapMs << "state" << runStateName(runState)
+                     << "retunePending" << (liveCenterRetuneThread != nullptr)
+                     << "queuedRetune" << queuedLiveCenterRetuneGeneration;
+        }
+    });
+    guiHeartbeat->start();
+
     receiverSection.contentLayout->addLayout(rtlGainLayout);
     receiverSection.contentLayout->addWidget(hackRfSettingsButton);
     receiverSection.contentLayout->addWidget(uhdSettingsButton);
     receiverSection.contentLayout->addWidget(virtualSignalSettingsButton);
     receiverSection.contentLayout->addLayout(startStopLayout);
+    // Keep status text as the shared source for the extended spectrum overlays;
+    // it no longer contributes size hints to the receiver dock.
+    for (auto *status : {adcOverloadStatusLabel, fobosIfStatusLabel, fobosMetadataStatusLabel}) {
+        status->setMinimumWidth(0);
+        status->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Minimum);
+        status->setWordWrap(true);
+        status->setTextFormat(Qt::PlainText);
+        status->hide();
+    }
 
     CollapsibleSection frequencySection = createCollapsibleSection(
         QStringLiteral("frequencies"), QStringLiteral("Frequencies"), true);
@@ -3768,6 +3896,11 @@ YourClassName::YourClassName(QWidget *parent)
     frequencySection.contentLayout->addWidget(listeningFrequencyControl);
     frequencySection.contentLayout->addLayout(fineTuneLayout);
     frequencySection.contentLayout->addWidget(quickHamContainer);
+
+    CollapsibleSection fftSection = createCollapsibleSection(
+        QStringLiteral("fft_section"), QStringLiteral("FFT"), true);
+    fftSection.contentLayout->addLayout(fftSizeLayout);
+    fftSection.contentLayout->addLayout(fftSettings);
 
     multiVfoWidget = new MultiVfoWidget(this);
     multiVfoWidget->setLanguage(uiLanguage == QStringLiteral("uk"));
@@ -3893,6 +4026,76 @@ YourClassName::YourClassName(QWidget *parent)
         QStringLiteral("waterfall_3d_section"),
         QStringLiteral("Waterfall visualization"),
         false);
+    auto *visualSpeedLayout = new QFormLayout;
+    visualSpeedLayout->setRowWrapPolicy(QFormLayout::WrapAllRows);
+    spectrumUpdateSpin = new QSpinBox(waterfall3DSection.widget);
+    spectrumUpdateSpin->setObjectName(QStringLiteral("spectrumUpdateIntervalSpin"));
+    spectrumUpdateSpin->setRange(SPECTRUM_UPDATE_AUTO_MS, SPECTRUM_UPDATE_MAX_MS);
+    spectrumUpdateSpin->setSuffix(QStringLiteral(" ms"));
+    spectrumUpdateSpin->setValue(spectrumUpdateIntervalMs);
+    spectrumUpdateSpin->setSpecialValueText(uiText("auto", "Auto"));
+    spectrumUpdateSpin->setToolTip(uiText("spectrum_update_interval_tooltip", "Spectrum and waterfall update interval. Auto keeps the FFT-dependent default."));
+    waterfallRowsSpin = new QSpinBox(waterfall3DSection.widget);
+    waterfallRowsSpin->setObjectName(QStringLiteral("waterfallRowsPerFrameSpin"));
+    waterfallRowsSpin->setRange(WATERFALL_ROWS_PER_FRAME_MIN, WATERFALL_ROWS_PER_FRAME_MAX);
+    waterfallRowsSpin->setValue(waterfallRowsPerFrame);
+    waterfallRowsSpin->setToolTip(uiText("waterfall_speed_tooltip", "Visual waterfall scroll speed. Higher values move more rows per FFT frame without increasing FFT load."));
+    auto *spectrumSpeedLabel = new QLabel(waterfall3DSection.widget);
+    markTranslatable(spectrumSpeedLabel, "spectrum_update_interval", "Spectrum/waterfall update");
+    auto *waterfallSpeedLabel = new QLabel(waterfall3DSection.widget);
+    markTranslatable(waterfallSpeedLabel, "waterfall_speed", "Waterfall speed");
+    visualSpeedLayout->addRow(spectrumSpeedLabel, spectrumUpdateSpin);
+    visualSpeedLayout->addRow(waterfallSpeedLabel, waterfallRowsSpin);
+    waterfall3DSection.contentLayout->addLayout(visualSpeedLayout);
+    displayReductionCombo = new QComboBox(this);
+    displayReductionCombo->addItem(uiText(QStringLiteral("display_reduction_peak"),
+                                           QStringLiteral("Peak (preserve narrow signals)")), 0);
+    displayReductionCombo->addItem(uiText(QStringLiteral("display_reduction_average_db"),
+                                           QStringLiteral("Average in dB")), 1);
+    displayReductionCombo->addItem(uiText(QStringLiteral("display_reduction_average_power"),
+                                           QStringLiteral("Average linear power (RMS)")), 2);
+    displayReductionCombo->addItem(uiText(QStringLiteral("display_reduction_sample"),
+                                           QStringLiteral("Center sample")), 3);
+    displayReductionCombo->addItem(uiText(QStringLiteral("display_reduction_minimum"),
+                                           QStringLiteral("Minimum")), 4);
+    displayReductionCombo->setToolTip(uiText(
+        QStringLiteral("display_reduction_tooltip"),
+        QStringLiteral("How groups of FFT bins are reduced to screen pixels. Peak retains short narrow signals; linear power gives the physically meaningful average noise level.")));
+    displayReductionCombo->setObjectName(QStringLiteral("spectrumDisplayReduction"));
+    displayReductionCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    displayReductionCombo->setMinimumContentsLength(8);
+    displayReductionCombo->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    displayReductionCombo->setCurrentIndex((std::max)(0, displayReductionCombo->findData(spectrumDisplayReductionMode)));
+    auto *reductionLabel = new QLabel(this);
+    markTranslatable(reductionLabel, "display_reduction", "FFT display reduction:");
+    auto *reductionRow = new QFormLayout;
+    reductionRow->setRowWrapPolicy(QFormLayout::WrapAllRows);
+    reductionRow->addRow(reductionLabel, displayReductionCombo);
+    waterfall3DSection.contentLayout->addLayout(reductionRow);
+    auto *spectrumOptions = new QVBoxLayout;
+    spectrumOptions->addWidget(graphCheckbox);
+    spectrumOptions->addWidget(colorCheckbox);
+    graphCheckbox->show();
+    colorCheckbox->show();
+    waterfall3DSection.contentLayout->addLayout(spectrumOptions);
+    connect(displayReductionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] {
+        spectrumDisplayReductionMode = (std::clamp)(displayReductionCombo->currentData().toInt(), 0, 4);
+        savePersistentSettings();
+    });
+
+    connect(spectrumUpdateSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+        spectrumUpdateIntervalMs = value > 0 ? (std::max)(SPECTRUM_UPDATE_MIN_MS, value) : value;
+        const QSignalBlocker blocker(spectrumUpdateSpin);
+        spectrumUpdateSpin->setValue(spectrumUpdateIntervalMs);
+        updateSpectrumTimerInterval();
+        if (wirelessLabDialog) wirelessLabDialog->setSpectrumUpdateInterval(spectrumUpdateIntervalMs);
+        savePersistentSettings();
+    });
+    connect(waterfallRowsSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int value) {
+        waterfallRowsPerFrame = value;
+        if (waterfallWidget) waterfallWidget->setRowsPerFrame(value);
+        savePersistentSettings();
+    });
     waterfall3DSection.contentLayout->addLayout(waterfallDisplayModeLayout);
     waterfall3DSection.contentLayout->addLayout(spectrumDisplayModeLayout);
     waterfall3DSection.contentLayout->addLayout(persistenceControlsLayout);
@@ -3912,6 +4115,7 @@ YourClassName::YourClassName(QWidget *parent)
 
     layout->addWidget(receiverSection.widget);
     layout->addWidget(frequencySection.widget);
+    layout->addWidget(fftSection.widget);
     layout->addWidget(audioSection.widget);
     layout->addWidget(audioFilterChainSection.widget);
     layout->addWidget(waterfall3DSection.widget);
@@ -6424,6 +6628,14 @@ YourClassName::~YourClassName() {
         processor->finalizeStopped();
     }
 
+    if (fobosCommandThread) {
+        // Receiver I/O is stopped above; only now may its issuing thread exit.
+        fobosCommandThread->quit();
+        fobosCommandThread->wait();
+        fobosCommandWorker = nullptr;
+        liveCenterRetuneThread = nullptr;
+    }
+
     if (dsdNeoThread) {
         // The receiver worker is stopped above; no more direct PCM submissions.
         disconnect(dsdNeoBridge, nullptr, audioProcessor, nullptr);
@@ -6535,7 +6747,7 @@ bool YourClassName::eventFilter(QObject *watched, QEvent *event) {
 }
 
 void YourClassName::closeEvent(QCloseEvent *event) {
-    if (fobosVerboseLoggingEnabled()) {
+    if (hasActiveFobosDevice() || fobosVerboseLoggingEnabled()) {
         qDebug() << "[FobosLifecycle] closeEvent enter"
                  << "state" << runStateName(runState)
                  << "deviceOpened" << deviceOpened
@@ -6576,6 +6788,7 @@ void YourClassName::closeEvent(QCloseEvent *event) {
 
     const bool processorRunning = processor && processor->isRunning();
     const bool needsAsyncStop =
+        liveCenterRetuneThread ||
         processorRunning ||
         runState == RadioRunState::Running ||
         runState == RadioRunState::Starting ||
@@ -6723,6 +6936,11 @@ void YourClassName::applyReceiverCalibrationLive() {
         return;
     }
 
+    if (liveCenterRetuneThread) {
+        scheduleLiveAgileCenterRetune(QStringLiteral("calibration"));
+        return;
+    }
+
     bool applied = false;
     double logicalActualFrequencyHz = pendingSettings.centerFrequency;
     if (isExternalReceiverBackendSelected()) {
@@ -6768,7 +6986,15 @@ static void logIqBufferRetuneState(const char *stage,
                                    double requestedFrequency,
                                    double actualFrequency);
 
-bool YourClassName::restartStreamForHardwareChange() {
+bool YourClassName::restartStreamForHardwareChange(bool forceFrequencyApply) {
+    if (liveCenterRetuneThread) {
+        liveRetuneDeferredHardwareChange = true;
+        return true;
+    }
+    ++liveCenterRetuneGeneration;
+    queuedLiveCenterRetuneGeneration = 0;
+    queuedLiveCenterRetuneReason.clear();
+    if (agileLiveRetuneTimer) agileLiveRetuneTimer->stop();
     QElapsedTimer restartTimer;
     restartTimer.start();
     qint64 audioStopMs = 0;
@@ -6842,7 +7068,7 @@ bool YourClassName::restartStreamForHardwareChange() {
             qDebug() << "[LiveHardware] settings changed while idle; preparing Fobos session";
             return prepareFobosSessionFromSettings(QStringLiteral("idle hardware change"));
         }
-        return applyFobosSettings();
+        return applyFobosSettings(forceFrequencyApply);
     }
 
     if (!hasActiveFobosDevice()) {
@@ -6905,7 +7131,14 @@ bool YourClassName::restartStreamForHardwareChange() {
 
     runState = RadioRunState::Starting;
     updateUiForRunState();
-    if (!applyFobosSettings()) {
+    bool settingsApplied = applyFobosSettings(forceFrequencyApply);
+    if (!settingsApplied && fobosTuneRequiresRestart && sampleRateReopenRequired) {
+        qWarning() << "[LiveHardware] reopening raw Fobos session after unconfirmed sample rate";
+        deviceOpened = false;
+        settingsApplied = closeFobosSession(false) &&
+                          prepareFobosSessionFromSettings(QStringLiteral("sample-rate recovery"));
+    }
+    if (!settingsApplied) {
         qDebug() << "[LiveHardware] applyFobosSettings failed";
         closeFobosSession(true);
         clearLiveSpectrumSnapshot();
@@ -7523,6 +7756,10 @@ void YourClassName::connectDataProcessorSignals() {
     }
 
     DataProcessor *connectedProcessor = processor;
+    connect(processor, &DataProcessor::fobosStreamMetricsReady, this,
+            [this, connectedProcessor](const QVariantMap &metrics) {
+                if (processor == connectedProcessor) updateFobosIntegrity(metrics);
+            }, Qt::QueuedConnection);
     connect(processor,
             &DataProcessor::readerFailed,
             this,
@@ -7611,6 +7848,48 @@ void YourClassName::connectDataProcessorSignals() {
                 }
             },
             Qt::QueuedConnection);
+    const auto fullRecordingBudget = processor->fullIqRecordingQueueBudget();
+    connect(processor, &DataProcessor::fullIqRecordingFrameReady, this,
+            [this, connectedProcessor, fullRecordingBudget, haveFrame = false,
+             nextSample = quint64(0), lastEpoch = quint64(0)]
+            (const QByteArray &data, double rate, int count, quint64 firstSample,
+             quint64 epoch, qint64 utcMs) mutable {
+                if (connectedProcessor == processor && spectrumEventCaptureMode == 2) {
+                    const bool gap = haveFrame && (firstSample != nextSample || epoch != lastEpoch);
+                    if (gap) {
+                        spectrumIqPrebuffer.clear();
+                        if (spectrumFrameRecorder.isRecording() && !spectrumEventIqChannelized()) {
+                            stopSpectrumFrameRecording();
+                            updateSpectrumFrameRecordingStatus(
+                                QStringLiteral("Spectrum event recording stopped: full IQ discontinuity"));
+                        }
+                    }
+                    haveFrame = true; nextSample = firstSample + quint64(count); lastEpoch = epoch;
+                    const auto dropped = fullRecordingBudget->takeDroppedFrames();
+                    const auto droppedSamples = fullRecordingBudget->takeDroppedSamples();
+                    if (dropped) qWarning() << "[Full IQ recording queue] dropped" << dropped
+                                            << "frames /" << droppedSamples << "samples";
+                    handleSpectrumEventIqFrame(data, rate, count, false, utcMs);
+                }
+                fullRecordingBudget->release(data.size());
+            }, Qt::QueuedConnection);
+    connect(processor, &DataProcessor::atvIqDiscontinuity, this,
+            [this, connectedProcessor](quint64 dropped) {
+                if (connectedProcessor != processor || pendingSettings.modulationType != MOD_ATV) return;
+                if (videoProcessor) QMetaObject::invokeMethod(videoProcessor, "reset", Qt::QueuedConnection);
+                if (dropped) {
+                    qWarning() << "[ATV IQ] discontinuity; dropped input samples" << dropped;
+                    if (isChannelIqRecordingActive()) {
+                        stopRecording(false);
+                        updateRecordingStatus(QStringLiteral("IQ recording stopped: ATV input discontinuity"));
+                    }
+                    if (spectrumFrameRecorder.isRecording() && spectrumEventIqChannelized()) {
+                        stopSpectrumFrameRecording();
+                        updateSpectrumFrameRecordingStatus(
+                            QStringLiteral("Spectrum event recording stopped: ATV input discontinuity"));
+                    }
+                }
+            }, Qt::QueuedConnection);
     if (wirelessLabDialog) {
         connect(processor, &DataProcessor::wifiIqFrameReady,
                 wirelessLabDialog, &WirelessLabDialog::appendLiveIq,
@@ -7675,6 +7954,7 @@ static void logIqBufferRetuneState(const char *stage,
 
 bool YourClassName::applyCenterFrequencyToHardwareIfNeeded(const RadioSettings &previousSettings,
                                                            const char *reason) {
+    if (runState == RadioRunState::Stopping) return true;
     if (pendingSettings.inputMode != INPUT_RF ||
         isIdle() ||
         std::abs(previousSettings.centerFrequency - pendingSettings.centerFrequency) <= 0.5) {
@@ -7757,12 +8037,11 @@ bool YourClassName::applyCenterFrequencyToHardwareIfNeeded(const RadioSettings &
         return true;
     }
 
-    const bool liveAgileRfRetune =
-        activeFobosApiKind == FobosApiKind::Agile &&
-        !agileScanEnabled &&
+    const bool liveFobosRfRetune =
+        !(activeFobosApiKind == FobosApiKind::Agile ? agileScanEnabled : standardScanEnabled) &&
         processor &&
         processor->isRunning();
-    if (liveAgileRfRetune) {
+    if (liveFobosRfRetune) {
         return scheduleLiveAgileCenterRetune(QString::fromUtf8(reason ? reason : "live"));
     }
 
@@ -7821,32 +8100,15 @@ bool YourClassName::applyCenterFrequencyToHardwareIfNeeded(const RadioSettings &
 
 bool YourClassName::scheduleLiveAgileCenterRetune(const QString &reason) {
     const uint64_t generation = ++liveCenterRetuneGeneration;
-    const int commandIntervalMs = (std::clamp)(agileLiveRetuneCommandIntervalMs,
-                                               AGILE_LIVE_RETUNE_MIN_COMMAND_INTERVAL_MS,
-                                               AGILE_LIVE_RETUNE_MAX_COMMAND_INTERVAL_MS);
-    const qint64 elapsedMs = agileLiveRetuneCommandTimer.isValid()
-                                 ? agileLiveRetuneCommandTimer.elapsed()
-                                 : commandIntervalMs;
-    const bool timerActive = agileLiveRetuneTimer && agileLiveRetuneTimer->isActive();
-    if (commandIntervalMs <= 0 ||
-        (!timerActive && elapsedMs >= commandIntervalMs)) {
-        queuedLiveCenterRetuneGeneration = 0;
-        queuedLiveCenterRetuneReason.clear();
-        return applyLiveAgileCenterRetune(generation, reason);
-    }
-
     queuedLiveCenterRetuneGeneration = generation;
     queuedLiveCenterRetuneReason = reason;
-    const qint64 delayMs = (std::max<qint64>)(
-        1,
-        static_cast<qint64>(commandIntervalMs) - elapsedMs);
-    if (agileLiveRetuneTimer) {
-        agileLiveRetuneTimer->start(static_cast<int>((std::min<qint64>)(delayMs, 1000)));
-    }
+    agileLiveRetuneInputClock.restart();
+    if (!liveCenterRetuneThread) flushQueuedLiveAgileCenterRetune();
     return true;
 }
 
 void YourClassName::flushQueuedLiveAgileCenterRetune() {
+    if (liveCenterRetuneThread) return;
     const uint64_t generation = queuedLiveCenterRetuneGeneration;
     if (generation == 0) {
         return;
@@ -7858,23 +8120,36 @@ void YourClassName::flushQueuedLiveAgileCenterRetune() {
     const qint64 elapsedMs = agileLiveRetuneCommandTimer.isValid()
                                  ? agileLiveRetuneCommandTimer.elapsed()
                                  : commandIntervalMs;
-    if (elapsedMs < commandIntervalMs) {
-        const qint64 delayMs = (std::max<qint64>)(1, commandIntervalMs - elapsedMs);
+    const auto decision = liveCenterRetuneDecision(
+        agileContinuousRetuneEnabled && (!fobosTuneRequiresRestart || fobosRawLiveTune),
+        pendingSettings.centerFrequency, actualFrequency,
+        pendingSettings.sampleRate, agileContinuousRetuneStepPercent,
+        agileLiveRetuneInputClock.isValid() ? agileLiveRetuneInputClock.elapsed() : 60,
+        elapsedMs, commandIntervalMs, queuedLiveCenterRetuneReason == QStringLiteral("calibration"),
+        liveRetuneFrameDeadline.remainingTime());
+    if (!decision.send && decision.waitMs > 0) {
         if (agileLiveRetuneTimer) {
-            agileLiveRetuneTimer->start(static_cast<int>((std::min<qint64>)(delayMs, 1000)));
+            agileLiveRetuneTimer->start((std::min)(decision.waitMs, 1000));
         }
+        return;
+    }
+    if (!decision.send) {
+        queuedLiveCenterRetuneGeneration = 0;
+        queuedLiveCenterRetuneReason.clear();
         return;
     }
 
     const QString reason = queuedLiveCenterRetuneReason.isEmpty()
                                ? QStringLiteral("queued live retune")
                                : queuedLiveCenterRetuneReason;
-    queuedLiveCenterRetuneGeneration = 0;
-    queuedLiveCenterRetuneReason.clear();
-    applyLiveAgileCenterRetune(generation, reason);
+    if (std::abs(decision.targetHz - pendingSettings.centerFrequency) < 0.5) {
+        queuedLiveCenterRetuneGeneration = 0;
+        queuedLiveCenterRetuneReason.clear();
+    }
+    applyLiveAgileCenterRetune(generation, reason, decision.targetHz);
 }
 
-bool YourClassName::applyLiveAgileCenterRetune(uint64_t generation, const QString &reason) {
+bool YourClassName::applyLiveAgileCenterRetune(uint64_t generation, const QString &reason, double targetHz) {
     if (generation != liveCenterRetuneGeneration) {
         qDebug() << "[LiveTune]" << reason
                  << "skipping stale Agile live retune"
@@ -7886,12 +8161,11 @@ bool YourClassName::applyLiveAgileCenterRetune(uint64_t generation, const QStrin
     if (runState != RadioRunState::Running ||
         pendingSettings.inputMode != INPUT_RF ||
         !hasActiveFobosDevice() ||
-        activeFobosApiKind != FobosApiKind::Agile ||
-        agileScanEnabled ||
+        (activeFobosApiKind == FobosApiKind::Agile ? agileScanEnabled : standardScanEnabled) ||
         !processor ||
         !processor->isRunning()) {
         qDebug() << "[LiveTune]" << reason
-                 << "skipping Agile live retune because stream is not in normal RF running state"
+                 << "skipping Fobos live retune because stream is not in normal RF running state"
                  << "generation" << generation
                  << "state" << static_cast<int>(runState)
                  << "inputMode" << pendingSettings.inputMode
@@ -7900,7 +8174,14 @@ bool YourClassName::applyLiveAgileCenterRetune(uint64_t generation, const QStrin
         return true;
     }
 
-    if (liveRetuneSettleTimer.isValid()) {
+    if (fobosTuneRequiresRestart && !fobosRawLiveTune) {
+        qDebug() << "[LiveTune]" << reason << "restarting raw stream for center change"
+                 << "requested" << pendingSettings.centerFrequency;
+        agileLiveRetuneCommandTimer.restart();
+        return restartStreamForHardwareChange(true);
+    }
+
+    if (liveRetuneSettleTimer.isValid() && !agileContinuousRetuneEnabled) {
         const qint64 elapsedMs = liveRetuneSettleTimer.elapsed();
         const qint64 settleMs =
             liveRetuneSettleDurationMs > 0 ? liveRetuneSettleDurationMs : LIVE_RETUNE_SETTLE_MS;
@@ -7917,86 +8198,194 @@ bool YourClassName::applyLiveAgileCenterRetune(uint64_t generation, const QStrin
         liveRetuneSettleTimer.invalidate();
     }
 
-    if (!stopAgileScanForNormalRf("live center retune")) {
+    if (activeFobosApiKind == FobosApiKind::Agile && !stopAgileScanForNormalRf("live center retune")) {
         qDebug() << "[LiveTune]" << reason
                  << "Agile live center retune aborted because scan mode could not be stopped"
                  << "generation" << generation;
         return false;
     }
 
-    const double requestedFrequency = pendingSettings.centerFrequency;
+    const double requestedFrequency = targetHz > 0.0 ? targetHz : pendingSettings.centerFrequency;
     const double previousFrequency = actualFrequency;
+    const bool rawContinuousTune = fobosRawLiveTune && agileContinuousRetuneEnabled;
     agileLiveRetuneCommandTimer.restart();
 
-    const uint64_t preRetuneIqEpoch =
-        processor ? processor->beginIqRetuneBarrier() : 0;
-    clearLiveSpectrumSnapshot(false, preRetuneIqEpoch);
-    IqBuffer::armRetuneTrace(preRetuneIqEpoch, 6, 4, 6, 6);
-    logIqBufferRetuneState("agile-live-pre-retune-clear",
-                           reason,
-                           preRetuneIqEpoch,
-                           previousFrequency,
-                           requestedFrequency,
-                           pendingSettings.actualFrequency);
+    if (!rawContinuousTune) {
+        const uint64_t preRetuneIqEpoch = processor ? processor->beginIqRetuneBarrier() : 0;
+        clearLiveSpectrumSnapshot(false, preRetuneIqEpoch);
+        IqBuffer::armRetuneTrace(preRetuneIqEpoch, 6, 4, 6, 6);
+        logIqBufferRetuneState("agile-live-pre-retune-clear",
+                               reason,
+                               preRetuneIqEpoch,
+                               previousFrequency,
+                               requestedFrequency,
+                               pendingSettings.actualFrequency);
+    }
 
-    QElapsedTimer tuneTimer;
-    tuneTimer.start();
-    double tunedFrequency = requestedFrequency;
-    const int tuneResult = setCalibratedActiveFrequencySafely(requestedFrequency, &tunedFrequency);
-    const qint64 tuneMs = tuneTimer.elapsed();
-    if (tuneResult != FOBOS_ERR_OK) {
+    struct RetuneResult {
+        int code = FOBOS_ERR_LIBUSB;
+        qint64 elapsedMs = 0;
+        double actualHz = 0.0;
+    };
+    const auto result = std::make_shared<RetuneResult>();
+    auto *const targetDevice = activeFobosDevice();
+    const auto targetApiKind = activeFobosApiKind;
+    const double offsetHz = effectiveFrequencyCalibrationOffsetHz(requestedFrequency);
+    const bool rawLiveTune = fobosRawLiveTune;
+    const auto completeRetune = [this, targetDevice, targetApiKind, requestedFrequency, previousFrequency,
+                                 generation, reason, result, rawLiveTune, rawContinuousTune] {
+        liveCenterRetuneThread = nullptr;
+        const int tuneResult = result->code;
+        const qint64 tuneMs = result->elapsedMs;
+        const double tunedFrequency = result->actualHz;
+        const bool sameDevice = activeFobosDevice() == targetDevice && activeFobosApiKind == targetApiKind;
+        if (tuneResult == FOBOS_ERR_OK && sameDevice) {
+            actualFrequency = tunedFrequency;
+            if (hardwareSettingsApplied) {
+                appliedHardwareSettings.centerFrequency = requestedFrequency;
+                appliedHardwareSettings.actualFrequency = tunedFrequency;
+            }
+        }
+        qDebug() << "[LiveTune async] completed" << "generation" << generation
+                 << "api" << fobosApiKindName(targetApiKind)
+                 << "requested" << requestedFrequency << "actual" << tunedFrequency
+                 << "result" << tuneResult << "usbWallMs" << tuneMs;
+        if (runState != RadioRunState::Running || closeShutdownInProgress || !sameDevice) {
+            liveRetuneDeferredHardwareChange = false;
+            if (runState == RadioRunState::Stopping) QTimer::singleShot(0, this, &YourClassName::pollStopCompletion);
+            return;
+        }
+        if (liveRetuneDeferredHardwareChange) {
+            liveRetuneDeferredHardwareChange = false;
+            QTimer::singleShot(0, this, [this] { restartStreamForHardwareChange(); });
+            return;
+        }
+        const bool rawRestart = rawLiveTune && tuneResult == FOBOS_ERR_BUSY;
+        if (generation != liveCenterRetuneGeneration && (!agileContinuousRetuneEnabled || rawRestart)) {
+            // The wheel may have queued many intermediate values. Only the newest
+            // target is sent next; stale completion never overwrites its UI value.
+            if (!agileLiveRetuneTimer || !agileLiveRetuneTimer->isActive())
+                QTimer::singleShot(0, this, &YourClassName::flushQueuedLiveAgileCenterRetune);
+            return;
+        }
+        if (rawRestart) {
+            qDebug() << "[LiveTune]" << reason << "RAW tune requires reader restart"
+                     << "requested" << pendingSettings.centerFrequency;
+            restartStreamForHardwareChange(true);
+            return;
+        }
+        if (tuneResult != FOBOS_ERR_OK) {
+            qDebug() << "[LiveTune]" << reason
+                     << "Fobos live set_frequency failed"
+                     << "requested" << requestedFrequency
+                     << "result" << tuneResult
+                     << "tuneMs" << tuneMs;
+            pendingSettings.centerFrequency = previousFrequency;
+            pendingSettings.actualFrequency = previousFrequency;
+            queuedLiveCenterRetuneGeneration = 0;
+            queuedLiveCenterRetuneReason.clear();
+            if (frequencyControl) {
+                const QSignalBlocker blocker(frequencyControl);
+                frequencyControl->setValueHz(previousFrequency);
+            }
+            publishSettingsToGlobals();
+            settingRange();
+            return;
+        }
+
+        pendingSettings.actualFrequency = tunedFrequency;
+        actualFrequency = tunedFrequency;
+        if (hardwareSettingsApplied) {
+            appliedHardwareSettings.centerFrequency = requestedFrequency;
+            appliedHardwareSettings.actualFrequency = tunedFrequency;
+        }
+        publishSettingsToGlobals();
+        updateIqFrameProducerSettings();
+        if (processor) {
+            processor->setCenterFrequencyHint(tunedFrequency);
+        }
+        networkSpectrumFrameMetadataValid = false;
+        networkSpectrumFrameMinFrequency = 0.0;
+        networkSpectrumFrameMaxFrequency = 0.0;
+        networkSpectrumFrameFftLength = 0;
+
+        const uint64_t postRetuneIqEpoch =
+            processor ? processor->beginIqRetuneBarrier() : 0;
+        clearLiveSpectrumSnapshot(false, postRetuneIqEpoch);
+        if (rawContinuousTune) {
+            // The firmware has applied the LO. Start building the next FFT from
+            // fresh IQ, keeping both the reader and the display timer running.
+            liveRetuneSettleDurationMs = 0;
+            liveRetuneSettleTimer.invalidate();
+        } else {
+            IqBuffer::armRetuneTrace(postRetuneIqEpoch);
+            logIqBufferRetuneState("agile-live-post-retune-clear",
+                                   reason,
+                                   postRetuneIqEpoch,
+                                   previousFrequency,
+                                   requestedFrequency,
+                                   tunedFrequency);
+            liveRetuneSettleDurationMs = agileContinuousRetuneEnabled
+                                            ? 20 : (targetApiKind == FobosApiKind::Agile
+                                                ? agileRfLiveSettleMs(pendingSettings.sampleRate, false)
+                                                : LIVE_RETUNE_SETTLE_MS);
+            liveRetuneSettleTimer.start();
+        }
+        if (agileContinuousRetuneEnabled && updateTimer && updateTimer->isActive() && !isMinimized()) {
+            constexpr int maxFrameWaitMs = 120;
+            liveRetuneFrameDeadline.setRemainingTime(maxFrameWaitMs, Qt::PreciseTimer);
+        }
+        spectrumTuningDebugFramesRemaining = !rawContinuousTune && fobosVerboseLoggingEnabled() ? 8 : 0;
+
         qDebug() << "[LiveTune]" << reason
-                 << "Agile live set_frequency failed"
+                 << "Fobos live set_frequency done without reader restart"
+                 << "previous" << previousFrequency
                  << "requested" << requestedFrequency
-                 << "result" << tuneResult
-                 << "tuneMs" << tuneMs;
-        return false;
+                 << "actual" << tunedFrequency
+                 << "tuneMs" << tuneMs
+                 << "settleMs" << liveRetuneSettleDurationMs
+                 << "iqEpoch" << postRetuneIqEpoch;
+        if (queuedLiveCenterRetuneGeneration != 0)
+            QTimer::singleShot(0, this, &YourClassName::flushQueuedLiveAgileCenterRetune);
+    };
+    if (!fobosCommandThread) {
+        // libusb may resubmit bulk reads from a synchronous control caller.
+        // Keep that Windows I/O issuing thread alive until RX has drained.
+        fobosCommandThread = new QThread(this);
+        fobosCommandThread->setObjectName(QStringLiteral("FobosCommands"));
+        fobosCommandWorker = new QObject();
+        fobosCommandWorker->moveToThread(fobosCommandThread);
+        connect(fobosCommandThread, &QThread::finished, fobosCommandWorker, &QObject::deleteLater);
+        fobosCommandThread->start();
     }
-
-    pendingSettings.actualFrequency = tunedFrequency;
-    actualFrequency = tunedFrequency;
-    if (hardwareSettingsApplied) {
-        appliedHardwareSettings.centerFrequency = requestedFrequency;
-        appliedHardwareSettings.actualFrequency = tunedFrequency;
-    }
-    publishSettingsToGlobals();
-    updateIqFrameProducerSettings();
-    if (processor) {
-        processor->setCenterFrequencyHint(tunedFrequency);
-    }
-    networkSpectrumFrameMetadataValid = false;
-    networkSpectrumFrameMinFrequency = 0.0;
-    networkSpectrumFrameMaxFrequency = 0.0;
-    networkSpectrumFrameFftLength = 0;
-
-    const uint64_t postRetuneIqEpoch =
-        processor ? processor->beginIqRetuneBarrier() : 0;
-    clearLiveSpectrumSnapshot(false, postRetuneIqEpoch);
-    IqBuffer::armRetuneTrace(postRetuneIqEpoch);
-    logIqBufferRetuneState("agile-live-post-retune-clear",
-                           reason,
-                           postRetuneIqEpoch,
-                           previousFrequency,
-                           requestedFrequency,
-                           tunedFrequency);
-
-    liveRetuneSettleDurationMs = agileRfLiveSettleMs(pendingSettings.sampleRate, false);
-    liveRetuneSettleTimer.start();
-    spectrumTuningDebugFramesRemaining = fobosVerboseLoggingEnabled() ? 8 : 0;
-
-    qDebug() << "[LiveTune]" << reason
-             << "Agile live set_frequency done without reader restart"
-             << "previous" << previousFrequency
-             << "requested" << requestedFrequency
-             << "actual" << tunedFrequency
-             << "tuneMs" << tuneMs
-             << "settleMs" << liveRetuneSettleDurationMs
-             << "iqEpoch" << postRetuneIqEpoch;
+    liveCenterRetuneThread = fobosCommandThread;
+    qDebug() << "[LiveTune async] submitted" << "generation" << generation
+             << "api" << fobosApiKindName(targetApiKind) << "requested" << requestedFrequency;
+    QMetaObject::invokeMethod(fobosCommandWorker,
+        [this, targetDevice, targetApiKind, requestedFrequency, offsetHz, result, completeRetune] {
+            QElapsedTimer timer;
+            timer.start();
+            result->code = runLiveFobosRetune(targetApiKind == FobosApiKind::Agile,
+                requestedFrequency, offsetHz, result->actualHz,
+                [targetDevice](double hz) {
+                    return setFobosAgileFrequencySafely(static_cast<fobos_sdr_dev_t *>(targetDevice), hz);
+                },
+                [targetDevice](double hz, double *actual) {
+                    return setFobosFrequencySafely(static_cast<fobos_dev_t *>(targetDevice), hz, actual);
+                });
+            result->elapsedMs = timer.elapsed();
+            QMetaObject::invokeMethod(this, completeRetune, Qt::QueuedConnection);
+        }, Qt::QueuedConnection);
     return true;
 }
 
 void YourClassName::clearLiveSpectrumSnapshot(bool clearVisualHistory, uint64_t iqEpoch) {
+    liveRetuneFrameDeadline.setRemainingTime(0);
     IqBuffer::clear(iqEpoch);
+    // Clearing IQ restarts its sample counter even when the epoch stays the same.
+    lastSpectrumFftEpoch = 0;
+    lastSpectrumFftEndFloats = 0;
+    lastSpectrumFftLength = 0;
     fftResult = std::make_unique<FFTResult>();
     if (spectrumFftWorker) {
         spectrumFftWorker->resetHfNoiseCancelState();
@@ -8024,11 +8413,18 @@ void YourClassName::clearLiveSpectrumSnapshot(bool clearVisualHistory, uint64_t 
 void YourClassName::updateUiForRunState() {
     if (networkMode == NetworkMode::Server) sendServerStateToClients();
     const bool processorRunning = processor && processor->isRunning();
-    const bool idle = isIdle() && !processorRunning;
+    const bool idle = isIdle() && !processorRunning && !dualFobosSwitchPending;
+    if(idle && adcOverloadStatusLabel) {
+        adcOverloadStatusLabel->setText(uiText(QStringLiteral("adc_status_idle"),QStringLiteral("ADC: stopped")));
+        adcOverloadStatusLabel->setStyleSheet(QString());
+        adcOverloadStatusLabel->setToolTip(QString());
+        adcOverloadGuard.reset();
+    }
     if (multiSdrDialog) {
         multiSdrDialog->setPrimaryConfiguration(pendingSettings.centerFrequency,
                                                 pendingSettings.sampleRate,
-                                                pendingSettings.fftLength);
+                                                pendingSettings.fftLength,
+                                                pendingSettings.inputMode == INPUT_RF && !agileScanEnabled && !standardScanEnabled);
         multiSdrDialog->setPrimaryRunning(runState == RadioRunState::Starting ||
                                           runState == RadioRunState::Running);
     }
@@ -8174,22 +8570,12 @@ void YourClassName::onAudioEnabledChanged(bool checked) {
         return;
     }
 
-    if (isIdle()) {
-        return;
-    }
-
-    if (checked) {
-        if (processor && processor->isRunning() && audioProcessor) {
-            audioProcessor->startDemodulation();
-        } else {
-            pendingAudioStartAfterStreamReady = true;
-        }
-    } else {
-        pendingAudioStartAfterStreamReady = false;
-        if (audioProcessor) {
-            audioProcessor->stopDemodulation();
-        }
-    }
+    const bool readerReady = processor && processor->isRunning() &&
+        !(streamWatchdogTimer && streamWatchdogTimer->isActive());
+    const auto action = localAudioAction(runState, checked, readerReady, spurSweepActive);
+    pendingAudioStartAfterStreamReady = action == LocalAudioAction::AwaitIq;
+    if (audioProcessor && action == LocalAudioAction::Start) audioProcessor->startDemodulation();
+    else if (audioProcessor && action == LocalAudioAction::Stop) audioProcessor->stopDemodulation();
 }
 
 void YourClassName::updateSpectrumTimerInterval() {
@@ -8283,6 +8669,9 @@ bool YourClassName::openFobosSession() {
         return false;
     }
     selectedDevice = selectedInfo.nativeIndex;
+    const QByteArray stockSerial = isObriiDualFirmware(selectedInfo.hardwareRevision, selectedInfo.firmwareVersion) &&
+        dualFobosStockLibrary.value(selectedInfo.serial) ? selectedInfo.serial.toLatin1() : QByteArray();
+    const char *stockReceiver = stockSerial.isEmpty() ? nullptr : stockSerial.constData();
 
     qDebug() << "[FobosLifecycle] openFobosSession enter"
              << "logicalDevice" << pendingSettings.deviceIndex
@@ -8300,7 +8689,7 @@ bool YourClassName::openFobosSession() {
     if (hasActiveFobosDevice() &&
         openedDeviceIndex == pendingSettings.deviceIndex &&
         openedNativeDeviceIndex == selectedInfo.nativeIndex &&
-        openedDeviceApiKind == selectedInfo.apiKind) {
+        openedDeviceApiKind == selectedInfo.apiKind && activeFobosUsesStockLibrary() == (stockReceiver != nullptr)) {
         if (selectedInfo.apiKind == FobosApiKind::Agile) {
             qDebug() << "[FobosLifecycle] reusing idle Agile session; settings will be applied in place"
                      << activeFobosDevice();
@@ -8326,7 +8715,7 @@ bool YourClassName::openFobosSession() {
     int ret = FOBOS_ERR_OK;
     if (selectedInfo.apiKind == FobosApiKind::Agile) {
         qDebug() << "[FobosLifecycle] fobos_sdr_open begin" << "selectedDevice" << selectedDevice;
-        ret = openFobosAgileDeviceSafely(&agileDevice, static_cast<uint32_t>(selectedDevice));
+        ret = openFobosAgileDeviceSafely(&agileDevice, static_cast<uint32_t>(selectedDevice), stockReceiver);
         qDebug() << "[FobosLifecycle] fobos_sdr_open end" << "result" << ret << "device" << agileDevice;
         if (ret != FOBOS_ERR_OK || !agileDevice) {
             qDebug() << "[FobosLifecycle] fobos_sdr_open failed; waiting before one recovery retry"
@@ -8334,14 +8723,14 @@ bool YourClassName::openFobosSession() {
                      << "selectedDevice" << selectedDevice;
             agileDevice = nullptr;
             QThread::msleep(700);
-            ret = openFobosAgileDeviceSafely(&agileDevice, static_cast<uint32_t>(selectedDevice));
+            ret = openFobosAgileDeviceSafely(&agileDevice, static_cast<uint32_t>(selectedDevice), stockReceiver);
             qDebug() << "[FobosLifecycle] fobos_sdr_open retry end"
                      << "result" << ret
                      << "device" << agileDevice;
         }
     } else {
         qDebug() << "[FobosLifecycle] fobos_rx_open begin" << "selectedDevice" << selectedDevice;
-        ret = openFobosDeviceSafely(&device, static_cast<uint32_t>(selectedDevice));
+        ret = openFobosDeviceSafely(&device, static_cast<uint32_t>(selectedDevice), stockReceiver);
         qDebug() << "[FobosLifecycle] fobos_rx_open end" << "result" << ret << "device" << device;
     }
 
@@ -8364,12 +8753,18 @@ bool YourClassName::openFobosSession() {
     openedDeviceApiKind = selectedInfo.apiKind;
     appliedHardwareSettings = RadioSettings{};
     hardwareSettingsApplied = false;
+    fobosTuneRequiresRestart = false;
+    fobosRawLiveTune = false;
     sampleRateReopenRequired = false;
     fobosCloseKnownUnsafe = false;
     return true;
 }
 
 bool YourClassName::closeFobosSession(bool clearIq) {
+    if (liveCenterRetuneThread) {
+        qWarning() << "[FobosLifecycle] USB close deferred until live frequency command completes";
+        return false;
+    }
     qDebug() << "[FobosLifecycle] closeFobosSession enter"
              << "clearIq" << clearIq
              << "device" << activeFobosDevice()
@@ -8429,6 +8824,8 @@ bool YourClassName::closeFobosSession(bool clearIq) {
     sampleRateReopenRequired = false;
     fobosCloseKnownUnsafe = false;
     closeFobosSessionAfterStop = false;
+    fobosTuneRequiresRestart = false;
+    fobosRawLiveTune = false;
     resetStandardScanState(true);
     resetListeningScanState();
     activeFobosApiKind = FobosApiKind::Standard;
@@ -8438,6 +8835,7 @@ bool YourClassName::closeFobosSession(bool clearIq) {
 }
 
 bool YourClassName::prepareFobosSessionFromSettings(const QString &reason) {
+    if (dualFobosSwitchPending) return false;
     if (isNetworkClientMode()) {
         qDebug() << "[FobosLifecycle] idle Fobos prepare skipped in network client mode"
                  << "reason" << reason;
@@ -8608,9 +9006,14 @@ bool YourClassName::applyFobosSettings(bool forceFrequencyApply) {
         return false;
     }
 
+    const bool firstApply = !hardwareSettingsApplied;
+    if (activeFobosApiKind == FobosApiKind::Agile && sampleBox &&
+        (firstApply || appliedHardwareSettings.inputMode != pendingSettings.inputMode)) {
+        const QSignalBlocker rateSignals(sampleBox);
+        populateSampleRates();
+    }
     normalizeTuning(pendingSettings);
     publishSettingsToGlobals();
-    const bool firstApply = !hardwareSettingsApplied;
     auto changedDouble = [](double a, double b) {
         return std::abs(a - b) > 0.5;
     };
@@ -8633,6 +9036,70 @@ bool YourClassName::applyFobosSettings(bool forceFrequencyApply) {
         activeFobosApiKind == FobosApiKind::Agile &&
         pendingSettings.inputMode == INPUT_RF &&
         !agileScanEnabled;
+    if (hasActiveFobosDevice()) {
+        unsigned int mode = 0;
+        const int probeResult = getActiveFobosIfModeSafely( &mode);
+        if (probeResult == FOBOS_ERR_UNSUPPORTED) {
+            // A persisted preference must never block a stock receiver session.
+            if (useCorrectedFobosCommands) {
+                useCorrectedFobosCommands = false;
+                qWarning() << "[Fobos IF] compatible Obrii extension absent; using original commands";
+                savePersistentSettings();
+            }
+        } else if (probeResult != FOBOS_ERR_OK) {
+            qWarning() << "[Fobos IF] requested mode is unavailable" << probeResult
+                       << "correctedCommands" << useCorrectedFobosCommands;
+            return false;
+        } else {
+            const unsigned int requestedMode = useCorrectedFobosCommands ? 1U : 0U;
+            if (mode != requestedMode) {
+                result = setActiveFobosIfModeSafely( requestedMode);
+                qDebug() << "[Fobos IF] select mode" << requestedMode << "result" << result;
+                if (result != FOBOS_ERR_OK) return false;
+                forceFrequencyApply = true;
+            }
+            qDebug() << "[Fobos IF] active plan" << (requestedMode ? "IF2350 corrected" : "original Auto");
+        }
+        bool tableChanged=false;
+        if(!applyStoredFobosIfRules(&tableChanged))return false;
+        if(tableChanged)forceFrequencyApply=true;
+        unsigned int testMode = 0, row3IfMhz = 0, ifCapabilities = 0;
+        const int testProbe = getActiveFobosIfPlanSafely( &testMode, nullptr, &row3IfMhz, &ifCapabilities);
+        if (testProbe == FOBOS_ERR_UNSUPPORTED) {
+            // Revision4/5 may retain an old row3-only override. Explicitly
+            // return it to the base plan; stock firmware receives no new OUT.
+            const int clearResult = setActiveFobosIfPlanSafely(0);
+            if (clearResult == FOBOS_ERR_OK) forceFrequencyApply = true;
+            else if (clearResult != FOBOS_ERR_UNSUPPORTED) return false;
+            if (fobosIfTestMode != 0) {
+                fobosIfTestMode = 0;
+                savePersistentSettings();
+                qWarning() << "[Fobos IF] global IF unavailable; using selected base plan";
+            }
+        } else if (testProbe != FOBOS_ERR_OK) {
+            qWarning() << "[Fobos IF] cannot read global IF plan" << testProbe;
+            return false;
+        } else {
+            if (fobosIfTestMode == 3 && !(ifCapabilities & 2u)) {
+                fobosIfTestMode = 0;
+                savePersistentSettings();
+                qWarning() << "[Fobos IF] automatic table unsupported; retaining native plan";
+            }
+            const unsigned int desiredTest = fobosRequestedIfTestMode(fobosIfTestMode, ifCapabilities, pendingSettings.sampleRate);
+            // An older client can leave a row3-only override while the global
+            // selector still reads0. Explicitly clear it on idle preparation.
+            const bool clearLegacyOverride = desiredTest == 0 &&
+                (isIdle() || runState == RadioRunState::Starting);
+            if (testMode != desiredTest || clearLegacyOverride) {
+                result = setActiveFobosIfPlanSafely( desiredTest);
+                qDebug() << "[Fobos IF] global IF selection" << desiredTest << "result" << result;
+                if (result != FOBOS_ERR_OK) return false;
+                forceFrequencyApply = true;
+            }
+            qDebug() << "[Fobos IF] global IF preference" << fobosIfTestMode << "active mode" << desiredTest
+                     << "effective IF MHz before retune" << row3IfMhz << "capabilities" << ifCapabilities;
+        }
+    }
     const bool skipDefaultAgileClockSource =
         agileNormalRfMode &&
         pendingSettings.clockSource == 0 &&
@@ -8688,6 +9155,7 @@ bool YourClassName::applyFobosSettings(bool forceFrequencyApply) {
         }
         pendingSettings.sampleRate = globalSampleRate;
         appliedSampleRate = globalSampleRate;
+        forceFrequencyApply = true;
     } else {
         qDebug() << "[FobosLifecycle] fobos_rx_set_samplerate skipped unchanged";
         if (appliedSampleRate > 0.0) {
@@ -8718,6 +9186,7 @@ bool YourClassName::applyFobosSettings(bool forceFrequencyApply) {
                 qDebug() << "Failed to set frequency, error code:" << result;
             }
             pendingSettings.actualFrequency = actualFrequency;
+            if (result == FOBOS_ERR_OK) refreshFobosIfStatus();
         } else {
             qDebug() << "[FobosLifecycle] fobos_rx_set_frequency skipped unchanged";
             actualFrequency = pendingSettings.actualFrequency;
@@ -8815,12 +9284,13 @@ bool YourClassName::applyFobosSettings(bool forceFrequencyApply) {
         listeningFrequencyControl->setValueHz(pendingSettings.listeningFrequency);
     }
     settingRange();
+    if(!applyFobosRuntimeSettings())return false;
     qDebug() << "[FobosLifecycle] applyFobosSettings exit";
     return true;
 }
 
 void YourClassName::startFobosProcessing() {
-    if (fftTuningActive()) return;
+    if (fftTuningActive() || dualFobosSwitchPending) return;
     if (playbackManager && playbackManager->isPlaying()) {
         stopPlayback();
     }
@@ -8864,6 +9334,7 @@ void YourClassName::startFobosProcessing() {
              << "watchdogRestart" << watchdogRestart
              << "startupRetryCount" << streamStartupRetryCount;
     logMemorySnapshot("before start");
+    if (liveCenterRetuneThread) return;
     if (!isIdle() || deviceOpened || (processor && processor->isRunning())) {
         if (isIdle() && !deviceOpened && processor && processor->isRunning()) {
             qDebug() << "[FobosLifecycle] stale DataProcessor detected while UI is idle; stopping before start";
@@ -8920,6 +9391,17 @@ void YourClassName::startFobosProcessing() {
     const bool externalBackendSelected = rtlBackendSelected || soapySdrSelected || uhdNativeSelected ||
                                          bladeRfNativeSelected || hackRfNativeSelected ||
                                          virtualSignalSelected;
+    if (!externalBackendSelected && !hasActiveFobosDevice()) {
+        // A USB re-enumeration may outlast the automatic recovery attempt.
+        // A subsequent manual Start must reopen the receiver, not repeatedly
+        // reject a missing prepared session until the whole app is restarted.
+        if (!prepareFobosSessionFromSettings(QStringLiteral("Start after USB reconnect"))) {
+            clearLiveSpectrumSnapshot();
+            runState = RadioRunState::Idle;
+            updateUiForRunState();
+            return;
+        }
+    }
     if (rtlBackendSelected) {
         normalizeRtlSdrSettings();
     }
@@ -9255,13 +9737,13 @@ void YourClassName::openZoomSpectrum() {
     if (!graphWidget || !graphWidget->bandwidthSelection(selectedLowHz, selectedHighHz)) {
         QMessageBox::information(this,
                                  QStringLiteral("Zoom spectrum"),
-                                 QString::fromUtf8(u8"Спочатку затисніть ліву кнопку миші та виділіть потрібну смугу на основному спектрі."));
+                                 QString::fromUtf8(u8"РЎРїРѕС‡Р°С‚РєСѓ Р·Р°С‚РёСЃРЅС–С‚СЊ Р»С–РІСѓ РєРЅРѕРїРєСѓ РјРёС€С– С‚Р° РІРёРґС–Р»С–С‚СЊ РїРѕС‚СЂС–Р±РЅСѓ СЃРјСѓРіСѓ РЅР° РѕСЃРЅРѕРІРЅРѕРјСѓ СЃРїРµРєС‚СЂС–."));
         return;
     }
     if (!processor) {
         QMessageBox::warning(this,
                              QStringLiteral("Zoom spectrum"),
-                             QString::fromUtf8(u8"IQ-процесор ще не створений."));
+                             QString::fromUtf8(u8"IQ-РїСЂРѕС†РµСЃРѕСЂ С‰Рµ РЅРµ СЃС‚РІРѕСЂРµРЅРёР№."));
         return;
     }
     if (!zoomSpectrumDialog) {
@@ -9315,6 +9797,15 @@ void YourClassName::openTransmitDialog() {
 }
 
 void YourClassName::finishFobosStop(bool forcedRecovery) {
+    if (liveCenterRetuneThread) {
+        if (stopPollTimer && !stopPollTimer->isActive()) stopPollTimer->start();
+        return;
+    }
+    ++liveCenterRetuneGeneration;
+    queuedLiveCenterRetuneGeneration = 0;
+    queuedLiveCenterRetuneReason.clear();
+    liveRetuneDeferredHardwareChange = false;
+    if (agileLiveRetuneTimer) agileLiveRetuneTimer->stop();
     if (fobosVerboseLoggingEnabled()) {
         qDebug() << "[FobosLifecycle] finishFobosStop enter"
                  << "forcedRecovery" << forcedRecovery
@@ -9420,7 +9911,7 @@ void YourClassName::finishFobosStop(bool forcedRecovery) {
         restartAfterStartupWatchdog = false;
         qDebug() << "[FobosLifecycle] scheduling automatic prepare and restart after stream startup watchdog"
                  << "retryCount" << streamStartupRetryCount;
-        QTimer::singleShot(350, this, [this]() {
+        QTimer::singleShot(1500, this, [this]() {
             if (!prepareFobosSessionFromSettings(QStringLiteral("reader failure retry"))) {
                 qDebug() << "[FobosLifecycle] automatic restart skipped because Fobos session could not be prepared";
                 automaticStreamRestart = false;
@@ -9458,8 +9949,10 @@ void YourClassName::checkStreamStartup() {
             pendingAudioStartAfterStreamReady = false;
             if (deviceOpened && processor && processor->isRunning()) {
                 qDebug() << "[FobosLifecycle] starting deferred audio after IQ stream became active";
+                QElapsedTimer audioStartTimer;
+                audioStartTimer.start();
                 audioProcessor->startDemodulation();
-                qDebug() << "Fobos audio Started";
+                qDebug() << "Fobos audio Started" << "audioStartWallMs" << audioStartTimer.elapsed();
             } else {
                 qDebug() << "[FobosLifecycle] deferred audio start skipped because SDR is no longer running";
             }
@@ -9511,6 +10004,7 @@ void YourClassName::checkStreamStartup() {
 }
 
 void YourClassName::pollStopCompletion() {
+    if (liveCenterRetuneThread) return;
     if (!processor) {
         if (fobosVerboseLoggingEnabled()) {
             qDebug() << "[FobosLifecycle] pollStopCompletion: no processor";
@@ -9553,6 +10047,9 @@ void YourClassName::pollStopCompletion() {
                  << "device" << activeFobosDevice()
                  << "apiKind" << fobosApiKindName(activeFobosApiKind);
         closeFobosSessionAfterStop = true;
+        // Keep observing completion after a slow driver cancellation. Stopping
+        // this timer left the UI permanently in Stopping after the reader exited.
+        if (stopPollTimer) stopPollTimer->start(250);
         updateUiForRunState();
         return;
     }
@@ -9607,7 +10104,7 @@ void YourClassName::stopFobosProcessing() {
     stopGnssSdrAcquisition(QStringLiteral("stop"), false);
     resetListeningScanState();
 
-    if (runState == RadioRunState::Idle && !deviceOpened && !(processor && processor->isRunning())) {
+    if (runState == RadioRunState::Idle && !deviceOpened && !liveCenterRetuneThread && !(processor && processor->isRunning())) {
         if (fobosVerboseLoggingEnabled()) {
             qDebug() << "Stop ignored because radio is already idle.";
         }
@@ -9624,6 +10121,11 @@ void YourClassName::stopFobosProcessing() {
     if (fobosVerboseLoggingEnabled()) {
         qDebug() << "[FobosLifecycle] state changed" << runStateName(runState);
     }
+    ++liveCenterRetuneGeneration;
+    queuedLiveCenterRetuneGeneration = 0;
+    queuedLiveCenterRetuneReason.clear();
+    liveRetuneDeferredHardwareChange = false;
+    if (agileLiveRetuneTimer) agileLiveRetuneTimer->stop();
     updateUiForRunState();
     if (fpvAutoScanController.active()) {
         stopFpvAutoScan(true);

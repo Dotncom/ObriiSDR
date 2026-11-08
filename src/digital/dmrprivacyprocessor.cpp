@@ -1,5 +1,6 @@
 #include "dmrprivacyprocessor.h"
 #include "dmrprivacyutils.h"
+#include <QDebug>
 #include <algorithm>
 
 namespace {
@@ -26,6 +27,18 @@ QByteArray validatedKey(int mode, const QString &keyHex) {
         return {};
     }
     return QByteArray::fromHex(clean.toLatin1());
+}
+
+bool decodePiWithPolarity(const QString &dibits, DmrPrivacyCodec::PiHeader &header) {
+    if (DmrPrivacyCodec::decodePi(dibits, header)) return true;
+    if (dibits.size() != 132) return false;
+    QString flipped = dibits;
+    for (int i = 0; i < flipped.size(); ++i) {
+        const int symbol = flipped.at(i).unicode() - '0';
+        if (symbol < 0 || symbol > 3) return false;
+        flipped[i] = QLatin1Char(char('0' + ((symbol + 2) & 3)));
+    }
+    return DmrPrivacyCodec::decodePi(flipped, header);
 }
 }
 
@@ -106,20 +119,15 @@ void DmrPrivacyProcessor::reset() {
     counters = {};
 }
 
+bool DmrPrivacyProcessor::isValidPi(const QString &dibits) {
+    DmrPrivacyCodec::PiHeader header;
+    return decodePiWithPolarity(dibits, header);
+}
+
 bool DmrPrivacyProcessor::observePi(const QString &dibits, int timeslot, quint64 sample) {
     if (!active || requestedMode == DMR_PRIVACY_HYTERA_BASIC) return false;
     DmrPrivacyCodec::PiHeader header;
-    bool decoded = DmrPrivacyCodec::decodePi(dibits, header);
-    if (!decoded && dibits.size() == 132) {
-        QString flipped = dibits;
-        for (int i = 0; i < flipped.size(); ++i) {
-            const int symbol = flipped.at(i).unicode() - '0';
-            if (symbol < 0 || symbol > 3) { ++counters.piRejected; return false; }
-            flipped[i] = QLatin1Char(char('0' + ((symbol + 2) & 3)));
-        }
-        decoded = DmrPrivacyCodec::decodePi(flipped, header);
-    }
-    if (timeslot < 0 || timeslot > 2 || !decoded) {
+    if (timeslot < 0 || timeslot > 2 || !decodePiWithPolarity(dibits, header)) {
         ++counters.piRejected;
         return false;
     }
@@ -184,6 +192,10 @@ void DmrPrivacyProcessor::beginSuperframe(Slot &slot, const DmrAmbePayload &payl
                 slot.keyId = pi.header.keyId;
                 slot.key.clear();
             }
+            qDebug() << "[DMR native privacy]" << (selected ? "auto key selected" : "auto key unavailable")
+                     << "algorithm" << dmrPrivacyModeId(piMode)
+                     << "algId" << pi.header.algorithm << "keyId" << pi.header.keyId
+                     << "timeslot" << payload.timeslot << "piSample" << pi.sample;
         } else {
             slot.blocked = pi.header.algorithm != (requestedMode == DMR_PRIVACY_ARC4 ? 1 : 5) ||
                            (requestedId != 0 && pi.header.keyId != requestedId);
@@ -264,7 +276,7 @@ DmrPrivacyProcessor::Outcome DmrPrivacyProcessor::process(DmrAmbePayload &payloa
         if (ordinal == 17) finishLateEntry(slot);
         if (slot.blocked) return mute(Outcome::KeyMismatch, counters.keyMismatch);
         if (requestedMode == DMR_PRIVACY_AUTO && slot.key.isEmpty())
-            return mute(Outcome::KeyMismatch, counters.keyMismatch);
+            return mute(Outcome::MissingPi, counters.missingPi);
         if (requestedMode != DMR_PRIVACY_AUTO && !configuredKeyBits)
             return mute(Outcome::InvalidKey, counters.invalidKey);
         if (slot.stream.size() != 126) return mute(Outcome::MissingMi, counters.missingMi);

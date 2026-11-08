@@ -1,12 +1,15 @@
 #include "main.h"
+#include "../wireless/usrplabdialog.h"
 #include "multivfowidget.h"
 
 #include "audiofilterchainwidget.h"
 #include "appsettingsutils.h"
+#include "coherentiqlive.h"
 #include "dspflowpanel.h"
 #include "dspcomputedialog.h"
 #include "dspbranchsettingswidget.h"
 #include "dspgraphmodel.h"
+#include "transmitdialog.h"
 #include "frequencycontrol.h"
 #include "tuningutils.h"
 #include "researchanalysisdialog.h"
@@ -31,6 +34,7 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QPointer>
@@ -383,6 +387,19 @@ AudioFilterKind filterKindForBlock(const QString &type, bool *ok = nullptr) {
 void YourClassName::ensureDspFlowPanel() {
     if (dspFlowPanel) return;
     dspFlowPanel = new DspFlowPanel(nullptr);
+    connect(dspFlowPanel, &DspFlowPanel::laboratoryTransmissionRequested, this,
+            [this](const SignalLabGenerationResult &result, double centerHz) {
+        const bool uk = normalizedUiLanguage(uiLanguage) == QStringLiteral("uk");
+        const auto answer = QMessageBox::question(dspFlowPanel,
+            uk ? QStringLiteral("Передача I/Q") : QStringLiteral("I/Q transmission"),
+            (uk ? QStringLiteral("Передати %1 с I/Q із центром %2 МГц через вибраний у передавачі вихід?")
+                : QStringLiteral("Send %1 s of I/Q at a center of %2 MHz using the selected transmitter output?"))
+                .arg(result.durationSeconds, 0, 'f', 3).arg(centerHz / 1e6, 0, 'f', 6),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (answer != QMessageBox::Yes) return;
+        openTransmitDialog();
+        transmitDialog->startLaboratoryTransmission(result, centerHz);
+    });
     connect(dspFlowPanel, &DspFlowPanel::commandConsoleRequested, this, &YourClassName::showCommandConsole);
     dspFlowPanel->setAttribute(Qt::WA_DeleteOnClose, false);
     dspFlowPanel->setLanguage(normalizedUiLanguage(uiLanguage) == QStringLiteral("uk"));
@@ -664,6 +681,10 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
     if (type == QStringLiteral("zero_span")) { openZeroSpanDialog(); return; }
     if (type == QStringLiteral("research_analysis")) { openResearchAnalysis(0); return; }
     if (type == QStringLiteral("wireless_lab")) { openWirelessLab(); return; }
+    if (type == QStringLiteral("usrp_lab")) {
+        showUsrpLabDialog(this, normalizedUiLanguage(uiLanguage) == QStringLiteral("uk"));
+        return;
+    }
     if (type == QStringLiteral("open_radio_lab")) { openOpenRadioLab(); return; }
     if (type == QStringLiteral("radio_propagation")) { openPropagationLab(); return; }
     static const QHash<QString, ResearchAnalysisDialog::Tab> researchTabs = {
@@ -870,6 +891,8 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
             for (int receiverIndex = 2; receiverIndex <= 8; ++receiverIndex)
                 receiver->addItem(QStringLiteral("RX %1 (Multi-SDR)").arg(receiverIndex),
                                   QStringLiteral("multi-rx-%1").arg(receiverIndex));
+            receiver->addItem(text("Когерентний IQ (Multi-SDR)", "Coherent IQ (Multi-SDR)"),
+                              CoherentIqLive::outputIdentity().receiverId);
             int receiverIndex = receiver->findData(stored.value("receiverId").toString(QStringLiteral("main")));
             receiver->setCurrentIndex(receiverIndex < 0 ? 0 : receiverIndex);
             form->addRow(text("Джерело IQ:", "IQ source:"), receiver);

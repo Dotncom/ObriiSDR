@@ -712,6 +712,11 @@ ObriiCli module tx cw "TEST" --tx-sink uhd --rf-confirm \
   --tx-gain-db 0
 ```
 
+To accept KISS packets from a TCP client, start a local virtual IQ receiver at
+48 kS/s and the same center, then run `ObriiCli module tx kiss 8002
+obrii-virtual-iq 144.8M`. The command binds loopback and uses the port 0 AX.25 UI
+path. Run the RX-only KISS module on another port if needed.
+
 The `file` sink creates CF32LE IQ and a JSON sidecar; it refuses to overwrite
 existing files. The `virtual` sink sends paced IQ to a local IPC virtual RX
 by default or to a TCP virtual RX with `--virtual-host`. FT8 virtual TX waits
@@ -992,6 +997,8 @@ cd ~/ObriiSDR-raspberry-source
 ```
 
 The control server listens **only on 127.0.0.1** (port 17675 by default).
+The CLI reports command-write and reply failures separately. If the command
+was written but no reply arrived, check status before sending it again.
 Use a local terminal or SSH for control; it does not expose an unauthenticated
 control port on the LAN. Without `--serve`, `run` prints one JSON status line
 per second and stops on Ctrl+C, `control stop`, or `--seconds`; a server stays
@@ -1172,7 +1179,9 @@ queues, drop/delay counters, and optional `--delay-ms`, `--noise-sigma`,
 `--seed` and `--collision-ms` experiments. It forwards whole frames in arrival
 order rather than summing simultaneous IQ waveforms. The opt-in
 `--mix-rate 48000 --mix-center 1000000` mode sums sample-aligned CF32 per RX
-with bounded buffers and per-link gain/delay. TX must use the exact rate/center;
+with bounded buffers and per-link gain, delay and optional `frequencyOffsetHz`.
+The offset shifts baseband IQ while retaining the configured center in frame
+metadata. TX must use the exact rate/center;
 source clocks need synchronization for accurate inter-host alignment. This is
 not a coherent physical RF channel or a routed mesh network, and it has no authentication; use loopback or
 a trusted lab network. Add `--scenario docs/virtual_iq_link_scenario.json` to

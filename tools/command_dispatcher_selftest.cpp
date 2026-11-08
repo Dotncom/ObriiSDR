@@ -27,6 +27,8 @@ int main(int argc, char **argv) {
     dispatcher.add(restricted, [&](const QJsonObject &) { ++calls; return QJsonObject{}; });
     restricted.name = QStringLiteral("tx"); restricted.access = CommandDispatcher::Access::Transmit;
     dispatcher.add(restricted, [&](const QJsonObject &) { ++calls; return QJsonObject{}; });
+    restricted.name = QStringLiteral("usrp"); restricted.access = CommandDispatcher::Access::Local;
+    dispatcher.add(restricted, [&](const QJsonObject &) { ++calls; return QJsonObject{}; });
     restricted.name = QStringLiteral("error"); restricted.access = CommandDispatcher::Access::Read;
     dispatcher.add(restricted, [](const QJsonObject &) -> QJsonObject { throw std::runtime_error("private-token"); });
     restricted.name = QStringLiteral("nested");
@@ -61,6 +63,9 @@ int main(int argc, char **argv) {
     check(!dispatcher.executeText("files", {}).value("ok").toBool());
     check(dispatcher.executeText("files", human).value("ok").toBool());
     check(!dispatcher.executeText("tx", human).value("ok").toBool());
+    const CommandDispatcher::Context remote{"agent", true, true, true};
+    check(!dispatcher.executeText("usrp", remote).value("ok").toBool());
+    check(dispatcher.executeText("usrp", human).value("ok").toBool());
     check(!dispatcher.executeText("nested", human).value("ok").toBool());
     reply = dispatcher.executeText("error", human);
     check(!reply.value("ok").toBool() && !QJsonDocument(reply).toJson().contains("private-token"));

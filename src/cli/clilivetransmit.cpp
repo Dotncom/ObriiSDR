@@ -1,6 +1,7 @@
 #include "clilivetransmit.h"
 #include "climicrophonecapture.h"
 #include "clijsonoutput.h"
+#include "clijsonrequest.h"
 #include "diagnosticlogging.h"
 #include "hackrftransmitterbackend.h"
 #include "transmitwaveformgenerator.h"
@@ -55,15 +56,15 @@ int command(const QStringList &words, quint16 port) {
     } else { std::fprintf(stderr, "tx control status|arm|disarm|stop|ptt on|off|key on|off|gain 0..16\n"); return 2; }
     QTcpSocket socket; socket.connectToHost(QHostAddress::LocalHost, port);
     if (!socket.waitForConnected(2000)) return 1;
-    socket.write(QJsonDocument(request).toJson(QJsonDocument::Compact) + '\n');
-    QByteArray reply; QElapsedTimer timer; timer.start();
-    while (!reply.contains('\n') && timer.elapsed() < 5000) {
-        if (socket.bytesAvailable() || socket.waitForReadyRead(100)) reply += socket.read(65536 - reply.size());
-        if (reply.size() >= 65536) return 1;
+    const CliJsonReply reply = exchangeCliJson(socket, request, 2000, 5000, 65536);
+    if (!reply.error.isEmpty()) {
+        std::fprintf(stderr, "%s\n", qPrintable(reply.error));
+        return 1;
     }
-    const auto object = QJsonDocument::fromJson(reply).object();
-    if (object.isEmpty()) return 1;
-    std::fwrite(reply.constData(), 1, static_cast<size_t>(reply.size()), stdout); std::fflush(stdout);
+    const auto object = QJsonDocument::fromJson(reply.line).object();
+    std::fwrite(reply.line.constData(), 1, static_cast<size_t>(reply.line.size()), stdout);
+    std::fputc('\n', stdout);
+    std::fflush(stdout);
     return object.value("ok").toBool() ? 0 : 1;
 }
 }

@@ -7,6 +7,8 @@
 #include "tuningutils.h"
 #include "frequencycontrol.h"
 #include "../mesh/meshnodecommands.h"
+#include "../wireless/usrplabdialog.h"
+#include "usrplabjob.h"
 
 #include <QSignalBlocker>
 
@@ -81,6 +83,30 @@ void YourClassName::ensureCommandDispatcher() {
     commandDispatcher = std::make_unique<CommandDispatcher>(QStringLiteral("gui"));
     commandControlServer = new CommandControlServer(commandDispatcher.get(), this);
     registerMeshNodeCommands(*commandDispatcher,this);
+    CommandDispatcher::Spec usrp;
+    usrp.name = QStringLiteral("usrp");
+    usrp.description = QStringLiteral("Run local USRP software jobs or open the USRP lab window");
+    usrp.access = CommandDispatcher::Access::Local;
+    usrp.inputSchema = {{"type", "object"}, {"additionalProperties", false}, {"properties", QJsonObject{
+        {"action", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"status", "open", "cancel",
+            "contracts", "wifi-loopback", "lte-zmq", "gsm-demo", "gsm-decode", "gsm-replay", "umts-decode"}}}},
+        {"input", QJsonObject{{"type", "string"}}}, {"context", QJsonObject{{"type", "string"}}},
+        {"arfcn", QJsonObject{{"type", "integer"}, {"minimum", 0}, {"maximum", 1023}}},
+        {"timeslot", QJsonObject{{"type", "integer"}, {"minimum", 1}, {"maximum", 7}}},
+        {"rate", QJsonObject{{"type", "integer"}, {"minimum", 3840000}, {"maximum", 32000000}}},
+        {"offset", QJsonObject{{"type", "integer"}, {"minimum", -13500000}, {"maximum", 13500000}}},
+        {"format", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"cf32", "cs16", "ci8"}}}},
+        {"start", QJsonObject{{"type", "integer"}, {"minimum", 0}, {"maximum", 9007199254740991.0}}}}}};
+    usrp.positional = QStringList{"action", "input", "arfcn", "timeslot"};
+    commandDispatcher->add(usrp, [this](QJsonObject request) {
+        auto *job = UsrpLabJob::forOwner(this);
+        if (request.isEmpty()) return job->status();
+        if (request.size() == 1 && request.value("action").toString() == QStringLiteral("open")) {
+            showUsrpLabDialog(this, normalizedUiLanguage(uiLanguage) == QStringLiteral("uk"));
+            return job->status();
+        }
+        return job->command(request);
+    });
     commandDispatcher->addStandard("status", [this](const QJsonObject &) { return commandStatus(false); });
     commandDispatcher->addStandard("metrics", [this](const QJsonObject &) { return commandStatus(true); });
     commandDispatcher->addStandard("capabilities", [this](const QJsonObject &) {
@@ -95,6 +121,7 @@ void YourClassName::ensureCommandDispatcher() {
     });
     commandDispatcher->addStandard("trace", [this](const QJsonObject &a) { return commandTrace(a); });
     const auto mayControl = [this](bool allowTransition = false) -> QJsonObject {
+        if (spurSweepActive) return CommandDispatcher::failure("busy", "Spur calibration is active");
         if (offlineIqPlaybackActive) return CommandDispatcher::failure("busy", "Stop offline playback before receiver control");
         if (!allowTransition && (runState == RadioRunState::Starting || runState == RadioRunState::Stopping))
             return CommandDispatcher::failure("busy", "Receiver transition is pending");

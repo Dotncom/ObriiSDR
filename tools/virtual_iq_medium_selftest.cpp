@@ -125,6 +125,29 @@ int main(int argc, char **argv) {
     capacity.addSubscriber("rx");
     if (!check(!capacity.setLink("a", "rx", {true, 100, 0.0f}),
                "reject delay beyond capacity")) return 13;
+
+    VirtualIqMedium offset(settings);
+    offset.addSubscriber("rx");
+    constexpr double offsetHz = -137.5;
+    if (!check(!offset.setLink("a", "rx", {true, 0, 0, 4000.0}) &&
+               offset.setLink("a", "rx", {true, 0, 0, offsetHz}), "frequency offset limits")) return 14;
+    // Use a frame boundary that also falls inside a mix block.
+    if (!check(offset.publish("a", frame(0.25f, 39), Arrival) &&
+               offset.publish("a", frame(0.25f, 217, Timestamp + 4875000LL), Arrival + 4875000LL),
+               "offset frame publish")) return 14;
+    const auto offsetFrames = offset.takeReady("rx", Arrival + 50000000LL);
+    if (!check(offsetFrames.size() == 2, "frequency offset output size")) return 14;
+    int sample = 0;
+    for (const auto &packet : offsetFrames) {
+        QVector<float> iq;
+        if (!check(virtualSignalDecodeComplexFloat32(packet.payload, &iq), "offset IQ decode")) return 14;
+        for (int i = 0; i < iq.size(); i += 2, ++sample) {
+            const std::complex<double> observed{iq[i], iq[i + 1]};
+            const auto expected = std::complex<double>{0.25, -0.25} *
+                std::polar(1.0, 6.2831853071795864769 * offsetHz * sample / 8000.0);
+            if (!check(std::abs(observed - expected) < 1e-6, "offset phase across frame and mix block boundaries")) return 14;
+        }
+    }
     qInfo() << "Virtual IQ medium selftest passed";
     return 0;
 }

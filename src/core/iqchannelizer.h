@@ -56,16 +56,20 @@ private:
     static constexpr int MaxResamplerTaps = 256;
     static constexpr int ResamplerHistory = MaxResamplerTaps * 2;
 
-    void configureFrontDecimator(int factor);
+    void configureFrontDecimator(int factor, bool directPairs = false);
     bool pushFrontDecimatorSample(const std::complex<float> &sample,
                                   std::complex<float> &output);
     void configureResampler(double inputRate, double targetRate, double cutoff, int tapCount);
     void pushResamplerSample(const std::complex<float> &sample,
-                             std::vector<float> &output,
+                             float *output, std::size_t &written,
                              bool applyAgc);
     std::complex<float> historySample(std::int64_t sampleIndex) const;
 
     double ncoPhase = 0.0;
+    std::vector<std::complex<float>> mixedAtvInput;
+    std::vector<std::complex<float>> frontAtvInput;
+    std::array<std::complex<float>, 3> atvFrontHistory = {};
+    bool atvFrontPending = false, configuredDirectFront = false;
     int configuredFrontDecimationFactor = 0;
     int frontDecimationWriteIndex = 0;
     int frontDecimationCount = 0;
@@ -79,10 +83,12 @@ private:
     float agcLevel = 0.01f;
     double configuredCoarseRate = 0.0;
     double configuredTargetRate = 0.0;
+    double configuredOutputStep = 1.0;
     double configuredCutoff = 0.0;
     int configuredTapCount = ResamplerTaps;
     std::array<std::array<float, MaxResamplerTaps>, ResamplerPhases> resamplerTaps = {};
-    std::array<std::complex<float>, ResamplerHistory> resamplerHistory = {};
+    // Mirror the ring to make every steady-state FIR window contiguous.
+    std::array<std::complex<float>, ResamplerHistory * 2> resamplerHistory = {};
     std::uint64_t resamplerSamplesSeen = 0;
     int resamplerWriteIndex = 0;
     double nextOutputPosition = 0.0;

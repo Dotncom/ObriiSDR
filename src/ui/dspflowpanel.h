@@ -12,6 +12,8 @@
 #include "radiosettings.h"
 #include "dspgraphmodel.h"
 #include "dspstreammanager.h"
+#include "dspboardsignal.h"
+#include "dspboardqpskreceiver.h"
 #include "spectrumcomputeoptions.h"
 #include <QPointer>
 class DspBranchEngine;
@@ -95,6 +97,7 @@ public:
 
 signals:
     void commandConsoleRequested();
+    void laboratoryTransmissionRequested(const SignalLabGenerationResult &result, double centerHz);
     void externalEndpointChanged();
     void spectrumComputeOptionsChanged();
     void spectrumComputeStatusChanged(const QString &status);
@@ -138,6 +141,11 @@ private:
     void refreshSectorControls();
     void syncWorkspaceViewport();
     void refreshBranches();
+    void updatePacketWorker(const DspGraphPlan *activePlan);
+    void refreshPacketViews();
+    void requestBoardSignal(const QString &type, const QString &id, bool run);
+    void stopBoardSignal();
+    void publishBoardSignal();
     void queueBoardHistory(const QString &mergeKey);
     void commitBoardHistory();
     void resetBoardHistory();
@@ -207,5 +215,16 @@ private:
     QString spectrumComputeStatus_;
     QPointer<DspComputeDialog> computeDialog_;
     QHash<QString, QString> branchRecordings_;
+    DspBoardSignalRequest boardSignalRequest_;
+    DspBoardSignalRequest boardDecodedRequest_;
+    std::shared_ptr<const DspBoardDecodedPayload> boardDecoded_;
+    std::unique_ptr<DspBoardPacketWorker> packetWorker_;
+    QVector<DspBoardPacketRoute> livePacketRoutes_;
+    QHash<QString, std::shared_ptr<const DspBoardDecodedPayload>> livePackets_;
+    SignalLabGenerationResult boardSignal_;
+    QElapsedTimer boardSignalClock_;
+    qint64 boardSignalSamplesSent_ = 0;
+    quint64 boardSignalRevision_ = 0;
+    bool boardSignalPreparing_ = false;
     double analogPeakMeterTargetHz_ = 0.0;
 };

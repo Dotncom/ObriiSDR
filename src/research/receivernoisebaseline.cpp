@@ -11,8 +11,8 @@
 
 namespace {
 constexpr quint32 kMagic = 0x4f4e424cu; // ONBL
-constexpr quint32 kVersion = 1u;
-constexpr int kMaximumProfiles = 16;
+constexpr quint32 kVersion = 2u;
+constexpr int kMaximumProfiles = 512;
 constexpr int kMaximumStoredBins = 32768;
 constexpr int kMaximumSerializedBins = 1048576;
 constexpr double kMinimumPower = 1.0e-30;
@@ -46,10 +46,11 @@ void writeKey(QDataStream &out, const ReceiverNoiseBaselineKey &key) {
         << qint32(key.rfBandwidthHz)
         << key.amplitudeOffsetDb
         << key.calibrationTableEnabled
-        << qint32(key.calibrationPointCount);
+        << qint32(key.calibrationPointCount)
+        << key.hardwareIdentity;
 }
 
-void readKey(QDataStream &in, ReceiverNoiseBaselineKey &key) {
+void readKey(QDataStream &in, ReceiverNoiseBaselineKey &key, quint32 version) {
     qint32 inputMode = -1;
     qint32 lnaGain = -1;
     qint32 vgaGain = -1;
@@ -73,6 +74,7 @@ void readKey(QDataStream &in, ReceiverNoiseBaselineKey &key) {
        >> key.amplitudeOffsetDb
        >> key.calibrationTableEnabled
        >> calibrationPointCount;
+    if (version >= 2) in >> key.hardwareIdentity;
     key.receiver.inputMode = inputMode;
     key.receiver.lnaGain = lnaGain;
     key.receiver.vgaGain = vgaGain;
@@ -150,10 +152,12 @@ bool ReceiverNoiseBaselineProfile::isValid() const {
     return true;
 }
 
-void ReceiverNoiseBaseline::beginCapture(const ReceiverNoiseBaselineKey &key, int targetFrames) {
+void ReceiverNoiseBaseline::beginCapture(const ReceiverNoiseBaselineKey &key, int targetFrames, int storedBins) {
     captureKey = key;
     captureFrames = 0;
     captureTargetFrames = (std::clamp)(targetFrames, 8, 512);
+    captureStoredBins = (std::clamp)(storedBins, 128, kMaximumStoredBins);
+    captureSourceBins = 0;
     captureMinimumFrequencyHz = 0.0;
     captureMaximumFrequencyHz = 0.0;
     capturePowerSum.clear();
@@ -184,7 +188,8 @@ ReceiverNoiseBaseline::CaptureResult ReceiverNoiseBaseline::addFrame(
     }
 
     if (capturePowerSum.isEmpty()) {
-        const int storedBins = (std::min)(static_cast<int>(sourceCount), kMaximumStoredBins);
+        captureSourceBins = static_cast<int>(sourceCount);
+        const int storedBins = (std::min)(static_cast<int>(sourceCount), captureStoredBins);
         capturePowerSum.fill(0.0, storedBins);
         capturePowerSquareSum.fill(0.0, storedBins);
         captureMinimumFrequencyHz = frequencies.front();
@@ -219,6 +224,7 @@ ReceiverNoiseBaseline::CaptureResult ReceiverNoiseBaseline::addFrame(
 }
 
 void ReceiverNoiseBaseline::finishCapture() {
+    invalidateShapeCache();
     ReceiverNoiseBaselineProfile profile;
     profile.key = captureKey;
     profile.minimumFrequencyHz = captureMinimumFrequencyHz;
@@ -226,6 +232,18 @@ void ReceiverNoiseBaseline::finishCapture() {
     profile.capturedFrames = captureFrames;
     profile.capturedUtcMs = QDateTime::currentMSecsSinceEpoch();
     profile.averagePower.resize(capturePowerSum.size());
+    if (captureStoredBins == 1024) {
+        // Wide-only profiles are independent of FFT geometry. Keep them separate
+        // from precise scientific profiles at the same center and gain.
+        profile.key.fftLength = 0;
+        profile.key.fftWindowType = -1;
+        if (captureSourceBins > capturePowerSum.size()) {
+            const double shift = (captureMaximumFrequencyHz - captureMinimumFrequencyHz) /
+                (captureSourceBins - 1) * (static_cast<double>(captureSourceBins) / capturePowerSum.size() - 1) * 0.5;
+            profile.minimumFrequencyHz += shift;
+            profile.maximumFrequencyHz -= shift;
+        }
+    }
 
     double spreadSumDb = 0.0;
     int spreadCount = 0;
@@ -248,9 +266,12 @@ void ReceiverNoiseBaseline::finishCapture() {
         profiles[existingIndex] = profile;
     } else {
         profiles.append(profile);
-        while (profiles.size() > kMaximumProfiles) {
-            profiles.removeFirst();
-        }
+    }
+    qint64 totalBins = 0;
+    for (const auto &stored : profiles) totalBins += stored.averagePower.size();
+    while (profiles.size() > kMaximumProfiles || totalBins > kMaximumSerializedBins) {
+        totalBins -= profiles.front().averagePower.size();
+        profiles.removeFirst();
     }
     capturing = false;
     status = QStringLiteral("Capture complete: %1 frames, variation %2 dB")
@@ -268,36 +289,93 @@ void ReceiverNoiseBaseline::cancelCapture() {
     capturePowerSquareSum.clear();
 }
 
-int ReceiverNoiseBaseline::matchingProfileIndex(const ReceiverNoiseBaselineKey &key) const {
+int ReceiverNoiseBaseline::matchingProfileIndex(const ReceiverNoiseBaselineKey &key, bool wideShape) const {
+    int nearest = -1;
+    double distance = std::numeric_limits<double>::infinity();
     for (int index = profiles.size() - 1; index >= 0; --index) {
-        if (profiles[index].isValid() && profiles[index].key.matches(key)) {
-            return index;
+        if (!profiles[index].isValid()) continue;
+        const auto &candidate = profiles[index].key;
+        if (!wideShape) {
+            if (candidate.matches(key) && (candidate.hardwareIdentity.isEmpty() || key.hardwareIdentity.isEmpty() ||
+                candidate.hardwareIdentity == key.hardwareIdentity)) return index;
+            continue;
+        }
+        if (!sameReceiverContext(candidate.receiver, key.receiver) ||
+            candidate.hardwareIdentity != key.hardwareIdentity || candidate.rfBandwidthHz != key.rfBandwidthHz ||
+            candidate.calibrationTableEnabled != key.calibrationTableEnabled ||
+            candidate.calibrationPointCount != key.calibrationPointCount) continue;
+        const double delta = std::abs(candidate.centerFrequencyHz - key.centerFrequencyHz);
+        if (delta <= (std::max)(1.0, key.receiver.sampleRateHz * 0.25) && delta < distance) {
+            nearest = index; distance = delta;
         }
     }
-    return -1;
+    return nearest;
 }
 
-bool ReceiverNoiseBaseline::hasMatchingProfile(const ReceiverNoiseBaselineKey &key) const {
-    return matchingProfileIndex(key) >= 0;
+bool ReceiverNoiseBaseline::hasMatchingProfile(const ReceiverNoiseBaselineKey &key, bool wideShape) const {
+    return matchingProfileIndex(key, wideShape) >= 0;
 }
 
 ReceiverNoiseBaselineProfile ReceiverNoiseBaseline::matchingProfile(
-    const ReceiverNoiseBaselineKey &key) const {
-    const int index = matchingProfileIndex(key);
+    const ReceiverNoiseBaselineKey &key, bool wideShape) const {
+    const int index = matchingProfileIndex(key, wideShape);
     return index >= 0 ? profiles.at(index) : ReceiverNoiseBaselineProfile{};
+}
+
+void ReceiverNoiseBaseline::prepareShapeCache(int index, double widthHz) const {
+    widthHz = (std::clamp)(widthHz, 50000.0, 2000000.0);
+    if (shapeCacheIndex == index && shapeCacheWidthHz == widthHz) return;
+    const auto &profile = profiles.at(index);
+    const int bins = (std::min)(2048, profile.averagePower.size());
+    QVector<float> reduced(bins), median(bins);
+    std::vector<float> scratch;
+    // Median reduction/filtering excludes isolated narrow spurs from the broad
+    // noise template. The template is learned with a terminated input only.
+    for (int i = 0; i < bins; ++i) {
+        const int begin = i * profile.averagePower.size() / bins;
+        const int end = (i + 1) * profile.averagePower.size() / bins;
+        scratch.clear();
+        for (int j = begin; j < end; ++j) scratch.push_back(static_cast<float>(10 * std::log10(profile.averagePower[j])));
+        std::nth_element(scratch.begin(), scratch.begin() + scratch.size() / 2, scratch.end());
+        reduced[i] = scratch[scratch.size() / 2];
+    }
+    const double step = (profile.maximumFrequencyHz - profile.minimumFrequencyHz) / (bins - 1);
+    const int radius = (std::clamp)(static_cast<int>(std::ceil(widthHz / (2 * step))), 1, bins / 2);
+    for (int i = 0; i < bins; ++i) {
+        scratch.clear();
+        for (int j = (std::max)(0, i - radius); j <= (std::min)(bins - 1, i + radius); ++j) scratch.push_back(reduced[j]);
+        std::nth_element(scratch.begin(), scratch.begin() + scratch.size() / 2, scratch.end());
+        median[i] = scratch[scratch.size() / 2];
+    }
+    shapeCacheDb.resize(bins);
+    const int smoothRadius = (std::max)(1, radius / 4);
+    QVector<double> prefix(bins + 1, 0);
+    for (int i = 0; i < bins; ++i) prefix[i + 1] = prefix[i] + median[i];
+    for (int i = 0; i < bins; ++i) {
+        const int begin = (std::max)(0, i - smoothRadius), end = (std::min)(bins, i + smoothRadius + 1);
+        shapeCacheDb[i] = static_cast<float>((prefix[end] - prefix[begin]) / (end - begin));
+    }
+    scratch.assign(shapeCacheDb.cbegin(), shapeCacheDb.cend());
+    const size_t floorIndex = scratch.size() / 10;
+    std::nth_element(scratch.begin(), scratch.begin() + floorIndex, scratch.end());
+    shapeCacheFloorDb = scratch[floorIndex];
+    shapeCacheIndex = index;
+    shapeCacheWidthHz = widthHz;
 }
 
 bool ReceiverNoiseBaseline::apply(const std::vector<float> &frequencies,
                                   std::vector<float> &levelsDb,
                                   const ReceiverNoiseBaselineKey &key,
                                   ReceiverNoiseBaselineMode mode,
-                                  double targetFloorDb) const {
+                                  double targetFloorDb, double shapeWidthHz, double shapeStrength) const {
     if (mode == ReceiverNoiseBaselineMode::Off ||
         frequencies.size() != levelsDb.size() || frequencies.empty() ||
-        !std::isfinite(targetFloorDb)) {
+        (mode != ReceiverNoiseBaselineMode::WideShape && !std::isfinite(targetFloorDb))) {
         return false;
     }
-    const int profileIndex = matchingProfileIndex(key);
+    const bool wide = mode == ReceiverNoiseBaselineMode::WideShape;
+    if (wide && (!std::isfinite(shapeWidthHz) || !std::isfinite(shapeStrength))) return false;
+    const int profileIndex = matchingProfileIndex(key, wide);
     if (profileIndex < 0) {
         return false;
     }
@@ -306,6 +384,22 @@ bool ReceiverNoiseBaseline::apply(const std::vector<float> &frequencies,
     const int profileLast = profile.averagePower.size() - 1;
     if (profileSpan <= 0.0 || profileLast < 1) {
         return false;
+    }
+    if (wide) {
+        prepareShapeCache(profileIndex, shapeWidthHz);
+        if (shapeCacheDb.size() < 2) return false;
+        const double strength = (std::clamp)(shapeStrength, 0.0, 1.0);
+        // Shapes follow baseband, so a nearby RF calibration can be reused.
+        const double centerShift = key.centerFrequencyHz - profile.key.centerFrequencyHz;
+        for (size_t i = 0; i < levelsDb.size(); ++i) {
+            if (!std::isfinite(levelsDb[i]) || !std::isfinite(frequencies[i])) continue;
+            const double x = (std::clamp)((frequencies[i] - centerShift - profile.minimumFrequencyHz) / profileSpan,
+                0.0, 1.0) * (shapeCacheDb.size() - 1);
+            const int low = static_cast<int>(x), high = (std::min)(low + 1, shapeCacheDb.size() - 1);
+            const double envelope = shapeCacheDb[low] + (shapeCacheDb[high] - shapeCacheDb[low]) * (x - low);
+            levelsDb[i] -= static_cast<float>(strength * (std::max)(0.0, envelope - shapeCacheFloorDb));
+        }
+        return true;
     }
 
     for (std::size_t index = 0; index < levelsDb.size(); ++index) {
@@ -334,18 +428,20 @@ bool ReceiverNoiseBaseline::apply(const std::vector<float> &frequencies,
     return true;
 }
 
-bool ReceiverNoiseBaseline::clearMatching(const ReceiverNoiseBaselineKey &key) {
-    const int index = matchingProfileIndex(key);
+bool ReceiverNoiseBaseline::clearMatching(const ReceiverNoiseBaselineKey &key, bool wideShape) {
+    const int index = matchingProfileIndex(key, wideShape);
     if (index < 0) {
         return false;
     }
     profiles.removeAt(index);
+    invalidateShapeCache();
     status = QStringLiteral("Matching profile removed.");
     return true;
 }
 
 void ReceiverNoiseBaseline::clearAll() {
     profiles.clear();
+    invalidateShapeCache();
     cancelCapture();
     status = QStringLiteral("All receiver-noise profiles removed.");
 }
@@ -372,6 +468,7 @@ QByteArray ReceiverNoiseBaseline::serialize() const {
 }
 
 bool ReceiverNoiseBaseline::deserialize(const QByteArray &encoded, QString *error) {
+    invalidateShapeCache();
     profiles.clear();
     if (encoded.isEmpty()) {
         return true;
@@ -388,24 +485,26 @@ bool ReceiverNoiseBaseline::deserialize(const QByteArray &encoded, QString *erro
     quint32 version = 0;
     quint32 count = 0;
     in >> magic >> version >> count;
-    if (magic != kMagic || version != kVersion || count > kMaximumProfiles) {
+    if (magic != kMagic || (version != 1 && version != kVersion) || count > kMaximumProfiles) {
         if (error) *error = QStringLiteral("Unsupported receiver-noise profile format.");
         return false;
     }
     QVector<ReceiverNoiseBaselineProfile> restored;
     restored.reserve(static_cast<int>(count));
+    qint64 totalBins = 0;
     for (quint32 profileIndex = 0; profileIndex < count; ++profileIndex) {
         ReceiverNoiseBaselineProfile profile;
         qint32 capturedFrames = 0;
         quint32 bins = 0;
-        readKey(in, profile.key);
+        readKey(in, profile.key, version);
         in >> profile.minimumFrequencyHz
            >> profile.maximumFrequencyHz
            >> capturedFrames
            >> profile.spreadDb
            >> profile.capturedUtcMs
            >> bins;
-        if (in.status() != QDataStream::Ok || bins < 2 || bins > kMaximumSerializedBins) {
+        totalBins += bins;
+        if (in.status() != QDataStream::Ok || bins < 2 || bins > kMaximumSerializedBins || totalBins > kMaximumSerializedBins) {
             if (error) *error = QStringLiteral("Receiver-noise profile is truncated or too large.");
             profiles.clear();
             return false;

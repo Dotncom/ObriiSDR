@@ -247,6 +247,12 @@ void MyGraphWidget::setFpsOverlayEnabled(bool enabled) {
     update();
 }
 
+void MyGraphWidget::setReceiverStatusText(const QString &text) {
+    if (receiverStatusText == text) return;
+    receiverStatusText = text;
+    if (extendedInfoOverlayEnabled) update();
+}
+
 void MyGraphWidget::setExtendedInfoOverlayEnabled(bool enabled) {
     if (extendedInfoOverlayEnabled == enabled) {
         return;

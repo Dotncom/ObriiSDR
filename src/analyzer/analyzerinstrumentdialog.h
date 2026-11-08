@@ -28,6 +28,7 @@ private:
     void loadPlan();
     void savePlan();
     void saveSessionTemplate();
+    void correctReflectionFile();
     void restoreLastPlan();
     void persistLastPlan() const;
 

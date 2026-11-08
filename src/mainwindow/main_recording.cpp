@@ -351,7 +351,9 @@ void YourClassName::handleLocalIqFrame(const QByteArray &iqData, double sampleRa
     if (channelized && isChannelIqRecordingActive()) {
         recordingManager->appendIqFrame(iqData, sampleRate, sampleCount);
     }
-    handleSpectrumEventIqFrame(iqData, sampleRate, sampleCount, channelized);
+    // Full-band event captures have their own unity-gain PCM16 producer.
+    // Compact network IQ8 must never be mistaken for an archival frame.
+    if (channelized) handleSpectrumEventIqFrame(iqData, sampleRate, sampleCount, true);
     if (channelized) processVideoIqFrame(iqData, sampleRate, sampleCount);
     if (channelized == isChannelIqProcessingMode()) {
         sendNetworkIqFrame(iqData, sampleRate, sampleCount);
@@ -361,12 +363,13 @@ void YourClassName::handleLocalIqFrame(const QByteArray &iqData, double sampleRa
 void YourClassName::handleIqFrameQueueDrops(quint64 frames, quint64 samples) {
     networkIqFrameSequence += frames;
     networkIqFramesDropped += frames;
-    spectrumIqPrebuffer.clear();
+    if (videoProcessor) QMetaObject::invokeMethod(videoProcessor, "reset", Qt::QueuedConnection);
+    if (spectrumEventIqChannelized()) spectrumIqPrebuffer.clear();
     if (isChannelIqRecordingActive()) {
         stopRecording(false);
         updateRecordingStatus(QStringLiteral("IQ recording stopped: capture queue overrun"));
     }
-    if (spectrumFrameRecorder.isRecording() && spectrumEventCaptureMode > 0) {
+    if (spectrumFrameRecorder.isRecording() && spectrumEventIqChannelized()) {
         stopSpectrumFrameRecording();
         updateSpectrumFrameRecordingStatus(
             QStringLiteral("Spectrum event recording stopped: IQ capture queue overrun"));
@@ -381,9 +384,10 @@ void YourClassName::handleIqFrameQueueDrops(quint64 frames, quint64 samples) {
 }
 
 void YourClassName::updateIqFrameProducerSettings() {
+    const RadioSettings captureSettings = liveReceiverSettings();
     if (wirelessLabDialog) {
         wirelessLabDialog->setLiveIqSource(pendingSettings.sampleRate,
-            pendingSettings.centerFrequency,
+            captureSettings.centerFrequency,
             runState == RadioRunState::Running && pendingSettings.inputMode == INPUT_RF &&
                 !isNetworkClientMode());
     }
@@ -402,13 +406,15 @@ void YourClassName::updateIqFrameProducerSettings() {
     const bool eventChannelIq = eventIq && spectrumEventIqChannelized();
     const bool atvChannelIq = isVideoDecodeActive() &&
                               pendingSettings.modulationType == MOD_ATV;
-    processor->configureNetworkIqStreaming(pendingSettings,
-                                           serverIqStreaming || atvChannelIq ||
-                                               (!dmrAudioIq && (channelIqRecording || eventIq)),
+    const bool legacyAtvChannelIq = atvChannelIq && pendingSettings.inputMode != INPUT_RF;
+    processor->setFullIqRecordingEnabled(eventFullIq);
+    processor->configureNetworkIqStreaming(captureSettings,
+                                           serverIqStreaming || legacyAtvChannelIq ||
+                                               (!dmrAudioIq && (channelIqRecording || eventChannelIq)),
                                            !serverFullIqStreaming &&
-                                               !eventFullIq &&
-                                               (serverChannelIqStreaming || channelIqRecording ||
-                                                eventChannelIq || atvChannelIq));
+                                               (serverChannelIqStreaming || channelIqRecording || legacyAtvChannelIq ||
+                                                eventChannelIq),
+                                           atvChannelIq && !legacyAtvChannelIq);
 }
 
 void YourClassName::updateRecordingStatus(const QString &status) {
@@ -518,7 +524,7 @@ void YourClassName::startSpectrumFrameRecording() {
             const SpectrumIqEventRecorder::Mode iqMode =
                 wantChannelized
                     ? SpectrumIqEventRecorder::Mode::ChannelIqS16
-                    : SpectrumIqEventRecorder::Mode::FullIqS8;
+                    : SpectrumIqEventRecorder::Mode::FullIqS16;
             if (!spectrumIqEventRecorder.start(spectrumEventBasePath,
                                                iqMode,
                                                pendingSettings,
@@ -527,11 +533,18 @@ void YourClassName::startSpectrumFrameRecording() {
                                                spectrumFrameRecorder.firstFrameUtcMs(),
                                                &errorMessage)) {
                 qDebug() << "[SpectrumEventIQ] failed to start prebuffer IQ recorder" << errorMessage;
+                stopSpectrumFrameRecording();
+                updateSpectrumFrameRecordingStatus(QStringLiteral("Spectrum event recording stopped: IQ open error"));
+                return;
             } else {
                 for (auto it = firstIqIt; it != spectrumIqPrebuffer.end(); ++it) {
                     const SpectrumEventIqFrame &frame = *it;
                     if (frame.channelized == wantChannelized) {
-                        spectrumIqEventRecorder.appendFrame(frame.data, frame.sampleRate, frame.sampleCount, frame.utcMs);
+                        if (!spectrumIqEventRecorder.appendFrame(frame.data, frame.sampleRate, frame.sampleCount, frame.utcMs)) {
+                            stopSpectrumFrameRecording();
+                            updateSpectrumFrameRecordingStatus(QStringLiteral("Spectrum event recording stopped: IQ prebuffer write error"));
+                            return;
+                        }
                     }
                 }
             }
@@ -541,6 +554,7 @@ void YourClassName::startSpectrumFrameRecording() {
     if (spectrumFrameBinsCombo) {
         spectrumFrameBinsCombo->setEnabled(false);
     }
+    if (spectrumEventModeCombo) spectrumEventModeCombo->setEnabled(false);
     if (spectrumFramePrebufferSpin) {
         spectrumFramePrebufferSpin->setEnabled(false);
     }
@@ -576,10 +590,11 @@ void YourClassName::stopSpectrumFrameRecording() {
     const QString finishedFile = spectrumFrameRecorder.currentFilePath();
     const quint64 frames = spectrumFrameRecorder.frameCount();
     const quint64 iqBytes = spectrumIqEventRecorder.bytesWritten();
-    if (spectrumIqEventRecorder.isRecording()) {
-        spectrumIqEventRecorder.stop();
-    }
+    // A failed append marks the recorder inactive while its valid prefix
+    // still needs closing and metadata finalization.
+    spectrumIqEventRecorder.stop();
     spectrumFrameRecorder.stop();
+    if (spectrumEventModeCombo) spectrumEventModeCombo->setEnabled(true);
     if (spectrumFrameBinsCombo) {
         spectrumFrameBinsCombo->setEnabled(true);
     }
@@ -656,7 +671,8 @@ void YourClassName::openSpectrumFrameReplay() {
 void YourClassName::handleSpectrumEventIqFrame(const QByteArray &iqData,
                                                double sampleRate,
                                                int sampleCount,
-                                               bool channelized) {
+                                               bool channelized,
+                                               qint64 capturedUtcMs) {
     if (iqData.isEmpty() || sampleRate <= 0.0 || sampleCount <= 0 || spectrumEventCaptureMode <= 0) {
         return;
     }
@@ -670,13 +686,17 @@ void YourClassName::handleSpectrumEventIqFrame(const QByteArray &iqData,
     frame.sampleRate = sampleRate;
     frame.sampleCount = sampleCount;
     frame.channelized = channelized;
-    frame.utcMs = QDateTime::currentMSecsSinceEpoch();
+    frame.utcMs = capturedUtcMs > 0 ? capturedUtcMs : QDateTime::currentMSecsSinceEpoch();
 
     if (spectrumFrameBufferEnabled) {
         spectrumIqPrebuffer.push_back(frame);
         const qint64 keepMs = static_cast<qint64>((std::max)(1, spectrumFramePrebufferSeconds)) * 1000;
+        qint64 bufferedBytes = 0;
+        for (const auto &buffered : spectrumIqPrebuffer) bufferedBytes += buffered.data.size();
         while (!spectrumIqPrebuffer.empty() &&
-               frame.utcMs - spectrumIqPrebuffer.front().utcMs > keepMs) {
+               (frame.utcMs - spectrumIqPrebuffer.front().utcMs > keepMs ||
+                bufferedBytes > 64LL * 1024 * 1024)) {
+            bufferedBytes -= spectrumIqPrebuffer.front().data.size();
             spectrumIqPrebuffer.pop_front();
         }
     }
@@ -696,7 +716,7 @@ void YourClassName::handleSpectrumEventIqFrame(const QByteArray &iqData,
         const SpectrumIqEventRecorder::Mode iqMode =
             channelized
                 ? SpectrumIqEventRecorder::Mode::ChannelIqS16
-                : SpectrumIqEventRecorder::Mode::FullIqS8;
+                : SpectrumIqEventRecorder::Mode::FullIqS16;
         if (!spectrumIqEventRecorder.start(spectrumEventBasePath,
                                            iqMode,
                                            pendingSettings,
@@ -705,11 +725,15 @@ void YourClassName::handleSpectrumEventIqFrame(const QByteArray &iqData,
                                            spectrumFrameRecorder.firstFrameUtcMs(),
                                            &errorMessage)) {
             qDebug() << "[SpectrumEventIQ] failed to start IQ event recorder" << errorMessage;
+            stopSpectrumFrameRecording();
+            updateSpectrumFrameRecordingStatus(QStringLiteral("Spectrum event recording stopped: IQ open error"));
             return;
         }
     }
     if (!spectrumIqEventRecorder.appendFrame(iqData, sampleRate, sampleCount, frame.utcMs)) {
         qDebug() << "[SpectrumEventIQ] IQ write failed";
+        stopSpectrumFrameRecording();
+        updateSpectrumFrameRecordingStatus(QStringLiteral("Spectrum event recording stopped: IQ write error"));
     }
 }
 
@@ -733,8 +757,7 @@ void YourClassName::startRecording(bool momentary) {
 
     const RecordingManager::Mode mode = selectedRecordingMode();
     if (mode == RecordingManager::Mode::ChannelIqWav &&
-        ((networkMode != NetworkMode::Disabled && isFullIqProcessingMode()) ||
-         (spectrumEventIqProducerNeeded() && spectrumEventCaptureMode == 2))) {
+        (networkMode != NetworkMode::Disabled && isFullIqProcessingMode())) {
         updateRecordingStatus(QStringLiteral("Recording blocked: Channel IQ cannot run during Full IQ streaming"));
         if (recordButton) {
             QSignalBlocker blocker(recordButton);

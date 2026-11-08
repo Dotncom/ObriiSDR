@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 8.2.0)
+project(ObriiSDR VERSION 9.0.0)
 enable_testing()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -19,6 +19,16 @@ endif()
 
 find_package(Qt5 REQUIRED COMPONENTS Core Widgets Network SerialPort Concurrent)
 find_package(Qt5 COMPONENTS Multimedia QUIET)
+add_library(ObriiUsrpLabCore STATIC src/core/usrplabjob.cpp src/core/usrplabjob.h)
+set_target_properties(ObriiUsrpLabCore PROPERTIES AUTOMOC ON AUTOUIC OFF AUTORCC OFF)
+target_include_directories(ObriiUsrpLabCore PUBLIC src/core)
+target_link_libraries(ObriiUsrpLabCore PUBLIC Qt5::Core)
+add_executable(ObriiUsrpLabJobSelfTest EXCLUDE_FROM_ALL tools/usrp_lab_job_selftest.cpp)
+target_link_libraries(ObriiUsrpLabJobSelfTest PRIVATE ObriiUsrpLabCore)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/fobos_firmware/CMakeLists.txt")
+    add_subdirectory(tools/fobos_firmware)
+endif()
+set(OBRII_LOCAL_IF_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/firmware/agile-if-extension/protocol.h")
 add_library(ObriiCommandCore STATIC src/core/commanddispatcher.cpp src/core/commanddispatcher.h)
 set_target_properties(ObriiCommandCore PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 target_include_directories(ObriiCommandCore PUBLIC src/core)
@@ -281,6 +291,7 @@ add_executable(ObriiCli
     src/analyzer/spectrummosaicengine.h
     src/backends/fobosbackend.cpp
     src/backends/fobosbackend.h
+    src/backends/fobosfrequencylimits.h
     src/backends/hackrfbackend.cpp
     src/backends/hackrfbackend.h
     src/core/dspgraphmodel.cpp
@@ -549,6 +560,8 @@ endif()
 
 add_executable(ObriiCliTxModule
     src/cli/obriiclitxmodule.cpp
+    src/openradio/kissvirtualtx.cpp src/openradio/kissvirtualtx.h
+    src/openradio/kisscodec.cpp src/openradio/kisscodec.h
     src/cli/clilivetransmit.cpp src/cli/clilivetransmit.h
     src/cli/climicrophonecapture.cpp src/cli/climicrophonecapture.h
     src/transmit/windowsmicrophonecapture.cpp src/transmit/windowsmicrophonecapture.h
@@ -723,6 +736,7 @@ obrii_register_selftest(ObriiIq16QuantizerSelfTest)
 obrii_register_selftest(ObriiIqFrameBudgetSelfTest)
 obrii_register_selftest(ObriiAppHelpSelfTest)
 obrii_register_selftest(ObriiCommandDispatcherSelfTest)
+obrii_register_selftest(ObriiUsrpLabJobSelfTest)
 obrii_register_selftest(ObriiCommandControlSelfTest)
 obrii_register_selftest(ObriiCommandConsoleSelfTest)
 
@@ -820,6 +834,8 @@ set(SOURCES
     src/main.cpp
     src/main.h
     src/mainwindow/main_appsettings.cpp
+    src/mainwindow/main_fobos_if_editor.cpp
+    src/mainwindow/main_fobos_runtime.cpp
     src/mainwindow/main_receiver_noise_baseline.cpp
     src/mainwindow/main_receiver_yfactor.cpp
     src/mainwindow/main_controls.cpp
@@ -840,6 +856,7 @@ set(SOURCES
     src/mainwindow/main_localization.cpp
     src/mainwindow/main_localization_translations.cpp
     src/mainwindow/main_measurements.cpp
+    src/mainwindow/main_spurcalibration.cpp
     src/mainwindow/main_experiment.cpp
     src/mainwindow/main_wireless.cpp
     src/mainwindow/main_propagation.cpp
@@ -856,6 +873,7 @@ set(SOURCES
     src/wireless/wirelesscaptureworker.cpp
     src/wireless/wirelesscaptureworker.h
     src/wireless/wirelesslabdialog.cpp
+    src/wireless/usrplabdialog.cpp
     src/wireless/wirelesslabdialog.h
     src/wireless/wirelesspacketdetails.cpp
     src/wireless/wirelesspacketdetails.h
@@ -889,6 +907,8 @@ set(SOURCES
     src/core/dspsourceidentity.h
     src/core/coherentiqaligner.cpp
     src/core/coherentiqaligner.h
+    src/core/coherentiqlive.cpp
+    src/core/coherentiqlive.h
     src/core/coherentiqsession.cpp
     src/core/coherentiqsession.h
     src/core/dspiqsourceregistry.cpp
@@ -936,6 +956,10 @@ set(SOURCES
     src/analyzer/analyzerspectrumwidget.h
     src/analyzer/multisdrdialog.cpp
     src/analyzer/multisdrdialog.h
+    src/analyzer/multisdrliveiq.cpp
+    src/analyzer/multisdrliveiq.h
+    src/analyzer/multisdrsignalalignment.cpp
+    src/analyzer/multisdrsignalalignment.h
     src/ui/spectrummarkerpairsdialog.cpp
     src/ui/spectrummarkerpairsdialog.h
     src/core/dataprocessor.cpp
@@ -973,6 +997,8 @@ set(SOURCES
     src/digital/cwaudiodecoder.h
     src/openradio/openradiolabdialog.cpp
     src/openradio/openradiolabdialog.h
+    src/openradio/kissvirtualtx.cpp
+    src/openradio/kissvirtualtx.h
     src/backends/bladerfbackend.cpp
     src/backends/bladerfbackend.h
     src/backends/hackrfbackend.cpp
@@ -985,6 +1011,7 @@ set(SOURCES
     src/ui/multivfowidget.h
     src/backends/fobosbackend.cpp
     src/backends/fobosbackend.h
+    src/backends/fobosfrequencylimits.h
     src/digital/fpvhunterdetector.cpp
     src/digital/fpvhunterdetector.h
     src/digital/fpvautoscancontroller.cpp
@@ -1107,6 +1134,8 @@ set(SOURCES
     src/ui/audiofilterchainwidget.cpp
     src/ui/audiofilterchainwidget.h
     src/ui/dspflowpanel.cpp
+    src/transmit/dspboardsignal.cpp
+    src/transmit/dspboardqpskreceiver.cpp
     src/ui/dspflowpanel.h
     src/ui/dspresearchwidget.cpp
     src/ui/dspresearchwidget.h
@@ -1156,9 +1185,12 @@ if(WIN32)
 endif()
 
 add_executable(ObriiSDR ${SOURCES})
+if(EXISTS "${OBRII_LOCAL_IF_HEADER}")
+    target_compile_definitions(ObriiSDR PRIVATE OBRII_LOCAL_FOBOS_IF_HEADER="${OBRII_LOCAL_IF_HEADER}")
+endif()
 target_sources(ObriiSDR PRIVATE src/mainwindow/main_commands.cpp)
-target_link_libraries(ObriiSDR PRIVATE ObriiCommandUi)
-target_link_libraries(ObriiCli PRIVATE ObriiCommandNetwork)
+target_link_libraries(ObriiSDR PRIVATE ObriiCommandUi ObriiUsrpLabCore)
+target_link_libraries(ObriiCli PRIVATE ObriiCommandNetwork ObriiUsrpLabCore)
 
 add_executable(ObriiUhdBackendSelfTest
     tools/uhd_backend_selftest.cpp
@@ -1183,12 +1215,19 @@ add_executable(ObriiAnalyzer
     src/analyzer/analyzerinstrumentdialog.h
     src/analyzer/multisdrdialog.cpp
     src/analyzer/multisdrdialog.h
+    src/analyzer/multisdrliveiq.cpp
+    src/analyzer/multisdrliveiq.h
+    src/analyzer/multisdrsignalalignment.cpp
+    src/analyzer/multisdrsignalalignment.h
+    src/core/iqchannelizer.cpp
+    src/core/channelizerutils.cpp
     src/analyzer/analyzerspectrumwidget.cpp
     src/analyzer/analyzerspectrumwidget.h
     src/ui/spectrummarkerpairsdialog.cpp
     src/ui/spectrummarkerpairsdialog.h
     src/backends/fobosbackend.cpp
     src/backends/fobosbackend.h
+    src/backends/fobosfrequencylimits.h
     src/backends/hackrfbackend.cpp
     src/backends/hackrfbackend.h
     src/backends/rtlsdrbackend.cpp
@@ -1203,6 +1242,8 @@ add_executable(ObriiAnalyzer
     src/core/dspsourceidentity.h
     src/core/coherentiqaligner.cpp
     src/core/coherentiqaligner.h
+    src/core/coherentiqlive.cpp
+    src/core/coherentiqlive.h
     src/core/coherentiqsession.cpp
     src/core/coherentiqsession.h
     src/core/dspiqsourceregistry.cpp
@@ -1300,6 +1341,9 @@ target_link_libraries(ObriiAnalyzer PRIVATE
     ${FOBOS_AGILE_LIBRARY}
     ${FFTW_FLOAT_LIBRARY}
     Qt5::Core Qt5::Widgets Qt5::Network Qt5::Concurrent)
+if(NOT WIN32)
+    target_link_libraries(ObriiAnalyzer PRIVATE Threads::Threads)
+endif()
 if(MSVC)
     target_compile_options(ObriiAnalyzer PRIVATE /utf-8)
     target_compile_definitions(ObriiAnalyzer PRIVATE FOBOSAPP_HAS_FFTW_THREADS=1)
@@ -1712,12 +1756,20 @@ if(FOBOS_BUILD_CW_SELFTEST)
         src/ui/frequencycontrol.cpp src/ui/frequencycontrol.h)
     target_include_directories(ObriiFrequencyControlSelfTest PRIVATE src/ui)
     target_link_libraries(ObriiFrequencyControlSelfTest PRIVATE Qt5::Widgets)
+    add_executable(ObriiLiveCenterRetuneSelfTest EXCLUDE_FROM_ALL tools/live_center_retune_selftest.cpp)
+    target_include_directories(ObriiLiveCenterRetuneSelfTest PRIVATE src/core)
     if(MSVC)
         target_compile_options(ObriiFrequencyControlSelfTest PRIVATE /utf-8)
     endif()
 
     add_executable(ObriiCoherentIqSelfTest
         tools/coherent_iq_selftest.cpp
+        src/analyzer/multisdrliveiq.cpp
+        src/analyzer/multisdrsignalalignment.cpp
+        src/core/iqchannelizer.cpp
+        src/core/channelizerutils.cpp
+        src/core/coherentiqlive.cpp
+        src/core/fftplannermutex.cpp
         src/core/coherentiqaligner.cpp
         src/core/coherentiqaligner.h
         src/core/coherentiqsession.cpp
@@ -1726,8 +1778,12 @@ if(FOBOS_BUILD_CW_SELFTEST)
         src/core/dspiqsourceregistry.h
         src/core/dspsourceidentity.cpp
         src/core/dspsourceidentity.h)
-    target_include_directories(ObriiCoherentIqSelfTest PRIVATE src/core)
+    target_include_directories(ObriiCoherentIqSelfTest PRIVATE src/core src/analyzer)
     target_link_libraries(ObriiCoherentIqSelfTest PRIVATE Qt5::Core)
+    if(NOT WIN32)
+        target_link_libraries(ObriiCoherentIqSelfTest PRIVATE Threads::Threads)
+    endif()
+    obrii_register_selftest(ObriiCoherentIqSelfTest)
     if(MSVC)
         target_compile_options(ObriiCoherentIqSelfTest PRIVATE /utf-8)
     endif()
@@ -1751,6 +1807,9 @@ if(FOBOS_BUILD_CW_SELFTEST)
         tools/remote_vfo_selftest.cpp
         src/network/networkcontroller.cpp src/network/networkcontroller.h
         src/ui/dspflowpanel.cpp src/ui/dspflowpanel.h
+        src/transmit/dspboardsignal.cpp src/transmit/signallabgenerator.cpp
+        src/transmit/dspboardqpskreceiver.cpp
+        src/transmit/virtualtransmitterbackend.cpp src/cli/clivirtualiqsource.cpp
         src/ui/dspbranchsettingswidget.cpp src/ui/dspbranchsettingswidget.h
         src/ui/multivfowidget.cpp src/ui/multivfowidget.h
         src/ui/dspresearchwidget.cpp
@@ -1778,7 +1837,7 @@ if(FOBOS_BUILD_CW_SELFTEST)
         src/scan/scanvisualassembler.cpp)
     get_target_property(OBRII_DSP_TEST_INCLUDES ObriiSDR INCLUDE_DIRECTORIES)
     target_include_directories(ObriiDspFlowSelfTest PRIVATE ${OBRII_DSP_TEST_INCLUDES})
-    target_link_libraries(ObriiDspFlowSelfTest PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets Qt5::Network Qt5::Concurrent ${FFTW_FLOAT_LIBRARY})
+    target_link_libraries(ObriiDspFlowSelfTest PRIVATE ObriiOpenRadio Qt5::Core Qt5::Gui Qt5::Widgets Qt5::Network Qt5::Concurrent ${FFTW_FLOAT_LIBRARY})
     target_compile_definitions(ObriiDspFlowSelfTest PRIVATE OBRII_VFO_SELFTEST=1)
     if(WIN32)
         target_link_libraries(ObriiDspFlowSelfTest PRIVATE opengl32 winmm)
@@ -1829,6 +1888,19 @@ if(FOBOS_BUILD_CW_SELFTEST)
         tools/spectrum_pipeline_selftest.cpp
         src/utils/spectrumdisplayreducer.cpp)
     target_include_directories(ObriiSpectrumPipelineSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src/utils)
+
+    add_executable(ObriiAdcOverloadGuardSelfTest tools/adc_overload_guard_selftest.cpp)
+    target_include_directories(ObriiAdcOverloadGuardSelfTest PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+
+    add_executable(ObriiSpurCalibrationSelfTest tools/spur_calibration_selftest.cpp)
+    if(EXISTS "${OBRII_LOCAL_IF_HEADER}")
+        target_compile_definitions(ObriiSpurCalibrationSelfTest PRIVATE OBRII_LOCAL_FOBOS_IF_HEADER="${OBRII_LOCAL_IF_HEADER}")
+    endif()
+    target_include_directories(ObriiSpurCalibrationSelfTest PRIVATE src/core src/backends)
+    target_link_libraries(ObriiSpurCalibrationSelfTest PRIVATE Qt5::Core)
+    add_executable(ObriiAudioLifecycleSelfTest tools/audio_lifecycle_selftest.cpp)
+    target_include_directories(ObriiAudioLifecycleSelfTest PRIVATE src/core)
+    target_link_libraries(ObriiAudioLifecycleSelfTest PRIVATE Qt5::Core)
 
     add_executable(ObriiIqChannelizerSelfTest tools/iq_channelizer_selftest.cpp
         src/core/iqchannelizer.cpp src/core/channelizerutils.cpp src/core/iqbuffer.cpp)
@@ -2128,6 +2200,20 @@ set_target_properties(ObriiFftTransformCore ObriiRecordingFormatCore
     PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 target_include_directories(ObriiRecordingFormatCore PUBLIC src/core)
 target_link_libraries(ObriiRecordingFormatCore PUBLIC Qt5::Core)
+add_executable(ObriiFullIqRecordingSelfTest EXCLUDE_FROM_ALL
+    tools/full_iq_recording_selftest.cpp
+    src/core/iqchannelizer.cpp src/core/channelizerutils.cpp
+    src/digital/videoprocessor.cpp src/digital/videoprocessor.h
+    src/research/spectrumiqeventrecorder.cpp)
+target_include_directories(ObriiFullIqRecordingSelfTest PRIVATE src/core src/research src/utils src/digital)
+target_link_libraries(ObriiFullIqRecordingSelfTest PRIVATE ObriiRecordingFormatCore Qt5::Gui)
+if(MSVC)
+    target_compile_options(ObriiFullIqRecordingSelfTest PRIVATE /utf-8)
+endif()
+if(NOT WIN32)
+    target_link_libraries(ObriiFullIqRecordingSelfTest PRIVATE Threads::Threads)
+endif()
+obrii_register_selftest(ObriiFullIqRecordingSelfTest)
 add_executable(ObriiSharedFftCoreSelfTest EXCLUDE_FROM_ALL
     tools/shared_fft_core_selftest.cpp tools/fft_test_globals.cpp
     src/cli/clispectrummeter.cpp src/core/fft.cpp src/core/fft.h
@@ -2154,7 +2240,8 @@ foreach(target ObriiSharedReceiverCoreSelfTest ObriiSharedFftCoreSelfTest ObriiS
 endforeach()
 foreach(target ObriiCli ObriiCliAsyncSpectrumSelfTest ObriiCliServicesTestCore
         ObriiCliView ObriiCliSpectrumSelfTest ObriiSDR ObriiFftSnapshotSelfTest
-        ObriiSpectrumComputeSelfTest ObriiDspStreamSelfTest ObriiDspFlowSelfTest)
+        ObriiSpectrumComputeSelfTest ObriiDspStreamSelfTest ObriiDspFlowSelfTest
+        ObriiAnalyzer ObriiCoherentIqSelfTest)
     if(TARGET ${target})
         target_link_libraries(${target} PRIVATE ObriiFftTransformCore)
     endif()

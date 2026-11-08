@@ -20,6 +20,14 @@ void YourClassName::loadUiTranslations() {
 
     uiTranslations = QJsonObject();
     uiTranslations[QStringLiteral("en")] = baseLanguage({
+        {"spectrum_persistence_classic", "Classic"},
+        {"spectrum_persistence_contours", "Contours"},
+        {"spectrum_persistence_tooltip", "Digital phosphor overlays recent spectra: X is frequency, Y is level, and color shows how often a level recurs. Rare traces are cyan; frequent traces become green/yellow/red."},
+        {"spectrum_persistence_style_tooltip", "Classic draws fading traces and allows temporal amplitude smoothing. Contours keeps distinct instantaneous levels and sharpens their density boundaries; amplitude smoothing is ignored in this style."},
+        {"spectrum_persistence_time_tooltip", "Memory of recent spectra: longer afterglow retains more history; shorter afterglow follows changes faster."},
+        {"spectrum_persistence_intensity_tooltip", "Display brightness of accumulated traces. This changes visualization, not receiver gain."},
+        {"spectrum_persistence_threshold_tooltip", "Hide rare frequency/level points. Start at 0% for Contours; raising it can also hide short useful signals."},
+        {"spectrum_persistence_smoothing_tooltip", "Classic only: smooth amplitude before accumulating traces. 0 disables it; larger values soften flicker and short events. Contours retains raw amplitude states."},
         {"__language_name", "English"},
         {"wireless_lab", "Wireless lab (beta)..."},
         {"multi_sdr", "Multi-SDR..."},
@@ -751,6 +759,15 @@ void YourClassName::loadUiTranslations() {
         {"gnss_raw_logged", "GNSS raw context written to the log."}
     });
     uiTranslations[QStringLiteral("uk")] = baseLanguage({
+        {"spectrum_display_persistence", "Цифровий фосфор"},
+        {"spectrum_persistence_classic", "Класичний"},
+        {"spectrum_persistence_contours", "Контури"},
+        {"spectrum_persistence_tooltip", "Цифровий фосфор накладає останні спектри: X — частота, Y — рівень, колір — повторюваність рівня. Рідкі сліди блакитні, часті стають зеленими, жовтими й червоними."},
+        {"spectrum_persistence_style_tooltip", "Класичний малює згасаючі сліди та дозволяє часове згладжування амплітуди. Контури зберігають окремі миттєві рівні й підкреслюють межі їхньої щільності; згладжування амплітуди в цьому стилі не діє."},
+        {"spectrum_persistence_time_tooltip", "Пам'ять останніх спектрів: довше післясвітіння зберігає більше історії, коротше швидше показує зміни."},
+        {"spectrum_persistence_intensity_tooltip", "Яскравість накопичених слідів. Змінює відображення, а не підсилення приймача."},
+        {"spectrum_persistence_threshold_tooltip", "Приховує рідкі точки частота/рівень. Для Контурів почніть із 0%; підвищення може приховати також короткі корисні сигнали."},
+        {"spectrum_persistence_smoothing_tooltip", "Лише Класичний: усереднення амплітуди перед накопиченням слідів. 0 вимикає його; більше значення пом'якшує мерехтіння та короткі події. Контури зберігають миттєві рівні."},
         {"__language_name", "Ukrainian"},
         {"command_console", "Консоль"},
         {"command_console_title", "Консоль команд"},

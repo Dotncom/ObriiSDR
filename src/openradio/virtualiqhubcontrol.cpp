@@ -23,9 +23,11 @@ VirtualIqHubControl::VirtualIqHubControl(VirtualIqHub &h,VirtualIqMedium *m,
     :QObject(parent),hub(h),medium(m),server(this),instance(QUuid::createUuid().toString(QUuid::WithoutBraces)),defaultRoute(route) {
     for(const auto &v:initial) {
         const auto l=v.toObject();
-        links.insert(l.value("tx").toString()+"/"+l.value("rx").toString(),{
+        QJsonObject snapshot{
             {"tx",l.value("tx")},{"rx",l.value("rx")},{"enabled",l.value("enabled").toBool(true)},
-            {"gainDb",l.value("gainDb").toDouble(0)},{"delayMs",l.value("delayMs").toInt(0)}});
+            {"gainDb",l.value("gainDb").toDouble(0)},{"delayMs",l.value("delayMs").toInt(0)}};
+        if (l.contains("frequencyOffsetHz")) snapshot.insert("frequencyOffsetHz", l.value("frequencyOffsetHz"));
+        links.insert(l.value("tx").toString()+"/"+l.value("rx").toString(),snapshot);
     }
     rateWindow.start();
     connect(&server,&QTcpServer::newConnection,this,[this]{
@@ -141,18 +143,24 @@ QJsonObject VirtualIqHubControl::execute(const QJsonObject &request) {
     }
     const auto tx=args.value("tx").toString(),rx=args.value("rx").toString();
     const auto gain=args.value("gainDb"),delay=args.value("delayMs"),enabled=args.value("enabled");
-    const double d=delay.toDouble(-1),g=gain.toDouble();
-    if(args.size()!=5||!sourceId(tx)||!hub.subscriberIds().contains(rx)||tx==rx||!enabled.isBool()||
-       !delay.isDouble()||!std::isfinite(d)||std::floor(d)!=d||d<0||d>60000||
-       !gain.isDouble()||!std::isfinite(g)||g< -120||g>60)
-        return finish(failure("invalid_link","Invalid link parameters"));
+    const auto offset=args.value("frequencyOffsetHz");
     const auto pair=tx+"/"+rx;
+    const double d=delay.toDouble(-1),g=gain.toDouble();
+    const double hz = offset.isUndefined() ? links.value(pair).value("frequencyOffsetHz").toDouble() : offset.toDouble();
+    if(args.size()!=(offset.isUndefined()?5:6)||!sourceId(tx)||!hub.subscriberIds().contains(rx)||tx==rx||!enabled.isBool()||
+       !delay.isDouble()||!std::isfinite(d)||std::floor(d)!=d||d<0||d>60000||
+       !gain.isDouble()||!std::isfinite(g)||g< -120||g>60||
+       (!offset.isUndefined()&&!offset.isDouble())||!std::isfinite(hz)||(!medium&&hz!=0))
+        return finish(failure("invalid_link","Invalid link parameters"));
     if(!links.contains(pair)&&links.size()>=1024)return finish(failure("link_limit","At most 1024 links are supported"));
-    const VirtualIqLinkSettings value{enabled.toBool(),int(d),float(g)};
+    const VirtualIqLinkSettings route{enabled.toBool(),int(d),float(g)};
+    const VirtualIqLinkSettings value{enabled.toBool(),int(d),float(g),hz};
     // Validate both paths before mutating either; never copy buffered IQ for control.
-    if(!hub.canSetLink(tx,rx,value)||(medium&&!medium->canSetLink(tx,rx,value)))
-        return finish(failure("link_capacity","Link exceeds the active medium's delay/buffer limits"));
-    hub.setLink(tx,rx,value);if(medium)medium->setLink(tx,rx,value);
-    links.insert(pair,args);++revision;
-    return finish({{"ok",true},{"link",args},{"appliesTo","future-published-frames"}});
+    if(!hub.canSetLink(tx,rx,route)||(medium&&!medium->canSetLink(tx,rx,value)))
+        return finish(failure("link_capacity","Link exceeds the active medium's delay, buffer or frequency limits"));
+    hub.setLink(tx,rx,route);if(medium)medium->setLink(tx,rx,value);
+    auto applied = args;
+    if (hz != 0.0) applied.insert("frequencyOffsetHz", hz);
+    links.insert(pair,applied);++revision;
+    return finish({{"ok",true},{"link",applied},{"appliesTo","future-published-frames"}});
 }

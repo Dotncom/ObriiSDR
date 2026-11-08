@@ -26,6 +26,7 @@ struct VirtualIqLinkSettings {
     bool enabled = true;
     int delayMs = 0;
     float gainDb = 0.0f;
+    double frequencyOffsetHz = 0.0;
 };
 
 struct VirtualIqHubCounters {

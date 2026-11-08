@@ -7,6 +7,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QtEndian>
+#include <algorithm>
 #include <iostream>
 
 namespace {
@@ -391,6 +392,59 @@ void testAutomaticKeySelection(const QString &path) {
     }
     check(keys.size() == 2, "automatic keyring has ARC4 and AES entries");
 
+    // An on-air PI between voice bursts must be found independently of the
+    // voice lock. Split it after sync, before the right half is available.
+    const QString voice = QString(154, '2') +
+        QStringLiteral("133313311131311113313331") + QString(86, '2');
+    const auto pcm = [](const QString &symbols, int rate) {
+        constexpr qint16 levels[] = {-6000, -18000, 6000, 18000};
+        QByteArray samples(symbols.size() * (rate / 4800) * 2, '\0');
+        int offset = 0;
+        for (const QChar symbol : symbols)
+            for (int n = 0; n < rate / 4800; ++n, offset += 2)
+                qToLittleEndian<qint16>(levels[symbol.unicode() - '0'], samples.data() + offset);
+        return samples;
+    };
+    const auto checkPiPcm = [&](const QString &pi, int rate, int expectedAlgorithm) {
+        DmrDecoder decoder;
+        decoder.setPrivacyIndicatorValidator(&DmrPrivacyProcessor::isValidPi);
+        check(decoder.processPcmFrame(pcm(voice, rate), rate).lockAcquired, "voice lock before PI");
+        const auto partial = decoder.processPcmFrame(pcm(pi.left(78), rate), rate);
+        check(std::none_of(partial.dibitBursts.begin(), partial.dibitBursts.end(),
+                  [](const auto &burst) { return burst.dataType == 0; }),
+              "incomplete PI does not reach privacy processor");
+        const auto complete = decoder.processPcmFrame(pcm(pi.mid(78), rate), rate);
+        int headers = 0;
+        for (const auto &burst : complete.dibitBursts) {
+            if (burst.dataType != 0) continue;
+            DmrPrivacyCodec::PiHeader header;
+            check(DmrPrivacyCodec::decodePi(burst.dibits, header) &&
+                      header.algorithm == expectedAlgorithm && header.keyId == 7,
+                  "CRC-valid PI delivered during voice lock");
+            ++headers;
+        }
+        check(headers == (expectedAlgorithm ? 1 : 0), "split PI delivered only with valid CRC");
+        const auto after = decoder.processPcmFrame(pcm(QString(90, '2'), rate), rate);
+        check(std::none_of(after.dibitBursts.begin(), after.dibitBursts.end(),
+                  [](const auto &burst) { return burst.dataType == 0; }),
+              "PI is not repeated from retained PCM");
+    };
+    QString cleanPi = vectors.at(0).toObject().value(QStringLiteral("PI")).toString();
+    cleanPi.replace(54, 24, QStringLiteral("311131133313133331131113"));
+    QString weakPi = vectors.at(1).toObject().value(QStringLiteral("PI")).toString();
+    weakPi.replace(54, 24, QStringLiteral("311131133313133331131113"));
+    weakPi[60] = weakPi.at(60) == '1' ? QLatin1Char('3') : QLatin1Char('1');
+    weakPi[70] = weakPi.at(70) == '1' ? QLatin1Char('3') : QLatin1Char('1');
+    QString corruptPi = weakPi;
+    for (int i = 0; i < 30; i += 3)
+        corruptPi[i] = QLatin1Char(char('0' + ((corruptPi.at(i).unicode() - '0') ^ 3)));
+    check(!DmrPrivacyProcessor::isValidPi(corruptPi), "damaged PI payload fails validation");
+    for (int rate : {24000, 48000}) {
+        checkPiPcm(cleanPi, rate, 1);
+        checkPiPcm(weakPi, rate, 5);
+        checkPiPcm(corruptPi, rate, 0);
+    }
+
     DmrPrivacyProcessor processor;
     processor.setKeyring(keys);
     processor.configure(DMR_PRIVACY_AUTO, true, QString(), 0);
@@ -429,6 +483,13 @@ void testAutomaticKeySelection(const QString &path) {
     payload.superframeSamples = 8640;
     payload.timeslot = 1;
     payload.privacyIndicator = 1;
+    DmrPrivacyProcessor waiting;
+    waiting.setKeyring(keys);
+    waiting.configure(DMR_PRIVACY_AUTO, true, QString(), 0);
+    auto noHeader = payload;
+    check(waiting.process(noHeader) == Outcome::MissingPi && noHeader.hex.isEmpty() &&
+              waiting.statistics().missingPi == 1 && waiting.statistics().keyMismatch == 0,
+          "auto distinguishes a missing PI from an unknown saved key");
     check(missing.process(payload) == Outcome::KeyMismatch && payload.hex.isEmpty(),
           "unknown automatic KID is muted without key guessing");
 }

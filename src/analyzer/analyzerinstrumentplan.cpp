@@ -364,3 +364,44 @@ double AnalyzerInstrumentPlanner::reflectionMagnitudeFromReturnLoss(double retur
     if (!std::isfinite(returnLoss)) return returnLoss > 0.0 ? 0.0 : 1.0;
     return std::pow(10.0, -returnLoss / 20.0);
 }
+
+bool AnalyzerInstrumentPlanner::correctOnePort(
+    const std::array<std::complex<double>, 3> &standards,
+    const std::array<std::complex<double>, 3> &measuredStandards,
+    std::complex<double> measuredDevice, std::complex<double> &corrected) {
+    using Complex = std::complex<double>;
+    // Solve m = (a + b * gamma) / (1 + c * gamma) for the three measured standards.
+    std::array<std::array<Complex, 4>, 3> rows;
+    double scale = 1.0;
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        rows[i] = {1.0, standards[i], -measuredStandards[i] * standards[i], measuredStandards[i]};
+        for (const auto value : rows[i]) {
+            const double magnitude = std::abs(value);
+            if (!std::isfinite(magnitude)) return false;
+            scale = std::max(scale, magnitude);
+        }
+    }
+    for (std::size_t column = 0; column < rows.size(); ++column) {
+        auto pivot = std::max_element(rows.begin() + column, rows.end(), [column](const auto &a, const auto &b) {
+            return std::abs(a[column]) < std::abs(b[column]);
+        });
+        const Complex divisor = (*pivot)[column];
+        if (!(std::abs(divisor) > 1e-12 * scale)) return false;
+        std::iter_swap(rows.begin() + column, pivot);
+        for (std::size_t j = column; j < rows[column].size(); ++j) rows[column][j] /= divisor;
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            if (i == column) continue;
+            const Complex factor = rows[i][column];
+            for (std::size_t j = column; j < rows[i].size(); ++j) rows[i][j] -= factor * rows[column][j];
+        }
+    }
+    const Complex tracking = rows[1][3];
+    const Complex mismatch = measuredDevice * rows[2][3];
+    const Complex denominator = tracking - mismatch;
+    if (!std::isfinite(std::abs(denominator)) ||
+        !(std::abs(denominator) > 1e-12 * std::max({1.0, std::abs(tracking), std::abs(mismatch)}))) return false;
+    const Complex gamma = (measuredDevice - rows[0][3]) / denominator;
+    if (!std::isfinite(std::abs(gamma))) return false;
+    corrected = gamma;
+    return true;
+}

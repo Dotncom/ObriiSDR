@@ -33,6 +33,15 @@ int main(int argc, char **argv) {
     try {
         QWidget owner;
         QTimer timer;
+        FrequencyControl defaults;
+        auto *steps = combo(&defaults, "2 kHz");
+        const struct { const char *name; double hz; } additionalSteps[] = {
+            {"2 kHz", 2000.0}, {"20 kHz", 20000.0}, {"200 kHz", 200000.0}, {"2 MHz", 2000000.0}
+        };
+        for (const auto &step : additionalSteps) {
+            defaults.setSelectedStepName(QString::fromLatin1(step.name));
+            require(steps->currentData().toDouble() == step.hz, "Incorrect default frequency step");
+        }
         auto *source = new FrequencyControl;
         source->setRangeHz(1000000, 6000000000.0);
         source->setStepPresets({{"12.5 kHz", 12500}, {"25 kHz", 25000}});

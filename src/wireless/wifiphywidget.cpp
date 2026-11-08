@@ -51,11 +51,15 @@ WifiPhyWidget::WifiPhyWidget(bool uk, QWidget *parent) : QWidget(parent), ukrain
                 const QFileInfo info(path);
                 if (info.suffix().compare(QStringLiteral("iq8"), Qt::CaseInsensitive) == 0)
                     format->setCurrentText(QStringLiteral("cs8"));
+                if (info.suffix().compare(QStringLiteral("cs16"), Qt::CaseInsensitive) == 0)
+                    format->setCurrentText(QStringLiteral("cs16"));
                 for (const auto &sidecar : {path + ".json", info.dir().filePath(info.completeBaseName() + ".json")}) {
                     QFile file(sidecar); if (!file.open(QIODevice::ReadOnly) || file.size() > 262144) continue;
                     const auto object = QJsonDocument::fromJson(file.readAll()).object();
                     if (object.value("format").toString() == QStringLiteral("full_iq_raw_s8_interleaved"))
                         format->setCurrentText(QStringLiteral("cs8"));
+                    if (object.value("format").toString() == QStringLiteral("full_iq_raw_s16le_interleaved"))
+                        format->setCurrentText(QStringLiteral("cs16"));
                     const double rate = object.value("sampleRate").toDouble(object.value("sampleRateHz").toDouble());
                     const double frequency = object.value("centerFrequency").toDouble(object.value("centerFrequencyHz").toDouble());
                     if (rate > 0) sampleRate->setValue(rate / 1e6);

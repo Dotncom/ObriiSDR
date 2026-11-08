@@ -251,8 +251,19 @@ void YourClassName::panSpectrumView(int deltaPixels, int widthPixels) {
 
     const double shiftHz = -static_cast<double>(deltaPixels) * visibleSpan /
                            static_cast<double>((std::max)(1, widthPixels));
-    const double desiredMin = minFrequency + shiftHz;
-    const double desiredMax = maxFrequency + shiftHz;
+    const double previousDisplayCenter = std::isfinite(spectrumDisplayCenterHz)
+                                             ? spectrumDisplayCenterHz
+                                             : (minFrequency + maxFrequency) * 0.5;
+    const bool continuousFobosPan = agileContinuousRetuneEnabled && hasActiveFobosDevice() &&
+        !multiSdrDisplayActive && !isNetworkClientMode() && !offlineIqPlaybackActive &&
+        processor && processor->isRunning() &&
+        !(activeFobosApiKind == FobosApiKind::Agile ? agileScanEnabled : standardScanEnabled);
+    // An FFT can still depict the preceding confirmed step. Accumulate the
+    // pointer's requested viewport, rather than adding that lag to every move.
+    const double panBaseMin = continuousFobosPan
+                                  ? previousDisplayCenter - visibleSpan * 0.5 : minFrequency;
+    const double desiredMin = panBaseMin + shiftHz;
+    const double desiredMax = desiredMin + visibleSpan;
     double retuneDeltaHz = 0.0;
     if (desiredMin < overallMin) {
         retuneDeltaHz = desiredMin - overallMin;
@@ -260,9 +271,6 @@ void YourClassName::panSpectrumView(int deltaPixels, int widthPixels) {
         retuneDeltaHz = desiredMax - overallMax;
     }
 
-    const double previousDisplayCenter = std::isfinite(spectrumDisplayCenterHz)
-                                             ? spectrumDisplayCenterHz
-                                             : (minFrequency + maxFrequency) * 0.5;
     spectrumDisplayCenterHz = previousDisplayCenter + shiftHz;
 
     if (multiSdrDisplayActive) {
@@ -615,6 +623,7 @@ void YourClassName::doubleGraphEnable(bool checked) {
         qDebug()<<"secondgraph disabled";
     }
     applyAlternativeInterfaceMode();
+    savePersistentSettings();
 }
 
 void YourClassName::colorGraphEnable(bool checked) {
@@ -625,6 +634,7 @@ void YourClassName::colorGraphEnable(bool checked) {
         colorf = false;
         qDebug()<<"color graph disabled";
     }
+    savePersistentSettings();
 }
 
 void YourClassName::syncEnable(bool checked) {
@@ -1231,12 +1241,12 @@ void YourClassName::onFrequencyEntered() {
     }
     settingRange();
     updateQuickHamPanel();
-    const bool deferSettingsSaveForLiveAgile =
+    const bool deferSettingsSaveForLiveFobos =
         runState == RadioRunState::Running &&
-        activeFobosApiKind == FobosApiKind::Agile &&
+        hasActiveFobosDevice() &&
         pendingSettings.inputMode == INPUT_RF &&
-        !agileScanEnabled;
-    if (!deferSettingsSaveForLiveAgile) {
+        !(activeFobosApiKind == FobosApiKind::Agile ? agileScanEnabled : standardScanEnabled);
+    if (!deferSettingsSaveForLiveFobos) {
         savePersistentSettings();
     }
     if (isNetworkClientMode()) {

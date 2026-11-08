@@ -6,6 +6,7 @@
 #include "iqbuffer.h"
 #include "diagnosticlogging.h"
 #include "fmphasediscriminator.h"
+#include <QElapsedTimer>
 #include <limits>
 
 #ifdef _MSC_VER
@@ -482,11 +483,16 @@ void AudioProcessor::clearExternalPcm() {
 }
 
 void AudioProcessor::startDemodulation() {
+    QElapsedTimer startClock; startClock.start();
+    const auto traceStart = [&](const char *phase) {
+        if (fobosVerboseLoggingEnabled()) qDebug() << "[Audio start]" << phase << "elapsedMs" << startClock.elapsed();
+    };
     bool expected = false;
     if (!running.compare_exchange_strong(expected, true)) {
         qDebug() << "Audio demodulation is already running.";
         return;
     }
+    traceStart("begin");
 
     {
         std::lock_guard<std::mutex> lock(audioMutex);
@@ -502,14 +508,17 @@ void AudioProcessor::startDemodulation() {
         externalIqQueue.clear();
     }
     resetDemodulatorState();
+    traceStart("DSP reset done");
 
     if (localPlaybackEnabled.load()) {
 #ifdef _WIN32
         const int audioDeviceId = currentSettingsSnapshot().audioDeviceId;
+        traceStart("output open begin");
         if (!openAudioDevice(audioDeviceId)) {
             closeAudioDevice();
             qDebug() << "Failed to open local audio output; demodulation will continue without waveOut playback.";
         }
+        traceStart("output open done");
 #else
         qDebug() << "[Audio] local playback is routed through the Qt audio bridge on this platform.";
 #endif
@@ -521,6 +530,7 @@ void AudioProcessor::startDemodulation() {
 
     // Запуск потока вывода аудио
     audioWorker = std::thread(&AudioProcessor::startAudioOutput, this);
+    traceStart("workers started");
 }
 
 
@@ -534,6 +544,7 @@ void AudioProcessor::stopDemodulationForStreamRestart() {
 }
 
 void AudioProcessor::stopDemodulationImpl(bool closeOutputDevice) {
+    QElapsedTimer stopClock; stopClock.start();
     const bool runningNow = running.load();
 #ifdef _WIN32
     const bool audioDeviceOpen = hWaveOut != nullptr;
@@ -598,7 +609,7 @@ void AudioProcessor::stopDemodulationImpl(bool closeOutputDevice) {
         }
     }
     if (fobosVerboseLoggingEnabled()) {
-        qDebug() << "[Audio] stopDemodulation exit";
+        qDebug() << "[Audio] stopDemodulation exit" << "elapsedMs" << stopClock.elapsed();
     }
 }
 
@@ -754,9 +765,6 @@ void AudioProcessor::resetDemodulatorState() {
     dmrFskLowPassState2 = 0.0f;
     dmrPreviousOutputSample = 0.0f;
     dmrPreviousOutputValid = false;
-    dmrLastLoggedOutputRate = 0;
-    dmrLastLoggedDecimationFactor = 0;
-    dmrLastLoggedChannelRate = 0.0;
     hfNoiseCancelCoeff = {0.0f, 0.0f};
     hfNoiseCancelRefDecimationSum = {0.0f, 0.0f};
     hfNoiseCancelTapCoeffs.fill(std::complex<float>(0.0f, 0.0f));
@@ -951,40 +959,7 @@ void AudioProcessor::processDmrIqDemodulatorBlock(const std::vector<float>& iqBl
     if (captureChannelIq) {
         channelIq.resize(static_cast<int>((iqSamples / std::size_t(decimationFactor) + 1) * 4));
     }
-    for (std::size_t n = 0; n < iqSamples; ++n) {
-        float iSample = iqBlock[2 * n];
-        float qSample = iqBlock[2 * n + 1];
-        if (!std::isfinite(iSample)) iSample = 0.0f;
-        if (!std::isfinite(qSample)) qSample = 0.0f;
-
-        if (settings.inputMode == INPUT_HF_COMBINED) {
-            if (fShift < 0.0) {
-                qSample = 0.0f;
-            } else {
-                iSample = qSample;
-                qSample = 0.0f;
-            }
-        } else if (settings.inputMode == INPUT_HF1) {
-            qSample = 0.0f;
-        } else if (settings.inputMode == INPUT_HF2) {
-            iSample = qSample;
-            qSample = 0.0f;
-        }
-
-        const float mixedI = iSample * rotI - qSample * rotQ;
-        const float mixedQ = iSample * rotQ + qSample * rotI;
-        std::complex<float> channelSample;
-        const bool channelSampleReady = dmrCicDecimator.push({mixedI, mixedQ}, channelSample);
-        const float nextRotI = rotI * rotStepI - rotQ * rotStepQ;
-        const float nextRotQ = rotI * rotStepQ + rotQ * rotStepI;
-        rotI = nextRotI;
-        rotQ = nextRotQ;
-        if ((n & 4095) == 4095) {
-            const float norm = std::sqrt(rotI * rotI + rotQ * rotQ);
-            if (norm > 0.0f) { rotI /= norm; rotQ /= norm; }
-        }
-        if (!channelSampleReady) continue;
-
+    const auto demodulateChannelSample = [&](std::complex<float> channelSample) {
         channelLowPass += channelLowPassAlpha * (channelSample - channelLowPass);
         std::complex<float> limited = channelLowPass;
         if (captureChannelIq) {
@@ -1026,6 +1001,54 @@ void AudioProcessor::processDmrIqDemodulatorBlock(const std::vector<float>& iqBl
         }
         previousSample = limited;
         previousValid = true;
+    };
+
+#if defined(_M_X64) || defined(__SSE2__)
+    const bool batchedRf = settings.inputMode == INPUT_RF &&
+        dmrCicDecimator.mixRfBlock(iqBlock.data(), iqSamples, rotI, rotQ,
+                                   rotStepI, rotStepQ, audioChannelizedIq);
+#else
+    const bool batchedRf = false;
+#endif
+    if (batchedRf) {
+        for (std::size_t n = 0; n < audioChannelizedIq.size(); n += 2) {
+            demodulateChannelSample({audioChannelizedIq[n], audioChannelizedIq[n + 1]});
+        }
+    } else {
+        for (std::size_t n = 0; n < iqSamples; ++n) {
+            float iSample = iqBlock[2 * n];
+            float qSample = iqBlock[2 * n + 1];
+            if (!std::isfinite(iSample)) iSample = 0.0f;
+            if (!std::isfinite(qSample)) qSample = 0.0f;
+
+            if (settings.inputMode == INPUT_HF_COMBINED) {
+                if (fShift < 0.0) {
+                    qSample = 0.0f;
+                } else {
+                    iSample = qSample;
+                    qSample = 0.0f;
+                }
+            } else if (settings.inputMode == INPUT_HF1) {
+                qSample = 0.0f;
+            } else if (settings.inputMode == INPUT_HF2) {
+                iSample = qSample;
+                qSample = 0.0f;
+            }
+
+            const float mixedI = iSample * rotI - qSample * rotQ;
+            const float mixedQ = iSample * rotQ + qSample * rotI;
+            std::complex<float> channelSample;
+            const bool ready = dmrCicDecimator.push({mixedI, mixedQ}, channelSample);
+            const float nextRotI = rotI * rotStepI - rotQ * rotStepQ;
+            const float nextRotQ = rotI * rotStepQ + rotQ * rotStepI;
+            rotI = nextRotI;
+            rotQ = nextRotQ;
+            if ((n & 4095) == 4095) {
+                const float norm = std::sqrt(rotI * rotI + rotQ * rotQ);
+                if (norm > 0.0f) { rotI /= norm; rotQ /= norm; }
+            }
+            if (ready) demodulateChannelSample(channelSample);
+        }
     }
 
     ncoPhase = std::remainder(ncoPhase + phaseIncrement * static_cast<double>(iqSamples), TWO_PI);

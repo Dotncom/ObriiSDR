@@ -42,12 +42,8 @@ resolve_source_dir() {
 Missing Fobos source directory:
   ${dir}
 
-This project expects the patched vendored Fobos sources, not a silent clone
-of the official upstream libraries. Make sure the source package contains:
-  third_party/patched/libfobos
-  third_party/patched/libfobos-sdr-agile
-
-For an explicit upstream experiment only, rerun with:
+The public Raspberry Pi source package uses the official Fobos SDKs.
+To download them explicitly, rerun with:
   ALLOW_UPSTREAM_FOBOS_CLONE=1 ./tools/prepare_fobos_linux.sh
 EOF
         exit 2

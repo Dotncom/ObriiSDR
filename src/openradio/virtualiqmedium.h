@@ -75,7 +75,8 @@ private:
     static qint64 floorBlock(qint64 sampleIndex, int blockSamples);
     void addToSubscriber(Subscriber *subscriber, const QString &sourceId,
                          const QString &sessionId, const VirtualSignalFrame &frame,
-                         const QVector<float> &iq, qint64 startIndex, float gain);
+                         const QVector<float> &iq, qint64 startIndex, float gain,
+                         double frequencyOffsetHz);
 
     VirtualIqMediumSettings settings_;
     QHash<QString, Subscriber> subscribers_;
