@@ -119,9 +119,6 @@ if ($Lite) {
 $excludeExactPaths = @(
     "third_party/mbelib-neo",
     "third_party/softdmr",
-    "token.txt",
-    "aqtinstall.log",
-    "Новий текстовий документ.txt",
     "tools/analyze_retune_raw_dump.py",
     "tools/dmr_lab_replay.cpp",
     "docs/dmr_lab_replay.md",

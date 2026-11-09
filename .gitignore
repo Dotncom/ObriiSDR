@@ -36,22 +36,22 @@ Makefile
 # Logs
 *.log
 *.log.*
-ObriiSDR.ini
-privacy_override.txt
 *.csv
 *.nmea
 *.ubx
-FobosAPP.ini
 
-# Local context screenshots/photos kept in the workspace root
+# Local captures and settings in the workspace root
 /*.jpg
 /*.jpeg
 /*.png
 /*.txt
+/*.ini
 
 # IDE
 .idea/
 .vscode/
+CMakeLists.txt.user
+CMakeSettings.json
 
 # Temp
 *.tmp
@@ -59,16 +59,6 @@ FobosAPP.ini
 *.private.json
 __pycache__/
 *.py[cod]
-
-# Your local/private files
-token.txt
-FobosAPP_diagnostic.log
-CMakeLists.txt.user
-CMakeSettings.json
-FobosAPP.desktop
-fobos-sdr.rules
-resources.qrc
-toolchain.cmake
 
 # Backups and drafts
 _stable_backups/
@@ -111,12 +101,6 @@ third_party/downloads/
 third_party/rtl-sdr/
 third_party/src/
 third_party/dsd-fme/
-
-# Local vendor FPGA project and generated Vivado outputs
-/B210_Project_Firmwire/
-
-# Private development plans
-/docs/roadmap_4.0_cleanup.md
 
 # unused source
 src/udp_sender.cpp
