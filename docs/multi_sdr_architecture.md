@@ -107,6 +107,11 @@ A receiver that publishes only its own sample counter cannot enter this mode.
 The current Fobos API exposes no verified shared sample timeline. Hardware
 validation and the corresponding backend support are separate work.
 
+The live status tooltip reports the largest estimated relative phase drift
+against the reference receiver in Hz. The estimate uses consecutive coherent
+blocks and clears on recalibration or loss of continuity. It does not steer
+the receiver clocks or change the IQ combiner.
+
 **Align by signal (Fobos)** is a separate software mode for two receivers
 using the existing Agile or Standard IQ APIs. Set both RF inputs to the same
 center and 8 MS/s, switch off scanning and span auto-alignment, connect the

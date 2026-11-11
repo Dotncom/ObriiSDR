@@ -9,6 +9,12 @@
 #include <cstring>
 
 CliNetworkBridge::CliNetworkBridge(QObject *parent) : network(parent) {
+    centerChangeTimer.setSingleShot(true);
+    QObject::connect(&centerChangeTimer, &QTimer::timeout, &network,
+                     [this] { flushCenterChange(); });
+    QObject::connect(&network, &NetworkController::peerDisconnected, &network, [this] {
+        if (peerCount() == 0) resetPendingAudio();
+    });
     QObject::connect(&network, &NetworkController::channelReady, &network, [this](const QString &) {
         if (network.mode() == NetworkMode::Server) broadcastState();
         else if (network.mode() == NetworkMode::Client)
@@ -41,6 +47,8 @@ CliNetworkBridge::CliNetworkBridge(QObject *parent) : network(parent) {
             onClientAudio(payload);
         } else if (type == QStringLiteral("iqbin") && onClientIq) {
             onClientIq(command, payload);
+        } else if (type == QStringLiteral("uhdRxSpectrum") && onClientUhdRxSpectrum) {
+            onClientUhdRxSpectrum(command, payload);
         } else if (type == QStringLiteral("spectrumbin") && onClientSpectrum) {
             const int count = command.value(QStringLiteral("fftLength")).toInt();
             if (count < 2 || count > 65536) return;
@@ -73,14 +81,25 @@ CliNetworkBridge::CliNetworkBridge(QObject *parent) : network(parent) {
                      [this](const QString &status) { if (onStatus) onStatus(status); });
 }
 
+CliNetworkBridge::~CliNetworkBridge() {
+    // Peer-disconnect handlers capture the bridge's audio buffers.
+    network.blockSignals(true);
+    network.stop();
+}
+
 bool CliNetworkBridge::startServer(const QString &bindAddress, quint16 port,
                                    ServerCallbacks callbacks) {
+    centerChangeTimer.stop();
+    pendingCenterChange = {};
+    pendingCenterRequestIds.clear();
+    resetPendingAudio();
     serverCallbacks = std::move(callbacks);
     network.startServer(bindAddress, port);
     return network.mode() == NetworkMode::Server;
 }
 
 void CliNetworkBridge::connectClient(const QString &address, quint16 port) {
+    network.enableUhdRxSpectrum(bool(onClientUhdRxSpectrum));
     network.testClientConnection(address, port);
 }
 
@@ -116,11 +135,16 @@ bool CliNetworkBridge::setServerProcessingMode(int requested) {
     if (network.mode() != NetworkMode::Server || requested < 0 || requested > 2) return false;
     if (mode != requested) {
         mode = requested;
+        resetPendingAudio();
         iqChannelizer.reset();
         previousIqRate = 0.0;
         broadcastState();
     }
     return true;
+}
+
+void CliNetworkBridge::publishUhdClockStatus(const QJsonObject &status) {
+    network.sendControlCommand({{"type", "control"}, {"action", "uhdClockStatus"}, {"status", status}});
 }
 
 void CliNetworkBridge::broadcastState() {
@@ -131,6 +155,8 @@ void CliNetworkBridge::broadcastState() {
                       {QStringLiteral("serverDisableLocalVisualAudio"), true},
                       {QStringLiteral("fullResolutionSpectrumFrames"), false},
                       {QStringLiteral("settings"), serverCallbacks.settings()}};
+    if (serverCallbacks.isRunning)
+        state.insert(QStringLiteral("receiverRunning"), serverCallbacks.isRunning());
     if (serverCallbacks.receivers)
         state.insert(QStringLiteral("receiverDevices"), serverCallbacks.receivers());
     network.sendControlCommand(state);
@@ -144,6 +170,8 @@ void CliNetworkBridge::sendAck(const QString &peerId, const QJsonObject &request
                     {QStringLiteral("processingMode"), mode},
                     {QStringLiteral("serverDisableLocalVisualAudio"), true},
                     {QStringLiteral("settings"), serverCallbacks.settings()}};
+    if (serverCallbacks.isRunning)
+        ack.insert(QStringLiteral("receiverRunning"), serverCallbacks.isRunning());
     if (serverCallbacks.receivers)
         ack.insert(QStringLiteral("receiverDevices"), serverCallbacks.receivers());
     if (request.contains(QStringLiteral("requestId")))
@@ -167,8 +195,35 @@ void CliNetworkBridge::handleServerCommand(const QJsonObject &command) {
              {QStringLiteral("reason"), QStringLiteral("Observer cannot control the CLI receiver")}});
         return;
     }
+    if (action == QStringLiteral("getUhdGnss")) {
+        const QJsonObject status = serverCallbacks.uhdGnssStatus
+            ? serverCallbacks.uhdGnssStatus() : QJsonObject{{"state", "disabled"}};
+        QJsonObject reply{{"type", "control"}, {"action", "uhdGnssStatus"}, {"status", status}};
+        const QString requestId = command.value(QStringLiteral("requestId")).toString();
+        if (!requestId.isEmpty() && requestId.size() <= 128)
+            reply.insert(QStringLiteral("requestId"), requestId);
+        network.sendControlCommandToPeer(peerId, reply);
+        return;
+    }
     if (action == QStringLiteral("setViewport") ||
         action == QStringLiteral("setServerLocalOutput")) return;
+    const auto settings = command.value(QStringLiteral("settings")).toObject();
+    const QString requestId = command.value(QStringLiteral("requestId")).toString();
+    if (serverCallbacks.coalesceCenterChanges && action == QStringLiteral("setParameters") &&
+        settings.value(QStringLiteral("centerFrequency")).isDouble() && !requestId.isEmpty()) {
+        // Only replace patches for the same fields. A change to another
+        // setting must retain its position relative to a pending retune.
+        if (!pendingCenterChange.isEmpty() &&
+            (pendingCenterChange.value(QStringLiteral("_networkPeerId")).toString() != peerId ||
+             pendingCenterChange.value(QStringLiteral("settings")).toObject().keys() != settings.keys()))
+            flushCenterChange();
+        pendingCenterChange = command;
+        pendingCenterRequestIds.append(requestId);
+        if (pendingCenterRequestIds.size() >= 32) flushCenterChange();
+        else centerChangeTimer.start(120);
+        return;
+    }
+    flushCenterChange();
     if (action == QStringLiteral("setProcessingMode")) {
         const int requested = command.value(QStringLiteral("processingMode")).toInt(-1);
         if (requested < 0 || requested > 2) {
@@ -183,25 +238,48 @@ void CliNetworkBridge::handleServerCommand(const QJsonObject &command) {
     }
     if (action == QStringLiteral("setParameters") || action == QStringLiteral("settings") ||
         action == QStringLiteral("start")) {
-        QString reason;
-        const bool applied = !serverCallbacks.applySettings ||
-            serverCallbacks.applySettings(command.value(QStringLiteral("settings")).toObject(), &reason);
-        if (!applied) {
-            sendAck(peerId, command, false, reason);
-            return;
-        }
-        bool running = true;
-        if (action == QStringLiteral("start") && serverCallbacks.setRunning)
-            running = serverCallbacks.setRunning(true, &reason);
-        sendAck(peerId, command, running, reason);
-        broadcastState();
+        applyServerSettings(command);
         return;
     }
     if (action == QStringLiteral("stop")) {
         QString reason;
         if (serverCallbacks.setRunning) serverCallbacks.setRunning(false, &reason);
-        broadcastState();
+        publishState();
     }
+}
+
+void CliNetworkBridge::flushCenterChange() {
+    if (pendingCenterChange.isEmpty()) return;
+    centerChangeTimer.stop();
+    QJsonObject command;
+    QStringList requestIds;
+    command.swap(pendingCenterChange);
+    requestIds.swap(pendingCenterRequestIds);
+    if (command.value(QStringLiteral("_networkPeerId")).toString() == network.controllerPeerId())
+        applyServerSettings(command, requestIds);
+}
+
+void CliNetworkBridge::applyServerSettings(const QJsonObject &command, const QStringList &requestIds) {
+    const QString peerId = command.value(QStringLiteral("_networkPeerId")).toString();
+    const auto settings = command.value(QStringLiteral("settings")).toObject();
+    const bool txOnly = settings.size() == 1 && settings.contains(QStringLiteral("uhdTx"));
+    const bool wasRunning = serverCallbacks.isRunning && serverCallbacks.isRunning();
+    QString reason;
+    const bool applied = !serverCallbacks.applySettings || serverCallbacks.applySettings(settings, &reason);
+    bool okay = applied;
+    if (applied && command.value(QStringLiteral("action")).toString() == QStringLiteral("start") &&
+        serverCallbacks.setRunning)
+        okay = serverCallbacks.setRunning(true, &reason);
+    if (applied && (!txOnly || command.value("action") == QLatin1String("start")))
+        resetPendingAudio();
+    if (requestIds.isEmpty()) {
+        sendAck(peerId, command, okay, reason);
+    } else {
+        for (const QString &requestId : requestIds)
+            sendAck(peerId, {{QStringLiteral("requestId"), requestId}}, okay, reason);
+    }
+    if (applied || (serverCallbacks.isRunning && serverCallbacks.isRunning() != wasRunning))
+        broadcastState();
 }
 
 void CliNetworkBridge::sendSpectrum(const std::vector<float> &orderedDbfs,
@@ -256,15 +334,79 @@ void CliNetworkBridge::sendSpectrum(const std::vector<float> &orderedDbfs,
     }
 }
 
+bool CliNetworkBridge::hasUhdRxSpectrumPeers() const {
+    if (network.mode() != NetworkMode::Server) return false;
+    for (const QString &peerId : network.readyPeerIds()) {
+        if (network.peerSupportsUhdRxSpectrum(peerId) &&
+            network.peerStreamProfile(peerId) != QStringLiteral("remote-vfo")) return true;
+    }
+    return false;
+}
+
+void CliNetworkBridge::sendUhdRxSpectrum(int channel, const std::vector<float> &orderedDbfs,
+                                        double centerHz, double sampleRateHz, int sourceFftLength) {
+    if (network.mode() != NetworkMode::Server || channel < 0 || channel > 1 ||
+        orderedDbfs.size() < 2 || !std::isfinite(centerHz) || centerHz <= 0.0 ||
+        !std::isfinite(sampleRateHz) || sampleRateHz <= 0.0) return;
+    const int sourceCount = static_cast<int>(orderedDbfs.size());
+    const int count = (std::min)(sourceCount, 512);
+    std::vector<float> levels;
+    levels.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        const auto first = static_cast<qint64>(i) * sourceCount / count;
+        const auto last = static_cast<qint64>(i + 1) * sourceCount / count;
+        levels.push_back(*std::max_element(orderedDbfs.begin() + first, orderedDbfs.begin() + last));
+    }
+    const QJsonObject frame{
+        {QStringLiteral("type"), QStringLiteral("uhdRxSpectrum")},
+        {QStringLiteral("channel"), channel},
+        {QStringLiteral("sequence"), QString::number(++uhdRxSpectrumSequence)},
+        {QStringLiteral("centerFrequency"), centerHz},
+        {QStringLiteral("sampleRate"), sampleRateHz},
+        {QStringLiteral("fftLength"), count},
+        {QStringLiteral("sourceFftLength"), (std::max)(sourceFftLength, sourceCount)},
+        {QStringLiteral("binFormat"), QStringLiteral("s16le-db10")}};
+    const QByteArray payload = DisplaySpectrumCodec::encodeDb10(levels);
+    for (const QString &peerId : network.readyPeerIds()) {
+        if (!network.peerSupportsUhdRxSpectrum(peerId) ||
+            network.peerStreamProfile(peerId) == QStringLiteral("remote-vfo")) continue;
+        if (network.pendingBytesForPeer(peerId) > 256 * 1024) {
+            ++droppedSpectrum;
+            continue;
+        }
+        network.sendBinaryCommandToPeer(peerId, frame, payload);
+    }
+}
+
 void CliNetworkBridge::sendAudio(const QByteArray &pcm) {
-    if (network.mode() != NetworkMode::Server || mode != 0 || peerCount() == 0 || pcm.isEmpty()) return;
+    if (network.mode() != NetworkMode::Server || mode != 0 || !network.isControlReady() ||
+        pcm.isEmpty() || pcm.size() % sizeof(qint16) != 0) return;
+    // 20 ms of mono PCM16 at 48 kHz. The decoder can produce only a few samples
+    // per IQ read at high sample rates, so send complete playback blocks.
+    constexpr int packetBytes = 48000 * 20 / 1000 * sizeof(qint16);
+    pendingAudio.append(pcm);
+    if (pendingAudio.size() < packetBytes) return;
+    const QStringList peers = network.readyPeerIds();
+    if (peers.isEmpty()) {
+        pendingAudio.clear();
+        return;
+    }
+    int offset = 0;
+    while (pendingAudio.size() - offset >= packetBytes) {
+        sendAudioPacket(pendingAudio.mid(offset, packetBytes), peers);
+        offset += packetBytes;
+    }
+    pendingAudio.remove(0, offset);
+}
+
+void CliNetworkBridge::sendAudioPacket(const QByteArray &pcm, const QStringList &peers) {
     QJsonObject frame{{QStringLiteral("type"), QStringLiteral("audiobin")},
                       {QStringLiteral("sampleRate"), 48000},
                       {QStringLiteral("channels"), 1},
                       {QStringLiteral("sampleFormat"), QStringLiteral("pcm_s16le")},
                       {QStringLiteral("sequence"), QString::number(++audioSequence)},
                       {QStringLiteral("sourceTimeMs"), QString::number(QDateTime::currentMSecsSinceEpoch())}};
-    for (const QString &peerId : network.readyPeerIds()) {
+    for (const QString &peerId : peers) {
         if (network.pendingBytesForPeer(peerId) > 256 * 1024) {
             ++droppedAudio;
             continue;

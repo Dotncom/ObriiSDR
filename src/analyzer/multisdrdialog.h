@@ -25,6 +25,7 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QSpinBox;
+class QTabWidget;
 class QTimer;
 
 class MultiSdrDialog final : public QDialog {
@@ -35,6 +36,9 @@ public:
     ~MultiSdrDialog() override;
     void consumePrimaryFrame(const AnalyzerSpectrumFrame &frame);
     void setPrimaryRunning(bool running);
+    void setPrimaryUhdSettingsAvailable(bool visible, bool enabled);
+    void setRemoteUhdCompanionChannel(int channel);
+    void consumeRemoteUhdSpectrum(int channel, const AnalyzerSpectrumFrame &frame);
     void setPrimaryConfiguration(double centerHz, double sampleRateHz, int fftLength, bool fixedRf);
     bool mainMosaicFrame(AnalyzerSpectrumFrame &frame) const;
     void setMainViewMode(int mode);
@@ -52,6 +56,7 @@ signals:
     void primaryRetuneRequested(double deltaHz);
     void primaryStartRequested();
     void primaryStopRequested();
+    void primaryUhdSettingsRequested();
     void audioSourceChanged(int receiverIndex);
     void auxiliaryIqReady(int receiverIndex, const float *samples, quint64 floatCount,
                           double sampleRateHz, double centerHz);
@@ -67,6 +72,7 @@ private:
     void populateDeviceCombo(int sourceIndex);
     void populateInputs(int sourceIndex);
     void populateSampleRates(int sourceIndex);
+    void showUhdRxSettings(int sourceIndex);
     AnalyzerReceiverSettings receiverSettings(int sourceIndex) const;
     SpectrumMosaicSourceSettings previewMosaicSettings(int sourceIndex) const;
     SpectrumMosaicSourceSettings mainMosaicSettings(int sourceIndex) const;
@@ -95,6 +101,7 @@ private:
     void stopCoherentLive(const QString &reason = {});
     void updateCoherentLivePreview();
     void displayPreviewFrame(const AnalyzerSpectrumFrame &frame);
+    void clearRemoteUhdPreview();
     QString text(const char *english, const char *ukrainian) const;
     QString frequencyText(double hz) const;
 
@@ -116,6 +123,12 @@ private:
     bool latestMainMosaicValid = false;
     AnalyzerSpectrumWidget *spectrum = nullptr;
     AnalyzerWaterfallPreview *previewWaterfall = nullptr;
+    int remoteUhdCompanionChannel = -1;
+    QTabWidget *previewTabs = nullptr;
+    AnalyzerSpectrumWidget *remoteUhdSpectrum = nullptr;
+    AnalyzerWaterfallPreview *remoteUhdWaterfall = nullptr;
+    QLabel *remoteUhdStatus = nullptr;
+    QPushButton *remoteUhdSettings = nullptr;
     QComboBox *panTargetCombo = nullptr;
     QCheckBox *synchronizedPanCheckbox = nullptr;
     QCheckBox *autoAlignCheckbox = nullptr;

@@ -2,7 +2,7 @@
 Type=Application
 Name=Obrii SDR
 Comment=Wideband SDR receiver and research workstation
-Exec=ObriiSDR
+Exec=env -u QT_QPA_PLATFORMTHEME QT_STYLE_OVERRIDE=Fusion QT_SCALE_FACTOR=1.1 ObriiSDR
 Icon=obriisdr
 Terminal=false
 Categories=AudioVideo;HamRadio;Science;

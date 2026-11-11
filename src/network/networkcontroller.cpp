@@ -231,6 +231,10 @@ bool NetworkController::peerSupportsBinaryAudio(const QString &peerIdValue) cons
     return binaryAudioPeers.contains(peerForId(peerIdValue));
 }
 
+bool NetworkController::peerSupportsUhdRxSpectrum(const QString &peerIdValue) const {
+    return uhdRxSpectrumPeers.contains(peerForId(peerIdValue));
+}
+
 void NetworkController::stop() {
     handshakeTimer->stop();
     stopHeartbeat();
@@ -516,6 +520,7 @@ void NetworkController::closePeerSocket(QTcpSocket *socket) {
         peerStreamProfiles.remove(peer);
         compactSpectrumPeers.remove(peer);
         binaryAudioPeers.remove(peer);
+        uhdRxSpectrumPeers.remove(peer);
         peerLastMessageTimers.remove(peer);
         processingPeerReads.remove(peer);
         peerSockets.removeAll(peer);
@@ -550,6 +555,7 @@ void NetworkController::closePeerSocket(QTcpSocket *socket) {
     peerStreamProfiles.clear();
     compactSpectrumPeers.clear();
     binaryAudioPeers.clear();
+    uhdRxSpectrumPeers.clear();
     peerLastMessageTimers.clear();
     processingPeerReads.clear();
     peerSocket = nullptr;
@@ -873,6 +879,8 @@ void NetworkController::processLine(QTcpSocket *socket, const QByteArray &line) 
             capabilities[QStringLiteral("type")] = QStringLiteral("capabilities");
             capabilities[QStringLiteral("compactSpectrumS16")] = true;
             capabilities[QStringLiteral("binaryAudioPcmS16")] = true;
+            if (uhdRxSpectrumEnabled)
+                capabilities[QStringLiteral("uhdRxSpectrum")] = true;
             sendJsonToSocket(socket, capabilities);
             const QString message = QString("Control channel ready: %1:%2")
                                         .arg(clientSocket->peerAddress().toString())
@@ -912,6 +920,10 @@ void NetworkController::processLine(QTcpSocket *socket, const QByteArray &line) 
             binaryAudioPeers.insert(socket);
         else
             binaryAudioPeers.remove(socket);
+        if (command.value(QStringLiteral("uhdRxSpectrum")).toBool(false))
+            uhdRxSpectrumPeers.insert(socket);
+        else
+            uhdRxSpectrumPeers.remove(socket);
         return;
     }
     if (command.contains("payloadBytes")) {

@@ -248,8 +248,10 @@ void YourClassName::startGnssSerial() {
         return;
     }
 
-    qthSource = QStringLiteral("nmea");
-    qthPositionVisible = false;
+    if (qthSource != QLatin1String("uhd")) {
+        qthSource = QStringLiteral("nmea");
+        qthPositionVisible = false;
+    }
     updateQthControls();
     savePersistentSettings();
     updateGnssSerialStatus(uiText(QStringLiteral("gnss_serial_waiting"),
@@ -538,7 +540,7 @@ void YourClassName::processGnssNmeaLine(const QString &line, bool fromReplay, bo
                                       QStringLiteral("NMEA serial: fix ignored by satellite filters")));
         return;
     }
-    if (applyNmeaPositionText(trimmed, &status, false)) {
+    if (qthSource != QLatin1String("uhd") && applyNmeaPositionText(trimmed, &status, false)) {
         ++gnssSerialFixCount;
         QStringList extras;
         if (std::isfinite(gnssSerialHdop)) extras << QStringLiteral("HDOP %1").arg(gnssSerialHdop, 0, 'f', 1);
@@ -793,6 +795,7 @@ void YourClassName::processGnssUbxFrame(quint8 messageClass, quint8 messageId, c
                                               QStringLiteral("NMEA serial: fix ignored by satellite filters")));
                 return;
             }
+            if (qthSource == QLatin1String("uhd")) return;
             qthLatitude = lat;
             qthLongitude = lon;
             qthSource = QStringLiteral("nmea");

@@ -1042,6 +1042,44 @@ void testSelectionDeletion() {
     std::cout << "DSP deletion: 32 mixed selections, edge-only, partial, pending gestures and docked settings passed\n";
 }
 
+void testExplicitDspRateGeometry() {
+    const auto graph = [](const QString &sourceType, const QJsonObject &sourceSettings,
+                          const QJsonObject &ddcSettings) {
+        return QJsonObject{
+            {"blocks", QJsonArray{
+                QJsonObject{{"id", "source"}, {"type", sourceType}, {"settings", sourceSettings}},
+                QJsonObject{{"id", "ddc"}, {"type", "ddc_channelizer"}, {"settings", ddcSettings}},
+                QJsonObject{{"id", "good"}, {"type", "ddc_channelizer"},
+                            {"settings", QJsonObject{{"enabled", true}, {"outputRateHz", 16000}}}}}},
+            {"connections", QJsonArray{
+                QJsonObject{{"source", "source"}, {"target", "ddc"}},
+                QJsonObject{{"source", "source"}, {"target", "good"}}}}};
+    };
+    const QJsonObject lab{{"rate", 48000}};
+    const QJsonObject excessive{{"enabled", true}, {"outputRateHz", 96000}};
+    const auto conflict = compileDspGraph(graph("lab_iq", lab, excessive));
+    require(conflict.errors.isEmpty() && conflict.branchInputErrors.size() == 1 &&
+            conflict.branchInputErrors.value("ddc").contains("48000") && conflict.branches.size() == 2 &&
+            !conflict.branches[0].enabled && conflict.branches[1].enabled,
+            "An impossible Lab IQ rate must disable only the affected DDC");
+    const auto decimation = compileDspGraph(graph("lab_iq", lab,
+        {{"enabled", true}, {"outputRateHz", 12001}, {"decimation", 4}}));
+    require(decimation.branchInputErrors.value("ddc").contains("12000") && !decimation.branches[0].enabled,
+            "Manual decimation rate limit was ignored");
+    const auto boundary = compileDspGraph(graph("lab_iq", lab,
+        {{"enabled", true}, {"outputRateHz", 12000}, {"decimation", 4}}));
+    require(boundary.branchInputErrors.isEmpty() && boundary.branches[0].enabled,
+            "Valid manual decimation was rejected at the exact rate limit");
+    for (const auto &legacy : {graph("lab_iq", {}, excessive),
+                               graph("lab_iq", lab, {{"enabled", true}}),
+                               graph("receiver_source", lab, excessive), graph("network_input", lab, excessive)}) {
+        const auto plan = compileDspGraph(legacy);
+        require(plan.errors.isEmpty() && plan.branchInputErrors.isEmpty() &&
+                plan.branches.size() == 2 && plan.branches[0].enabled,
+                "Unspecified or runtime input geometry was treated as an incompatible link");
+    }
+}
+
 void testMainFftGraph() {
     require(dspLinkKind("receiver_source", "fft") == DspLinkKind::Iq &&
             dspLinkKind("iq_source", "fft") == DspLinkKind::Iq, "Main FFT input is not typed IQ");
@@ -1578,6 +1616,7 @@ int main(int argc, char **argv) {
         testSelectionDeletion();
         testBoard();
         testLazyWorkspaceWaterfall();
+        testExplicitDspRateGeometry();
         testMainFftGraph();
         testBoardSignalPath();
         testMainFftBoardRouting();

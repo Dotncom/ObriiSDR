@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/usrp-lab">
+        <file>usrp_zmq_loopback.py</file>
+    </qresource>
+</RCC>

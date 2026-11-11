@@ -568,6 +568,7 @@ void YourClassName::openNetworkSettingsDialog() {
             if (previousNetworkMode == NetworkMode::Client) {
                 stopNetworkClientProcessing();
                 clearRemoteReceiverDeviceList();
+                runState = RadioRunState::Idle;
             } else if (previousNetworkMode == NetworkMode::Server && runState == RadioRunState::Running) {
                 if (audioProcessor) {
                     audioProcessor->setLocalPlaybackEnabled(true);
@@ -580,6 +581,7 @@ void YourClassName::openNetworkSettingsDialog() {
                 remoteAudioPlayer->stop();
             }
             networkController->stop();
+            if (previousNetworkMode == NetworkMode::Client) updateUiForRunState();
             updateRemoteWebServer();
             if (runState == RadioRunState::Running) {
                 updateIqFrameProducerSettings();
@@ -591,6 +593,7 @@ void YourClassName::openNetworkSettingsDialog() {
         if (previousNetworkMode == NetworkMode::Client && networkMode != NetworkMode::Client) {
             stopNetworkClientProcessing();
             clearRemoteReceiverDeviceList();
+            runState = RadioRunState::Idle;
         }
 
         if (remoteAudioPlayer && networkMode != NetworkMode::Client) {
@@ -601,6 +604,7 @@ void YourClassName::openNetworkSettingsDialog() {
             networkClientRequestedServerLocalOutput = -1;
             clearRemoteReceiverDeviceList();
             networkController->startServer(networkBindAddress, networkControlPort);
+            if (previousNetworkMode == NetworkMode::Client) updateUiForRunState();
             updateRemoteWebServer();
             const bool restartRequired =
                 runState == RadioRunState::Running &&
@@ -667,6 +671,8 @@ void YourClassName::openNetworkSettingsDialog() {
         if (previousNetworkMode == NetworkMode::Client) {
             stopNetworkClientProcessing();
             clearRemoteReceiverDeviceList();
+            runState = RadioRunState::Idle;
+            updateUiForRunState();
         } else if (previousNetworkMode == NetworkMode::Server && runState == RadioRunState::Running) {
             if (audioProcessor) {
                 audioProcessor->setLocalPlaybackEnabled(true);

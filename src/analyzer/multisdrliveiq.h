@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 class MultiSdrLiveIq final {
@@ -15,6 +16,7 @@ public:
         int sourceCount = 0;
         QString error;
         QString waiting;
+        std::optional<double> maximumPhaseDriftHz;
     };
 
     ~MultiSdrLiveIq();

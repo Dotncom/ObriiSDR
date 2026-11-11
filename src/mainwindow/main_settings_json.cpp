@@ -146,9 +146,9 @@ QJsonObject YourClassName::settingsToJson() const {
     settings["extendedRecordingMetadata"] = extendedRecordingMetadataEnabled;
     settings["agileContinuousRetune"] = agileContinuousRetuneEnabled;
     settings["agileContinuousRetuneStepPercent"] = agileContinuousRetuneStepPercent;
-    settings["qthLatitude"] = qthLatitude;
-    settings["qthLongitude"] = qthLongitude;
-    settings["qthPositionVisible"] = qthPositionVisible;
+    settings["qthLatitude"] = qthPositionBeforeUhd ? qthPositionBeforeUhd->y() : qthLatitude;
+    settings["qthLongitude"] = qthPositionBeforeUhd ? qthPositionBeforeUhd->x() : qthLongitude;
+    settings["qthPositionVisible"] = qthPositionBeforeUhd ? qthPositionVisibleBeforeUhd : qthPositionVisible;
     settings["qthSource"] = qthSource;
     settings["gnssSerialPortName"] = gnssSerialPortName;
     settings["gnssSerialBaud"] = gnssSerialBaud;
@@ -560,14 +560,22 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
         std::abs(previousScanMeasurementBinMhz - scanMeasurementBinMhz) > 0.000001) {
         clearScanMeasurement();
     }
-    qthLatitude = (std::clamp)(readDouble("qthLatitude", qthLatitude), -90.0, 90.0);
-    qthLongitude = (std::clamp)(readDouble("qthLongitude", qthLongitude), -180.0, 180.0);
-    qthPositionVisible = settingsJson.value("qthPositionVisible").toBool(qthPositionVisible);
+    const double previousLatitude = qthPositionBeforeUhd ? qthPositionBeforeUhd->y() : qthLatitude;
+    const double previousLongitude = qthPositionBeforeUhd ? qthPositionBeforeUhd->x() : qthLongitude;
+    const bool previousVisibility = qthPositionBeforeUhd ? qthPositionVisibleBeforeUhd : qthPositionVisible;
+    qthLatitude = (std::clamp)(readDouble("qthLatitude", previousLatitude), -90.0, 90.0);
+    qthLongitude = (std::clamp)(readDouble("qthLongitude", previousLongitude), -180.0, 180.0);
+    qthPositionVisible = settingsJson.value("qthPositionVisible").toBool(previousVisibility);
     qthSource = settingsJson.value("qthSource").toString(qthSource).trimmed();
     if (qthSource.isEmpty()) {
         qthSource = QStringLiteral("manual");
     }
-    if (qthSource == QStringLiteral("nmea")) {
+    qthPositionBeforeUhd.reset();
+    if (qthSource == QLatin1String("uhd")) {
+        qthPositionBeforeUhd = QPointF(qthLongitude, qthLatitude);
+        qthPositionVisibleBeforeUhd = qthPositionVisible;
+        qthPositionVisible = false;
+    } else if (qthSource == QLatin1String("nmea")) {
         qthPositionVisible = false;
     }
     gnssSerialPortName = settingsJson.value("gnssSerialPortName").toString(gnssSerialPortName).trimmed();

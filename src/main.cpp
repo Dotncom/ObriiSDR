@@ -52,6 +52,7 @@
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDoubleSpinBox>
 #include <QDir>
 #include <QEventLoop>
 #include <QFile>
@@ -63,10 +64,12 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLineEdit>
 #include <QList>
 #include <QMenu>
 #include <QAction>
 #include <QMetaObject>
+#include <QMessageBox>
 #include <QHostAddress>
 #include <QHostInfo>
 #include <QIcon>
@@ -87,6 +90,7 @@
 #include <QTextStream>
 #include <QTextCursor>
 #include <QPushButton>
+#include <QTimer>
 #include <QToolButton>
 #include <QKeyEvent>
 #include <QAbstractButton>
@@ -119,6 +123,11 @@
 #include <new>
 #include <utility>
 
+static qint64 uhdStartupOpenTimeoutMs(const QString &fpgaImagePath) {
+    // A cold FPGA load can take longer than the normal UHD open timeout.
+    return fpgaImagePath.trimmed().isEmpty() ? 12000 : 75000;
+}
+static constexpr qint64 StreamFirstIqTimeoutMs = 1800;
 
 fobos_dev_t* device = nullptr;
 fobos_sdr_dev_t* agileDevice = nullptr;
@@ -956,6 +965,7 @@ YourClassName::YourClassName(QWidget *parent)
     playbackManager = new PlaybackManager(this);
     recordingManager = new RecordingManager(this);
     networkController = new NetworkController(this);
+    networkController->enableUhdRxSpectrum(true);
     remoteVfoService = new RemoteVfoService(this);
     remoteWebServer = new RemoteWebServer(remoteVfoService, this);
     remoteAudioPlayer = new RemoteAudioPlayer(this);
@@ -2349,6 +2359,8 @@ YourClassName::YourClassName(QWidget *parent)
                     this, &YourClassName::startFobosProcessing);
             connect(multiSdrDialog, &MultiSdrDialog::primaryStopRequested,
                     this, &YourClassName::stopFobosProcessing);
+            connect(multiSdrDialog, &MultiSdrDialog::primaryUhdSettingsRequested,
+                    this, &YourClassName::showUhdRxSettings);
             connect(multiSdrDialog, &MultiSdrDialog::audioSourceChanged,
                     this, [this](int receiverIndex) {
                 if (audioProcessor)
@@ -2370,6 +2382,9 @@ YourClassName::YourClassName(QWidget *parent)
                                                     pendingSettings.inputMode == INPUT_RF && !agileScanEnabled && !standardScanEnabled);
             multiSdrDialog->setMainViewMode(multiSdrViewMode);
             multiSdrDialog->setPrimaryRunning(isRunningOrTransitioning());
+            multiSdrDialog->setPrimaryUhdSettingsAvailable(!uhdSettingsButton->isHidden(),
+                                                          uhdSettingsButton->isEnabled());
+            multiSdrDialog->setRemoteUhdCompanionChannel(remoteUhdCompanionChannel());
         }
         multiSdrDialog->show();
         multiSdrDialog->raise();
@@ -2702,6 +2717,10 @@ YourClassName::YourClassName(QWidget *parent)
     qthSourceCombo->addItem(uiText(QStringLiteral("manual"), QStringLiteral("Manual")), QStringLiteral("manual"));
     qthSourceCombo->addItem(QStringLiteral("NMEA GPS"), QStringLiteral("nmea"));
     qthSourceCombo->addItem(uiText(QStringLiteral("os_location"), QStringLiteral("OS location")), QStringLiteral("os"));
+    qthSourceCombo->addItem(QStringLiteral("UHD GPS"), QStringLiteral("uhd"));
+    uhdGnssPollTimer = new QTimer(this);
+    uhdGnssPollTimer->setInterval(2500);
+    connect(uhdGnssPollTimer, &QTimer::timeout, this, &YourClassName::refreshUhdGnssPosition);
     qthSourceCombo->setItemData(1,
                                 uiText(QStringLiteral("nmea_paste_tooltip"),
                                        QStringLiteral("Paste NMEA GGA/RMC text from the clipboard and use it as the current QTH.")),
@@ -4361,7 +4380,18 @@ YourClassName::YourClassName(QWidget *parent)
         resetHfInterferenceDefaults();
     });
     connect(qthSourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
-        qthSource = qthSourceCombo ? qthSourceCombo->currentData().toString() : QStringLiteral("manual");
+        const QString nextSource = qthSourceCombo->currentData().toString();
+        if (qthSource == QLatin1String("uhd") && nextSource != qthSource && qthPositionBeforeUhd) {
+            qthLatitude = qthPositionBeforeUhd->y();
+            qthLongitude = qthPositionBeforeUhd->x();
+            qthPositionVisible = qthPositionVisibleBeforeUhd;
+        }
+        if (nextSource == QLatin1String("uhd") && nextSource != qthSource) {
+            qthPositionBeforeUhd = QPointF(qthLongitude, qthLatitude);
+            qthPositionVisibleBeforeUhd = qthPositionVisible;
+            qthPositionVisible = false;
+        }
+        qthSource = nextSource;
         updateQthControls();
         savePersistentSettings();
     });
@@ -4677,6 +4707,7 @@ YourClassName::YourClassName(QWidget *parent)
         Q_UNUSED(status);
         if (isNetworkClientMode()) {
             networkClientReconnectPending = false;
+            networkClientCanInferRunning = true;
             if (runState == RadioRunState::Running) {
                 if (isClientIqProcessingMode()) {
                     startNetworkClientProcessing();
@@ -4736,6 +4767,7 @@ YourClassName::YourClassName(QWidget *parent)
         });
     });
     connect(networkController, &NetworkController::controlCommandReceived, this, &YourClassName::onNetworkControlCommandReceived);
+    connect(networkController, &NetworkController::controlCommandReceived, this, &YourClassName::handleUhdGnssReply);
     connect(networkController, &NetworkController::binaryCommandReceived, this, [this](const QJsonObject &command, const QByteArray &payload) {
         if (networkMode != NetworkMode::Client) {
             return;
@@ -4745,6 +4777,8 @@ YourClassName::YourClassName(QWidget *parent)
             receiveNetworkIqFrameBinary(command, payload);
         } else if (type == QStringLiteral("spectrumbin")) {
             displayNetworkSpectrumFrameBinary(command, payload);
+        } else if (type == QStringLiteral("uhdRxSpectrum")) {
+            receiveRemoteUhdSpectrum(command, payload);
         } else if (type == QStringLiteral("audiobin") &&
                    !isChannelIqProcessingMode()) {
             playNetworkAudioPcmFrame(command, payload);
@@ -7213,9 +7247,7 @@ bool YourClassName::restartStreamForHardwareChange(bool forceFrequencyApply) {
     }
 
     pendingAudioStartAfterStreamReady = serverLocalAudioEnabled;
-    streamStartCallbackCount = processor ? processor->callbackCount() : 0;
-    streamStartElapsedTimer.restart();
-    if (streamWatchdogTimer) streamWatchdogTimer->start();
+    armStreamStartupWatchdog(false);
 
     runState = RadioRunState::Running;
     updateUiForRunState();
@@ -7677,7 +7709,8 @@ void YourClassName::handleDataProcessorFailure(int errorCode, bool stoppedByRequ
              << "sampleRate" << pendingSettings.sampleRate
              << "inputMode" << pendingSettings.inputMode;
 
-    if (stoppedByRequest || isNetworkClientMode()) {
+    if (stoppedByRequest || isNetworkClientMode() || runState == RadioRunState::Stopping ||
+        (isIdle() && !deviceOpened && !hasActiveFobosDevice())) {
         return;
     }
 
@@ -7692,7 +7725,8 @@ void YourClassName::handleDataProcessorFailure(int errorCode, bool stoppedByRequ
     clearSpectrumAfterStop = true;
     const bool startupFailure =
         streamStartElapsedTimer.isValid() &&
-        streamStartElapsedTimer.elapsed() < 2500 &&
+        streamStartElapsedTimer.elapsed() < (streamStartupWaitingForUhd
+            ? uhdStartupOpenTimeoutMs(pendingSettings.uhdFpgaImagePath) : 2500) &&
         streamStartupRetryCount < 1;
     if (startupFailure) {
         ++streamStartupRetryCount;
@@ -7704,14 +7738,6 @@ void YourClassName::handleDataProcessorFailure(int errorCode, bool stoppedByRequ
     } else if (externalBackendFailure) {
         qDebug() << "[FobosLifecycle] external receiver startup failure retry already used"
                  << "error" << errorCode;
-    }
-
-    if (runState == RadioRunState::Stopping) {
-        return;
-    }
-
-    if (runState == RadioRunState::Idle && !deviceOpened && !hasActiveFobosDevice()) {
-        return;
     }
 
     qDebug() << "[FobosLifecycle] recovering from reader failure; closing Fobos session";
@@ -9290,6 +9316,7 @@ bool YourClassName::applyFobosSettings(bool forceFrequencyApply) {
 }
 
 void YourClassName::startFobosProcessing() {
+    ++streamStartupGeneration;
     if (fftTuningActive() || dualFobosSwitchPending) return;
     if (playbackManager && playbackManager->isPlaying()) {
         stopPlayback();
@@ -9676,14 +9703,7 @@ void YourClassName::startFobosProcessing() {
                  << "settleMs" << liveRetuneSettleDurationMs;
     }
     pendingAudioStartAfterStreamReady = serverLocalAudioEnabled;
-    streamStartCallbackCount = processor ? processor->callbackCount() : 0;
-    streamStartElapsedTimer.restart();
-    if (streamWatchdogTimer) {
-        qDebug() << "[FobosLifecycle] stream startup watchdog armed"
-                 << "callbackCount" << streamStartCallbackCount
-                 << "retryCount" << streamStartupRetryCount;
-        streamWatchdogTimer->start();
-    }
+    armStreamStartupWatchdog(uhdNativeSelected);
     runState = RadioRunState::Running;
     qDebug() << "[FobosLifecycle] state changed" << runStateName(runState)
              << "processorRunning" << (processor && processor->isRunning());
@@ -9782,6 +9802,157 @@ void YourClassName::openZoomDensity() {
 }
 
 void YourClassName::openTransmitDialog() {
+    const auto remoteTx = [this] {
+        return networkClientConfirmedSettingsJson.value(QStringLiteral("uhdTx")).toObject();
+    };
+    if (networkMode == NetworkMode::Client && !isRemoteVfoProcessingMode() && !remoteTx().isEmpty()) {
+        const bool uk = uiLanguage.startsWith(QLatin1String("uk"));
+        QDialog dialog(this);
+        dialog.setWindowTitle(uk ? QStringLiteral("UHD TX · віддалений B210") : QStringLiteral("UHD TX · remote B210"));
+        QFormLayout form(&dialog);
+        const auto initialTx = remoteTx();
+        const auto txChannels = initialTx.value(QStringLiteral("txChannels")).toArray();
+        const bool dualTx = txChannels.size() == 2;
+        QComboBox output;
+        const auto outputName = [uk](int target) {
+            return target == 2 ? (uk ? QStringLiteral("TX 0 і TX 1") : QStringLiteral("TX 0 and TX 1"))
+                               : QStringLiteral("TX %1").arg(target);
+        };
+        for (const auto &entry : txChannels) {
+            const int port = entry.toInt();
+            output.addItem(outputName(port), port);
+        }
+        const int defaultTx = initialTx.value(QStringLiteral("channel")).toInt();
+        if (output.count() == 0) output.addItem(outputName(defaultTx), defaultTx);
+        if (dualTx) output.addItem(outputName(2), 2);
+        output.setCurrentIndex((std::max)(0, output.findData(defaultTx)));
+        output.setEnabled(dualTx);
+        form.addRow(uk ? QStringLiteral("Вихід TX") : QStringLiteral("TX output"), &output);
+        QDoubleSpinBox frequency;
+        frequency.setDecimals(6);
+        frequency.setRange(0.0, 6000.0);
+        frequency.setSpecialValueText(uk ? QStringLiteral("Введіть частоту") : QStringLiteral("Enter a frequency"));
+        frequency.setSuffix(QStringLiteral(" MHz"));
+        QSpinBox gain;
+        gain.setRange(0, 10);
+        gain.setSuffix(QStringLiteral(" dB"));
+        QSpinBox duration;
+        duration.setRange(50, 500);
+        duration.setSuffix(QStringLiteral(" ms"));
+        QLineEdit armCode;
+        armCode.setEchoMode(QLineEdit::Password);
+        armCode.setMaxLength(36);
+        armCode.setPlaceholderText(QStringLiteral("ObriiCli control uhd-tx-arm"));
+        form.addRow(uk ? QStringLiteral("Центр TX") : QStringLiteral("TX center"), &frequency);
+        form.addRow(uk ? QStringLiteral("Підсилення") : QStringLiteral("Gain"), &gain);
+        form.addRow(uk ? QStringLiteral("Тривалість") : QStringLiteral("Duration"), &duration);
+        form.addRow(uk ? QStringLiteral("Одноразовий код") : QStringLiteral("Single-use code"), &armCode);
+        QLabel status;
+        status.setTextFormat(Qt::PlainText);
+        status.setWordWrap(true);
+        form.addRow(&status);
+        QDialogButtonBox buttons(QDialogButtonBox::Close);
+        auto *send = buttons.addButton(uk ? QStringLiteral("Тестовий тон") : QStringLiteral("Test tone"),
+                                       QDialogButtonBox::ActionRole);
+        auto *stop = buttons.addButton(uk ? QStringLiteral("Зупинити TX") : QStringLiteral("Stop TX"),
+                                       QDialogButtonBox::ActionRole);
+        form.addRow(&buttons);
+
+        QString requestId;
+        QString requestError;
+        bool sentTone = false;
+        QTimer timeout;
+        timeout.setSingleShot(true);
+        QTimer refresh;
+        const auto update = [&] {
+            const auto tx = remoteTx();
+            const bool active = tx.value("active").toBool();
+            const bool canControl = networkMode == NetworkMode::Client && networkController &&
+                networkController->clientHasControl() && tx.value("available").toBool();
+            send->setEnabled(canControl && !active && requestId.isEmpty() &&
+                frequency.value() >= 70.0 && !armCode.text().trimmed().isEmpty());
+            stop->setEnabled(canControl && (active || (!requestId.isEmpty() && sentTone)));
+            QString message = requestError;
+            if (message.isEmpty()) message = tx.value("error").toString();
+            if (message.isEmpty() && !canControl)
+                message = uk ? QStringLiteral("Потрібен активний RX і право керування сервером.")
+                             : QStringLiteral("An active receiver and server control are required.");
+            if (message.isEmpty() && !requestId.isEmpty())
+                message = uk ? QStringLiteral("Очікування відповіді сервера…") : QStringLiteral("Waiting for the server…");
+            if (message.isEmpty()) {
+                const auto state = tx.value("state").toString();
+                if (active) message = uk ? QStringLiteral("Передавання тону") : QStringLiteral("Sending tone");
+                else if (state == QLatin1String("completed") || state == QLatin1String("stopped"))
+                    message = QStringLiteral("%1 · %2").arg(
+                        outputName(tx.value("targetChannel").toInt(defaultTx)),
+                        (uk ? QStringLiteral("Відліків на канал передано в UHD: %1")
+                            : QStringLiteral("Samples per channel submitted to UHD: %1"))
+                                .arg(static_cast<qint64>(tx.value("samples").toDouble())));
+                else if (output.currentData().toInt() == 2)
+                    message = uk ? QStringLiteral("TX 0: +1 кГц · TX 1: +2 кГц")
+                                 : QStringLiteral("TX 0: +1 kHz · TX 1: +2 kHz");
+                else message = uk ? QStringLiteral("TX/RX · тон +1 кГц") : QStringLiteral("TX/RX · +1 kHz tone");
+            }
+            status.setText(message);
+        };
+        const auto submit = [&](const QJsonObject &tx) {
+            requestError.clear();
+            if (sendRemoteControlCommand(QStringLiteral("setParameters"),
+                                         {{"settings", QJsonObject{{"uhdTx", tx}}}})) {
+                requestId = QString::number(networkClientSettingsRequestCounter);
+                timeout.start(7000);
+            } else {
+                requestError = uk ? QStringLiteral("Команду не надіслано.") : QStringLiteral("Command was not sent.");
+            }
+            update();
+        };
+        connect(networkController, &NetworkController::controlCommandReceived, &dialog,
+                [&](const QJsonObject &command) {
+            if (requestId.isEmpty() || command.value("action") != QLatin1String("settingsAck") ||
+                command.value("requestId").toString() != requestId) return;
+            timeout.stop();
+            requestId.clear();
+            if (!command.value("ok").toBool()) requestError = command.value("reason").toString();
+            update();
+        });
+        connect(&timeout, &QTimer::timeout, &dialog, [&] {
+            requestId.clear();
+            requestError = uk ? QStringLiteral("Сервер не підтвердив команду.") : QStringLiteral("Server did not acknowledge the command.");
+            update();
+        });
+        connect(&refresh, &QTimer::timeout, &dialog, update);
+        connect(&output, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog, update);
+        connect(&frequency, QOverload<double>::of(&QDoubleSpinBox::valueChanged), &dialog, update);
+        connect(&armCode, &QLineEdit::textChanged, &dialog, update);
+        connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        connect(send, &QPushButton::clicked, &dialog, [&] {
+            const int target = output.currentData().toInt();
+            const auto confirm = (uk ? QStringLiteral("Почати RF-тест на %1 із центром %2 МГц?")
+                                     : QStringLiteral("Start the RF test on %1 at %2 MHz center?"))
+                                         .arg(outputName(target), QString::number(frequency.value(), 'f', 6));
+            const auto termination = dualTx
+                ? (uk ? QStringLiteral("Для стендового тесту обидва TX/RX мають бути підключені до навантажень 50 Ом або атенуйованого тракту.")
+                      : QStringLiteral("For a bench test, connect both TX/RX ports to 50-ohm loads or an attenuated test path."))
+                : (uk ? QStringLiteral("Для стендового тесту підключіть вибраний TX/RX до навантаження 50 Ом або атенуйованого тракту.")
+                      : QStringLiteral("For a bench test, connect the selected TX/RX port to a 50-ohm load or attenuated test path."));
+            if (QMessageBox::question(&dialog, dialog.windowTitle(),
+                    confirm + QStringLiteral("\n\n") + termination,
+                    QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+            const auto code = armCode.text().trimmed();
+            armCode.clear();
+            sentTone = true;
+            submit({{"operation", "tone"}, {"rfConfirm", true}, {"code", code},
+                    {"frequencyHz", frequency.value() * 1e6}, {"gainDb", gain.value()},
+                    {"durationMs", duration.value()}, {"channel", target}});
+        });
+        connect(stop, &QPushButton::clicked, &dialog, [&] { submit({{"operation", "stop"}}); });
+        refresh.start(100);
+        update();
+        dialog.exec();
+        if (sentTone && (!requestId.isEmpty() || remoteTx().value("active").toBool()))
+            submit({{"operation", "stop"}});
+        return;
+    }
     if (!transmitDialog) {
         transmitDialog = new TransmitDialog(uiLanguage, this);
     }
@@ -9820,6 +9991,7 @@ void YourClassName::finishFobosStop(bool forcedRecovery) {
     if (streamWatchdogTimer) {
         streamWatchdogTimer->stop();
     }
+    streamStartupWaitingForUhd = false;
     resetListeningScanState();
 
     if (processor) {
@@ -9909,21 +10081,38 @@ void YourClassName::finishFobosStop(bool forcedRecovery) {
 
     if (restartAfterStartupWatchdog && !forcedRecovery && closeSucceeded) {
         restartAfterStartupWatchdog = false;
-        qDebug() << "[FobosLifecycle] scheduling automatic prepare and restart after stream startup watchdog"
+        const bool retryUhd = isUhdNativeSelected();
+        const auto generation = streamStartupGeneration;
+        qDebug() << "[FobosLifecycle] scheduling automatic restart after stream startup watchdog"
                  << "retryCount" << streamStartupRetryCount;
-        QTimer::singleShot(1500, this, [this]() {
-            if (!prepareFobosSessionFromSettings(QStringLiteral("reader failure retry"))) {
+        QTimer::singleShot(1500, this, [this, generation, retryUhd]() {
+            if (generation != streamStartupGeneration || closeShutdownInProgress || !isIdle() ||
+                isNetworkClientMode() || retryUhd != isUhdNativeSelected()) return;
+            if (!retryUhd && !prepareFobosSessionFromSettings(QStringLiteral("reader failure retry"))) {
                 qDebug() << "[FobosLifecycle] automatic restart skipped because Fobos session could not be prepared";
                 automaticStreamRestart = false;
                 return;
             }
             automaticStreamRestart = true;
             startFobosProcessing();
+            automaticStreamRestart = false;
         });
     } else if (restartAfterStartupWatchdog && !closeSucceeded) {
         restartAfterStartupWatchdog = false;
         automaticStreamRestart = false;
         qDebug() << "[FobosLifecycle] automatic restart skipped because device close failed";
+    }
+}
+
+void YourClassName::armStreamStartupWatchdog(bool waitForUhd) {
+    streamStartCallbackCount = processor ? processor->callbackCount() : 0;
+    streamStartupWaitingForUhd = waitForUhd;
+    streamStartElapsedTimer.restart();
+    if (streamWatchdogTimer) {
+        qDebug() << "[FobosLifecycle] stream startup watchdog armed"
+                 << "waitingForUhd" << waitForUhd
+                 << "retryCount" << streamStartupRetryCount;
+        streamWatchdogTimer->start();
     }
 }
 
@@ -9936,7 +10125,13 @@ void YourClassName::checkStreamStartup() {
     }
 
     const uint64_t callbackCount = processor->callbackCount();
-    if (callbackCount > streamStartCallbackCount) {
+    const bool receivedIq = callbackCount > streamStartCallbackCount;
+    if (streamStartupWaitingForUhd && (receivedIq || processor->uhdStreamReady())) {
+        qDebug() << "[UHD] RX stream command completed" << "openMs" << streamStartElapsedTimer.elapsed();
+        streamStartupWaitingForUhd = false;
+        streamStartElapsedTimer.restart();
+    }
+    if (receivedIq) {
         if (fobosVerboseLoggingEnabled()) {
             qDebug() << "[FobosLifecycle] stream startup watchdog satisfied"
                      << "callbackCount" << callbackCount
@@ -9966,11 +10161,13 @@ void YourClassName::checkStreamStartup() {
     }
 
     const qint64 elapsedMs = streamStartElapsedTimer.isValid() ? streamStartElapsedTimer.elapsed() : 0;
-    if (elapsedMs < 1800) {
+    if (elapsedMs < (streamStartupWaitingForUhd
+        ? uhdStartupOpenTimeoutMs(pendingSettings.uhdFpgaImagePath) : StreamFirstIqTimeoutMs)) {
         return;
     }
 
-    qDebug() << "[FobosLifecycle] stream startup watchdog: no IQ callbacks after start"
+    qDebug() << "[FobosLifecycle] stream startup watchdog expired"
+             << "phase" << (streamStartupWaitingForUhd ? "UHD open" : "first IQ")
              << "elapsedMs" << elapsedMs
              << "callbackCount" << callbackCount
              << "retryCount" << streamStartupRetryCount
@@ -10032,7 +10229,9 @@ void YourClassName::pollStopCompletion() {
         return;
     }
 
-    if (elapsedMs < 6000) {
+    if (elapsedMs < 6000 ||
+        (streamStartupWaitingForUhd &&
+         streamStartElapsedTimer.elapsed() < uhdStartupOpenTimeoutMs(pendingSettings.uhdFpgaImagePath))) {
         return;
     }
 
@@ -10087,6 +10286,7 @@ void YourClassName::stopFobosProcessing() {
             remoteAudioPlayer->stop();
         }
         networkClientReconnectPending = false;
+        if (sent) networkClientCanInferRunning = false;
         runState = RadioRunState::Idle;
         updateUiForRunState();
         return;

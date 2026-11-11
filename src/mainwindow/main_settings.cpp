@@ -179,6 +179,13 @@ void YourClassName::loadPersistentSettings() {
                      62) / 2 * 2;
     pendingSettings.uhdRxChannel =
         (std::clamp)(settings.value("receiver/uhdRxChannel", 0).toInt(), 0, 1);
+    const auto uhdClock = settings.value("receiver/uhdClockSource").toString();
+    if (uhdClock == QLatin1String("internal") || uhdClock == QLatin1String("external"))
+        pendingSettings.uhdClockSource = uhdClock;
+    else
+        pendingSettings.uhdClockSource = QStringLiteral("auto");
+    const int uhdGnssBaud = settings.value("receiver/uhdGnssBaud", 0).toInt();
+    pendingSettings.uhdGnssBaud = uhdGnssBaud == 9600 || uhdGnssBaud == 38400 ? uhdGnssBaud : 0;
     pendingSettings.uhdRxGainDb =
         (std::clamp)(settings.value("receiver/uhdRxGainDb", 30.0).toDouble(), 0.0, 100.0);
     pendingSettings.uhdRxAntenna =
@@ -350,7 +357,12 @@ void YourClassName::loadPersistentSettings() {
     if (qthSource.isEmpty()) {
         qthSource = QStringLiteral("manual");
     }
-    if (qthSource == QStringLiteral("nmea")) {
+    qthPositionBeforeUhd.reset();
+    if (qthSource == QLatin1String("uhd")) {
+        qthPositionBeforeUhd = QPointF(qthLongitude, qthLatitude);
+        qthPositionVisibleBeforeUhd = qthPositionVisible;
+        qthPositionVisible = false;
+    } else if (qthSource == QLatin1String("nmea")) {
         qthPositionVisible = false;
     }
     gnssSerialPortName =
@@ -1662,6 +1674,8 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("receiver/hackRfLnaGainDb", settingsToSave.hackRfLnaGainDb);
     settings.setValue("receiver/hackRfVgaGainDb", settingsToSave.hackRfVgaGainDb);
     settings.setValue("receiver/uhdRxChannel", settingsToSave.uhdRxChannel);
+    settings.setValue("receiver/uhdClockSource", settingsToSave.uhdClockSource);
+    settings.setValue("receiver/uhdGnssBaud", settingsToSave.uhdGnssBaud);
     settings.setValue("receiver/uhdRxGainDb", settingsToSave.uhdRxGainDb);
     settings.setValue("receiver/uhdRxAntenna", settingsToSave.uhdRxAntenna);
     settings.setValue("receiver/uhdFpgaImagePath", settingsToSave.uhdFpgaImagePath);
@@ -1729,9 +1743,9 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("listeningScan/targetsMhz", listeningScanTargetsMhz);
     settings.setValue("listeningScan/dwellMs", listeningScanDwellMs);
     settings.setValue("listeningScan/settleMs", listeningScanSettleMs);
-    settings.setValue("gpsQth/latitude", qthLatitude);
-    settings.setValue("gpsQth/longitude", qthLongitude);
-    settings.setValue("gpsQth/positionVisible", qthPositionVisible);
+    settings.setValue("gpsQth/latitude", qthPositionBeforeUhd ? qthPositionBeforeUhd->y() : qthLatitude);
+    settings.setValue("gpsQth/longitude", qthPositionBeforeUhd ? qthPositionBeforeUhd->x() : qthLongitude);
+    settings.setValue("gpsQth/positionVisible", qthPositionBeforeUhd ? qthPositionVisibleBeforeUhd : qthPositionVisible);
     settings.setValue("gpsQth/source", qthSource);
     settings.setValue("gpsQth/nmeaSerialPort", gnssSerialPortName);
     settings.setValue("gpsQth/nmeaSerialBaud", gnssSerialBaud);

@@ -1,4 +1,5 @@
 #include "clinetworkbridge.h"
+#include "displayspectrumcodec.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -31,6 +32,12 @@ int main(int argc, char **argv) {
     probe.close();
     CliNetworkBridge server(&app), client(&app);
     CliNetworkBridge::ServerCallbacks callbacks;
+    bool running = true;
+    callbacks.isRunning = [&] { return running; };
+    callbacks.setRunning = [&](bool requested, QString *) {
+        running = requested;
+        return true;
+    };
     callbacks.settings = [] { return QJsonObject{{QStringLiteral("centerFrequency"), 100e6},
                                                   {QStringLiteral("listeningFrequency"), 100e6},
                                                   {QStringLiteral("sampleRate"), 8e6}}; };
@@ -38,6 +45,8 @@ int main(int argc, char **argv) {
                                                                {QStringLiteral("label"), QStringLiteral("test")}}}; };
     if (!server.startServer(QStringLiteral("127.0.0.1"), port, std::move(callbacks))) return 2;
     int channelFrames = 0, fullFrames = 0, audioFrames = 0;
+    int uhdSpectrumFrames = 0;
+    QByteArray receivedAudio;
     client.onClientIq = [&](const QJsonObject &frame, const QByteArray &payload) {
         if (frame.value(QStringLiteral("channelized")).toBool()) {
             if (frame.value(QStringLiteral("sampleFormat")).toString() ==
@@ -50,10 +59,35 @@ int main(int argc, char **argv) {
         }
     };
     client.onClientAudio = [&](const QByteArray &pcm) {
-        if (pcm.size() == 960) ++audioFrames;
+        ++audioFrames;
+        receivedAudio += pcm;
+    };
+    client.onClientUhdRxSpectrum = [&](const QJsonObject &frame, const QByteArray &payload) {
+        const int count = frame.value("fftLength").toInt();
+        std::vector<float> levels;
+        if (frame.value("channel").toInt(-1) == 1 && count == 512 &&
+            frame.value("sourceFftLength").toInt() == 65537 &&
+            frame.value("centerFrequency").toDouble() == 100e6 &&
+            frame.value("sampleRate").toDouble() == 8e6 &&
+            DisplaySpectrumCodec::decodeDb10(payload, count, false, &levels) &&
+            levels[256] == -7.0f) ++uhdSpectrumFrames;
     };
     client.connectClient(QStringLiteral("127.0.0.1"), port);
-    if (!waitFor([&] { return server.peerCount() == 1 && client.ready(); })) return 3;
+    if (!waitFor([&] {
+        return server.peerCount() == 1 && client.ready() &&
+               client.clientState().value("receiverRunning") == QJsonValue(true);
+    })) return 3;
+    if (!client.sendClientControl(QStringLiteral("stop")) ||
+        !waitFor([&] { return client.clientState().value("receiverRunning") == QJsonValue(false); }))
+        return 17;
+    bool startAck = false;
+    client.onClientState = [&](const QJsonObject &state) {
+        if (state.value("action") == QJsonValue("settingsAck"))
+            startAck = state.value("ok").toBool() && state.value("receiverRunning").toBool();
+    };
+    if (!client.sendClientControl(QStringLiteral("start")) ||
+        !waitFor([&] { return startAck && client.clientState().value("receiverRunning").toBool(); }))
+        return 18;
 
     RadioSettings settings;
     settings.sampleRate = 8e6;
@@ -73,8 +107,14 @@ int main(int argc, char **argv) {
     server.sendIq(iq.data(), 65536, settings);
     if (!waitFor([&] { return fullFrames > 0; })) return 7;
     if (!server.setServerProcessingMode(0)) return 8;
-    server.sendAudio(QByteArray(960, '\0'));
-    if (!waitFor([&] { return audioFrames > 0; })) return 9;
+    QByteArray expectedAudio;
+    for (int i = 0; i < 120; ++i) {
+        const QByteArray fragment(32, static_cast<char>(i));
+        server.sendAudio(fragment);
+        expectedAudio += fragment;
+    }
+    if (!waitFor([&] { return audioFrames >= 2; }) ||
+        audioFrames != 2 || receivedAudio != expectedAudio) return 9;
     int spectrumFrames = 0;
     QJsonObject latest;
     client.onClientSpectrum = [&](const QJsonObject &frame) { latest = frame; ++spectrumFrames; };
@@ -105,6 +145,19 @@ int main(int argc, char **argv) {
     const auto oddNative = latest.value("magnitudes").toArray();
     for (int i = 0; i < 5; ++i)
         if (oddNative[(i + 3) % 5].toDouble() != small[static_cast<std::size_t>(i)]) return 16;
+
+    CliNetworkBridge legacy(&app);
+    legacy.connectClient(QStringLiteral("127.0.0.1"), port);
+    if (!waitFor([&] { return legacy.ready() && server.peerCount() == 2 && server.hasUhdRxSpectrumPeers(); }))
+        return 19;
+    int legacyUhdFrames = 0, legacySpectrumFrames = 0;
+    // Install the observer after the legacy peer has sent its capabilities.
+    legacy.onClientUhdRxSpectrum = [&](const QJsonObject &, const QByteArray &) { ++legacyUhdFrames; };
+    legacy.onClientSpectrum = [&](const QJsonObject &) { ++legacySpectrumFrames; };
+    server.sendUhdRxSpectrum(1, full, 100e6, 8e6, length);
+    server.sendSpectrum(small, 100e6, 8e6, 100e6, 12500, MOD_NFM, INPUT_RF);
+    if (!waitFor([&] { return uhdSpectrumFrames == 1 && legacySpectrumFrames == 1; }) ||
+        legacyUhdFrames != 0) return 20;
     std::puts("CLI network bridge self-test passed");
     return 0;
 }

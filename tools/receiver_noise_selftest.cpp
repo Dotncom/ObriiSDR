@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 int main(int argc, char **argv) {
@@ -60,6 +61,8 @@ int main(int argc, char **argv) {
     check(profile.isValid(), "Y-factor profile");
     check(std::abs(profile.noiseFigureDb.front() - 3.0103f) < 0.01f,
           "Y-factor NF");
+    check(profile.ratioRepeatabilityDb.size() == 4 && profile.ratioRepeatabilityDb.front() == 0.0f,
+          "constant Y-factor captures have zero statistical spread");
     std::vector<float> inputReferred = coldLevels;
     check(yFactor.applyInputReferred(frequencies, inputReferred, key, -120.0) &&
           std::abs(inputReferred.front() + 120.0f) < 0.01f,
@@ -67,6 +70,62 @@ int main(int argc, char **argv) {
     ReceiverYFactorCalibration restoredYFactor;
     check(restoredYFactor.deserialize(yFactor.serialize()) &&
           restoredYFactor.hasMatchingProfile(key), "Y-factor serialization");
+
+    yFactor.beginColdCapture(key, 8);
+    for (int frame = 0; frame < 8; ++frame) {
+        auto levels = coldLevels;
+        levels[0] = static_cast<float>(10.0 * std::log10(frame % 2 ? 1.2 : 0.8));
+        if (frame == 0) levels[1] = std::numeric_limits<float>::quiet_NaN();
+        yFactor.addFrame(frequencies, levels, key);
+    }
+    check(yFactor.beginHotCapture(key, 8, YFactorSourceMode::Temperatures,
+                                  290.0, 2900.0, 0.0), "mismatched hot capture start");
+    auto shiftedFrequencies = frequencies;
+    for (auto &frequency : shiftedFrequencies) frequency += 10000.0f;
+    ReceiverYFactorCalibration::CaptureResult mismatch = ReceiverYFactorCalibration::CaptureResult::Ignored;
+    for (int frame = 0; frame < 8; ++frame) mismatch = yFactor.addFrame(shiftedFrequencies, hotLevels, key);
+    check(mismatch == ReceiverYFactorCalibration::CaptureResult::Rejected && yFactor.coldReady(key),
+          "mismatched Hot/Cold frequency grids are rejected without losing Cold");
+    check(yFactor.beginHotCapture(key, 8, YFactorSourceMode::Temperatures,
+                                  290.0, 2900.0, 0.0), "varying hot capture start");
+    for (int frame = 0; frame < 8; ++frame) {
+        auto levels = hotLevels;
+        levels[0] = static_cast<float>(10.0 * std::log10(5.5 * (frame % 2 ? 1.1 : 0.9)));
+        yFactor.addFrame(frequencies, levels, key);
+    }
+    const auto varying = yFactor.matchingProfile(key);
+    const double expectedRepeatability = 10.0 / std::log(10.0) * std::hypot(0.2, 0.1) / std::sqrt(7.0);
+    check(varying.isValid() && varying.ratioRepeatabilityDb.size() == 4 &&
+          std::abs(varying.ratioRepeatabilityDb[0] - expectedRepeatability) < 1e-6 &&
+          std::isnan(varying.ratioRepeatabilityDb[1]), "independent Hot/Cold standard uncertainty and unavailable bin");
+    check(restoredYFactor.deserialize(yFactor.serialize()), "repeatability profile round trip");
+    const auto restoredVarying = restoredYFactor.matchingProfile(key);
+    check(restoredVarying.ratioRepeatabilityDb.size() == 4 &&
+          restoredVarying.ratioRepeatabilityDb[0] == varying.ratioRepeatabilityDb[0] &&
+          std::isnan(restoredVarying.ratioRepeatabilityDb[1]), "persisted repeatability values");
+
+    QByteArray legacyYFactorPayload;
+    QDataStream legacyYFactor(&legacyYFactorPayload, QIODevice::WriteOnly);
+    legacyYFactor.setVersion(QDataStream::Qt_5_12);
+    legacyYFactor.setByteOrder(QDataStream::LittleEndian);
+    legacyYFactor << quint32(0x4f594643) << quint32(1) << quint32(1)
+        << key.receiver.backendId << qint32(key.receiver.inputMode) << key.receiver.sampleRateHz
+        << qint32(key.receiver.lnaGain) << qint32(key.receiver.vgaGain)
+        << qint32(key.receiver.rtlGainTenthsDb) << qint32(key.receiver.gainState)
+        << key.centerFrequencyHz << qint32(key.fftLength) << qint32(key.fftWindowType)
+        << qint32(key.rfBandwidthHz) << key.amplitudeOffsetDb << key.calibrationTableEnabled
+        << qint32(key.calibrationPointCount) << qint32(YFactorSourceMode::Temperatures)
+        << profile.coldTemperatureKelvin << profile.hotTemperatureKelvin << profile.enrDb
+        << profile.minimumFrequencyHz << profile.maximumFrequencyHz << qint32(profile.coldFrames)
+        << qint32(profile.hotFrames) << qint32(profile.validBins) << profile.capturedUtcMs << quint32(4);
+    for (int i = 0; i < 4; ++i) {
+        legacyYFactor << profile.coldPower[i] << profile.hotPower[i]
+                      << profile.equivalentNoiseTemperatureKelvin[i] << profile.noiseFigureDb[i];
+    }
+    check(restoredYFactor.deserialize(qCompress(legacyYFactorPayload)) &&
+          restoredYFactor.hasMatchingProfile(key) &&
+          restoredYFactor.matchingProfile(key).ratioRepeatabilityDb.isEmpty(),
+          "legacy Y-factor profile has no inferred uncertainty");
 
     ReceiverNoiseBaseline broad;
     ReceiverNoiseBaselineKey shapeKey;

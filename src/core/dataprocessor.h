@@ -26,6 +26,7 @@
 #include "iqchannelizer.h"
 #include "iqframequeuebudget.h"
 #include "receiverbackend.h"
+#include "uhdbackend.h"
 
 class ZoomSpectrumProcessor;
 class AtvIqWorker;
@@ -70,6 +71,10 @@ public:
     bool applyHackRfGainSettings(int lnaGainDb, int vgaGainDb);
     bool queryHackRfDiagnostics(HackRfDeviceDiagnostics *diagnostics,
                                 QString *errorMessage = nullptr);
+    bool uhdStreamReady() const { return uhdStreamReady_.load(std::memory_order_acquire); }
+    UhdClockStatus uhdClockStatus() const;
+    void setUhdGnssPollingEnabled(bool enabled);
+    UhdGnssStatus uhdGnssStatus() const;
     void updateNetworkIqSettings(const RadioSettings &settings, bool channelizeFrames);
     void configureNetworkIqStreaming(const RadioSettings &settings, bool emitFrames, bool channelizeFrames,
                                      bool atvFrames = false);
@@ -142,6 +147,11 @@ private:
     QString activeBackendId;
     QString activeBackendName;
     ReceiverStreamDescriptor activeStreamDescriptor;
+    std::atomic<bool> uhdStreamReady_{false};
+    mutable QMutex uhdStatusMutex;
+    UhdClockStatus activeUhdClock;
+    UhdGnssStatus activeUhdGnss;
+    std::atomic<bool> uhdGnssPollingEnabled{false};
     std::mutex networkIqSettingsMutex;
     RadioSettings networkIqSettings;
     double networkIqNcoPhase = 0.0;

@@ -289,9 +289,18 @@ void YourClassName::updateReceiverSpecificControls() {
                                          (isIdle() || runState == RadioRunState::Running));
     }
     if (uhdSettingsButton) {
-        const bool selected = isUhdNativeSelected();
-        uhdSettingsButton->setVisible(selected);
-        uhdSettingsButton->setEnabled(selected && isIdle());
+        const bool local = isUhdNativeSelected() && !isNetworkClientMode();
+        const bool remote = isNetworkClientMode() && remoteReceiverDeviceListValid &&
+            networkClientConfirmedSettingsJson.value(QStringLiteral("uhdRx")).isObject();
+        const bool canConfigureUhd = (local && (isIdle() || runState == RadioRunState::Running)) ||
+            (remote && networkController && networkController->isControlReady() &&
+             !isRemoteVfoProcessingMode());
+        uhdSettingsButton->setVisible(local || remote);
+        uhdSettingsButton->setEnabled(canConfigureUhd);
+        if (multiSdrDialog) {
+            multiSdrDialog->setPrimaryUhdSettingsAvailable(local || remote, canConfigureUhd);
+            multiSdrDialog->setRemoteUhdCompanionChannel(remoteUhdCompanionChannel());
+        }
     }
     if (virtualSignalSettingsButton) {
         const bool selected = isVirtualSignalSelected();

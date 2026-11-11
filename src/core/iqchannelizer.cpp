@@ -9,6 +9,9 @@
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
 #include <emmintrin.h>
 #endif
+#if defined(__aarch64__) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 namespace {
 constexpr double TWO_PI = 6.28318530717958647692;
@@ -175,14 +178,14 @@ void IqChannelizer::reset(double initialNcoPhaseRadians) {
     nextOutputPosition = static_cast<double>(ResamplerTaps / 2);
 }
 
-void IqChannelizer::configureFrontDecimator(int factor, bool directPairs) {
+void IqChannelizer::configureFrontDecimator(int factor, bool direct) {
     factor = (std::clamp)(factor, 1, FrontDecimatorMaxFactor);
-    if (configuredFrontDecimationFactor == factor && configuredDirectFront == directPairs) {
+    if (configuredFrontDecimationFactor == factor && configuredDirectFront == direct) {
         return;
     }
 
     configuredFrontDecimationFactor = factor;
-    configuredDirectFront = directPairs;atvFrontPending = false;atvFrontHistory.fill({0,0});
+    configuredDirectFront = direct;atvFrontPending = false;atvFrontHistory.fill({0,0});
     frontDecimationWriteIndex = 0;
     frontDecimationCount = 0;
     for (auto &delay : frontDecimationDelay) {
@@ -193,6 +196,20 @@ void IqChannelizer::configureFrontDecimator(int factor, bool directPairs) {
                                static_cast<double>(factor) *
                                static_cast<double>(factor);
     frontDecimationScale = static_cast<float>(1.0 / factorCubed);
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    nextBlockSums.fill({});
+    if (direct) {
+        // The convolution of three length-R boxcars, split into three blocks.
+        const auto triangle = [](int n) { return n < 0 ? 0 : (n + 2) * (n + 1) / 2; };
+        for (int block = 0; block < FrontDecimatorOrder; ++block) {
+            for (int i = 0; i < factor; ++i) {
+                const int n = (block + 1) * factor - 1 - i;
+                blockTaps[block][i] = frontDecimationScale *
+                    (triangle(n) - 3 * triangle(n - factor) + 3 * triangle(n - 2 * factor));
+            }
+        }
+    }
+#endif
     decimationSum = {0.0f, 0.0f};
     preLowPassStates.fill({0.0f, 0.0f});
     decimationCount = 0;
@@ -224,6 +241,101 @@ bool IqChannelizer::pushFrontDecimatorSample(const std::complex<float> &sample,
     output = stageValue * frontDecimationScale;
     return true;
 }
+
+#if defined(__aarch64__) && defined(__ARM_NEON)
+void IqChannelizer::decimateWfm(const float *samples, std::size_t count, double phaseStep) {
+    const int factor = configuredFrontDecimationFactor;
+    const std::size_t total = count;
+    frontIq.clear();
+    frontIq.reserve((count + frontDecimationCount) / factor);
+    const auto identity = [](float32x4x2_t iq) { return iq; };
+    const auto appendBlock = [this, factor](const float *iq, const auto &mix) {
+        float32x4_t sumI[FrontDecimatorOrder] = {}, sumQ[FrontDecimatorOrder] = {};
+        const auto infinity = vdupq_n_f32(std::numeric_limits<float>::infinity());
+        for (int i = 0; i < factor; i += 4) {
+            const auto input = vld2q_f32(iq + i * 2);
+            const auto finite = [infinity](float32x4_t x) {
+                return vreinterpretq_f32_u32(vandq_u32(vreinterpretq_u32_f32(x), vcaltq_f32(x, infinity)));
+            };
+            const auto mixed = mix(float32x4x2_t{{finite(input.val[0]), finite(input.val[1])}});
+            for (int b = 0; b < FrontDecimatorOrder; ++b) {
+                const auto taps = vld1q_f32(blockTaps[b].data() + i);
+                sumI[b] = vfmaq_f32(sumI[b], mixed.val[0], taps);
+                sumQ[b] = vfmaq_f32(sumQ[b], mixed.val[1], taps);
+            }
+        }
+        const auto contribution = [&](int b) {
+            return std::complex<float>{vaddvq_f32(sumI[b]), vaddvq_f32(sumQ[b])};
+        };
+        frontIq.push_back(contribution(0) + nextBlockSums[0]);
+        nextBlockSums[0] = contribution(1) + nextBlockSums[1];
+        nextBlockSums[1] = contribution(2);
+    };
+
+    // Keep partial blocks in baseband, with the same phase they had when read.
+    const auto copyPartial = [&](float *dest, std::size_t samplesToCopy) {
+        if (phaseStep == 0.0) {
+            std::copy_n(samples, samplesToCopy * 2, dest);
+            return;
+        }
+        const double phase = ncoPhase + double(total - count) * phaseStep;
+        for (std::size_t n = 0; n < samplesToCopy; ++n) {
+            const float i = finiteIqSample(samples[2*n]) ? samples[2*n] : 0.0f;
+            const float q = finiteIqSample(samples[2*n+1]) ? samples[2*n+1] : 0.0f;
+            const double angle = phase + double(n) * phaseStep;
+            const float c = float(std::cos(angle)), s = float(std::sin(angle));
+            dest[2*n] = i*c - q*s;
+            dest[2*n+1] = q*c + i*s;
+        }
+    };
+    if (frontDecimationCount) {
+        const auto take = (std::min)(count, std::size_t(factor - frontDecimationCount));
+        copyPartial(blockCarry.data() + frontDecimationCount * 2, take);
+        frontDecimationCount += static_cast<int>(take);
+        if (frontDecimationCount != factor) return;
+        appendBlock(blockCarry.data(), identity);
+        samples += take * 2;
+        count -= take;
+    }
+    const auto appendBlocks = [&](std::size_t blocks, const auto &mix) {
+        for (std::size_t b = 0; b < blocks; ++b) {
+            appendBlock(samples, mix);
+            samples += factor * 2;
+            count -= factor;
+        }
+    };
+    if (phaseStep == 0.0) {
+        appendBlocks(count / factor, identity);
+    } else {
+        const auto stepC = vdupq_n_f32(float(std::cos(4.0 * phaseStep)));
+        const auto stepS = vdupq_n_f32(float(std::sin(4.0 * phaseStep)));
+        constexpr std::size_t reanchorSamples = 512;
+        while (count >= static_cast<std::size_t>(factor)) {
+            // Periodically derive phase from the sample index to bound NCO drift.
+            const double phase = ncoPhase + double(total - count) * phaseStep;
+            float cosines[4], sines[4];
+            for (int lane = 0; lane < 4; ++lane) {
+                const double angle = phase + lane * phaseStep;
+                cosines[lane] = float(std::cos(angle));
+                sines[lane] = float(std::sin(angle));
+            }
+            auto c = vld1q_f32(cosines), s = vld1q_f32(sines);
+            const auto mix = [&](float32x4x2_t iq) {
+                const auto i = iq.val[0], q = iq.val[1];
+                const float32x4x2_t baseband{{vfmsq_f32(vmulq_f32(i, c), q, s),
+                                               vfmaq_f32(vmulq_f32(q, c), i, s)}};
+                const auto nextC = vfmsq_f32(vmulq_f32(c, stepC), s, stepS);
+                s = vfmaq_f32(vmulq_f32(s, stepC), c, stepS);
+                c = nextC;
+                return baseband;
+            };
+            appendBlocks((std::min)(count, reanchorSamples) / factor, mix);
+        }
+    }
+    copyPartial(blockCarry.data(), count);
+    frontDecimationCount = static_cast<int>(count);
+}
+#endif
 
 void IqChannelizer::configureResampler(double inputRate,
                                        double targetRate,
@@ -418,21 +530,25 @@ IqChannelizer::Result IqChannelizer::processFloatIq(const float *samples,
     const double cutoff = options ? options->cutoffHz : channelizerCutoff(settings, outputRate);
     const int tapCount = firTapCountForOptions(options, coarseRate, outputRate, cutoff);
     if (tapCount == 0) return result;
-    bool directAtvFront = false;
+    const double fShift = result.frequencyShift;
+    const bool noFrequencyShift = std::abs(fShift) < 0.5;
+    bool directFront = false;
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
-    directAtvFront = settings.modulationType == MOD_ATV && settings.inputMode == INPUT_RF &&
-                     frontDecimationFactor == 2;
+    directFront = settings.modulationType == MOD_ATV && settings.inputMode == INPUT_RF &&
+                  frontDecimationFactor == 2;
 #endif
-    configureFrontDecimator(frontDecimationFactor, directAtvFront);
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    directFront = !options && settings.modulationType == MOD_WFM && settings.inputMode == INPUT_RF &&
+                  frontDecimationFactor >= 16;
+#endif
+    configureFrontDecimator(frontDecimationFactor, directFront);
     configureResampler(coarseRate, outputRate, cutoff, tapCount);
     const float preLowPassAlpha = static_cast<float>((std::clamp)(
         1.0 - std::exp(-TWO_PI * cutoff / frontOutputRate),
         0.000001,
         1.0));
 
-    const double fShift = result.frequencyShift;
     const double phaseIncrement = -TWO_PI * fShift / settings.sampleRate;
-    const bool noFrequencyShift = std::abs(fShift) < 0.5;
     float rotI = 1.0f;
     float rotQ = 0.0f;
     float rotStepI = 1.0f;
@@ -451,18 +567,21 @@ IqChannelizer::Result IqChannelizer::processFloatIq(const float *samples,
     std::size_t written = 0;
     bool vectorMixed = false;
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
-    if (settings.modulationType == MOD_ATV && settings.inputMode == INPUT_RF && (!noFrequencyShift || directAtvFront)) {
+    if (settings.modulationType == MOD_ATV && settings.inputMode == INPUT_RF && (!noFrequencyShift || directFront)) {
         mixAtvRfBlock(samples, iqSamples, noFrequencyShift ? 0.0 : ncoPhase,
                       noFrequencyShift ? 0.0 : phaseIncrement, mixedAtvInput);
         vectorMixed = true;
     }
-    if (directAtvFront) decimateAtvPairs(mixedAtvInput, frontAtvInput, atvFrontHistory, atvFrontPending);
+    if (directFront) decimateAtvPairs(mixedAtvInput, frontIq, atvFrontHistory, atvFrontPending);
+#endif
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    if (directFront) decimateWfm(samples, iqSamples, noFrequencyShift ? 0.0 : phaseIncrement);
 #endif
 
-    const std::size_t processingSamples = directAtvFront ? frontAtvInput.size() : iqSamples;
+    const std::size_t processingSamples = directFront ? frontIq.size() : iqSamples;
     for (std::size_t n = 0; n < processingSamples; ++n) {
         std::complex<float> frontDecimatedSample;
-        if (directAtvFront) frontDecimatedSample = frontAtvInput[n];
+        if (directFront) frontDecimatedSample = frontIq[n];
         else {
         std::complex<float> mixedSample;
         if (vectorMixed) mixedSample = mixedAtvInput[n];

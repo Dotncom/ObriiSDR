@@ -1,9 +1,12 @@
 #include "cliaudiooutput.h"
+#include "cliasyncwfmaudio.h"
 #include "audioprocessor.h"
 
 #include <QCoreApplication>
 #include <QFile>
 #include <QTemporaryDir>
+#include <QElapsedTimer>
+#include <QThread>
 
 #include <algorithm>
 #include <cmath>
@@ -77,9 +80,52 @@ static bool liveDiscontinuities() {
     return true;
 }
 
+static bool asyncWfmMatchesReference() {
+    constexpr std::size_t blockSamples = 4096;
+    CliAsyncWfmAudio::Format format{480000, 100e6, 100e6, 180000, QStringLiteral("[]"), 0};
+    CliAsyncWfmAudio worker(blockSamples);
+    std::vector<float> iq(blockSamples * 2);
+    for (std::size_t n = 0; n < blockSamples; ++n) {
+        const double phase = 0.04 * n + 0.8 * std::sin(0.017 * n);
+        iq[2*n] = float(0.3 * std::cos(phase));
+        iq[2*n + 1] = float(0.3 * std::sin(phase));
+    }
+    for (int pass = 0; pass < 3; ++pass) {
+        if (pass == 1) worker.markGap();
+        if (pass == 2) { format.listen += 20000; ++format.streamEpoch; }
+        worker.setFormat(format);
+        QByteArray expected, received;
+        QString error;
+        CliAudioOutput reference;
+        if (!reference.open({}, false, INPUT_RF, MOD_WFM, format.bandwidth, format.rate,
+                            format.center, format.listen, false, &error,
+                            [&expected](const QByteArray &frame) { expected.append(frame); }))
+            return false;
+        reference.setFilterChain(format.filters);
+        for (int i = 0; i < 4; ++i) {
+            if (!reference.process(iq.data(), blockSamples, &error)) return false;
+            worker.submit(iq.data(), blockSamples);
+        }
+        QElapsedTimer timeout;
+        timeout.start();
+        while (received.size() < expected.size() && timeout.elapsed() < 2000) {
+            received.append(worker.takePcm(&error));
+            if (!error.isEmpty()) return false;
+            if (received.size() < expected.size()) QThread::msleep(1);
+        }
+        if (expected.isEmpty() || received != expected) return false;
+    }
+    return worker.suspend() && !worker.status().value("active").toBool() &&
+           worker.status().value("droppedIqBlocks").toDouble() == 0;
+}
+
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     if (!liveDiscontinuities()) return 1;
+    if (!asyncWfmMatchesReference()) {
+        std::cerr << "Async WFM differs from synchronous PCM or did not reset on a gap/tune\n";
+        return 1;
+    }
     QTemporaryDir temporary;
     if (!temporary.isValid()) return 1;
     const QString path = temporary.filePath(QStringLiteral("audio.wav"));

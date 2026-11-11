@@ -116,6 +116,55 @@ void testLiveAlignment() {
     registry.removeSubscriptions(&registry);
 }
 
+void testLivePhaseDrift() {
+    constexpr double rate = 48000;
+    constexpr double driftHz = -0.50;
+    constexpr double radiansPerSample = 6.283185307179586 * driftHz / rate;
+    constexpr std::size_t calibrationSamples = 4096;
+    constexpr std::size_t length = 16384;
+    std::vector<DspIqSourceSnapshot> inputs(2);
+    std::mt19937 random(481);
+    std::uniform_real_distribution<float> distribution(-0.5f, 0.5f);
+    for (std::size_t i = 0; i < inputs.size(); ++i) {
+        auto &input = inputs[i];
+        input.source = DspSourceIdentity::normalized(QStringLiteral("phase-test-%1").arg(i), QStringLiteral("rx0"));
+        input.sampleRateHz = rate;
+        input.centerHz = 145500000;
+        input.clockId = QStringLiteral("phase-test-clock");
+        input.sampleClockValid = input.sharedSampleTimeline = input.clockLocked = true;
+        input.continuityId = 1;
+        input.endComplexSample = length;
+        input.iq.resize(length * 2);
+    }
+    for (std::size_t n = 0; n < length; ++n) {
+        const std::complex<float> reference{distribution(random), distribution(random)};
+        const auto target = reference * std::polar(0.7f, float(0.2 + n * radiansPerSample));
+        inputs[0].iq[2 * n] = reference.real();
+        inputs[0].iq[2 * n + 1] = reference.imag();
+        inputs[1].iq[2 * n] = target.real();
+        inputs[1].iq[2 * n + 1] = target.imag();
+    }
+    auto calibration = inputs;
+    for (auto &input : calibration) {
+        input.iq.resize(2 * calibrationSamples);
+        input.endComplexSample = calibrationSamples;
+    }
+    CoherentIqLive combiner;
+    DspIqSourceSnapshot output;
+    QString error;
+    require(combiner.calibrate(calibration, 0, error) && !combiner.maximumPhaseDriftHz(),
+            "Reported phase drift before receiving aligned blocks");
+    for (int block = 0; block < 9; ++block)
+        require(combiner.takeBlock(inputs, output, error) && !output.iq.empty(),
+                "Phase drift test lost coherence before the measurement");
+    const auto measured = combiner.maximumPhaseDriftHz();
+    require(measured && std::abs(*measured - std::abs(driftHz)) < 0.02,
+            "Did not recover the known relative phase drift");
+    ++inputs[1].continuityId;
+    require(!combiner.takeBlock(inputs, output, error) && !combiner.maximumPhaseDriftHz(),
+            "Retained stale phase drift after an IQ gap");
+}
+
 void testVirtualWorker() {
     MultiSdrLiveIq worker;
     auto &registry = DspIqSourceRegistry::instance();
@@ -266,6 +315,7 @@ int main(int argc, char **argv) {
         require(CoherentIqSession::read(manifestPath, restoredSnapshots, restoredCalibrations, error) &&
                     restoredSnapshots.size() == 2U, "Legacy coherent-session support was lost");
         testLiveAlignment();
+        testLivePhaseDrift();
         testVirtualWorker();
         std::cout << "Coherent IQ delay, phase, gain and alignment self-test passed\n";
         return 0;

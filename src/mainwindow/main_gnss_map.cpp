@@ -581,9 +581,8 @@ void YourClassName::applyQthMapSearch() {
 
 void YourClassName::copyQthLocator() {
     if (!qthPositionVisible) {
-        if (qthSource == QStringLiteral("nmea") &&
-            gnssSerialFixCount <= 0 &&
-            gnssLastUbxFixMs <= 0) {
+        if (qthSource == QLatin1String("uhd") ||
+            (qthSource == QLatin1String("nmea") && gnssSerialFixCount <= 0 && gnssLastUbxFixMs <= 0)) {
             if (qthStatusLabel) {
                 qthStatusLabel->setText(uiText(QStringLiteral("qth_position_waiting_for_fix"),
                                                QStringLiteral("QTH position is hidden until a fresh GNSS fix is received.")));

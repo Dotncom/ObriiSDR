@@ -14,8 +14,9 @@
 #include <QClipboard>
 #include <QDateTime>
 #include <QDesktopServices>
-#include <QDialogButtonBox>
+#include <QDialog>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -25,6 +26,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLabel>
 #include <QMenu>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -36,7 +38,9 @@
 #include <QTableWidgetItem>
 #include <QTextCursor>
 #include <QTextStream>
+#include <QTimer>
 #include <QUrl>
+#include <QUuid>
 
 #include <algorithm>
 #include <cmath>
@@ -167,6 +171,160 @@ bool normalizeM8nUbxConstellationSelection(bool &useGps,
 
 } // namespace
 
+void YourClassName::showUhdGnssStatus(const QString &status) {
+    if (qthPositionVisible) {
+        qthPositionVisible = false;
+        updateQthControls();
+    }
+    if (qthStatusLabel) qthStatusLabel->setText(status);
+}
+
+void YourClassName::applyUhdGnssReading(const UhdGnssStatus &reading) {
+    const bool uk = uiLanguage.startsWith(QLatin1String("uk"));
+    if (reading.state == QLatin1String("unsupported")) {
+        showUhdGnssStatus(uk ? QStringLiteral("UHD GPS: датчики недоступні в поточній збірці FPGA/UHD.")
+                            : QStringLiteral("UHD GPS: sensors unavailable in this FPGA/UHD build."));
+        return;
+    }
+    if (reading.state != QLatin1String("available")) {
+        showUhdGnssStatus(uk ? QStringLiteral("UHD GPS: очікування даних NMEA…")
+                            : QStringLiteral("UHD GPS: waiting for NMEA data…"));
+        return;
+    }
+    QString details;
+    const int used = parseNmeaIntField(nmeaBodyFields(reading.gga), 7);
+    if (used >= 0) {
+        details += (uk ? QStringLiteral("\nВикористано для фікса: %1.")
+                       : QStringLiteral("\nSatellites used for fix: %1.")).arg(used);
+    }
+    const auto sky = summarizeUhdGnssGsv(reading.gsv);
+    if (sky.satellitesInView >= 0) {
+        details += (uk ? QStringLiteral("\nУ полі зору за GSV: %1, із виміряним сигналом: %2.")
+                       : QStringLiteral("\nIn view (GSV): %1, with measured signal: %2."))
+                       .arg(sky.satellitesInView).arg(sky.satellitesWithSignal);
+    }
+    if (sky.strongestCn0DbHz >= 0) {
+        details += (uk ? QStringLiteral(" Найвищий C/N₀: %1 дБ·Гц.")
+                       : QStringLiteral(" Strongest C/N₀: %1 dB-Hz.")).arg(sky.strongestCn0DbHz);
+    }
+    if (sky.incomplete) {
+        details += uk ? QStringLiteral("\nЗвіт GSV неповний.")
+                      : QStringLiteral("\nGSV report is incomplete.");
+    }
+
+    ParsedNmeaPosition fix;
+    if (!parseNmeaPositionSentence(reading.gga, &fix) && !parseNmeaPositionSentence(reading.rmc, &fix)) {
+        showUhdGnssStatus((uk ? QStringLiteral("UHD GPS: NMEA надходить, очікування координат…")
+                             : QStringLiteral("UHD GPS: receiving NMEA, waiting for a fix…")) + details);
+        return;
+    }
+
+    if (!qthPositionBeforeUhd) {
+        qthPositionBeforeUhd = QPointF(qthLongitude, qthLatitude);
+        qthPositionVisibleBeforeUhd = qthPositionVisible;
+    }
+    const bool firstFix = !qthPositionVisible;
+    if (firstFix || qthLatitude != fix.latitude || qthLongitude != fix.longitude) {
+        qthLatitude = fix.latitude;
+        qthLongitude = fix.longitude;
+        qthPositionVisible = true;
+        updateQthControls();
+        if (firstFix && qthMapWidget) qthMapWidget->centerOn(qthLatitude, qthLongitude);
+    }
+    if (qthStatusLabel) {
+        qthStatusLabel->setText(
+            (uk ? QStringLiteral("UHD GPS: координати %1°, %2° (%3)")
+                : QStringLiteral("UHD GPS: fix %1°, %2° (%3)"))
+                .arg(QString::number(fix.latitude, 'f', 6), QString::number(fix.longitude, 'f', 6),
+                     qth::maidenheadLocator(fix.latitude, fix.longitude, 6)) + details);
+    }
+}
+
+void YourClassName::refreshUhdGnssPosition() {
+    if (qthSource != QLatin1String("uhd")) return;
+
+    const bool uk = uiLanguage.startsWith(QLatin1String("uk"));
+    const bool remote = isNetworkClientMode();
+    const bool localRunning = !remote && isUhdNativeSelected() && processor &&
+                              runState == RadioRunState::Running && processor->isRunning();
+    if (uhdGnssProcessor && (!localRunning || uhdGnssProcessor.data() != processor)) {
+        uhdGnssProcessor->setUhdGnssPollingEnabled(false);
+        uhdGnssProcessor.clear();
+    }
+
+    if (!remote) {
+        uhdGnssRequestId.clear();
+        if (!localRunning) {
+            showUhdGnssStatus(uk ? QStringLiteral("UHD GPS: виберіть UHD-приймач і запустіть RX.")
+                                : QStringLiteral("UHD GPS: select a UHD receiver and start RX."));
+            return;
+        }
+        if (!uhdGnssProcessor) {
+            uhdGnssProcessor = processor;
+            uhdGnssProcessor->setUhdGnssPollingEnabled(true);
+        }
+        applyUhdGnssReading(uhdGnssProcessor->uhdGnssStatus());
+        return;
+    }
+
+    if (!networkController || !networkController->isControlReady()) {
+        uhdGnssRequestId.clear();
+        showUhdGnssStatus(uk ? QStringLiteral("UHD GPS: під’єднайтеся до UHD-сервера.")
+                            : QStringLiteral("UHD GPS: connect to the UHD server."));
+        return;
+    }
+    if (isRemoteVfoProcessingMode() || !networkController->clientHasControl()) {
+        uhdGnssRequestId.clear();
+        showUhdGnssStatus(uk ? QStringLiteral("UHD GPS: потрібен доступ до керування приймачем.")
+                            : QStringLiteral("UHD GPS: receiver control access is required."));
+        return;
+    }
+    const auto rx = networkClientConfirmedSettingsJson.value(QStringLiteral("uhdRx")).toObject();
+    if (!rx.value(QStringLiteral("gnssControl")).toBool()) {
+        uhdGnssRequestId.clear();
+        showUhdGnssStatus(uk ? QStringLiteral("UHD GPS: GPS на сервері недоступний або вимкнений.")
+                            : QStringLiteral("UHD GPS: GPS is unavailable or disabled on the server."));
+        return;
+    }
+    if (runState != RadioRunState::Running) {
+        uhdGnssRequestId.clear();
+        showUhdGnssStatus(uk ? QStringLiteral("UHD GPS: запустіть RX на сервері.")
+                            : QStringLiteral("UHD GPS: start RX on the server."));
+        return;
+    }
+    if (!uhdGnssRequestId.isEmpty()) {
+        if (!uhdGnssRequestAge.hasExpired(5000)) return;
+        showUhdGnssStatus(uk ? QStringLiteral("UHD GPS: сервер не відповів на запит.")
+                            : QStringLiteral("UHD GPS: the server did not reply."));
+    }
+    uhdGnssRequestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    uhdGnssRequestAge.start();
+    if (!networkController->sendControlCommand({
+            {QStringLiteral("type"), QStringLiteral("control")},
+            {QStringLiteral("action"), QStringLiteral("getUhdGnss")},
+            {QStringLiteral("requestId"), uhdGnssRequestId}})) {
+        uhdGnssRequestId.clear();
+        showUhdGnssStatus(uk ? QStringLiteral("UHD GPS: не вдалося надіслати запит.")
+                            : QStringLiteral("UHD GPS: could not send the request."));
+    }
+}
+
+void YourClassName::handleUhdGnssReply(const QJsonObject &command) {
+    if (qthSource != QLatin1String("uhd") || uhdGnssRequestId.isEmpty() ||
+        !isNetworkClientMode() || isRemoteVfoProcessingMode() || runState != RadioRunState::Running ||
+        !networkController || !networkController->isControlReady() || !networkController->clientHasControl() ||
+        command.value(QStringLiteral("type")) != QLatin1String("control") ||
+        command.value(QStringLiteral("action")) != QLatin1String("uhdGnssStatus") ||
+        command.value(QStringLiteral("requestId")).toString() != uhdGnssRequestId) return;
+
+    uhdGnssRequestId.clear();
+    const auto reading = command.value(QStringLiteral("status")).toObject();
+    applyUhdGnssReading({reading.value(QStringLiteral("state")).toString(),
+                        reading.value(QStringLiteral("gga")).toString(),
+                        reading.value(QStringLiteral("rmc")).toString(),
+                        reading.value(QStringLiteral("gsv")).toString()});
+}
+
 void YourClassName::updateQthControls() {
     qthLatitude = (std::clamp)(qthLatitude, -90.0, 90.0);
     qthLongitude = (std::clamp)(qthLongitude, -180.0, 180.0);
@@ -198,10 +356,12 @@ void YourClassName::updateQthControls() {
     if (qthLatitudeSpin) {
         QSignalBlocker blocker(qthLatitudeSpin);
         qthLatitudeSpin->setValue(qthLatitude);
+        qthLatitudeSpin->setReadOnly(qthSource == QLatin1String("uhd"));
     }
     if (qthLongitudeSpin) {
         QSignalBlocker blocker(qthLongitudeSpin);
         qthLongitudeSpin->setValue(qthLongitude);
+        qthLongitudeSpin->setReadOnly(qthSource == QLatin1String("uhd"));
     }
     if (gnssSerialPortEdit) {
         const QList<QSerialPortInfo> ports = QSerialPortInfo::availablePorts();
@@ -226,7 +386,7 @@ void YourClassName::updateQthControls() {
                                               QStringLiteral("NMEA serial: disconnected")));
     }
     if (qthLocatorLabel) {
-        qthLocatorLabel->setText(locator);
+        qthLocatorLabel->setText(qthSource == QLatin1String("uhd") && !qthPositionVisible ? QString() : locator);
     }
     if (gnssMonitorCheckbox) {
         QSignalBlocker blocker(gnssMonitorCheckbox);
@@ -261,6 +421,21 @@ void YourClassName::updateQthControls() {
         updateQthMapSatelliteOverlay();
     }
     updateQthMapControls();
+    if (qthSource == QLatin1String("uhd")) {
+        if (!uhdGnssPollTimer->isActive()) {
+            uhdGnssPollTimer->start();
+            applyUhdGnssReading({});
+            refreshUhdGnssPosition();
+        }
+        return;
+    }
+    uhdGnssPollTimer->stop();
+    if (uhdGnssProcessor) {
+        uhdGnssProcessor->setUhdGnssPollingEnabled(false);
+        uhdGnssProcessor.clear();
+    }
+    uhdGnssRequestId.clear();
+    qthPositionBeforeUhd.reset();
     if (qthStatusLabel) {
         const bool manual = qthSource == QStringLiteral("manual") || qthSource.isEmpty();
         if (!qthPositionVisible) {

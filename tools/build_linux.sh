@@ -59,6 +59,7 @@ need_path() {
 
 need_cmd cmake
 need_cmd c++
+need_cmd python3
 need_path "${FOBOS_STANDARD_ROOT}/include/fobos.h"
 need_path "${FOBOS_AGILE_ROOT}/include/fobos_sdr.h"
 
@@ -75,7 +76,7 @@ Then install or build Linux libfobos/libfobos_sdr. Expected default layout:
   ${LOCAL_FOBOS_PREFIX}/lib/libfobos_sdr.so
 
 You can build that private copy with:
-  ALLOW_UPSTREAM_FOBOS_CLONE=1 ./tools/prepare_fobos_linux.sh
+  ./tools/prepare_fobos_linux.sh
 
 System-wide fallback layout:
   ${FOBOS_STANDARD_ROOT}/include/fobos.h
@@ -121,6 +122,9 @@ cmake -S "${WORKSPACE}" -B "${BUILD_DIR}" \
 
 if [ -n "${BUILD_TARGET:-}" ]; then
     cmake --build "${BUILD_DIR}" --target "${BUILD_TARGET}" -j "${JOBS}"
+    if [ "${BUILD_TARGET}" = ObriiSDR ]; then
+        python3 "${WORKSPACE}/tools/install_linux_shortcut.py" --build-dir "${BUILD_DIR}"
+    fi
     echo
     echo "Build complete: ${BUILD_DIR}/${BUILD_TARGET}"
     exit 0
@@ -149,3 +153,4 @@ echo "  ${BUILD_DIR}/ObriiIqHub"
 echo "  ${BUILD_DIR}/ObriiCli"
 mkdir -p "${BUILD_DIR}/wireless"
 cp "${WORKSPACE}/tools/wifi_phy_decoder.py" "${BUILD_DIR}/wireless/"
+python3 "${WORKSPACE}/tools/install_linux_shortcut.py" --build-dir "${BUILD_DIR}"

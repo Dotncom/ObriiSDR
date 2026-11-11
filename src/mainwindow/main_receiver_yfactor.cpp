@@ -307,14 +307,18 @@ void YourClassName::openReceiverYFactorDialog() {
     root->addWidget(plot);
 
     auto *table = new QTableWidget(&dialog);
-    table->setColumnCount(6);
+    table->setColumnCount(7);
     table->setHorizontalHeaderLabels({
         uiText(QStringLiteral("frequency"), QStringLiteral("Frequency")),
         uiText(QStringLiteral("receiver_y_factor_cold_db"), QStringLiteral("Cold dB")),
         uiText(QStringLiteral("receiver_y_factor_hot_db"), QStringLiteral("Hot dB")),
         QStringLiteral("Y dB"),
         QStringLiteral("Te K"),
-        QStringLiteral("NF dB")});
+        QStringLiteral("NF dB"),
+        ukrainian ? QStringLiteral("Повторюваність Y, дБ") : QStringLiteral("Y repeatability, dB")});
+    table->horizontalHeaderItem(6)->setToolTip(ukrainian
+        ? QStringLiteral("Оцінка стандартної невизначеності Y за розкидом кадрів Cold і Hot за припущення їхньої незалежності. Калібрування джерела та дрейф приймача сюди не входять.")
+        : QStringLiteral("Estimated standard uncertainty of Y from the spread of Cold and Hot frames, assuming independent frames. Source calibration and receiver drift are excluded."));
     table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -359,7 +363,9 @@ void YourClassName::openReceiverYFactorDialog() {
             const QStringList values{
                 QString::number(frequencyHz / 1.0e6, 'f', 6),
                 numberOrDash(coldDb, 2), numberOrDash(hotDb, 2),
-                numberOrDash(yDb, 2), numberOrDash(te, 1), numberOrDash(nf, 2)};
+                numberOrDash(yDb, 2), numberOrDash(te, 1), numberOrDash(nf, 2),
+                profile.ratioRepeatabilityDb.isEmpty() ? QStringLiteral("--")
+                    : numberOrDash(profile.ratioRepeatabilityDb.at(index), 2)};
             for (int column = 0; column < values.size(); ++column) {
                 table->setItem(row, column, new QTableWidgetItem(values[column]));
             }
@@ -509,7 +515,8 @@ void YourClassName::openReceiverYFactorDialog() {
         }
         QTextStream stream(&file);
         stream.setCodec("UTF-8");
-        stream << "frequency_hz,cold_db,hot_db,y_db,equivalent_noise_temperature_k,noise_figure_db\n";
+        stream << "frequency_hz,cold_db,hot_db,y_db,equivalent_noise_temperature_k,noise_figure_db,"
+                  "y_independent_frame_standard_uncertainty_db\n";
         const int count = profile.coldPower.size();
         for (int index = 0; index < count; ++index) {
             const double frequencyHz = profile.minimumFrequencyHz +
@@ -521,7 +528,10 @@ void YourClassName::openReceiverYFactorDialog() {
                    << numberOrDash(coldDb, 6) << ',' << numberOrDash(hotDb, 6) << ','
                    << numberOrDash(hotDb - coldDb, 6) << ','
                    << numberOrDash(profile.equivalentNoiseTemperatureKelvin[index], 6) << ','
-                   << numberOrDash(profile.noiseFigureDb[index], 6) << '\n';
+                   << numberOrDash(profile.noiseFigureDb[index], 6) << ',';
+            if (!profile.ratioRepeatabilityDb.isEmpty() && std::isfinite(profile.ratioRepeatabilityDb.at(index)))
+                stream << QString::number(profile.ratioRepeatabilityDb.at(index), 'f', 6);
+            stream << '\n';
         }
     });
 

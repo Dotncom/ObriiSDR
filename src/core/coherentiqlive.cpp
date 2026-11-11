@@ -9,6 +9,8 @@
 namespace {
 using Complex = std::complex<double>;
 using SampleIndex = std::uint64_t;
+constexpr double TwoPi = 6.28318530717958647693;
+constexpr SampleIndex PhaseMeasurementSamples = 8 * CoherentIqLive::BlockSamples;
 
 bool usable(const DspIqSourceSnapshot &input, CoherentIqLive::Timeline timeline) {
     return input.source.isValid() && input.sampleClockValid && input.continuityId != 0 &&
@@ -42,6 +44,8 @@ DspSourceIdentity CoherentIqLive::outputIdentity() {
 bool CoherentIqLive::calibrate(const std::vector<DspIqSourceSnapshot> &inputs,
                                int maximumDelay, QString &error) {
     aligned.clear();
+    phaseBaselineSample.reset();
+    measuredDriftHz.reset();
     error.clear();
     if (inputs.size() < 2 || inputs.size() > 8) {
         error = QStringLiteral("Live coherent IQ requires 2–8 sources");
@@ -99,6 +103,8 @@ bool CoherentIqLive::takeBlock(const std::vector<DspIqSourceSnapshot> &inputs,
     error.clear();
     const auto reject = [&](const QString &reason) {
         aligned.clear();
+        phaseBaselineSample.reset();
+        measuredDriftHz.reset();
         error = reason;
         return false;
     };
@@ -117,6 +123,9 @@ bool CoherentIqLive::takeBlock(const std::vector<DspIqSourceSnapshot> &inputs,
     }
     if (end <= next || end - next < BlockSamples) return true;
 
+    const auto phaseSamples = phaseBaselineSample ? next - *phaseBaselineSample : 0;
+    const bool measurePhase = phaseSamples >= PhaseMeasurementSamples;
+    double largestDriftHz = 0.0;
     std::vector<Complex> sum(BlockSamples);
     double referencePower = 0.0;
     for (int n = 0; n < BlockSamples; ++n) {
@@ -124,7 +133,7 @@ bool CoherentIqLive::takeBlock(const std::vector<DspIqSourceSnapshot> &inputs,
         referencePower += std::norm(sum[n]);
     }
     for (std::size_t i = 1; i < inputs.size(); ++i) {
-        const auto &plan = aligned[i];
+        auto &plan = aligned[i];
         auto index = shiftIndex(next, plan.whole);
         Complex cross{};
         double power = 0.0;
@@ -138,10 +147,18 @@ bool CoherentIqLive::takeBlock(const std::vector<DspIqSourceSnapshot> &inputs,
             sum[n] += corrected;
         }
         const double norm = std::sqrt(referencePower * power);
+        const double phase = std::arg(cross);
         if (!(norm > 0) || !std::isfinite(norm) || !(std::abs(cross) >= 0.35 * norm) ||
-            std::abs(std::arg(cross)) > 1.0471975511965976)
+            std::abs(phase) > 1.0471975511965976)
             return reject(QStringLiteral("Coherence or phase lock lost in %1").arg(plan.source.key()));
+        if (measurePhase) {
+            const double phaseChange = std::remainder(phase - plan.phaseBaseline, TwoPi);
+            largestDriftHz = std::max(largestDriftHz, std::abs(phaseChange) * rate / (TwoPi * phaseSamples));
+        }
+        if (!phaseBaselineSample || measurePhase) plan.phaseBaseline = phase;
     }
+    if (measurePhase) measuredDriftHz = largestDriftHz;
+    if (!phaseBaselineSample || measurePhase) phaseBaselineSample = next;
     output.source = outputIdentity();
     output.startComplexSample = next;
     next += BlockSamples;

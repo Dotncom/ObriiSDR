@@ -10,6 +10,7 @@ sudo apt-get update
 sudo apt-get install -y \
     build-essential \
     cmake \
+    python3 \
     pkg-config \
     qtbase5-dev \
     qt5-image-formats-plugins \

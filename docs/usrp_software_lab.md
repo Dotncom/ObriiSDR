@@ -26,6 +26,7 @@ The standalone CLI waits for completion and prints the result as JSON.
 ObriiCli usrp status
 ObriiCli usrp contracts
 ObriiCli usrp wifi-loopback
+ObriiCli usrp zmq-loopback
 ObriiCli usrp lte-zmq
 ObriiCli usrp gsm-demo
 ObriiCli usrp gsm-decode "channel 62.cf32" 62 1
@@ -38,6 +39,7 @@ ObriiCli usrp umts-decode capture.cs16 16000000 -2600000 cs16 32000000
 |---|---|
 | `contracts` | Worker ownership, IQ framing and software radio contract checks. |
 | `wifi-loopback` | Windows GNU Radio runtime. Tests the existing 20 MHz legacy OFDM PHY across the 26 synthetic cases. |
+| `zmq-loopback` | Bundled localhost transport check. Python with PyZMQ verifies byte-identical CF32 samples in each test direction and confirms a bounded send timeout without a peer. |
 | `lte-zmq` | Linux srsRAN build with ZMQ, TUN and SCTP. Runs attach, IP transfer and orderly shutdown inside the lab's owned namespaces. |
 | `gsm-demo` | Generates a noisy synthetic IQ file and verifies seven CS-1 control blocks. |
 | `gsm-decode` | Centered CF32LE GSM IQ, 3250000/3 complex samples per second, up to 32 MiB. ARFCN is supplied by the caller. Omit the timeslot for BCCH only, or choose 1–7 to also decode PDCH CS-1. |
@@ -63,6 +65,12 @@ Keep the tested GSM lab beside the USRP lab as `gsm-bcch-u3`. The runner
 expects the locally prepared engines described in those labs. It reports
 a missing dependency without installing software. On Linux, an alternate
 prepared srsRAN lab may be selected with `OBRII_USRP_LTE_ROOT`.
+
+The bundled `zmq-loopback` works independently of the local lab checkout.
+Use `OBRII_USRP_LAB_PYTHON` to select a Python executable with PyZMQ when
+the default environment lacks it. A missing runtime yields `BLOCKED`.
+The result is stored in a per-run system temporary directory shown by the job.
+The transport check uses synthetic IQ and loopback sockets on the same host.
 
 Keep `umts-sync-u5` beside the USRP lab and use Python with NumPy. On
 Windows UMTS runs natively with a 4096 MiB free host RAM gate, one logical

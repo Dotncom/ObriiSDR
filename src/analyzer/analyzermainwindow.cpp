@@ -1459,7 +1459,9 @@ void AnalyzerMainWindow::refreshReceivers() {
     receiverCombo->setItemData(0, wantedIndex, Qt::UserRole + 1);
     receiverRefreshButton->setText(uiText(QStringLiteral("Scanning...")));
     receiverRefreshButton->setEnabled(false);
-    receiverScanWatcher->setFuture(QtConcurrent::run(&AnalyzerReceiver::enumerateDevices));
+    receiverScanWatcher->setFuture(QtConcurrent::run([] {
+        return AnalyzerReceiver::enumerateDevices();
+    }));
 }
 
 void AnalyzerMainWindow::toggleStandaloneReceiver() {

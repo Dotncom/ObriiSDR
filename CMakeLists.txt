@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 9.0.0)
+project(ObriiSDR VERSION 9.0.1)
 enable_testing()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -19,8 +19,8 @@ endif()
 
 find_package(Qt5 REQUIRED COMPONENTS Core Widgets Network SerialPort Concurrent)
 find_package(Qt5 COMPONENTS Multimedia QUIET)
-add_library(ObriiUsrpLabCore STATIC src/core/usrplabjob.cpp src/core/usrplabjob.h)
-set_target_properties(ObriiUsrpLabCore PROPERTIES AUTOMOC ON AUTOUIC OFF AUTORCC OFF)
+add_library(ObriiUsrpLabCore STATIC src/core/usrplabjob.cpp src/core/usrplabjob.h src/core/usrplabresources.qrc)
+set_target_properties(ObriiUsrpLabCore PROPERTIES AUTOMOC ON AUTOUIC OFF AUTORCC ON)
 target_include_directories(ObriiUsrpLabCore PUBLIC src/core)
 target_link_libraries(ObriiUsrpLabCore PUBLIC Qt5::Core)
 add_executable(ObriiUsrpLabJobSelfTest EXCLUDE_FROM_ALL tools/usrp_lab_job_selftest.cpp)
@@ -1208,6 +1208,8 @@ add_executable(ObriiAnalyzer
     src/analyzer/analyzerfobosglobals.cpp
     src/analyzer/analyzerreceiver.cpp
     src/analyzer/analyzerreceiver.h
+    src/backends/uhdbackend.cpp
+    src/backends/uhdbackend.h
     src/analyzer/analyzermain.cpp
     src/analyzer/analyzermainwindow.cpp
     src/analyzer/analyzermainwindow.h

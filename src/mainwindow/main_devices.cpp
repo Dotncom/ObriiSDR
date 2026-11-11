@@ -23,6 +23,7 @@
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStyle>
+#include <QTimer>
 #include <QToolButton>
 
 #include <algorithm>
@@ -789,6 +790,8 @@ ReceiverStreamDescriptor YourClassName::makeUhdNativeStreamDescriptor(bool queue
     stream.frequencyCalibrationOffsetHz = effectiveFrequencyCalibrationOffsetHz(pendingSettings.centerFrequency);
     stream.uhdNativeDeviceIndex = uhdNativeIndexFromComboValue(pendingSettings.deviceIndex);
     stream.uhdRxChannel = pendingSettings.uhdRxChannel;
+    stream.uhdClockSource = pendingSettings.uhdClockSource;
+    stream.uhdGnssBaud = pendingSettings.uhdGnssBaud;
     stream.uhdRxGainDb = pendingSettings.uhdRxGainDb;
     stream.uhdRxAntenna = pendingSettings.uhdRxAntenna;
     stream.uhdFpgaImagePath = pendingSettings.uhdFpgaImagePath;
@@ -799,22 +802,40 @@ ReceiverStreamDescriptor YourClassName::makeUhdNativeStreamDescriptor(bool queue
 }
 
 void YourClassName::showUhdRxSettings() {
+    const bool remote = isNetworkClientMode();
+    const bool uk = uiLanguage.startsWith(QLatin1String("uk"));
+    const bool canEditRx = remote ? networkController && networkController->clientHasControl() : isIdle();
+    const auto remoteRx = networkClientConfirmedSettingsJson.value(QStringLiteral("uhdRx")).toObject();
+    const auto remoteSecondary = remoteRx.value(QStringLiteral("secondary")).toObject();
+    if (remote && (remoteRx.isEmpty() || !networkController || !networkController->isControlReady() ||
+                   isRemoteVfoProcessingMode())) return;
     QDialog dialog(this);
     dialog.setWindowTitle(uiText(QStringLiteral("uhd_rx_settings"), QStringLiteral("USRP UHD RX")));
     auto *layout = new QFormLayout(&dialog);
     auto *channel = new QComboBox(&dialog);
     channel->addItem(QStringLiteral("RX 0"), 0);
     channel->addItem(QStringLiteral("RX 1"), 1);
-    channel->setCurrentIndex((std::clamp)(pendingSettings.uhdRxChannel, 0, 1));
+    const int rxChannel = remote ? remoteRx.value(QStringLiteral("channel")).toInt() : pendingSettings.uhdRxChannel;
+    channel->setCurrentIndex((std::clamp)(rxChannel, 0, 1));
+    channel->setEnabled(canEditRx && (!remote || remoteSecondary.isEmpty()));
     auto *gain = new QDoubleSpinBox(&dialog);
     gain->setRange(0.0, 100.0);
     gain->setSuffix(QStringLiteral(" dB"));
-    gain->setValue(pendingSettings.uhdRxGainDb);
-    auto *antenna = new QComboBox(&dialog);
-    antenna->addItem(uiText(QStringLiteral("uhd_default_antenna"), QStringLiteral("Driver default")), QString());
-    antenna->addItem(QStringLiteral("RX2"), QStringLiteral("RX2"));
-    antenna->addItem(QStringLiteral("TX/RX"), QStringLiteral("TX/RX"));
-    antenna->setCurrentIndex((std::max)(0, antenna->findData(pendingSettings.uhdRxAntenna)));
+    gain->setValue(remote ? remoteRx.value(QStringLiteral("gainDb")).toDouble() : pendingSettings.uhdRxGainDb);
+    gain->setEnabled(canEditRx);
+    const auto makeAntenna = [this, &dialog](const QString &selected) {
+        auto *combo = new QComboBox(&dialog);
+        combo->addItem(uiText(QStringLiteral("uhd_default_antenna"), QStringLiteral("Driver default")), QString());
+        combo->addItem(QStringLiteral("RX2"), QStringLiteral("RX2"));
+        combo->addItem(QStringLiteral("TX/RX"), QStringLiteral("TX/RX"));
+        if (!selected.isEmpty() && combo->findData(selected) < 0)
+            combo->addItem(selected, selected);
+        combo->setCurrentIndex((std::max)(0, combo->findData(selected)));
+        return combo;
+    };
+    const QString rxAntenna = remote ? remoteRx.value(QStringLiteral("antenna")).toString() : pendingSettings.uhdRxAntenna;
+    auto *antenna = makeAntenna(rxAntenna);
+    antenna->setEnabled(canEditRx);
     auto *fpgaRow = new QWidget(&dialog);
     auto *fpgaLayout = new QHBoxLayout(fpgaRow);
     fpgaLayout->setContentsMargins(0, 0, 0, 0);
@@ -824,6 +845,7 @@ void YourClassName::showUhdRxSettings() {
     browse->setToolTip(uiText(QStringLiteral("uhd_browse_fpga"), QStringLiteral("Choose FPGA image")));
     fpgaLayout->addWidget(fpgaPath, 1);
     fpgaLayout->addWidget(browse);
+    fpgaRow->setEnabled(canEditRx);
     connect(browse, &QToolButton::clicked, &dialog, [fpgaPath, &dialog]() {
         const QString file = QFileDialog::getOpenFileName(&dialog,
             QStringLiteral("UHD FPGA image"), fpgaPath->text(), QStringLiteral("FPGA image (*.bin);;All files (*)"));
@@ -832,12 +854,146 @@ void YourClassName::showUhdRxSettings() {
     layout->addRow(uiText(QStringLiteral("uhd_rx_channel"), QStringLiteral("RX channel")), channel);
     layout->addRow(uiText(QStringLiteral("uhd_rx_gain"), QStringLiteral("RX gain")), gain);
     layout->addRow(uiText(QStringLiteral("uhd_rx_antenna"), QStringLiteral("RX antenna")), antenna);
-    layout->addRow(uiText(QStringLiteral("uhd_fpga_image"), QStringLiteral("FPGA image (optional)")), fpgaRow);
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    QDoubleSpinBox *secondaryGain = nullptr;
+    QComboBox *secondaryAntenna = nullptr;
+    if (remote && !remoteSecondary.isEmpty()) {
+        const int secondaryChannel = remoteSecondary.value(QStringLiteral("channel")).toInt();
+        const QString prefix = QStringLiteral("RX %1 — ").arg(secondaryChannel);
+        secondaryGain = new QDoubleSpinBox(&dialog);
+        secondaryGain->setRange(gain->minimum(), gain->maximum());
+        secondaryGain->setSuffix(gain->suffix());
+        secondaryGain->setValue(remoteSecondary.value(QStringLiteral("gainDb")).toDouble());
+        secondaryAntenna = makeAntenna(remoteSecondary.value(QStringLiteral("antenna")).toString());
+        secondaryGain->setEnabled(canEditRx);
+        secondaryAntenna->setEnabled(canEditRx);
+        layout->addRow(prefix + uiText(QStringLiteral("uhd_rx_gain"), QStringLiteral("RX gain")), secondaryGain);
+        layout->addRow(prefix + uiText(QStringLiteral("uhd_rx_antenna"), QStringLiteral("RX antenna")), secondaryAntenna);
+    }
+    auto *gnssBaud = new QComboBox(&dialog);
+    if (remote) {
+        fpgaRow->hide();
+        gnssBaud->hide();
+    } else {
+        layout->addRow(uiText(QStringLiteral("uhd_fpga_image"), QStringLiteral("FPGA image (optional)")), fpgaRow);
+        gnssBaud->addItem(uk ? QStringLiteral("Авто (датчики UHD)") : QStringLiteral("Auto (UHD sensors)"), 0);
+        gnssBaud->addItem(QStringLiteral("38400"), 38400);
+        gnssBaud->addItem(QStringLiteral("9600"), 9600);
+        gnssBaud->setCurrentIndex((std::max)(0, gnssBaud->findData(pendingSettings.uhdGnssBaud)));
+        gnssBaud->setEnabled(canEditRx);
+        gnssBaud->setToolTip(uk
+            ? QStringLiteral("Вкажіть швидкість NMEA для сумісного образу FPGA і бібліотеки UHD B210.")
+            : QStringLiteral("Set the NMEA baud rate for a compatible B210 FPGA image and UHD library."));
+        layout->addRow(uk ? QStringLiteral("Швидкість GPS NMEA") : QStringLiteral("GPS NMEA baud"), gnssBaud);
+    }
+    const auto internal = uk ? QStringLiteral("Внутрішня") : QStringLiteral("Internal");
+    const auto external = uk ? QStringLiteral("Зовнішня 10 МГц") : QStringLiteral("External 10 MHz");
+    const auto sourceName = [&](const QString &source) {
+        if (source == QLatin1String("internal")) return internal;
+        if (source == QLatin1String("external")) return external;
+        return source;
+    };
+    const bool clockControl = remote ? remoteRx.value(QStringLiteral("clockControl")).toBool() : uhdClockControlAvailable();
+    auto *clock = new QComboBox(&dialog);
+    clock->addItem(uk ? QStringLiteral("Авто (за драйвером)") : QStringLiteral("Auto (driver default)"), QStringLiteral("auto"));
+    clock->addItem(internal, QStringLiteral("internal"));
+    clock->addItem(external, QStringLiteral("external"));
+    const auto selectedClock = remote ? remoteRx.value(QStringLiteral("clockSource")).toString() : pendingSettings.uhdClockSource;
+    clock->setCurrentIndex((std::max)(0, clock->findData(selectedClock)));
+    clock->setEnabled(clockControl && (!remote || canEditRx));
+    layout->addRow(uk ? QStringLiteral("Джерело опори") : QStringLiteral("Clock source"), clock);
+    auto *clockStatus = new QLabel(&dialog);
+    clockStatus->setTextFormat(Qt::PlainText);
+    layout->addRow(uk ? QStringLiteral("Фактична опора") : QStringLiteral("Active reference"), clockStatus);
+    if (!remote && !canEditRx) {
+        layout->addRow(new QLabel(uk ? QStringLiteral("Нова опора застосовується після Стоп → Старт.")
+                                     : QStringLiteral("The new source applies after Stop → Start."), &dialog));
+    }
+    auto *refreshClock = new QTimer(&dialog);
+    const auto updateClockStatus = [&] {
+        UhdClockStatus status;
+        if (remote && networkController->isControlReady()) {
+            const auto state = networkClientConfirmedSettingsJson.value(QStringLiteral("uhdClock")).toObject();
+            status.source = state.value(QStringLiteral("source")).toString();
+            const auto locked = state.value(QStringLiteral("refLocked"));
+            if (locked.isBool()) status.locked = locked.toBool();
+        } else if (!remote && processor && !isIdle()) {
+            status = processor->uhdClockStatus();
+        }
+        if (status.source.isEmpty()) {
+            clockStatus->setText(uk ? QStringLiteral("Немає даних") : QStringLiteral("No reading"));
+        } else if (status.source == QLatin1String("internal")) {
+            clockStatus->setText(internal);
+        } else {
+            const auto lockText = !status.locked
+                ? (uk ? QStringLiteral("статус недоступний") : QStringLiteral("lock status unavailable"))
+                : (*status.locked ? (uk ? QStringLiteral("захоплено") : QStringLiteral("locked"))
+                                  : (uk ? QStringLiteral("немає захоплення") : QStringLiteral("unlocked")));
+            clockStatus->setText(sourceName(status.source) + QStringLiteral(" · ") + lockText);
+        }
+    };
+    connect(refreshClock, &QTimer::timeout, &dialog, updateClockStatus);
+    refreshClock->start(300);
+    updateClockStatus();
+    auto *buttons = new QDialogButtonBox(remote
+        ? QDialogButtonBox::Apply | QDialogButtonBox::Close
+        : QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     layout->addRow(buttons);
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (remote) {
+        auto *apply = buttons->button(QDialogButtonBox::Apply);
+        apply->setEnabled(canEditRx);
+        auto *result = new QLabel(&dialog);
+        result->setWordWrap(true);
+        result->setTextFormat(Qt::PlainText);
+        layout->insertRow(layout->rowCount() - 1, result);
+        QString requestId;
+        QTimer ackDeadline;
+        ackDeadline.setSingleShot(true);
+        connect(apply, &QPushButton::clicked, &dialog, [&] {
+            QJsonObject rx = remoteRx;
+            rx.insert(QStringLiteral("channel"), channel->currentData().toInt());
+            rx.insert(QStringLiteral("gainDb"), gain->value());
+            rx.insert(QStringLiteral("antenna"), antenna->currentData().toString());
+            if (clockControl) rx.insert(QStringLiteral("clockSource"), clock->currentData().toString());
+            if (secondaryGain && secondaryAntenna) {
+                auto secondary = remoteSecondary;
+                secondary.insert(QStringLiteral("gainDb"), secondaryGain->value());
+                secondary.insert(QStringLiteral("antenna"), secondaryAntenna->currentData().toString());
+                rx.insert(QStringLiteral("secondary"), secondary);
+            }
+            if (sendRemoteControlCommand(QStringLiteral("setParameters"),
+                    {{QStringLiteral("settings"), QJsonObject{{QStringLiteral("uhdRx"), rx}}}})) {
+                requestId = QString::number(networkClientSettingsRequestCounter);
+                apply->setEnabled(false);
+                result->setText(uk ? QStringLiteral("Очікування відповіді UHD…") : QStringLiteral("Waiting for UHD…"));
+                ackDeadline.start(10000);
+            } else {
+                result->setText(uk ? QStringLiteral("Команду не надіслано.") : QStringLiteral("Command was not sent."));
+            }
+        });
+        connect(networkController, &NetworkController::controlCommandReceived, &dialog, [&](const QJsonObject &command) {
+            if (requestId.isEmpty() || command.value("action") != QLatin1String("settingsAck") ||
+                command.value("requestId").toString() != requestId) return;
+            ackDeadline.stop();
+            requestId.clear();
+            apply->setEnabled(true);
+            result->setText(command.value("ok").toBool()
+                ? (uk ? QStringLiteral("Застосовано") : QStringLiteral("Applied"))
+                : command.value("reason").toString());
+            updateClockStatus();
+        });
+        connect(&ackDeadline, &QTimer::timeout, &dialog, [&] {
+            requestId.clear();
+            apply->setEnabled(true);
+            result->setText(uk ? QStringLiteral("Сервер не підтвердив зміни.") : QStringLiteral("Server did not acknowledge changes."));
+        });
+        dialog.exec();
+        return;
+    }
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     if (dialog.exec() != QDialog::Accepted) return;
+    if (clockControl) pendingSettings.uhdClockSource = clock->currentData().toString();
+    if (canEditRx) pendingSettings.uhdGnssBaud = gnssBaud->currentData().toInt();
     pendingSettings.uhdRxChannel = channel->currentData().toInt();
     pendingSettings.uhdRxGainDb = gain->value();
     pendingSettings.uhdRxAntenna = antenna->currentData().toString();

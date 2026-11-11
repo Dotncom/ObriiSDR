@@ -226,7 +226,7 @@ void MultiSdrLiveIq::run(std::vector<DspSourceIdentity> sources, int maximumDela
                     nextPreview = now + 100ms;
                     auto frame = spectrumFrame(fft, output, ++sequence);
                     std::lock_guard<std::mutex> lock(previewMutex);
-                    latest = {std::move(frame), total, int(inputs.size()), {}};
+                    latest = {std::move(frame), total, int(inputs.size()), {}, {}, combiner.maximumPhaseDriftHz()};
                 }
             }
         }

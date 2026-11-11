@@ -8,6 +8,9 @@ support and a separately maintained Android USB/network client. Version 9.0.0
 adds the Fobos firmware updater and Dual receiver support, improves DMR and
 receiver controls, and adds live coherent IQ in Multi-SDR. See
 `docs/release_notes_9.0.0.md` for package contents and qualification limits.
+The 9.0.1 preview adds B210 dual RX, UHD GPS status with optional GSV,
+USRP Lab jobs, and updated Raspberry Pi launch and receive behavior.
+See `docs/release_notes_9.0.1.md` for the preview and its test coverage.
 Version 8.2.0
 adds saved VPN discovery addresses, bounded TCP fallback, an optional node
 directory, isolated live mesh topology changes, and experimental EU868 LoRaWAN
@@ -369,6 +372,11 @@ ALLOW_UPSTREAM_FOBOS_CLONE=1 ./tools/prepare_fobos_linux.sh
 ./tools/run_linux.sh
 ```
 
+The GUI build creates an **Obrii SDR (Fusion 110%)** shortcut in the application
+menu and on the desktop. Linux launchers use Qt Fusion and 110% scaling by
+default. After moving the source folder, recreate the shortcut with
+`python3 tools/install_linux_shortcut.py`.
+
 For future Raspberry Pi DMR voice/backend testing, start from a Git checkout
 with the optional DMR submodules, or clone them into the unpacked source tree:
 
@@ -419,8 +427,7 @@ FOBOS_AGILE_ROOT=/path/to/libfobos_sdr \
 ./tools/build_linux.sh
 ```
 
-The public checkout and Raspberry Pi source archive use the official Standard
-and Agile SDKs.
+The Raspberry Pi source archive uses the official Standard and Agile SDKs.
 The helper installs them under `third_party/fobos-linux`. To download and
 build both libraries explicitly, run:
 

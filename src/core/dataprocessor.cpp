@@ -346,6 +346,7 @@ void DataProcessor::startProcessing(const ReceiverStreamDescriptor &stream) {
     activeBackendId = stream.backendId;
     activeBackendName = stream.backendName;
     activeStreamDescriptor = stream;
+    uhdStreamReady_.store(false, std::memory_order_release);
     const uint64_t streamEpoch = iqRetuneEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
     requestedSampleRate = stream.sampleRateHz;
     requestedCenterFrequency = stream.centerFrequencyHz;
@@ -1090,17 +1091,44 @@ void DataProcessor::runSoapySdrReader(const ReceiverStreamDescriptor &stream, ui
     running = false;
 }
 
+UhdClockStatus DataProcessor::uhdClockStatus() const {
+    QMutexLocker lock(&uhdStatusMutex);
+    return activeUhdClock;
+}
+
+void DataProcessor::setUhdGnssPollingEnabled(bool enabled) {
+    QMutexLocker lock(&uhdStatusMutex);
+    uhdGnssPollingEnabled.store(enabled);
+    if (!enabled) activeUhdGnss = {};
+}
+
+UhdGnssStatus DataProcessor::uhdGnssStatus() const {
+    QMutexLocker lock(&uhdStatusMutex);
+    return activeUhdGnss;
+}
+
 void DataProcessor::runUhdNativeReader(const ReceiverStreamDescriptor &stream, uint32_t blockSamples) {
+    const auto publishClock = [this](const UhdClockStatus &status) {
+        QMutexLocker lock(&uhdStatusMutex);
+        activeUhdClock = status;
+    };
+    publishClock({});
     UhdRxSession session;
     QString error;
     const double logicalCenter = requestedCenterFrequency.load() > 0.0
                                      ? requestedCenterFrequency.load() : stream.centerFrequencyHz;
     if (!session.open(stream.uhdNativeDeviceIndex, stream.uhdRxChannel,
                       stream.sampleRateHz, logicalCenter + frequencyCalibrationOffsetHz.load(),
-                      stream.uhdRxGainDb, stream.uhdRxAntenna, stream.uhdFpgaImagePath, &error)) {
+                      stream.uhdRxGainDb, stream.uhdRxAntenna, stream.uhdFpgaImagePath, &error,
+                      stream.uhdClockSource, stream.uhdGnssBaud)) {
         qWarning().noquote() << "[UHD]" << error;
         if (running.load()) emit readerFailed(UHD_NATIVE_ERR_OPEN, false);
         running = false;
+        return;
+    }
+    // The reader's session destructor handles a Stop received during synchronous open.
+    if (!running.load()) {
+        setUhdGnssPollingEnabled(false);
         return;
     }
     activeDevice = &session;
@@ -1111,7 +1139,34 @@ void DataProcessor::runUhdNativeReader(const ReceiverStreamDescriptor &stream, u
     asyncRateTimer.restart();
     std::vector<float> iq(static_cast<std::size_t>((std::max)(blockSamples, MIN_ASYNC_BLOCK_SAMPLES)) * 2);
     double appliedCenter = logicalCenter;
+    QElapsedTimer clockPoll;
+    QElapsedTimer gnssPoll;
+    const bool profileReads = fobosVerboseLoggingEnabled();
+    QElapsedTimer readTimer;
+    qint64 previousReadEndNs = -1;
+    qint64 maximumReadPauseNs = 0;
+    uint64_t receivedSamples = 0;
+    if (profileReads) readTimer.start();
+    uhdStreamReady_.store(true, std::memory_order_release);
     while (running.load()) {
+        if (!clockPoll.isValid() || clockPoll.hasExpired(1000)) {
+            publishClock(session.clockStatus());
+            clockPoll.start();
+        }
+        if (uhdGnssPollingEnabled.load(std::memory_order_relaxed)) {
+            if (!gnssPoll.isValid() || gnssPoll.hasExpired(100)) {
+                session.requestGnssStatus();
+                const auto status = session.gnssStatus();
+                QMutexLocker lock(&uhdStatusMutex);
+                if (uhdGnssPollingEnabled.load(std::memory_order_relaxed) &&
+                    status.state != QLatin1String("polling")) {
+                    activeUhdGnss = status;
+                }
+                gnssPoll.start();
+            }
+        } else if (gnssPoll.isValid()) {
+            gnssPoll.invalidate();
+        }
         const double nextCenter = requestedCenterFrequency.load();
         if (nextCenter > 0.0 && std::abs(nextCenter - appliedCenter) > 0.5) {
             if (!session.retune(nextCenter + frequencyCalibrationOffsetHz.load(), &error)) {
@@ -1121,7 +1176,14 @@ void DataProcessor::runUhdNativeReader(const ReceiverStreamDescriptor &stream, u
             }
             appliedCenter = nextCenter;
         }
+        if (profileReads && previousReadEndNs >= 0) {
+            maximumReadPauseNs = (std::max)(maximumReadPauseNs, readTimer.nsecsElapsed() - previousReadEndNs);
+        }
         const int count = session.receive(iq.data(), iq.size() / 2, &error);
+        if (profileReads) {
+            previousReadEndNs = readTimer.nsecsElapsed();
+            if (count > 0) receivedSamples += static_cast<uint64_t>(count);
+        }
         if (count > 0) handleData(iq.data(), static_cast<uint32_t>(count));
         else if (count < 0) {
             if (running.load()) {
@@ -1131,7 +1193,16 @@ void DataProcessor::runUhdNativeReader(const ReceiverStreamDescriptor &stream, u
             break;
         }
     }
+    if (profileReads) {
+        qDebug() << "[UHD RX diagnostics]" << "samples" << receivedSamples
+                 << "elapsedMs" << (std::max)(qint64(0), previousReadEndNs) / 1000000.0
+                 << "overflows" << session.receiveOverflows() << "timeouts" << session.receiveTimeouts()
+                 << "maxReadPauseMs" << maximumReadPauseNs / 1000000.0;
+    }
+    uhdStreamReady_.store(false, std::memory_order_release);
     activeDevice = nullptr;
+    setUhdGnssPollingEnabled(false);
+    publishClock({});
     session.close();
     running = false;
 }
@@ -3205,6 +3276,7 @@ void DataProcessor::finalizeStopped() {
         void *previousDevice = activeDevice.load();
         running = false;
         activeDevice = nullptr;
+        uhdStreamReady_.store(false, std::memory_order_release);
         if (fobosVerboseLoggingEnabled() && (wasRunning || previousDevice)) {
             qDebug() << "[DataProcessor] finalizeStopped: thread is stopped";
         }

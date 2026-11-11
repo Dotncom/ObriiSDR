@@ -4908,13 +4908,21 @@ public:
     }
 
     void resetBranchRouteStatus(const DspGraphPlan &plan) {
-        branchStatuses_.clear();
+        branchStatuses_ = plan.branchInputErrors;
         for (QGraphicsItem *item : items()) {
             auto *block = dynamic_cast<DspBlockItem *>(item);
             if (!block || (block->blockType() != QStringLiteral("branch_spectrum") && block->blockType() != QStringLiteral("branch_waterfall"))) continue;
             const QString fftId = plan.spectrumRoutes.value(block->id());
             bool enabled = false;
-            for (const auto &b : plan.branches) for (const auto &f : b.ffts) if (f.id == fftId) enabled = b.enabled;
+            QString inputError;
+            for (const auto &b : plan.branches) for (const auto &f : b.ffts) if (f.id == fftId) {
+                enabled = b.enabled;
+                inputError = plan.branchInputErrors.value(b.id);
+            }
+            if (!inputError.isEmpty()) {
+                block->setMiniVfoStatus(inputError);
+                continue;
+            }
             block->setMiniVfoStatus(fftId.isEmpty() ?
                 (ukrainian ? QStringLiteral("Під'єднайте FFT гілки") : QStringLiteral("Connect branch FFT")) :
                 enabled ? (ukrainian ? QStringLiteral("Очікування IQ") : QStringLiteral("Waiting for IQ")) :
@@ -5471,7 +5479,11 @@ protected:
             DspBlockItem *source = pendingSource_;
             draggedBlock_ = nullptr;
             cancelPendingConnection();
-            if (target && addConnection(source, target))
+            const QString rateError = target ? dspLinkRateError(source->blockType(), source->settings(),
+                target->blockType(), target->settings(), ukrainian) : QString();
+            if (!rateError.isEmpty())
+                setStatus(rateError);
+            else if (target && addConnection(source, target))
                 setStatus(ukrainian ? QStringLiteral("З'єднання створено") : QStringLiteral("Connection created"));
             else
                 setStatus(ukrainian ? QStringLiteral("Готово") : QStringLiteral("Ready"));
@@ -7141,6 +7153,7 @@ DspFlowPanel::DspFlowPanel(QWidget *parent) : QDialog(parent, Qt::Window) {
 }
 
 void DspFlowPanel::setLanguage(bool ukrainian) {
+    if (ukrainian_ != ukrainian) branchPlanDirty_ = true;
     ukrainian_ = ukrainian;
     setWindowTitle(ukrainian_ ? QStringLiteral("Конструктор DSP-шляху") : QStringLiteral("DSP Path Designer"));
     addButton_->setText(ukrainian_ ? QStringLiteral("Додати") : QStringLiteral("Add"));
@@ -7842,8 +7855,9 @@ void DspFlowPanel::refreshBranches() {
         return;
     }
     if (branchPlanDirty_) {
-        auto plan = compileDspGraph(QJsonDocument::fromJson(configurationJson().toUtf8()).object());
-        if (branchPlan_.executionKey != plan.executionKey || branchPlan_.spectrumRoutes != plan.spectrumRoutes)
+        auto plan = compileDspGraph(QJsonDocument::fromJson(configurationJson().toUtf8()).object(), ukrainian_);
+        if (branchPlan_.executionKey != plan.executionKey || branchPlan_.spectrumRoutes != plan.spectrumRoutes ||
+            branchPlan_.branchInputErrors != plan.branchInputErrors)
             scene_->resetBranchRouteStatus(plan);
         branchPlan_ = std::move(plan);
         branchPlanDirty_ = false;

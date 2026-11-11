@@ -5,6 +5,7 @@
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QTemporaryDir>
 #include <QThread>
@@ -19,12 +20,15 @@ void check(bool passed, const char *message) {
     std::exit(1);
 }
 
-int fixture(const QString &path) {
-    const QDir dir(path);
+int fixture(const QStringList &args) {
+    const QDir dir(args.last());
     QFile file(dir.filePath("request.json"));
     if (!file.open(QIODevice::ReadOnly)) return 1;
     const auto request = QJsonDocument::fromJson(file.readAll()).object();
     const QString action = request.value("action").toString();
+    if (action == QStringLiteral("zmq-loopback") && (args.size() != 6 || args[3] != QStringLiteral("-c") ||
+            !args[4].contains(QStringLiteral("tcp://127.0.0.1")) || request.size() != 2))
+        return 1;
     if (action == QStringLiteral("umts-decode") &&
         (request.value("rate").toInt() != 7680000 || request.value("offset").toInt() != -1000 ||
          request.value("format").toString() != QStringLiteral("cs16") || request.value("start").toInt() != 10))
@@ -63,8 +67,8 @@ QJsonObject execute(UsrpLabJob &job, const QJsonObject &request, bool cancel = f
 
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
-    if (app.arguments().size() == 5 && app.arguments().value(1) == QStringLiteral("-I"))
-        return fixture(app.arguments().last());
+    if (app.arguments().size() >= 5 && app.arguments().value(1) == QStringLiteral("-I"))
+        return fixture(app.arguments());
     QTemporaryDir root(QDir::temp().filePath("obrii usrp job XXXXXX"));
     check(root.isValid(), "temporary lab directory");
     QFile marker(root.filePath("app_job.py"));
@@ -93,5 +97,18 @@ int main(int argc, char **argv) {
         "nonzero worker exit cannot claim PASS");
     const auto cancelled = execute(job, {{"action", "gsm-demo"}}, true);
     check(cancelled.value("status") == QJsonValue("CANCELLED"), "cancel request reaches the worker");
+    qputenv("OBRII_USRP_LAB_ROOT", root.filePath("missing").toUtf8());
+    check(!job.status().value("available").toBool(), "test requires an unavailable local lab");
+    check(job.status().value("jobs").toArray().contains(QStringLiteral("zmq-loopback")), "bundled transport is listed");
+    check(!job.command({{"action", "zmq-loopback"}, {"endpoint", "external.invalid"}}).value("ok").toBool(),
+        "transport rejects remote endpoints");
+    const auto transport = execute(job, UsrpLabJob::arguments({"zmq-loopback"}));
+    check(transport.value("ok").toBool(), "bundled worker reaches the process without a local lab");
+    const QDir transportDir(transport.value("directory").toString());
+    QFile::remove(transportDir.filePath("request.json"));
+    QFile::remove(transportDir.filePath("result.json"));
+    QDir().rmdir(transportDir.path());
+    qputenv("OBRII_USRP_LAB_PYTHON", root.filePath("missing-python").toUtf8());
+    check(job.command({{"action", "zmq-loopback"}}).value("status") == QJsonValue("BLOCKED"), "missing Python blocks transport");
     std::puts("USRP app job checks passed");
 }

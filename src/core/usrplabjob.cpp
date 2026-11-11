@@ -7,6 +7,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QProcessEnvironment>
+#include <QResource>
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QUuid>
@@ -15,10 +16,20 @@
 #include <qt_windows.h>
 #endif
 
+static QByteArray zmqWorker() {
+    static const QByteArray scriptContents = [] {
+        Q_INIT_RESOURCE(usrplabresources);
+        QFile script(QStringLiteral(":/usrp-lab/usrp_zmq_loopback.py"));
+        return script.open(QIODevice::ReadOnly) ? script.readAll() : QByteArray{};
+    }();
+    return scriptContents;
+}
+
 namespace {
+const QString zmqAction = QStringLiteral("zmq-loopback");
 const QStringList actions{QStringLiteral("contracts"), QStringLiteral("wifi-loopback"),
     QStringLiteral("lte-zmq"), QStringLiteral("gsm-demo"), QStringLiteral("gsm-decode"),
-    QStringLiteral("gsm-replay"), QStringLiteral("umts-decode")};
+    QStringLiteral("gsm-replay"), QStringLiteral("umts-decode"), zmqAction};
 constexpr qint64 maxResultBytes = 64 * 1024;
 constexpr int maxDiagnosticBytes = 4096;
 
@@ -122,9 +133,13 @@ QJsonObject UsrpLabJob::arguments(const QStringList &words) {
 }
 
 QJsonObject UsrpLabJob::status() const {
-    const bool available = !labRoot().isEmpty() && !interpreter().isEmpty();
+    const bool pythonAvailable = !interpreter().isEmpty();
+    const bool available = pythonAvailable && !labRoot().isEmpty();
+    QStringList listed = actions;
+    if (!pythonAvailable) listed.removeAll(zmqAction);
     QJsonObject state{{"ok", true}, {"available", available}, {"active", active_},
-        {"cancelling", cancelling_}, {"jobs", QJsonArray::fromStringList(actions)}};
+        {"zmqPythonAvailable", pythonAvailable}, {"cancelling", cancelling_},
+        {"jobs", QJsonArray::fromStringList(listed)}};
     if (active_) state.insert("action", action_);
     if (!result_.isEmpty()) state.insert("lastResult", result_);
     if (!available) state.insert("setup", QStringLiteral("Set OBRII_USRP_LAB_ROOT to the local USRP lab and install Python 3.11+."));
@@ -197,8 +212,22 @@ QJsonObject UsrpLabJob::command(const QJsonObject &request) {
 
     const QString root = labRoot();
     const QString python = interpreter();
-    if (root.isEmpty() || python.isEmpty()) return error(status().value("setup").toString());
-    const QString directory = QDir(root).filePath(QStringLiteral("runs/app-") + QUuid::createUuid().toString(QUuid::WithoutBraces));
+    const bool zmq = action == zmqAction;
+    if (zmq && python.isEmpty())
+        return {{"ok", false}, {"status", "BLOCKED"}, {"action", action},
+                {"error", "ZeroMQ IQ loopback requires Python with PyZMQ."}};
+    if (!zmq && (root.isEmpty() || python.isEmpty())) return error(status().value("setup").toString());
+    QStringList arguments{QStringLiteral("-I"), QStringLiteral("-B")};
+    if (zmq) {
+        const QByteArray worker = zmqWorker();
+        if (worker.isEmpty()) return error(QStringLiteral("Bundled ZeroMQ IQ worker is missing."));
+        arguments << QStringLiteral("-c") << QString::fromUtf8(worker);
+    } else {
+        arguments << QDir(root).filePath(QStringLiteral("app_job.py"));
+    }
+    const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString directory = zmq ? QDir::temp().filePath(QStringLiteral("obrii-usrp-zmq-") + id)
+                                  : QDir(root).filePath(QStringLiteral("runs/app-") + id);
     if (!QDir().mkpath(directory)) return error(QStringLiteral("Cannot create USRP result directory."));
     QSaveFile file(QDir(directory).filePath(QStringLiteral("request.json")));
     const QByteArray bytes = QJsonDocument(payload).toJson(QJsonDocument::Compact);
@@ -211,13 +240,12 @@ QJsonObject UsrpLabJob::command(const QJsonObject &request) {
     result_ = {};
     active_ = true;
     cancelling_ = false;
-    process_.setWorkingDirectory(root);
+    process_.setWorkingDirectory(zmq ? directory : root);
     auto environment = QProcessEnvironment::systemEnvironment();
     for (const auto *name : {"OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "BLIS_NUM_THREADS"})
         environment.insert(QString::fromLatin1(name), QStringLiteral("1"));
     process_.setProcessEnvironment(environment);
-    process_.start(python, {QStringLiteral("-I"), QStringLiteral("-B"),
-        QDir(root).filePath(QStringLiteral("app_job.py")), directory});
+    process_.start(python, arguments << directory);
     emit changed();
     return status();
 }

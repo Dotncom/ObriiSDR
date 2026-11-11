@@ -1,5 +1,12 @@
 # Changelog
 
+## 9.0.1 Preview - 2026-11-11
+
+- Add native UHD receiver controls for B210, dual RX on the CLI server, per-channel settings in Multi-SDR, and timed shared RX/TX test bursts.
+- Read GGA, RMC, and optional GSV through UHD GPS in GPS / QTH. Show satellites in view, measured signal, and fix status in the receiver controls.
+- Improve Raspberry Pi UHD buffering and allow extra time for a custom FPGA image to load. Install a Qt Fusion launcher at 110% scale.
+- Add USRP Lab jobs for file-based and software-loopback testing.
+
 ## 9.0.0 - 2026-11-08
 
 - Added Obrii Dual receiver support and a Windows firmware updater for qualified Fobos HW 3.0.0 images.

@@ -3,6 +3,7 @@
 #include "dspiqsourceregistry.h"
 
 #include <complex>
+#include <optional>
 
 class CoherentIqLive final {
 public:
@@ -20,6 +21,8 @@ public:
     // A failed call invalidates the session and requires fresh calibration.
     bool takeBlock(const std::vector<DspIqSourceSnapshot> &inputs,
                    DspIqSourceSnapshot &output, QString &error);
+    // Largest measured relative phase rate against the reference, in Hz.
+    std::optional<double> maximumPhaseDriftHz() const { return measuredDriftHz; }
 
 private:
     const Timeline timeline;
@@ -29,10 +32,13 @@ private:
         int whole = 0;
         double fractional = 0.0;
         std::complex<double> correction{1.0, 0.0};
+        double phaseBaseline = 0.0;
     };
     std::vector<Input> aligned;
     std::uint64_t next = 0;
     double rate = 0;
     double center = 0;
     QString clock;
+    std::optional<std::uint64_t> phaseBaselineSample;
+    std::optional<double> measuredDriftHz;
 };

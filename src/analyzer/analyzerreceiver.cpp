@@ -8,6 +8,7 @@
 #include "hackrfbackend.h"
 #include "rtlsdrbackend.h"
 #include "soapysdrbackend.h"
+#include "uhdbackend.h"
 #include "fftplannermutex.h"
 
 #include <QDateTime>
@@ -57,6 +58,7 @@ struct AnalyzerReceiver::Impl {
     std::atomic<int> pendingFrames{0};
     std::atomic<bool> nativeAgileScanActive{false};
     std::atomic<double> activeCenterHz{100.0e6};
+    std::atomic<double> pendingUhdCenterHz{0.0};
     int activeAgileScanIndex = -1;
     std::thread streamThread;
     std::thread fftThread;
@@ -240,6 +242,45 @@ struct AnalyzerReceiver::Impl {
         return true;
     }
 
+    void runUhdStream() {
+        UhdRxSession session;
+        QString message;
+        if (!session.open(settings.uhdDeviceAddress, settings.rxChannel,
+                          settings.sampleRateHz, settings.centerHz, settings.uhdRxGainDb,
+                          settings.uhdRxAntenna, QString(), &message)) {
+            reportError(message);
+            return;
+        }
+        constexpr std::size_t blockSamples = 65536;
+        std::vector<float> buffer(blockSamples * 2);
+        while (running.load(std::memory_order_acquire)) {
+            const double centerHz = pendingUhdCenterHz.exchange(0.0);
+            if (centerHz > 0.0) {
+                message.clear();
+                if (session.retune(centerHz, &message)) {
+                    session.beginTimestampedTuneSettling();
+                    std::lock_guard<std::mutex> lock(mutex);
+                    activeCenterHz.store(centerHz, std::memory_order_release);
+                    availableFloats = 0;
+                } else {
+                    reportError(message);
+                }
+            }
+            message.clear();
+            const int received = session.receive(buffer.data(), blockSamples, &message);
+            if (received < 0) {
+                if (running.load(std::memory_order_acquire))
+                    reportError(message.isEmpty() ? QStringLiteral("UHD RX receive failed") : message);
+                break;
+            }
+            if (received > 0) {
+                const auto count = static_cast<std::size_t>(received);
+                const auto skip = session.samplesBeforeTuneCutoff(count, settings.sampleRateHz).value_or(0);
+                append(buffer.data() + skip * 2, (count - skip) * 2);
+            }
+        }
+    }
+
     void runStream() {
         int result = 0;
         if (settings.backendId == QStringLiteral("fobos-agile")) {
@@ -303,6 +344,8 @@ struct AnalyzerReceiver::Impl {
             if (result == 0) result = resetRtlSdrBufferSafely(externalDevice);
             if (result == 0) result = readRtlSdrAsyncSafely(externalDevice, &Impl::rtlCallback,
                                                             this, 12, 65536);
+        } else if (settings.backendId == QStringLiteral("uhd-native")) {
+            runUhdStream();
         } else if (settings.backendId == QStringLiteral("soapy-sdr")) {
             result = openSoapySdrDeviceSafely(&externalDevice, settings.nativeIndex);
             if (result == 0) result = setSoapySdrSampleRateSafely(
@@ -559,6 +602,7 @@ struct AnalyzerReceiver::Impl {
         iqSampleCounter.store(0, std::memory_order_release);
         clockLocked = false;
         activeCenterHz.store(settings.centerHz, std::memory_order_release);
+        pendingUhdCenterHz.store(0.0);
         settings.fftLength = std::clamp(settings.fftLength, 512, 67108864);
         if ((settings.fftLength & 1) != 0) ++settings.fftLength;
         if (!std::isfinite(settings.sampleRateHz) || settings.sampleRateHz < 1000.0 ||
@@ -584,6 +628,10 @@ struct AnalyzerReceiver::Impl {
     bool retune(double centerHz) {
         if (!running.load(std::memory_order_acquire) || settings.directSampling ||
             !std::isfinite(centerHz) || centerHz <= 0.0) return false;
+        if (settings.backendId == QStringLiteral("uhd-native")) {
+            pendingUhdCenterHz.store(centerHz);
+            return true;
+        }
         int result = -1;
         if (settings.backendId.startsWith(QStringLiteral("fobos-"))) {
             double actual = centerHz;
@@ -706,7 +754,7 @@ AnalyzerReceiver::AnalyzerReceiver(QObject *parent)
 
 AnalyzerReceiver::~AnalyzerReceiver() = default;
 
-QVector<AnalyzerReceiverDevice> AnalyzerReceiver::enumerateDevices() {
+QVector<AnalyzerReceiverDevice> AnalyzerReceiver::enumerateDevices(bool includeNativeUhd) {
     QVector<AnalyzerReceiverDevice> result;
     const int agileCount = std::max(0, getFobosAgileDeviceCountSafely());
     for (int index = 0; index < agileCount; ++index)
@@ -733,6 +781,26 @@ QVector<AnalyzerReceiverDevice> AnalyzerReceiver::enumerateDevices() {
             ? QStringLiteral("SoapySDR device; capabilities are read on start")
             : QStringLiteral("SoapySDR driver: %1; capabilities are read on start").arg(item.driver);
         result.append(deviceInfo);
+    }
+    if (includeNativeUhd) {
+        const auto addresses = enumerateUhdDeviceArgs();
+        for (int index = 0; index < addresses.size(); ++index) {
+            const QString &address = addresses.at(index);
+            if (address.isEmpty()) continue;
+            AnalyzerReceiverDevice device;
+            device.backendId = QStringLiteral("uhd-native");
+            device.nativeIndex = index;
+            device.uhdDeviceAddress = address;
+            device.label = QStringLiteral("USRP UHD #%1").arg(index);
+            for (const QString &part : address.split(QLatin1Char(','))) {
+                const QString field = part.trimmed();
+                if (field.startsWith(QStringLiteral("serial="))) {
+                    device.label += QStringLiteral(" · %1").arg(field.mid(7));
+                    break;
+                }
+            }
+            result.append(device);
+        }
     }
     return result;
 }

@@ -105,7 +105,25 @@ QString dspLinkDescription(DspLinkKind kind, bool uk) {
     }
 }
 
-DspGraphPlan compileDspGraph(const QJsonObject &graph) {
+QString dspLinkRateError(const QString &sourceType, const QJsonObject &sourceSettings,
+                         const QString &targetType, const QJsonObject &targetSettings, bool uk) {
+    // Lab IQ generation and CF32 playback use the explicitly configured rate.
+    // Receiver, network and PFB input rates are known only to the running pipeline.
+    if (sourceType != "lab_iq" || targetType != "ddc_channelizer") return {};
+    const int inputRate = sourceSettings.value("rate").toInt();
+    const double outputRate = targetSettings.value("outputRateHz").toDouble();
+    if (inputRate < 8000 || inputRate > 2000000 ||
+        !std::isfinite(outputRate) || outputRate < 1000.0 || outputRate > 2000000.0) return {};
+
+    const int decimation = std::clamp(targetSettings.value("decimation").toInt(), 1, 4096);
+    const double maximumRate = double(inputRate) / decimation;
+    if (outputRate <= maximumRate) return {};
+    return (uk ? QStringLiteral("Запитано %1 відл./с. Для цього входу IQ та децимації DDC доступно до %2 відл./с.")
+               : QStringLiteral("Requested %1 samples/s. This IQ input and DDC decimation allow up to %2 samples/s."))
+        .arg(outputRate, 0, 'f', 2).arg(maximumRate, 0, 'f', 2);
+}
+
+DspGraphPlan compileDspGraph(const QJsonObject &graph, bool uk) {
     DspGraphPlan plan;
     QHash<QString, QJsonObject> blocks;
     QHash<QString, QString> inputs;
@@ -207,12 +225,17 @@ DspGraphPlan compileDspGraph(const QJsonObject &graph) {
         const auto block = blocks[id];
         if (block.value("type") != "ddc_channelizer" || !inputs.contains(id)) continue;
         const auto s = block.value("settings").toObject();
+        const QString parent = inputs.value(id);
+        const auto inputBlock = blocks.value(parent);
+        const QString rateError = dspLinkRateError(inputBlock.value("type").toString(),
+            inputBlock.value("settings").toObject(), block.value("type").toString(), s, uk);
+        if (!rateError.isEmpty()) plan.branchInputErrors.insert(id, rateError);
         DspBranchConfig branch;
         branch.id = id;
         branch.source = DspSourceIdentity::normalized(
             s.value("receiverId").toString(QStringLiteral("main")),
             s.value("channelId").toString(QStringLiteral("rx0")));
-        branch.enabled = s.value("enabled").toBool(false);
+        branch.enabled = s.value("enabled").toBool(false) && rateError.isEmpty();
         // Retain inactive routes for the board without reserving worker resources.
         if (branch.enabled && ++activeBranches > DspMaxBranches) { plan.errors << "At most eight DDC branches can run"; continue; }
         branch.frequencyHz = finiteValue(s, "frequencyHz", 0.0, 0.0, 8.0e9);
@@ -223,8 +246,7 @@ DspGraphPlan compileDspGraph(const QJsonObject &graph) {
         if (branch.firTaps != 16 && branch.firTaps != 32 && branch.firTaps != 64 &&
             branch.firTaps != 128 && branch.firTaps != 256) branch.firTaps = 32;
         branch.transitionHz = finiteValue(s, "transitionHz", 0.0, 0.0, 500000.0);
-        const QString parent = inputs.value(id);
-        branch.pfb = blocks.value(parent).value("type") == "pfb_channelizer";
+        branch.pfb = inputBlock.value("type") == "pfb_channelizer";
         const QString rawInput = branch.pfb ? inputs.value(parent) : parent;
         if (blocks.value(rawInput).value("type") == "lab_iq") branch.source = dspSignalSource(rawInput);
         if (branch.pfb) {

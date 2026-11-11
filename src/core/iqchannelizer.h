@@ -56,7 +56,7 @@ private:
     static constexpr int MaxResamplerTaps = 256;
     static constexpr int ResamplerHistory = MaxResamplerTaps * 2;
 
-    void configureFrontDecimator(int factor, bool directPairs = false);
+    void configureFrontDecimator(int factor, bool direct = false);
     bool pushFrontDecimatorSample(const std::complex<float> &sample,
                                   std::complex<float> &output);
     void configureResampler(double inputRate, double targetRate, double cutoff, int tapCount);
@@ -64,10 +64,16 @@ private:
                              float *output, std::size_t &written,
                              bool applyAgc);
     std::complex<float> historySample(std::int64_t sampleIndex) const;
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    void decimateWfm(const float *samples, std::size_t count, double phaseStep);
+    std::array<std::array<float, FrontDecimatorMaxFactor>, FrontDecimatorOrder> blockTaps = {};
+    std::array<float, FrontDecimatorMaxFactor * 2> blockCarry = {};
+    std::array<std::complex<float>, FrontDecimatorOrder - 1> nextBlockSums = {};
+#endif
 
     double ncoPhase = 0.0;
     std::vector<std::complex<float>> mixedAtvInput;
-    std::vector<std::complex<float>> frontAtvInput;
+    std::vector<std::complex<float>> frontIq;
     std::array<std::complex<float>, 3> atvFrontHistory = {};
     bool atvFrontPending = false, configuredDirectFront = false;
     int configuredFrontDecimationFactor = 0;

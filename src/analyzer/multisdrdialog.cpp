@@ -13,6 +13,7 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QDir>
+#include <QDialogButtonBox>
 #include <QFrame>
 #include <QFileDialog>
 #include <QFormLayout>
@@ -35,6 +36,8 @@
 #include <QSpinBox>
 #include <QSplitter>
 #include <QTimer>
+#include <QTabBar>
+#include <QTabWidget>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -104,6 +107,10 @@ struct MultiSdrDialog::SourceUi {
     QComboBox *fft = nullptr;
     QSpinBox *lna = nullptr;
     QSpinBox *vga = nullptr;
+    QPushButton *uhdSettings = nullptr;
+    int uhdRxChannel = 0;
+    double uhdRxGainDb = 30.0;
+    QString uhdRxAntenna;
     QDoubleSpinBox *edgeTrim = nullptr;
     QDoubleSpinBox *levelOffset = nullptr;
     QComboBox *clockRole = nullptr;
@@ -354,7 +361,11 @@ void MultiSdrDialog::updateCoherentLivePreview() {
                             .arg((preview.frame.maximumHz - preview.frame.minimumHz) *
                                  preview.frame.sourceFftLength / (preview.frame.sourceFftLength - 1) / 1000, 0, 'f', 1)
                             .arg(preview.combinedSamples);
-    coherentLiveStatus->setToolTip({});
+    coherentLiveStatus->setToolTip(preview.maximumPhaseDriftHz
+        ? text("Estimated maximum relative phase drift: %1 Hz",
+               "Оцінка найбільшого відносного дрейфу фази: %1 Гц")
+              .arg(*preview.maximumPhaseDriftHz, 0, 'f', 2)
+        : QString{});
     coherentLiveStatus->setText(status);
     statusLabel->setText(status);
 }
@@ -666,6 +677,8 @@ void MultiSdrDialog::buildUi() {
         source.vga = new QSpinBox(source.group);
         source.vga->setRange(0, 62);
         source.vga->setSuffix(QStringLiteral(" dB"));
+        source.uhdSettings = new QPushButton(QStringLiteral("USRP UHD RX..."), source.group);
+        source.uhdSettings->hide();
         auto *gainRow = new QWidget(source.group);
         auto *gainLayout = new QHBoxLayout(gainRow);
         gainLayout->setContentsMargins(0, 0, 0, 0);
@@ -706,6 +719,7 @@ void MultiSdrDialog::buildUi() {
         form->addRow(text("Sample rate:", "Частота семплів:"), source.sampleRate);
         form->addRow(QStringLiteral("FFT:"), source.fft);
         form->addRow(QStringLiteral("LNA / VGA:"), gainRow);
+        form->addRow(source.uhdSettings);
         form->addRow(text("Discard each edge:", "Відкинути кожен край:"), source.edgeTrim);
         form->addRow(text("Level correction:", "Поправка рівня:"), source.levelOffset);
         form->addRow(text("Clock role:", "Роль такту:"), source.clockRole);
@@ -722,6 +736,11 @@ void MultiSdrDialog::buildUi() {
                 this, [this, sourceIndex](int) {
             populateInputs(sourceIndex);
             populateSampleRates(sourceIndex);
+        });
+        connect(source.uhdSettings, &QPushButton::clicked,
+                this, [this, sourceIndex]() {
+            if (hostPrimary && sourceIndex == 0) emit primaryUhdSettingsRequested();
+            else showUhdRxSettings(sourceIndex);
         });
         connect(source.sampleRate, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, [this](int) {
@@ -810,9 +829,11 @@ void MultiSdrDialog::buildUi() {
             item.input->setEnabled(!running && item.input->count() > 1);
             item.sampleRate->setEnabled(!running);
             item.fft->setEnabled(!running);
-            item.clockRole->setEnabled(!running && !(hostPrimary && sourceIndex == 0));
+            item.uhdSettings->setEnabled(!running);
+            const bool nativeUhd = item.device->currentData() == QStringLiteral("uhd-native");
+            item.clockRole->setEnabled(!running && !nativeUhd && !(hostPrimary && sourceIndex == 0));
             item.clockId->setEnabled(!running);
-            item.hardwareSync->setEnabled(!running && !(hostPrimary && sourceIndex == 0));
+            item.hardwareSync->setEnabled(!running && !nativeUhd && !(hostPrimary && sourceIndex == 0));
             int expectedAudioSource = sourceIndex;
             if (!running && sourceIndex > 0 &&
                 audioSourceIndex.compare_exchange_strong(
@@ -887,7 +908,9 @@ void MultiSdrDialog::buildUi() {
     controlsLayout->insertWidget(2, displayGroup);
     controlsScroll->setWidget(controls);
 
-    auto *display = new QWidget(splitter);
+    previewTabs = new QTabWidget(splitter);
+    previewTabs->tabBar()->hide();
+    auto *display = new QWidget(previewTabs);
     auto *displayLayout = new QVBoxLayout(display);
     spectrum = new AnalyzerSpectrumWidget(display);
     spectrum->setAmplitudeBounds(topDbSpin->value(), bottomDbSpin->value());
@@ -898,8 +921,25 @@ void MultiSdrDialog::buildUi() {
     displayLayout->addWidget(spectrum, 3);
     displayLayout->addWidget(previewWaterfall, 2);
     displayLayout->addWidget(statusLabel);
+    previewTabs->addTab(display, text("Mosaic", "Мозаїка"));
+    if (hostPrimary) {
+        auto *remoteDisplay = new QWidget(previewTabs);
+        auto *remoteLayout = new QVBoxLayout(remoteDisplay);
+        remoteUhdSpectrum = new AnalyzerSpectrumWidget(remoteDisplay);
+        remoteUhdSpectrum->setAmplitudeBounds(topDbSpin->value(), bottomDbSpin->value());
+        remoteUhdWaterfall = new AnalyzerWaterfallPreview(remoteDisplay);
+        remoteUhdStatus = new QLabel(remoteDisplay);
+        remoteUhdSettings = new QPushButton(text("USRP UHD RX...", "USRP UHD RX…"), remoteDisplay);
+        connect(remoteUhdSettings, &QPushButton::clicked, this, &MultiSdrDialog::primaryUhdSettingsRequested);
+        remoteLayout->addWidget(remoteUhdSpectrum, 3);
+        remoteLayout->addWidget(remoteUhdWaterfall, 2);
+        remoteLayout->addWidget(remoteUhdStatus);
+        remoteLayout->addWidget(remoteUhdSettings, 0, Qt::AlignLeft);
+        previewTabs->addTab(remoteDisplay, QStringLiteral("USRP UHD RX"));
+        previewTabs->setTabEnabled(1, false);
+    }
     splitter->addWidget(controlsScroll);
-    splitter->addWidget(display);
+    splitter->addWidget(previewTabs);
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
     splitter->setSizes({360, 1060});
@@ -947,6 +987,8 @@ void MultiSdrDialog::buildUi() {
     });
     const auto updateAmplitude = [this](double) {
         spectrum->setAmplitudeBounds(topDbSpin->value(), bottomDbSpin->value());
+        if (remoteUhdSpectrum)
+            remoteUhdSpectrum->setAmplitudeBounds(topDbSpin->value(), bottomDbSpin->value());
     };
     connect(topDbSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, updateAmplitude);
     connect(bottomDbSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, updateAmplitude);
@@ -987,7 +1029,7 @@ void MultiSdrDialog::refreshDevices() {
         }
     }
     setCursor(Qt::WaitCursor);
-    devices = AnalyzerReceiver::enumerateDevices();
+    devices = AnalyzerReceiver::enumerateDevices(true);
     unsetCursor();
     for (int index = hostPrimary ? 1 : 0; index < static_cast<int>(sources.size()); ++index) {
         if (sources[static_cast<std::size_t>(index)]->active) populateDeviceCombo(index);
@@ -1000,23 +1042,37 @@ void MultiSdrDialog::populateDeviceCombo(int sourceIndex) {
     SourceUi &source = *sources[static_cast<std::size_t>(sourceIndex)];
     QString previousBackend = source.device->currentData(Qt::UserRole).toString();
     int previousIndex = source.device->currentData(Qt::UserRole + 1).toInt();
+    QString previousAddress = source.device->currentData(Qt::UserRole + 2).toString();
     if (previousBackend.isEmpty()) {
         previousBackend = source.device->property("savedBackend").toString();
         previousIndex = source.device->property("savedNativeIndex").toInt();
+        previousAddress = source.device->property("savedUhdAddress").toString();
     }
     const QSignalBlocker blocker(source.device);
     source.device->clear();
     for (const AnalyzerReceiverDevice &device : devices) {
         source.device->addItem(device.label, device.backendId);
         source.device->setItemData(source.device->count() - 1, device.nativeIndex, Qt::UserRole + 1);
+        source.device->setItemData(source.device->count() - 1, device.uhdDeviceAddress, Qt::UserRole + 2);
+        if (!device.uhdDeviceAddress.isEmpty())
+            source.device->setItemData(source.device->count() - 1, device.uhdDeviceAddress, Qt::ToolTipRole);
     }
     int wanted = -1;
     for (int index = 0; index < source.device->count(); ++index) {
         if (source.device->itemData(index, Qt::UserRole).toString() == previousBackend &&
-            source.device->itemData(index, Qt::UserRole + 1).toInt() == previousIndex) {
+            (previousAddress.isEmpty()
+                ? source.device->itemData(index, Qt::UserRole + 1).toInt() == previousIndex
+                : source.device->itemData(index, Qt::UserRole + 2).toString() == previousAddress)) {
             wanted = index;
             break;
         }
+    }
+    if (wanted < 0 && !previousAddress.isEmpty()) {
+        wanted = source.device->count();
+        source.device->addItem(text("USRP UHD (unavailable)", "USRP UHD (недоступний)"), previousBackend);
+        source.device->setItemData(wanted, -1, Qt::UserRole + 1);
+        source.device->setItemData(wanted, previousAddress, Qt::UserRole + 2);
+        source.device->setItemData(wanted, previousAddress, Qt::ToolTipRole);
     }
     if (wanted < 0 && sourceIndex < source.device->count()) wanted = sourceIndex;
     source.device->setCurrentIndex(wanted >= 0 ? wanted : 0);
@@ -1030,6 +1086,18 @@ void MultiSdrDialog::populateInputs(int sourceIndex) {
     if (source.input->count() == 0)
         previous = source.input->property("savedInput").toInt();
     const QString backend = source.device->currentData(Qt::UserRole).toString();
+    const bool nativeUhd = backend == QStringLiteral("uhd-native");
+    const bool running = source.receiver->isRunning();
+    auto *form = static_cast<QFormLayout *>(source.group->layout());
+    form->labelForField(source.input)->setVisible(!nativeUhd);
+    source.input->setVisible(!nativeUhd);
+    QWidget *gainRow = source.lna->parentWidget();
+    form->labelForField(gainRow)->setVisible(!nativeUhd);
+    gainRow->setVisible(!nativeUhd);
+    source.uhdSettings->setVisible(nativeUhd);
+    source.uhdSettings->setEnabled(!running);
+    source.clockRole->setEnabled(!nativeUhd && !running);
+    source.hardwareSync->setEnabled(!nativeUhd && !running);
     const QSignalBlocker blocker(source.input);
     source.input->clear();
     if (backend.startsWith(QStringLiteral("fobos-"))) {
@@ -1065,6 +1133,9 @@ void MultiSdrDialog::populateSampleRates(int sourceIndex) {
         rates = {2.0e6, 4.0e6, 8.0e6, 10.0e6, 12.5e6, 16.0e6, 20.0e6};
     else if (backend == QStringLiteral("rtl-sdr"))
         rates = {1.024e6, 1.536e6, 2.048e6, 2.4e6, 2.56e6, 3.2e6};
+    else if (backend == QStringLiteral("uhd-native"))
+        rates = {1.0e6, 2.0e6, 4.0e6, 8.0e6, 10.0e6, 12.5e6, 16.0e6, 20.0e6,
+                 25.0e6, 30.72e6, 32.0e6, 40.0e6, 50.0e6, 56.0e6, 61.44e6};
     else if (backend == QStringLiteral("soapy-sdr")) {
         const int nativeIndex = source.device->currentData(Qt::UserRole + 1).toInt();
         for (const AnalyzerReceiverDevice &device : devices) {
@@ -1090,6 +1161,39 @@ void MultiSdrDialog::populateSampleRates(int sourceIndex) {
         if (distance < nearest) { nearest = distance; selected = index; }
     }
     source.sampleRate->setCurrentIndex(std::max(0, selected));
+}
+
+void MultiSdrDialog::showUhdRxSettings(int sourceIndex) {
+    SourceUi &source = *sources[static_cast<std::size_t>(sourceIndex)];
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("USRP UHD RX %1").arg(sourceIndex + 1));
+    auto *form = new QFormLayout(&dialog);
+    auto *channel = new QSpinBox(&dialog);
+    channel->setPrefix(QStringLiteral("RX "));
+    channel->setRange(0, 31);
+    channel->setValue(source.uhdRxChannel);
+    auto *gain = new QDoubleSpinBox(&dialog);
+    gain->setRange(0.0, 100.0);
+    gain->setSuffix(QStringLiteral(" dB"));
+    gain->setValue(source.uhdRxGainDb);
+    auto *antenna = new QComboBox(&dialog);
+    antenna->setEditable(true);
+    antenna->setInsertPolicy(QComboBox::NoInsert);
+    antenna->addItems({QString(), QStringLiteral("RX2"), QStringLiteral("TX/RX")});
+    antenna->lineEdit()->setPlaceholderText(text("Driver default", "Типова для драйвера"));
+    antenna->setCurrentText(source.uhdRxAntenna);
+    form->addRow(text("RX channel", "Канал RX"), channel);
+    form->addRow(text("RX gain", "Підсилення RX"), gain);
+    form->addRow(text("RX antenna", "Антена RX"), antenna);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) return;
+    source.uhdRxChannel = channel->value();
+    source.uhdRxGainDb = gain->value();
+    source.uhdRxAntenna = antenna->currentText().trimmed();
+    saveSettings();
 }
 
 AnalyzerReceiverSettings MultiSdrDialog::receiverSettings(int sourceIndex) const {
@@ -1135,6 +1239,14 @@ AnalyzerReceiverSettings MultiSdrDialog::receiverSettings(int sourceIndex) const
         settings.directChannel = 0;
         settings.directSampling = false;
     }
+    if (settings.backendId == QStringLiteral("uhd-native")) {
+        settings.uhdDeviceAddress = source.device->currentData(Qt::UserRole + 2).toString();
+        settings.rxChannel = source.uhdRxChannel;
+        settings.uhdRxGainDb = source.uhdRxGainDb;
+        settings.uhdRxAntenna = source.uhdRxAntenna;
+        settings.clockRole = 0;
+        settings.hardwareStartSync = false;
+    }
     return settings;
 }
 
@@ -1173,21 +1285,27 @@ bool MultiSdrDialog::startSource(int sourceIndex) {
         source.status->setText(text("No receiver selected", "Приймач не вибрано"));
         return false;
     }
+    if (source.device->currentData() == QStringLiteral("uhd-native") &&
+        source.device->currentData(Qt::UserRole + 1).toInt() < 0) {
+        source.status->setText(text("USRP unavailable. Refresh the device list.",
+                                    "USRP недоступний. Оновіть список пристроїв."));
+        return false;
+    }
+    const QString sourceBackend = source.device->currentData().toString();
+    const int sourceNativeIndex = source.device->currentData(Qt::UserRole + 1).toInt();
+    const QString sourceUhdAddress = source.device->currentData(Qt::UserRole + 2).toString();
     for (int otherIndex = 0; otherIndex < static_cast<int>(sources.size()); ++otherIndex) {
         if (otherIndex == sourceIndex) continue;
         const SourceUi &other = *sources[static_cast<std::size_t>(otherIndex)];
         if (!other.active) continue;
         const QString otherBackend = other.device->currentData(Qt::UserRole).toString();
-        const QString sourceBackend = source.device->currentData(Qt::UserRole).toString();
-        const bool sameFobosDevice = otherBackend.startsWith(QStringLiteral("fobos-")) &&
-                                     sourceBackend.startsWith(QStringLiteral("fobos-")) &&
-                                     other.device->currentData(Qt::UserRole + 1).toInt() ==
-                                         source.device->currentData(Qt::UserRole + 1).toInt();
-        if (other.receiver->isRunning() && (sameFobosDevice ||
-            other.device->currentData(Qt::UserRole).toString() ==
-                source.device->currentData(Qt::UserRole).toString() &&
-            other.device->currentData(Qt::UserRole + 1).toInt() ==
-                source.device->currentData(Qt::UserRole + 1).toInt())) {
+        const bool bothFobos = otherBackend.startsWith(QStringLiteral("fobos-")) &&
+                               sourceBackend.startsWith(QStringLiteral("fobos-"));
+        const bool sameDevice = sourceUhdAddress.isEmpty()
+            ? (bothFobos || otherBackend == sourceBackend) &&
+                  other.device->currentData(Qt::UserRole + 1).toInt() == sourceNativeIndex
+            : other.device->currentData(Qt::UserRole + 2).toString() == sourceUhdAddress;
+        if (other.receiver->isRunning() && sameDevice) {
             source.status->setText(text("This physical device is already used by the other RX.",
                                         "Цей фізичний пристрій уже використовує інший RX."));
             return false;
@@ -1336,6 +1454,44 @@ void MultiSdrDialog::consumePrimaryFrame(const AnalyzerSpectrumFrame &frame) {
     }
 }
 
+void MultiSdrDialog::setPrimaryUhdSettingsAvailable(bool visible, bool enabled) {
+    if (!hostPrimary) return;
+    sources[0]->uhdSettings->setVisible(visible);
+    sources[0]->uhdSettings->setEnabled(enabled);
+    remoteUhdSettings->setEnabled(enabled);
+}
+
+void MultiSdrDialog::setRemoteUhdCompanionChannel(int channel) {
+    if (!hostPrimary || remoteUhdCompanionChannel == channel) return;
+    remoteUhdCompanionChannel = channel;
+    if (channel < 0) previewTabs->setCurrentIndex(0);
+    previewTabs->setTabEnabled(1, channel >= 0);
+    previewTabs->tabBar()->setVisible(channel >= 0);
+    if (channel >= 0)
+        previewTabs->setTabText(1, text("Remote UHD RX %1", "Віддалений UHD RX %1").arg(channel));
+    clearRemoteUhdPreview();
+}
+
+void MultiSdrDialog::clearRemoteUhdPreview() {
+    remoteUhdSpectrum->setFrame({}, {});
+    remoteUhdWaterfall->clear();
+    remoteUhdStatus->setText(primaryRunning ? text("Waiting for spectrum", "Очікування спектра")
+                                           : text("Stopped", "Зупинено"));
+}
+
+void MultiSdrDialog::consumeRemoteUhdSpectrum(int channel, const AnalyzerSpectrumFrame &frame) {
+    if (!isVisible() || channel < 0 || channel != remoteUhdCompanionChannel ||
+        frame.levelsDb.size() < 2) return;
+    std::vector<float> frequencies(frame.levelsDb.size());
+    const double step = (frame.maximumHz - frame.minimumHz) / (frequencies.size() - 1);
+    for (std::size_t i = 0; i < frequencies.size(); ++i)
+        frequencies[i] = static_cast<float>(frame.minimumHz + step * i);
+    remoteUhdSpectrum->setFrame(frequencies, frame.levelsDb);
+    remoteUhdWaterfall->appendFrame(frame.levelsDb, topDbSpin->value(), bottomDbSpin->value());
+    remoteUhdStatus->setText(frequencyText(frame.centerHz) + QStringLiteral(" | ") +
+                             frequencyText(frame.maximumHz - frame.minimumHz));
+}
+
 void MultiSdrDialog::setPrimaryRunning(bool running) {
     if (!hostPrimary) return;
     const bool changed = primaryRunning != running;
@@ -1357,6 +1513,7 @@ void MultiSdrDialog::setPrimaryRunning(bool running) {
                                      "Очікування основного спектра"));
     }
     if (!changed) return;
+    if (remoteUhdCompanionChannel >= 0) clearRemoteUhdPreview();
     invalidateCoherentCalibration(running
         ? text("Receiver streams restarted; recalibrate coherent alignment.",
                "Потоки приймачів перезапущено; повторіть когерентне калібрування.")
@@ -1805,6 +1962,10 @@ void MultiSdrDialog::saveSettings() const {
         settings.beginGroup(QStringLiteral("rx%1").arg(index + 1));
         settings.setValue(QStringLiteral("backend"), source.device->currentData(Qt::UserRole));
         settings.setValue(QStringLiteral("nativeIndex"), source.device->currentData(Qt::UserRole + 1));
+        settings.setValue(QStringLiteral("uhdAddress"), source.device->currentData(Qt::UserRole + 2));
+        settings.setValue(QStringLiteral("uhdRxChannel"), source.uhdRxChannel);
+        settings.setValue(QStringLiteral("uhdRxGainDb"), source.uhdRxGainDb);
+        settings.setValue(QStringLiteral("uhdRxAntenna"), source.uhdRxAntenna);
         settings.setValue(QStringLiteral("input"), source.input->currentData());
         settings.setValue(QStringLiteral("centerMhz"), source.centerMhz->value());
         settings.setValue(QStringLiteral("sampleRate"), source.sampleRate->currentData());
@@ -1888,6 +2049,10 @@ void MultiSdrDialog::restoreSettings() {
         if (source.active) ++activeSourceCount;
         source.device->setProperty("savedBackend", settings.value(QStringLiteral("backend")));
         source.device->setProperty("savedNativeIndex", settings.value(QStringLiteral("nativeIndex"), 0));
+        source.device->setProperty("savedUhdAddress", settings.value(QStringLiteral("uhdAddress")));
+        source.uhdRxChannel = settings.value(QStringLiteral("uhdRxChannel"), 0).toInt();
+        source.uhdRxGainDb = settings.value(QStringLiteral("uhdRxGainDb"), 30.0).toDouble();
+        source.uhdRxAntenna = settings.value(QStringLiteral("uhdRxAntenna")).toString();
         source.input->setProperty("savedInput", settings.value(QStringLiteral("input"), 0));
         source.centerMhz->setValue(settings.value(
             QStringLiteral("centerMhz"), index == 0 ? 90.0 : 125.0).toDouble());

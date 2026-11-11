@@ -89,7 +89,8 @@ void YourClassName::ensureCommandDispatcher() {
     usrp.access = CommandDispatcher::Access::Local;
     usrp.inputSchema = {{"type", "object"}, {"additionalProperties", false}, {"properties", QJsonObject{
         {"action", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"status", "open", "cancel",
-            "contracts", "wifi-loopback", "lte-zmq", "gsm-demo", "gsm-decode", "gsm-replay", "umts-decode"}}}},
+            "contracts", "wifi-loopback", "zmq-loopback", "lte-zmq", "gsm-demo", "gsm-decode",
+            "gsm-replay", "umts-decode"}}}},
         {"input", QJsonObject{{"type", "string"}}}, {"context", QJsonObject{{"type", "string"}}},
         {"arfcn", QJsonObject{{"type", "integer"}, {"minimum", 0}, {"maximum", 1023}}},
         {"timeslot", QJsonObject{{"type", "integer"}, {"minimum", 1}, {"maximum", 7}}},

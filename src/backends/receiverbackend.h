@@ -90,6 +90,8 @@ struct ReceiverStreamDescriptor {
     int soapySdrDeviceIndex = 0;
     int uhdNativeDeviceIndex = 0;
     int uhdRxChannel = 0;
+    QString uhdClockSource;
+    int uhdGnssBaud = 0;
     double uhdRxGainDb = 30.0;
     QString uhdRxAntenna;
     QString uhdFpgaImagePath;

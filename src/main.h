@@ -18,7 +18,9 @@
 #include <QMap>
 #include <QHash>
 #include <QPointer>
+#include <QPointF>
 #include <memory>
+#include <optional>
 #include <QScrollArea>
 #include <QCheckBox>
 #include <QColor>
@@ -487,6 +489,10 @@ private:
     void stopGnssSerial();
     void handleGnssSerialReadyRead();
     void processGnssNmeaLine(const QString &line, bool fromReplay = false, bool fromSdr = false);
+    void refreshUhdGnssPosition();
+    void handleUhdGnssReply(const QJsonObject &command);
+    void applyUhdGnssReading(const UhdGnssStatus &reading);
+    void showUhdGnssStatus(const QString &status);
     void showGnssSdrPvt();
     void showLrptDecoder();
     void processGnssUbxFrame(quint8 messageClass, quint8 messageId, const QByteArray &payload);
@@ -557,6 +563,7 @@ private:
     void updateSpectrumTimerInterval();
     void revertHardwareControlsToSettings();
     void finishFobosStop(bool forcedRecovery);
+    void armStreamStartupWatchdog(bool waitForUhd);
     void recreateDataProcessor();
     uint8_t currentGpoValue() const;
     bool isNetworkClientMode() const;
@@ -626,6 +633,8 @@ private:
     void flushPendingPersistentSettingsSave();
     void startNetworkClientProcessing();
     void stopNetworkClientProcessing();
+    void setNetworkClientReceiverRunning(bool running);
+    bool acceptNetworkReceiverFrame();
     void sendNetworkSpectrumFrame(const std::vector<float> &frequencies,
                                   const std::vector<float> &magnitudes,
                                   const std::vector<float> &referenceMagnitudes = {},
@@ -637,6 +646,11 @@ private:
                                   bool showScanSegmentMarkers = true);
     void displayNetworkSpectrumFrame(const QJsonObject &frame);
     void displayNetworkSpectrumFrameBinary(const QJsonObject &frame, const QByteArray &payload);
+    int remoteUhdCompanionChannel() const;
+    void receiveRemoteUhdSpectrum(const QJsonObject &frame, const QByteArray &payload);
+    void feedRemoteUhdPrimarySpectrum(const QJsonObject &frame,
+                                      const std::vector<float> &nativeLevels,
+                                      double centerHz, double minimumHz, double maximumHz);
     void sendNetworkAudioFrame(const QByteArray &pcmData);
     void playNetworkAudioFrame(const QJsonObject &frame);
     void playNetworkAudioPcmFrame(const QJsonObject &frame, const QByteArray &pcmData);
@@ -1123,6 +1137,8 @@ private:
     int stopCancelRetryCount = 0;
     int streamStartupRetryCount = 0;
     uint64_t streamStartCallbackCount = 0;
+    uint64_t streamStartupGeneration = 0;
+    bool streamStartupWaitingForUhd = false;
     bool restartAfterStartupWatchdog = false;
     bool automaticStreamRestart = false;
     bool pendingAudioStartAfterStreamReady = false;
@@ -1619,6 +1635,12 @@ private:
     QElapsedTimer gnssSpurLogTimer;
     QDialog *gnssAcquisitionPlotDialog = nullptr;
     QTimer *gnssContinuousAcquireTimer = nullptr;
+    QTimer *uhdGnssPollTimer = nullptr;
+    QPointer<DataProcessor> uhdGnssProcessor;
+    QString uhdGnssRequestId;
+    QElapsedTimer uhdGnssRequestAge;
+    std::optional<QPointF> qthPositionBeforeUhd;
+    bool qthPositionVisibleBeforeUhd = false;
     double qthLatitude = 0.0;
     double qthLongitude = 0.0;
     bool qthPositionVisible = true;
@@ -1673,6 +1695,7 @@ private:
     uint64_t networkIqFramesDropped = 0;
     QJsonObject networkClientConfirmedSettingsJson;
     bool networkClientConfirmedSettingsValid = false;
+    bool networkClientCanInferRunning = true;
     bool networkClientAwaitingSettingsAck = false;
     quint64 networkClientSettingsRequestCounter = 0;
     bool audioRelayTransmitEnabled = false;

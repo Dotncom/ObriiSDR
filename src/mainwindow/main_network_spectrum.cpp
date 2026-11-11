@@ -1,4 +1,5 @@
 #include "main.h"
+#include "analyzer/multisdrdialog.h"
 #include "appconstants.h"
 #include "appruntimeutils.h"
 #include "diagnosticlogging.h"
@@ -14,6 +15,7 @@
 #include <QAbstractSocket>
 #include <QByteArray>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDebug>
 #include <QHostAddress>
 #include <QJsonArray>
@@ -300,15 +302,60 @@ void YourClassName::sendNetworkSpectrumFrame(const std::vector<float> &frequenci
     }
 }
 
-void YourClassName::displayNetworkSpectrumFrame(const QJsonObject &frame) {
-    if (networkMode == NetworkMode::Client &&
-        runState == RadioRunState::Idle &&
-        networkController &&
-        !networkController->clientHasControl()) {
-        runState = RadioRunState::Running;
-        updateUiForRunState();
-    }
+int YourClassName::remoteUhdCompanionChannel() const {
+    if (networkMode != NetworkMode::Client || isRemoteVfoProcessingMode() ||
+        !networkController || !networkController->isControlReady() || !remoteReceiverDeviceListValid)
+        return -1;
+    const auto secondary = networkClientConfirmedSettingsJson.value(QStringLiteral("uhdRx"))
+                               .toObject().value(QStringLiteral("secondary")).toObject();
+    const int channel = secondary.value(QStringLiteral("channel")).toInt(-1);
+    return channel == 0 || channel == 1 ? channel : -1;
+}
 
+void YourClassName::receiveRemoteUhdSpectrum(const QJsonObject &frame, const QByteArray &payload) {
+    const int channel = frame.value(QStringLiteral("channel")).toInt(-1);
+    if (!multiSdrDialog || !multiSdrDialog->isVisible() ||
+        channel < 0 || channel != remoteUhdCompanionChannel()) return;
+    const int count = frame.value(QStringLiteral("fftLength")).toInt();
+    const double center = frame.value(QStringLiteral("centerFrequency")).toDouble();
+    const double rate = frame.value(QStringLiteral("sampleRate")).toDouble();
+    if (count < 2 || count > 512 || payload.size() != count * int(sizeof(qint16)) ||
+        !std::isfinite(center) || center <= 0.0 || !std::isfinite(rate) || rate <= 0.0 ||
+        frame.value(QStringLiteral("binFormat")).toString() != QStringLiteral("s16le-db10")) return;
+    AnalyzerSpectrumFrame spectrum;
+    if (!DisplaySpectrumCodec::decodeDb10(payload, count, false, &spectrum.levelsDb) ||
+        !acceptNetworkReceiverFrame()) return;
+    spectrum.sequence = frame.value(QStringLiteral("sequence")).toString().toULongLong();
+    spectrum.utcMs = QDateTime::currentMSecsSinceEpoch();
+    spectrum.centerHz = center;
+    spectrum.minimumHz = center - rate * 0.5;
+    spectrum.maximumHz = center + rate * 0.5;
+    spectrum.sourceFftLength = frame.value(QStringLiteral("sourceFftLength")).toInt(count);
+    multiSdrDialog->consumeRemoteUhdSpectrum(channel, spectrum);
+}
+
+void YourClassName::feedRemoteUhdPrimarySpectrum(const QJsonObject &frame,
+                                                const std::vector<float> &nativeLevels,
+                                                double centerHz, double minimumHz, double maximumHz) {
+    if (!multiSdrDialog || !multiSdrDialog->isVisible() || remoteUhdCompanionChannel() < 0 ||
+        nativeLevels.size() < 2 || !std::isfinite(centerHz) || !std::isfinite(minimumHz) ||
+        !std::isfinite(maximumHz) || maximumHz <= minimumHz ||
+        !frame.value(QStringLiteral("fresh")).toBool(true)) return;
+    AnalyzerSpectrumFrame spectrum;
+    spectrum.sequence = frame.value(QStringLiteral("sequence")).toString().toULongLong();
+    spectrum.utcMs = QDateTime::currentMSecsSinceEpoch();
+    spectrum.centerHz = centerHz;
+    spectrum.minimumHz = minimumHz;
+    spectrum.maximumHz = maximumHz;
+    spectrum.sourceFftLength =
+        frame.value(QStringLiteral("sourceFftLength")).toInt(static_cast<int>(nativeLevels.size()));
+    spectrum.levelsDb.resize(nativeLevels.size());
+    const auto first = nativeLevels.begin() + (nativeLevels.size() + 1) / 2;
+    std::rotate_copy(nativeLevels.begin(), first, nativeLevels.end(), spectrum.levelsDb.begin());
+    multiSdrDialog->consumePrimaryFrame(spectrum);
+}
+
+void YourClassName::displayNetworkSpectrumFrame(const QJsonObject &frame) {
     const QJsonArray frequencyArray = frame.value("frequencies").toArray();
     const QJsonArray magnitudeArray = frame.value("magnitudes").toArray();
     const QJsonArray referenceMagnitudeArray = frame.value("referenceMagnitudes").toArray();
@@ -316,6 +363,7 @@ void YourClassName::displayNetworkSpectrumFrame(const QJsonObject &frame) {
     if (dataCount <= 0) {
         return;
     }
+    if (!acceptNetworkReceiverFrame()) return;
 
     std::vector<float> frequencies;
     std::vector<float> magnitudes;
@@ -350,6 +398,7 @@ void YourClassName::displayNetworkSpectrumFrame(const QJsonObject &frame) {
     const double frameMinFrequency = frame.value("minFrequency").toDouble(minFrequency);
     const double frameMaxFrequency = frame.value("maxFrequency").toDouble(maxFrequency);
     const double frameCenterFrequency = frame.value("centerFrequency").toDouble(pendingSettings.centerFrequency);
+    feedRemoteUhdPrimarySpectrum(frame, magnitudes, frameCenterFrequency, frameMinFrequency, frameMaxFrequency);
     const bool frameFresh = frame.value("fresh").toBool(true);
     const QVector<ScanVisualSegment> frameScanSegments = scanSegmentsFromFrame(frame);
     const bool frameShowScanSegmentMarkers =
@@ -540,14 +589,6 @@ void YourClassName::displayNetworkSpectrumFrame(const QJsonObject &frame) {
 }
 
 void YourClassName::displayNetworkSpectrumFrameBinary(const QJsonObject &frame, const QByteArray &payload) {
-    if (networkMode == NetworkMode::Client &&
-        runState == RadioRunState::Idle &&
-        networkController &&
-        !networkController->clientHasControl()) {
-        runState = RadioRunState::Running;
-        updateUiForRunState();
-    }
-
     const int frameFftLength = frame.value("fftLength").toInt();
     const double frameMinFrequency = frame.value("minFrequency").toDouble(minFrequency);
     const double frameMaxFrequency = frame.value("maxFrequency").toDouble(maxFrequency);
@@ -565,6 +606,7 @@ void YourClassName::displayNetworkSpectrumFrameBinary(const QJsonObject &frame, 
                  << "max" << frameMaxFrequency;
         return;
     }
+    if (!acceptNetworkReceiverFrame()) return;
 
     std::vector<float> frequencies(static_cast<std::size_t>(frameFftLength), 0.0f);
     std::vector<float> magnitudes(static_cast<std::size_t>(frameFftLength), -160.0f);
@@ -604,6 +646,7 @@ void YourClassName::displayNetworkSpectrumFrameBinary(const QJsonObject &frame, 
     }
 
     const double frameCenterFrequency = frame.value("centerFrequency").toDouble(pendingSettings.centerFrequency);
+    feedRemoteUhdPrimarySpectrum(frame, magnitudes, frameCenterFrequency, frameMinFrequency, frameMaxFrequency);
     const bool frameFresh = frame.value("fresh").toBool(true);
     const QVector<ScanVisualSegment> frameScanSegments = scanSegmentsFromFrame(frame);
     const bool frameShowScanSegmentMarkers =

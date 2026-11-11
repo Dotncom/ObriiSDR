@@ -48,6 +48,8 @@ void showUsrpLabDialog(QWidget *owner, bool ukrainian) {
     mode->addItem(text("GPRS replay from MAC JSONL", "GPRS: повторний розбір MAC JSONL"), QStringLiteral("gsm-replay"));
     mode->addItem(QStringLiteral("Wi-Fi PHY loopback"), QStringLiteral("wifi-loopback"));
     mode->addItem(QStringLiteral("LTE ZMQ loopback"), QStringLiteral("lte-zmq"));
+    mode->addItem(text("ZeroMQ IQ transport (requires PyZMQ)", "Транспорт IQ через ZeroMQ (потрібен PyZMQ)"),
+        QStringLiteral("zmq-loopback"));
     mode->addItem(text("Shared worker and IQ contracts", "Спільний каркас і формати IQ"), QStringLiteral("contracts"));
     form->addRow(text("Job", "Завдання"), mode);
     auto *input = new QLineEdit(dialog);
@@ -103,6 +105,8 @@ void showUsrpLabDialog(QWidget *owner, bool ukrainian) {
         const bool decode = mode->currentData().toString() == QStringLiteral("gsm-decode");
         const bool replay = mode->currentData().toString() == QStringLiteral("gsm-replay");
         const bool umts = mode->currentData().toString() == QStringLiteral("umts-decode");
+        const bool zmq = mode->currentData().toString() == QStringLiteral("zmq-loopback");
+        const bool available = state.value(zmq ? "zmqPythonAvailable" : "available").toBool();
         mode->setEnabled(!active);
         input->setEnabled(!active && (decode || replay || umts));
         inputBrowse->setEnabled(input->isEnabled());
@@ -116,7 +120,7 @@ void showUsrpLabDialog(QWidget *owner, bool ukrainian) {
             if (auto *label = form->labelForField(field)) label->setVisible(umts);
             field->setEnabled(!active);
         }
-        start->setEnabled(!active && state.value("available").toBool());
+        start->setEnabled(!active && available);
         cancel->setEnabled(active && !state.value("cancelling").toBool());
         const auto result = state.value("lastResult").toObject();
         open->setEnabled(result.contains("directory"));
@@ -139,6 +143,9 @@ void showUsrpLabDialog(QWidget *owner, bool ukrainian) {
                     .arg(summary.value("cells").toInt()).arg(summary.value("pdchBlocks").toInt());
                 message += text("Decode status: %1\n", "Стан декодування: %1\n")
                     .arg(summary.value("status").toString());
+            } else if (summary.contains("samplesPerDirection")) {
+                message += text("Checks %1. Samples per direction %2.\n", "Перевірок %1. Відліків у кожному напрямку %2.\n")
+                    .arg(summary.value("checks").toInt()).arg(summary.value("samplesPerDirection").toInt());
             } else if (summary.contains("checks")) {
                 message += text("Checks: %1    Verified files: %2\n", "Перевірки: %1    Звірені файли: %2\n")
                     .arg(summary.value("checks").toInt()).arg(summary.value("artifacts").toInt());
@@ -146,9 +153,15 @@ void showUsrpLabDialog(QWidget *owner, bool ukrainian) {
             for (const QString &detail : {result.value("error").toString(), summary.value("reason").toString(),
                                           result.value("diagnostic").toString()})
                 if (!detail.isEmpty()) message += detail + QLatin1Char('\n');
-        } else if (!state.value("available").toBool()) {
+        } else if (!available && zmq) {
+            message = text("Select Python with PyZMQ using OBRII_USRP_LAB_PYTHON.",
+                           "Укажіть Python із PyZMQ в OBRII_USRP_LAB_PYTHON.");
+        } else if (!available) {
             message = text("Local lab unavailable. Set OBRII_USRP_LAB_ROOT and install Python 3.11+.",
                            "Локальний стенд недоступний. Задайте OBRII_USRP_LAB_ROOT і встановіть Python 3.11+.");
+        } else if (zmq) {
+            message = text("Requires PyZMQ in the selected Python environment.",
+                           "У вибраному середовищі Python потрібен PyZMQ.");
         } else {
             message = text("Ready.", "Готово до запуску.");
         }

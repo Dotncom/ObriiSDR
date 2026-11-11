@@ -1,4 +1,5 @@
 #include "cliaudiooutput.h"
+#include "cliasyncwfmaudio.h"
 #include "fftplanprofile.h"
 #include "clivfomanager.h"
 #include "clifrequencyscanner.h"
@@ -52,6 +53,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QUuid>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
@@ -108,6 +110,7 @@ int fail(const QString &message) {
 int runUsrpLab(const QStringList &words) {
     if (words == QStringList{QStringLiteral("--help")}) {
         QTextStream(stdout) << "usrp status | contracts | wifi-loopback | lte-zmq | gsm-demo\n"
+                               "usrp zmq-loopback (requires Python with PyZMQ)\n"
                                "usrp gsm-decode FILE ARFCN [PDCH_TS]\n"
                                "usrp gsm-replay MAC.jsonl ARFCN CONTEXT_DIR\n"
                                "usrp umts-decode FILE RATE [OFFSET_HZ [cf32|cs16|ci8 [START_SAMPLE]]]\n";
@@ -167,6 +170,7 @@ bool validProfile(const QJsonObject &profile, QString *error) {
         QStringLiteral("--rate"), QStringLiteral("--listen"), QStringLiteral("--mode"),
         QStringLiteral("--bandwidth"), QStringLiteral("--gain-db"), QStringLiteral("--lna"),
         QStringLiteral("--vga"), QStringLiteral("--rx-channel"), QStringLiteral("--antenna"),
+        QStringLiteral("--rx-second-gain-db"), QStringLiteral("--rx-second-antenna"),
         QStringLiteral("--fpga-image"), QStringLiteral("--iq-file"), QStringLiteral("--rtl-host"),
         QStringLiteral("--rtl-port"), QStringLiteral("--block-samples"), QStringLiteral("--fft"),
         QStringLiteral("--spectrum-ms"), QStringLiteral("--decode"), QStringLiteral("--decode-tone"),
@@ -180,7 +184,7 @@ bool validProfile(const QJsonObject &profile, QString *error) {
         QStringLiteral("--virtual-rx-bind"), QStringLiteral("--virtual-rx-port"),
         QStringLiteral("--virtual-rx-queue-mib"), QStringLiteral("--hz-per-bin"),
         QStringLiteral("--web-port"), QStringLiteral("--web-bind")};
-    const QSet<QString> flags{QStringLiteral("--serve"), QStringLiteral("--no-audio"),
+    const QSet<QString> flags{QStringLiteral("--serve"), QStringLiteral("--no-audio"), QStringLiteral("--rx-dual"),
         QStringLiteral("--spectrum"), QStringLiteral("--progress"),
         QStringLiteral("--audio-play"), QStringLiteral("--audio-stdout"),
         QStringLiteral("--module-voice-stdout")};
@@ -435,6 +439,12 @@ struct Device {
     std::atomic<quint64> hackrfDropped{0};
     std::vector<unsigned char> rtlNativeBuffer;
     UhdRxSession uhd;
+    QString uhdClockSource = QStringLiteral("auto");
+    UhdClockStatus uhdClock;
+    int uhdGnssBaud = 0;
+    std::optional<UhdRxChannelSettings> uhdSecondary;
+    int uhdDuplexTxChannel = -1;
+    std::vector<float> uhdSecondaryIq;
     QTcpSocket rtlSocket;
     QByteArray rtlBuffer;
     QFile replayFile;
@@ -709,8 +719,21 @@ struct Device {
             return -1;
         }
         if (backend == BackendKind::Uhd) {
-            uhdRunning = uhd.open(static_cast<int>(index), channel, requestedRate,
-                                  requestedCenter, gainDb, antenna, fpgaImage, &lastError);
+            if (uhdSecondary || uhdDuplexTxChannel >= 0) {
+                std::vector<UhdRxChannelSettings> channels{{channel, gainDb, antenna}};
+                if (uhdSecondary) {
+                    uhdSecondaryIq.resize(static_cast<std::size_t>(count) * 2);
+                    channels.push_back(*uhdSecondary);
+                }
+                uhdRunning = uhd.open(static_cast<int>(index), channels, requestedRate,
+                                      requestedCenter, fpgaImage, &lastError, uhdDuplexTxChannel, uhdClockSource,
+                                      uhdGnssBaud);
+            } else {
+                uhdRunning = uhd.open(static_cast<int>(index), channel, requestedRate,
+                                      requestedCenter, gainDb, antenna, fpgaImage, &lastError, uhdClockSource,
+                                      uhdGnssBaud);
+            }
+            uhdClock = uhd.clockStatus();
             return uhdRunning ? 0 : -1;
         }
         const int result = fobos.startSync(count);
@@ -806,7 +829,9 @@ struct Device {
             return result;
         }
         if (backend == BackendKind::Uhd) {
-            const int result = uhd.receive(samples, readCapacity, &lastError);
+            const int result = uhdSecondary
+                ? uhd.receive(samples, uhdSecondaryIq.data(), readCapacity, &lastError)
+                : uhd.receive(samples, readCapacity, &lastError);
             if (result >= 0) { *count = static_cast<unsigned int>(result); return 0; }
             return result;
         }
@@ -849,6 +874,7 @@ struct Device {
         if (backend == BackendKind::Uhd) {
             uhd.close();
             uhdRunning = false;
+            uhdClock = {};
             return 0;
         }
         if (!fobosRunning) return 0;
@@ -1264,7 +1290,11 @@ int remoteCommand(const QString &host, quint16 port, const QStringList &words, c
     if (words.isEmpty()) return fail(QStringLiteral("control requires commands, audit, request FILE.json, agent, status, metrics, spectrum, trace, traces, science, measure, tone, digital or receiver/audio commands"));
     QJsonObject command{{QStringLiteral("action"), words.front()}};
     bool okay = false;
-    if (words.front() == QStringLiteral("request")) {
+    if (words.front() == QStringLiteral("uhd-tx-arm")) {
+        if (words.size() != 1) return fail(QStringLiteral("control uhd-tx-arm takes no arguments"));
+    } else if (words.front() == QStringLiteral("uhd-gnss")) {
+        if (words.size() != 1) return fail(QStringLiteral("control uhd-gnss takes no arguments"));
+    } else if (words.front() == QStringLiteral("request")) {
         if (words.size() != 2) return fail(QStringLiteral("control request FILE.json"));
         QFile file(words[1]);
         QJsonParseError error;
@@ -1782,6 +1812,11 @@ struct RunOptions {
     double gainDb = 0.0;
     int rxChannel = 0;
     QString antenna;
+    std::optional<UhdRxChannelSettings> uhdSecondary;
+    int uhdDuplexTxChannel = -1;
+    QString uhdClockSource = QStringLiteral("auto");
+    bool uhdGnssEnabled = false;
+    int uhdGnssBaud = 0;
     QString fpgaImage;
     QString iqFile;
     VirtualSignalEndpoint virtualRxEndpoint;
@@ -1855,6 +1890,13 @@ QJsonArray profileLaunch(const RunOptions &options, double centerHz, double rate
             value(QStringLiteral("--rx-channel"), QString::number(options.rxChannel));
             if (!options.antenna.isEmpty()) value(QStringLiteral("--antenna"), options.antenna);
             if (!options.fpgaImage.isEmpty()) value(QStringLiteral("--fpga-image"), options.fpgaImage);
+            if (options.uhdClockSource != QLatin1String("auto"))
+                value(QStringLiteral("--clock-source"), options.uhdClockSource);
+            if (options.uhdSecondary) {
+                args.append(QStringLiteral("--rx-dual"));
+                value(QStringLiteral("--rx-second-gain-db"), hz(options.uhdSecondary->gainDb));
+                value(QStringLiteral("--rx-second-antenna"), options.uhdSecondary->antenna);
+            }
         }
     }
     value(QStringLiteral("--input"), inputName(options.inputMode));
@@ -1973,6 +2015,7 @@ int runClient(QCoreApplication &app, const QString &host, quint16 port,
     bridge.onClientState = [&](const QJsonObject &state) {
         const QJsonObject settings = state.value(QStringLiteral("settings")).toObject();
         remoteProcessingMode = state.value(QStringLiteral("processingMode")).toInt(0);
+        audioPlayer.setWideFmNetworkBuffer(settings.value(QStringLiteral("modulationType")).toInt() == MOD_WFM);
         if (remoteProcessingMode != 2) gnss.command({{"operation", "stop"}}, 0, 0);
         vfos.setSource(settings.value(QStringLiteral("centerFrequency")).toDouble(),
                        settings.value(QStringLiteral("sampleRate")).toDouble());
@@ -2343,7 +2386,7 @@ int runClient(QCoreApplication &app, const QString &host, quint16 port,
     return result;
 }
 
-int runReceiver(QCoreApplication &app, const RunOptions &options) {
+int runReceiver(QCoreApplication &app, RunOptions options) {
     if (!options.spectrumFramesFile.isEmpty() && options.fftSize > 2097152)
         return fail(QStringLiteral("Spectrum file format supports at most 2097152 exact bins; lower FFT or record full IQ instead"));
     if (QSysInfo::ByteOrder != QSysInfo::LittleEndian)
@@ -2362,6 +2405,10 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
     device.channel = options.rxChannel;
     device.gainDb = options.gainDb;
     device.antenna = options.antenna;
+    device.uhdSecondary = options.uhdSecondary;
+    device.uhdDuplexTxChannel = options.uhdDuplexTxChannel;
+    device.uhdClockSource = options.uhdClockSource;
+    device.uhdGnssBaud = options.uhdGnssBaud;
     device.fpgaImage = options.fpgaImage;
     device.replayPath = options.iqFile;
     device.rtlHost = options.rtlHost;
@@ -2432,6 +2479,7 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
         if (options.audioPlay) localAudioPlayer.playNetworkPcmFrame(pcm);
     };
     std::unique_ptr<CliAudioOutput> audio;
+    std::unique_ptr<CliAsyncWfmAudio> asyncWfm;
     const auto ensureAudio = [&]() -> QString {
         if (audio) return {};
         audio = std::make_unique<CliAudioOutput>();
@@ -2470,6 +2518,17 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
         if (!spectrum->valid()) return fail(QStringLiteral("Cannot create the diagnostic FFT plan"));
     }
     QJsonObject latestSpectrum;
+    constexpr int SecondaryFftSize = 4096;
+    std::unique_ptr<CliAsyncSpectrum> secondarySpectrum;
+    QJsonObject latestSecondarySpectrum;
+    if (device.uhdSecondary && (options.spectrum || options.serve)) {
+        secondarySpectrum = std::make_unique<CliAsyncSpectrum>(SecondaryFftSize);
+        if (!secondarySpectrum->valid()) return fail(QStringLiteral("Cannot create the secondary UHD FFT plan"));
+    }
+    const auto resetSecondarySpectrum = [&] {
+        if (secondarySpectrum) secondarySpectrum->reset();
+        latestSecondarySpectrum = {};
+    };
 
     RadioSettings recordSettings;
     recordSettings.inputMode = options.inputMode;
@@ -2509,11 +2568,14 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                                recordSettings, actualRate, 0, 0, &recordError)) return fail(recordError);
 
     QFile capture(options.output);
+    QFile secondaryCapture(device.uhdSecondary && !options.output.isEmpty()
+        ? options.output + QStringLiteral(".rx%1.cf32").arg(device.uhdSecondary->channel)
+        : QString());
     if (!options.output.isEmpty()) {
         if (!capture.open(QIODevice::WriteOnly | QIODevice::NewOnly)) return fail(capture.errorString());
         QFile metadata(options.output + QStringLiteral(".json"));
         if (!metadata.open(QIODevice::WriteOnly | QIODevice::NewOnly)) return fail(metadata.errorString());
-        const QJsonObject meta{{QStringLiteral("format"), QStringLiteral("cf32le")},
+        QJsonObject meta{{QStringLiteral("format"), QStringLiteral("cf32le")},
                                {QStringLiteral("receiver"), backendName(options.backend)},
                                {QStringLiteral("api"), options.backend == BackendKind::Fobos
                                    ? apiName(options.api) : backendName(options.backend)},
@@ -2526,12 +2588,34 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                                {QStringLiteral("requestedFrequency"), options.centerHz},
                                {QStringLiteral("listeningFrequency"), options.listeningHz > 0.0 ? options.listeningHz : options.centerHz},
                                {QStringLiteral("startUtc"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}};
+        if (device.uhdSecondary) {
+            meta.insert(QStringLiteral("rxChannel"), device.channel);
+            meta.insert(QStringLiteral("antenna"), device.antenna);
+            meta.insert(QStringLiteral("pairedCapture"), QFileInfo(secondaryCapture.fileName()).fileName());
+            if (!secondaryCapture.open(QIODevice::WriteOnly | QIODevice::NewOnly))
+                return fail(secondaryCapture.errorString());
+            QFile secondMetaFile(secondaryCapture.fileName() + QStringLiteral(".json"));
+            if (!secondMetaFile.open(QIODevice::WriteOnly | QIODevice::NewOnly))
+                return fail(secondMetaFile.errorString());
+            QJsonObject secondMeta = meta;
+            secondMeta.insert(QStringLiteral("rxChannel"), device.uhdSecondary->channel);
+            secondMeta.insert(QStringLiteral("antenna"), device.uhdSecondary->antenna);
+            secondMeta.insert(QStringLiteral("gainDb"), device.uhdSecondary->gainDb);
+            secondMeta.insert(QStringLiteral("pairedCapture"), QFileInfo(options.output).fileName());
+            const auto secondBytes = QJsonDocument(secondMeta).toJson(QJsonDocument::Indented);
+            if (secondMetaFile.write(secondBytes) != secondBytes.size()) return fail(secondMetaFile.errorString());
+        }
         const QByteArray metadataBytes = QJsonDocument(meta).toJson(QJsonDocument::Indented);
         if (metadata.write(metadataBytes) != metadataBytes.size())
             return fail(metadata.errorString());
     }
 
     bool stop = false, receiverRunning = false, discontinuity = true, fileAtEof = false;
+    QString uhdTxArmCode;
+    qint64 uhdTxArmDeadlineMs = 0;
+    bool announceUhdTxCompletion = false;
+    std::uint64_t txRxOverflowsBefore = 0;
+    std::uint64_t txRxMissingSamplesBefore = 0;
     std::vector<float> orderedTrace;
     std::vector<float> traceBinIndices;
     quint64 traceSequence = 0;
@@ -2805,6 +2889,20 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
     quint64 droppedVirtualFrames = 0;
     quint32 sequence = 0;
     QElapsedTimer elapsed; elapsed.start();
+    QElapsedTimer uhdClockPoll;
+    const bool canSetUhdClock = options.backend == BackendKind::Uhd && uhdClockControlAvailable();
+    const auto uhdClockJson = [&] {
+        return QJsonObject{{"source", device.uhdClock.source},
+                           {"refLocked", device.uhdClock.locked ? QJsonValue(*device.uhdClock.locked) : QJsonValue()}};
+    };
+    const auto uhdGnssJson = [&]() -> QJsonObject {
+        if (!options.uhdGnssEnabled) return {{"state", "disabled"}};
+        if (!receiverRunning) return {{"state", "stopped"}};
+        if (announceUhdTxCompletion) return {{"state", "busy"}};
+        device.uhd.requestGnssStatus();
+        const auto status = device.uhd.gnssStatus();
+        return {{"state", status.state}, {"gga", status.gga}, {"rmc", status.rmc}, {"gsv", status.gsv}};
+    };
     QElapsedTimer rateWindow; rateWindow.start();
     quint64 previousRateSamples = 0;
     double recentReadRateMsps = 0.0;
@@ -2932,8 +3030,11 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                     }
                 } else if (action == QStringLiteral("status")) {
                     reply.insert(QStringLiteral("running"), receiverRunning);
+                    if (options.backend == BackendKind::Uhd)
+                        reply.insert(QStringLiteral("uhdClock"), uhdClockJson());
                     reply.insert(QStringLiteral("previewLeaseMs"), double((std::max)(qint64(0), previewUntilMs - elapsed.elapsed())));
                     if (spectrum) reply.insert(QStringLiteral("fftWorker"), spectrum->status());
+                    if (asyncWfm) reply.insert(QStringLiteral("wfmAudioWorker"), asyncWfm->status());
                     reply.insert(QStringLiteral("input"), inputName(options.inputMode));
                     reply.insert(QStringLiteral("sampleRateHz"), actualRate);
                     reply.insert(QStringLiteral("centerFrequencyHz"), actualCenter);
@@ -2973,6 +3074,7 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                     if (bridge) reply.insert(QStringLiteral("network"), bridge->metrics());
                 } else if (action == QStringLiteral("metrics")) {
                     if (spectrum) reply.insert(QStringLiteral("fftWorker"), spectrum->status());
+                    if (asyncWfm) reply.insert(QStringLiteral("wfmAudioWorker"), asyncWfm->status());
                     reply.insert(QStringLiteral("recording"), runtimeRecorder.status());
                     if (options.backend == BackendKind::Virtual)
                         reply.insert(QStringLiteral("virtualRx"), device.virtualSource.status());
@@ -3466,6 +3568,7 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                             discontinuity = true;
                             latestSpectrum = {};
                             if (spectrum) spectrum->reset();
+                            resetSecondarySpectrum();
                             multi.clearPrimarySpectrum();
                             orderedTrace.clear();
                             accumulatedTraces.clear(); accumulatedFrames = 0;
@@ -3553,6 +3656,7 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                         if (result == FOBOS_ERR_OK) {
                             receiverRunning = true; fileAtEof = false;
                             if (spectrum) spectrum->reset();
+                            resetSecondarySpectrum();
                             if (bridge) bridge->publishState();
                         }
                         else reply = receiverError(device, "start", result);
@@ -3569,6 +3673,7 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                     multi.clearPrimarySpectrum();
                     if (runtimeRecorder.active()) runtimeRecorder.command({{"operation", "stop"}}, runtimeSettings());
                     if (spectrum) spectrum->reset();
+                    resetSecondarySpectrum();
                     if (startupRecordingLocked) {
                         stop = true;
                         reply.insert(QStringLiteral("recordingFinalized"), true);
@@ -3610,10 +3715,23 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                     reply = CommandDispatcher::failure("invalid_json", "Expected a JSON object");
                 else {
                     const auto input = document.object();
-                    const QJsonObject request = input.contains("command") ? input :
-                        QJsonObject{{"command", "cli.legacy"}, {"args", QJsonObject{{"request", input}}}};
-                    reply = cliCommandWireReply(dispatcher.execute(request, CommandDispatcher::Context::human()),
-                                                !input.contains("command"));
+                    if (input.value("action") == QLatin1String("uhd-tx-arm")) {
+                        if (options.uhdDuplexTxChannel < 0 || !receiverRunning || announceUhdTxCompletion) {
+                            reply = {{"ok", false}, {"error", "UHD duplex TX is unavailable or already active"}};
+                        } else {
+                            uhdTxArmCode = QUuid::createUuid().toString(QUuid::WithoutBraces);
+                            uhdTxArmDeadlineMs = elapsed.elapsed() + 60000;
+                            reply = {{"ok", true}, {"code", uhdTxArmCode}, {"expiresInSeconds", 60}};
+                        }
+                    } else if (input.value("action") == QLatin1String("uhd-gnss")) {
+                        // Read positions only on explicit local requests. Keep them out of status and audit logs.
+                        reply = {{"ok", true}, {"status", uhdGnssJson()}};
+                    } else {
+                        const QJsonObject request = input.contains("command") ? input :
+                            QJsonObject{{"command", "cli.legacy"}, {"args", QJsonObject{{"request", input}}}};
+                        reply = cliCommandWireReply(dispatcher.execute(request, CommandDispatcher::Context::human()),
+                                                    !input.contains("command"));
+                    }
                 }
                 client->write(QJsonDocument(reply).toJson(QJsonDocument::Compact) + '\n');
                 client->flush();
@@ -3627,8 +3745,11 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
     receiverRunning = true;
     if (bridge) {
         CliNetworkBridge::ServerCallbacks callbacks;
+        callbacks.isRunning = [&] { return receiverRunning; };
+        callbacks.uhdGnssStatus = uhdGnssJson;
+        callbacks.coalesceCenterChanges = options.backend == BackendKind::Uhd;
         callbacks.settings = [&]() {
-            return QJsonObject{{QStringLiteral("deviceIndex"), 0},
+            QJsonObject state{{QStringLiteral("deviceIndex"), 0},
                                {QStringLiteral("inputMode"), options.inputMode},
                                {QStringLiteral("centerFrequency"), actualCenter},
                                {QStringLiteral("actualFrequency"), actualCenter},
@@ -3642,6 +3763,35 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                                {QStringLiteral("audioEnabled"), networkAudioEnabled},
                                {QStringLiteral("scalePercent"), 100},
                                {QStringLiteral("additionalScaleDivisor"), 1}};
+            if (options.backend == BackendKind::Uhd) {
+                QJsonObject rx{
+                    {QStringLiteral("channel"), device.channel},
+                    {QStringLiteral("gainDb"), device.gainDb},
+                    {QStringLiteral("antenna"), device.antenna},
+                    {QStringLiteral("clockSource"), device.uhdClockSource},
+                    {QStringLiteral("clockControl"), canSetUhdClock},
+                    {QStringLiteral("gnssControl"), options.uhdGnssEnabled}};
+                if (device.uhdSecondary) {
+                    rx.insert(QStringLiteral("dual"), true);
+                    rx.insert(QStringLiteral("secondary"), QJsonObject{
+                        {QStringLiteral("channel"), device.uhdSecondary->channel},
+                        {QStringLiteral("gainDb"), device.uhdSecondary->gainDb},
+                        {QStringLiteral("antenna"), device.uhdSecondary->antenna}});
+                }
+                state.insert(QStringLiteral("uhdRx"), rx);
+                state.insert(QStringLiteral("uhdClock"), uhdClockJson());
+            }
+            if (options.uhdDuplexTxChannel >= 0) {
+                const auto tx = device.uhd.transmitStatus();
+                const QJsonArray channels = device.uhdSecondary
+                    ? QJsonArray{0, 1} : QJsonArray{options.uhdDuplexTxChannel};
+                state.insert(QStringLiteral("uhdTx"), QJsonObject{
+                    {"available", receiverRunning}, {"channel", options.uhdDuplexTxChannel},
+                    {"txChannels", channels}, {"targetChannel", tx.targetChannel},
+                    {"active", tx.active}, {"state", tx.state},
+                    {"samples", static_cast<qint64>(tx.samples)}, {"error", tx.error}});
+            }
+            return state;
         };
         callbacks.receivers = [&]() {
             return QJsonArray{QJsonObject{{QStringLiteral("deviceIndex"), 0},
@@ -3675,12 +3825,151 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
             discontinuity = true;
             latestSpectrum = {};
             if (spectrum) spectrum->reset();
+            resetSecondarySpectrum();
             orderedTrace.clear();
             accumulatedTraces.clear(); accumulatedFrames = 0;
             return true;
         };
         callbacks.applySettings = [&](const QJsonObject &patch, QString *reason) {
             if (patch.isEmpty()) return true;
+            if (patch.contains(QStringLiteral("uhdTx"))) {
+                if (options.uhdDuplexTxChannel < 0 || !receiverRunning || patch.size() != 1) {
+                    *reason = QStringLiteral("UHD duplex TX is unavailable");
+                    return false;
+                }
+                const auto tx = patch.value(QStringLiteral("uhdTx")).toObject();
+                const auto operation = tx.value("operation").toString();
+                if (operation == QLatin1String("stop")) {
+                    device.uhd.requestTransmitStop();
+                    return true;
+                }
+                if (operation != QLatin1String("tone") || tx.value("rfConfirm") != QJsonValue(true) ||
+                    announceUhdTxCompletion ||
+                    uhdTxArmCode.isEmpty() || elapsed.elapsed() >= uhdTxArmDeadlineMs ||
+                    tx.value("code").toString() != uhdTxArmCode) {
+                    *reason = QStringLiteral("A new local UHD TX arm code and RF confirmation are required");
+                    return false;
+                }
+                const auto target = tx.value(QStringLiteral("channel"));
+                const int targetChannel = target.isUndefined() ? options.uhdDuplexTxChannel : target.toInt(-1);
+                if (targetChannel < 0 || targetChannel > 2 ||
+                    (!device.uhdSecondary && targetChannel != options.uhdDuplexTxChannel)) {
+                    *reason = QStringLiteral("UHD TX target is unavailable in this session");
+                    return false;
+                }
+                if (device.antenna != QLatin1String("RX2") ||
+                    (device.uhdSecondary && device.uhdSecondary->antenna != QLatin1String("RX2"))) {
+                    *reason = QStringLiteral("Select RX2 on all receiving channels in duplex mode");
+                    return false;
+                }
+                uhdTxArmCode.clear();
+                txRxOverflowsBefore = device.uhd.receiveOverflows();
+                txRxMissingSamplesBefore = device.uhd.receiveMissingSamples();
+                announceUhdTxCompletion = device.uhd.startTransmitTone(
+                    tx.value("frequencyHz").toDouble(), tx.value("gainDb").toDouble(-1.0),
+                    tx.value("durationMs").toInt(-1), reason, targetChannel);
+                return announceUhdTxCompletion;
+            }
+            if (announceUhdTxCompletion && device.uhd.transmitStatus().active &&
+                (patch.contains("uhdRx") || patch.contains("centerFrequency") || patch.contains("sampleRate"))) {
+                *reason = QStringLiteral("Wait for the UHD TX burst to finish before changing the receiver");
+                return false;
+            }
+            if (patch.contains(QStringLiteral("uhdRx"))) {
+                const auto rx = patch.value(QStringLiteral("uhdRx")).toObject();
+                const int channel = rx.value(QStringLiteral("channel")).toInt(-1);
+                const double gain = rx.value(QStringLiteral("gainDb")).toDouble(-1.0);
+                const auto antenna = rx.value(QStringLiteral("antenna"));
+                const bool duplex = options.uhdDuplexTxChannel >= 0;
+                const QString antennaName = duplex && antenna.toString().isEmpty()
+                    ? QStringLiteral("RX2") : antenna.toString();
+                const auto requestedClock = rx.value(QStringLiteral("clockSource"));
+                const auto clockSource = requestedClock.isUndefined() ? device.uhdClockSource : requestedClock.toString();
+                if ((clockSource != QLatin1String("auto") && clockSource != QLatin1String("internal") &&
+                     clockSource != QLatin1String("external")) ||
+                    (clockSource != device.uhdClockSource && !canSetUhdClock)) {
+                    *reason = QStringLiteral("UHD clock source is invalid or unavailable");
+                    return false;
+                }
+                auto secondary = device.uhdSecondary;
+                const auto secondaryRx = rx.value(QStringLiteral("secondary"));
+                bool secondaryChanged = false;
+                if (!secondaryRx.isUndefined()) {
+                    const auto config = secondaryRx.toObject();
+                    const auto secondAntenna = config.value(QStringLiteral("antenna"));
+                    const auto secondName = duplex && secondAntenna.toString().isEmpty()
+                        ? QStringLiteral("RX2") : secondAntenna.toString();
+                    const double secondGain = config.value(QStringLiteral("gainDb")).toDouble(-1.0);
+                    if (!secondary || config.value(QStringLiteral("channel")).toInt(-1) != secondary->channel ||
+                        !std::isfinite(secondGain) || secondGain < 0.0 || secondGain > 100.0 ||
+                        !secondAntenna.isString() ||
+                        (duplex && secondName != QLatin1String("RX2")) ||
+                        (!secondName.isEmpty() && secondName != QLatin1String("RX2") &&
+                         secondName != QLatin1String("TX/RX") && secondName != secondary->antenna)) {
+                        *reason = QStringLiteral("Invalid secondary UHD RX settings");
+                        return false;
+                    }
+                    secondaryChanged = secondary->gainDb != secondGain || secondary->antenna != secondName;
+                    secondary->gainDb = secondGain;
+                    secondary->antenna = secondName;
+                }
+                if (options.backend != BackendKind::Uhd || patch.size() != 1 ||
+                    channel < 0 || channel > 1 || !std::isfinite(gain) || gain < 0.0 ||
+                    (secondary && channel != device.channel) ||
+                    (!secondary && duplex && channel != options.uhdDuplexTxChannel) ||
+                    gain > 100.0 || !antenna.isString() ||
+                    (duplex && antennaName != QLatin1String("RX2")) ||
+                    (!antennaName.isEmpty() && antennaName != QLatin1String("RX2") &&
+                     antennaName != QLatin1String("TX/RX") && antennaName != device.antenna)) {
+                    *reason = QStringLiteral("Invalid UHD RX channel, gain, or antenna");
+                    return false;
+                }
+                if (channel == device.channel && gain == device.gainDb &&
+                    antennaName == device.antenna && clockSource == device.uhdClockSource &&
+                    !secondaryChanged) return true;
+                if (recordingLocked() || calibration.capturing()) {
+                    *reason = QStringLiteral("UHD RX settings are fixed during recording or calibration");
+                    return false;
+                }
+                const bool wasRunning = receiverRunning;
+                if (wasRunning && device.stop() != FOBOS_ERR_OK) {
+                    *reason = QStringLiteral("Could not stop UHD before changing RX settings");
+                    return false;
+                }
+                device.channel = channel;
+                device.gainDb = gain;
+                device.antenna = antennaName;
+                device.uhdSecondary = secondary;
+                device.uhdClockSource = clockSource;
+                if (wasRunning && device.start(options.blockSamples) != FOBOS_ERR_OK) {
+                    *reason = device.errorText(-1);
+                    device.channel = options.rxChannel;
+                    device.gainDb = options.gainDb;
+                    device.antenna = options.antenna;
+                    device.uhdSecondary = options.uhdSecondary;
+                    device.uhdClockSource = options.uhdClockSource;
+                    receiverRunning = device.start(options.blockSamples) == FOBOS_ERR_OK;
+                    if (!receiverRunning)
+                        *reason += QStringLiteral("; restoring the previous UHD settings failed: ") + device.errorText(-1);
+                    discontinuity = true;
+                    if (spectrum) spectrum->reset();
+                    resetSecondarySpectrum();
+                    return false;
+                }
+                options.rxChannel = channel;
+                options.gainDb = gain;
+                options.antenna = device.antenna;
+                options.uhdSecondary = secondary;
+                options.uhdClockSource = clockSource;
+                discontinuity = true;
+                latestSpectrum = {};
+                orderedTrace.clear();
+                accumulatedTraces.clear(); accumulatedFrames = 0;
+                multi.clearPrimarySpectrum();
+                if (spectrum) spectrum->reset();
+                resetSecondarySpectrum();
+                return true;
+            }
             scanner.stop();
             trigger.disarm();
             quality.cancel();
@@ -3691,8 +3980,22 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
             const double requestedCenter = patch.value(QStringLiteral("centerFrequency")).toDouble(actualCenter);
             const double requestedListen = patch.value(QStringLiteral("listeningFrequency")).toDouble(listeningHz);
             const double requestedBandwidth = patch.value(QStringLiteral("bandwidth")).toDouble(audioBandwidthHz);
-            const int requestedLna = patch.value(QStringLiteral("lnaGain")).toInt(currentLna);
-            const int requestedVga = patch.value(QStringLiteral("vgaGain")).toInt(currentVga);
+            const int requestedFft = patch.value(QStringLiteral("fftLength")).toInt(options.fftSize);
+            if (!CliSpectrumLimits::supportsSize(requestedFft)) {
+                *reason = QStringLiteral("Requested FFT length is outside the server range");
+                return false;
+            }
+            const bool fftChanged = requestedFft != options.fftSize;
+            if (fftChanged && (recordingLocked() || calibration.capturing())) {
+                *reason = QStringLiteral("FFT length is fixed during recording or calibration");
+                return false;
+            }
+            // GUI receiver snapshots may carry Fobos gains for other backends.
+            const bool hasFobosGainControls = options.backend == BackendKind::Fobos;
+            const int requestedLna = hasFobosGainControls
+                ? patch.value(QStringLiteral("lnaGain")).toInt(currentLna) : currentLna;
+            const int requestedVga = hasFobosGainControls
+                ? patch.value(QStringLiteral("vgaGain")).toInt(currentVga) : currentVga;
             const int requestedModulation = patch.value(QStringLiteral("modulationType")).toInt(modulation);
             const bool requestedAudio = patch.value(QStringLiteral("audioEnabled")).toBool(networkAudioEnabled);
             if (requestedDevice != 0 || requestedInput != INPUT_RF) {
@@ -3700,6 +4003,8 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                 return false;
             }
             if (!std::isfinite(requestedRate) || requestedRate < 1e6 ||
+                (device.uhdSecondary && requestedRate > 30.72e6) ||
+                (options.uhdDuplexTxChannel >= 0 && requestedRate != actualRate) ||
                 !std::isfinite(requestedCenter) ||
                 requestedCenter < (options.backend == BackendKind::Fobos ? 50e6 : 1.0) ||
                 !std::isfinite(requestedListen) || requestedListen <= 0.0 ||
@@ -3766,14 +4071,19 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                     *reason = QStringLiteral("Cannot retune during IQ or spectrum recording");
                     return false;
                 }
+                const bool nearbyUhdWfm = options.backend == BackendKind::Uhd && receiverRunning &&
+                    requestedModulation == MOD_WFM && !rateChanged &&
+                    std::abs(requestedCenter - actualCenter) <= 5e6;
                 const int result = device.frequency(requestedCenter, &actualCenter);
                 if (result != FOBOS_ERR_OK) {
                     *reason = QStringLiteral("Receiver rejected frequency: %1").arg(device.errorText(result));
                     return false;
                 }
                 tuneSettlingSamples = static_cast<quint64>(actualRate * 0.10);
+                if (nearbyUhdWfm) device.uhd.beginTimestampedTuneSettling();
                 latestSpectrum = {};
                 if (spectrum) spectrum->reset();
+                resetSecondarySpectrum();
                 multi.clearPrimarySpectrum();
                 orderedTrace.clear();
                 accumulatedTraces.clear(); accumulatedFrames = 0;
@@ -3795,6 +4105,15 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                 currentVga = requestedVga;
                 if (spectrum) spectrum->reset();
                 latestSpectrum = {}; orderedTrace.clear();
+                accumulatedTraces.clear(); accumulatedFrames = 0;
+            }
+            if (fftChanged) {
+                spectrum = std::make_unique<CliAsyncSpectrum>(requestedFft);
+                options.fftSize = requestedFft;
+                recordSettings.fftLength = requestedFft;
+                latestSpectrum = {};
+                multi.clearPrimarySpectrum();
+                orderedTrace.clear();
                 accumulatedTraces.clear(); accumulatedFrames = 0;
             }
             listeningHz = requestedListen;
@@ -3835,6 +4154,8 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
     std::signal(SIGTERM, interruptHandler);
     std::vector<float> block(static_cast<std::size_t>(options.blockSamples) * 2);
     QElapsedTimer report; report.start();
+    qint64 previousUhdReadEndNs = -1;
+    qint64 maximumUhdReadPauseNs = 0;
     int exitCode = 0;
     const auto pollSpectrum = [&] {
         if (!spectrum) return;
@@ -3897,9 +4218,47 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
             }
         }
     };
+    const auto pollSecondarySpectrum = [&] {
+        if (!secondarySpectrum) return;
+        CliSpectrumResult result;
+        if (!secondarySpectrum->poll(result)) return;
+        if (!result.error.isEmpty()) { fail(result.error); exitCode = 1; stop = true; return; }
+        if (result.centerHz != actualCenter || result.sampleRateHz != actualRate) return;
+        latestSecondarySpectrum = std::move(result.summary);
+        latestSecondarySpectrum.insert(QStringLiteral("rxChannel"), device.uhdSecondary->channel);
+        if (bridge && receiverRunning && !result.display.empty())
+            bridge->sendUhdRxSpectrum(device.uhdSecondary->channel, result.display,
+                                      actualCenter, actualRate, SecondaryFftSize);
+    };
     if (options.webPort && !web.start(options.webBind, options.webPort)) return fail(web.statusText());
     while (!stop && !interrupted) {
         pollSpectrum();
+        pollSecondarySpectrum();
+        if (announceUhdTxCompletion) {
+            if (bridge->peerCount() == 0) device.uhd.requestTransmitStop();
+            const auto tx = device.uhd.transmitStatus();
+            if (!tx.active) {
+                announceUhdTxCompletion = false;
+                bridge->publishReceiverStatus();
+                printJson({{"event", "uhdTx"}, {"state", tx.state},
+                           {"targetChannel", tx.targetChannel},
+                           {"samples", static_cast<qint64>(tx.samples)}, {"error", tx.error},
+                           {"rxOverflows", static_cast<qint64>(device.uhd.receiveOverflows() - txRxOverflowsBefore)},
+                           {"rxMissingSamples", static_cast<qint64>(device.uhd.receiveMissingSamples() - txRxMissingSamplesBefore)}});
+            }
+        }
+        if (!receiverRunning && !uhdTxArmCode.isEmpty()) uhdTxArmCode.clear();
+        if (receiverRunning && options.backend == BackendKind::Uhd && !announceUhdTxCompletion &&
+            (!uhdClockPoll.isValid() || uhdClockPoll.hasExpired(1000))) {
+            const auto previous = device.uhdClock;
+            device.uhdClock = device.uhd.clockStatus();
+            uhdClockPoll.start();
+            if (device.uhdClock.source != previous.source || device.uhdClock.locked != previous.locked) {
+                const auto status = uhdClockJson();
+                if (bridge) bridge->publishUhdClockStatus(status);
+                printJson({{"event", "uhdClock"}, {"status", status}});
+            }
+        }
         if (fileAtEof && (!spectrum || !spectrum->busy()) && runtimeRecorder.active())
             runtimeRecorder.command({{"operation", "stop"}}, runtimeSettings());
         for (const auto &notification : runtimeRecorder.takeNotifications()) printJson(notification.toObject());
@@ -3913,6 +4272,9 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
         }
         graph.poll();
         if (!receiverRunning) {
+            previousUhdReadEndNs = -1;
+            maximumUhdReadPauseNs = 0;
+            if (asyncWfm) asyncWfm->suspend();
             const QJsonObject completed = trigger.submitIq(nullptr, 0);
             if (!completed.isEmpty()) printJson(completed);
             QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
@@ -3938,6 +4300,7 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                 discontinuity = true;
                 latestSpectrum = {};
                 if (spectrum) spectrum->reset();
+                resetSecondarySpectrum();
                 multi.clearPrimarySpectrum();
                 orderedTrace.clear();
                 accumulatedTraces.clear(); accumulatedFrames = 0;
@@ -3952,8 +4315,30 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                 if (bridge) bridge->publishState();
             }
         }
+        const bool networkPcm = bridge && networkAudioEnabled &&
+            bridge->processingMode() == 0 && bridge->peerCount() > 0;
+        const bool localPcm = !options.audioFile.isEmpty() || options.audioStdout ||
+            runtimeRecorder.needsAudio() || textDecoder.enabled() || modules.needsAudio();
+        const bool offloadWfm = options.backend == BackendKind::Uhd && modulation == MOD_WFM &&
+            networkPcm && !localPcm && !options.audioPlay && !modules.needsChannelIq();
+        if (offloadWfm) {
+            if (!asyncWfm) asyncWfm = std::make_unique<CliAsyncWfmAudio>(options.blockSamples);
+            asyncWfm->setFormat({actualRate, actualCenter, listeningHz, audioBandwidthHz,
+                                 audioFilterJson, bridge->audioGeneration()});
+            QString audioError;
+            const QByteArray pcm = asyncWfm->takePcm(&audioError);
+            if (!audioError.isEmpty()) { fail(audioError); exitCode = 1; break; }
+            if (!pcm.isEmpty()) bridge->sendAudio(pcm);
+        } else if (asyncWfm && asyncWfm->suspend() && audio) {
+            audio->setSampleRate(actualRate);
+        }
         unsigned int count = 0;
+        if (device.uhdSecondary && previousUhdReadEndNs >= 0) {
+            const qint64 pause = elapsed.nsecsElapsed() - previousUhdReadEndNs;
+            maximumUhdReadPauseNs = (std::max)(maximumUhdReadPauseNs, pause);
+        }
         code = device.read(block.data(), &count);
+        if (device.uhdSecondary) previousUhdReadEndNs = elapsed.nsecsElapsed();
         if (code != FOBOS_ERR_OK) {
             if (runtimeRecorder.needsIq()) runtimeRecorder.submitIq(nullptr, 0, runtimeSettings(), true);
             printJson(receiverError(device, "read", code)); exitCode = 1; break;
@@ -3975,6 +4360,7 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
             vfos.setSource(actualCenter, actualRate);
         }
         if (!count) {
+            if (offloadWfm) asyncWfm->markGap();
             if (options.backend == BackendKind::File && device.replayFinished) {
                 fileAtEof = true;
                 if (gnss.ready()) gnss.command({{"operation", "eof"}}, actualRate, actualCenter);
@@ -3988,12 +4374,22 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
             continue;
         }
         samples += count;
-        const unsigned int skip = static_cast<unsigned int>((std::min)(tuneSettlingSamples, quint64(count)));
-        tuneSettlingSamples -= skip;
+        const auto timestampSkip = options.backend == BackendKind::Uhd
+            ? device.uhd.samplesBeforeTuneCutoff(count, actualRate) : std::nullopt;
+        const auto skip = static_cast<unsigned int>(timestampSkip.value_or(
+            (std::min)(tuneSettlingSamples, quint64(count))));
+        if (timestampSkip && skip < count) tuneSettlingSamples = 0;
+        else tuneSettlingSamples -= (std::min)(tuneSettlingSamples, quint64(skip));
         discardedTuneSamples += skip;
         const float *published = block.data() + static_cast<std::size_t>(skip) * 2;
         const unsigned int publishedCount = count - skip;
         if (!publishedCount) { QCoreApplication::processEvents(QEventLoop::AllEvents, 1); continue; }
+        const float *secondary = device.uhdSecondary
+            ? device.uhdSecondaryIq.data() + static_cast<std::size_t>(skip) * 2 : nullptr;
+        if (secondarySpectrum && (options.spectrum || (bridge && bridge->hasUhdRxSpectrumPeers()))) {
+            secondarySpectrum->submit(secondary, static_cast<int>(publishedCount), actualRate,
+                                      actualCenter, options.spectrum ? 100 : 50, options.spectrum);
+        }
         if(Mesh::NodeService::radioCaptureActive())DspIqSourceRegistry::instance().publish(DspSourceIdentity{},published,static_cast<std::size_t>(publishedCount)*2,actualRate,actualCenter);
         if (gnss.ready()) gnss.submitIq(published, static_cast<int>(publishedCount), actualRate, actualCenter);
         if (runtimeRecorder.needsIq()) runtimeRecorder.submitIq(published, publishedCount, runtimeSettings());
@@ -4026,10 +4422,20 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
         const QJsonObject triggerWrite = trigger.submitIq(published, static_cast<int>(publishedCount));
         if (!triggerWrite.isEmpty()) printJson(triggerWrite);
         if (capture.isOpen()) {
+            const qint64 captureSize = capture.pos();
             RecordingFormatCore::EncodedIq bytes;
             if (!RecordingFormatCore::encodeIq(published, static_cast<std::size_t>(publishedCount) * 2,
                     RecordingFormatCore::IqEncoding::Cf32Le, quantizedIq, bytes, &recordError) ||
                 !RecordingFormatCore::checkedAppend(capture, bytes.data, bytes.size, &recordError)) {
+                if (secondaryCapture.isOpen()) capture.resize(captureSize);
+                fail(recordError); exitCode = 1; break;
+            }
+            if (secondaryCapture.isOpen() &&
+                (!RecordingFormatCore::encodeIq(secondary, static_cast<std::size_t>(publishedCount) * 2,
+                    RecordingFormatCore::IqEncoding::Cf32Le, quantizedIq, bytes, &recordError) ||
+                 !RecordingFormatCore::checkedAppend(secondaryCapture, bytes.data, bytes.size, &recordError))) {
+                capture.resize(captureSize);
+                secondaryCapture.resize(captureSize);
                 fail(recordError); exitCode = 1; break;
             }
         }
@@ -4074,15 +4480,11 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                 }
             }
         }
-        if (audio && (!options.audioFile.isEmpty() || options.audioStdout || options.audioPlay || runtimeRecorder.needsAudio() ||
-                      textDecoder.enabled() || modules.needsAudio() || modules.needsChannelIq() ||
-                      (bridge && bridge->peerCount() > 0 && bridge->processingMode() == 0 &&
-                       networkAudioEnabled))) {
+        if (offloadWfm) {
+            asyncWfm->submit(published, publishedCount);
+        } else if (audio && (localPcm || options.audioPlay || modules.needsChannelIq() || networkPcm)) {
             QString audioError;
-            const bool decodePcm = !options.audioFile.isEmpty() || options.audioStdout || runtimeRecorder.needsAudio() ||
-                (options.audioPlay && !modules.needsChannelIq()) || textDecoder.enabled() ||
-                modules.needsAudio() || (bridge && bridge->peerCount() > 0 &&
-                bridge->processingMode() == 0 && networkAudioEnabled);
+            const bool decodePcm = localPcm || networkPcm || (options.audioPlay && !modules.needsChannelIq());
             if (!audio->process(published, publishedCount, &audioError, decodePcm)) {
                 fail(audioError); exitCode = 1; break;
             }
@@ -4160,6 +4562,19 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
                                  {QStringLiteral("droppedVirtualFrames"), static_cast<double>(droppedVirtualFrames)}};
             if (options.spectrum && !latestSpectrum.isEmpty())
                 progress.insert(QStringLiteral("spectrum"), latestSpectrum);
+            if (options.spectrum && !latestSecondarySpectrum.isEmpty())
+                progress.insert(QStringLiteral("secondarySpectrum"), latestSecondarySpectrum);
+            if (device.uhdSecondary) {
+                progress.insert(QStringLiteral("uhdRxDiagnostics"), QJsonObject{
+                    {QStringLiteral("overflows"), static_cast<double>(device.uhd.receiveOverflows())},
+                    {QStringLiteral("timeouts"), static_cast<double>(device.uhd.receiveTimeouts())},
+                    {QStringLiteral("timestampGaps"), static_cast<double>(device.uhd.receiveTimestampGaps())},
+                    {QStringLiteral("missingSamplesPerChannel"), static_cast<double>(device.uhd.receiveMissingSamples())},
+                    {QStringLiteral("blocksWithoutTimestamp"), static_cast<double>(device.uhd.receiveTimestampMissingBlocks())},
+                    {QStringLiteral("maxReadPauseUs"), maximumUhdReadPauseNs / 1000.0}});
+                maximumUhdReadPauseNs = 0;
+            }
+            if (asyncWfm) progress.insert(QStringLiteral("wfmAudioWorker"), asyncWfm->status());
             if (bridge) progress.insert(QStringLiteral("network"), bridge->metrics());
             if (options.spectrum || options.progress) printJson(progress);
             report.restart();
@@ -4172,6 +4587,10 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
         pollSpectrum();
         QThread::msleep(1);
     }
+    while (secondarySpectrum && secondarySpectrum->busy()) {
+        pollSecondarySpectrum();
+        QThread::msleep(1);
+    }
     runtimeRecorder.shutdown();
     for (const auto &notification : runtimeRecorder.takeNotifications()) printJson(notification.toObject());
     if (gnss.ready()) gnss.command({{"operation", "eof"}}, actualRate, actualCenter);
@@ -4182,6 +4601,7 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
     gnss.stop();
     web.stop();
     if (capture.isOpen()) capture.close();
+    if (secondaryCapture.isOpen()) secondaryCapture.close();
     spectrumRecorder.stop();
     channelRecorder.stop();
     fullIq8Recorder.stop();
@@ -4190,12 +4610,17 @@ int runReceiver(QCoreApplication &app, const RunOptions &options) {
         if (!audio->close(&audioError)) { fail(audioError); exitCode = 1; }
     }
     localAudioPlayer.stop();
-    printJson({{QStringLiteral("event"), QStringLiteral("stopped")},
+    QJsonObject stopped{{QStringLiteral("event"), QStringLiteral("stopped")},
                {QStringLiteral("samples"), static_cast<double>(samples)},
                {QStringLiteral("fftWorker"), spectrum ? spectrum->status() : QJsonObject{}},
                {QStringLiteral("spectrum"), latestSpectrum},
                {QStringLiteral("iqSeconds"), samples / actualRate},
-               {QStringLiteral("elapsedSeconds"), elapsed.elapsed() / 1000.0}});
+               {QStringLiteral("elapsedSeconds"), elapsed.elapsed() / 1000.0}};
+    if (device.uhdSecondary)
+        stopped.insert(QStringLiteral("rxChannels"), QJsonArray{device.channel, device.uhdSecondary->channel});
+    if (!latestSecondarySpectrum.isEmpty())
+        stopped.insert(QStringLiteral("secondarySpectrum"), latestSecondarySpectrum);
+    printJson(stopped);
     return exitCode;
 }
 }
@@ -4301,8 +4726,23 @@ int main(int argc, char **argv) {
            QStringLiteral("dB"), QStringLiteral("0"));
     option(QStringLiteral("rx-channel"), QStringLiteral("Soapy/UHD RX channel index"),
            QStringLiteral("index"), QStringLiteral("0"));
+    parser.addOption(QCommandLineOption(QStringLiteral("rx-dual"),
+        QStringLiteral("UHD B210: receive RX 0 and RX 1 together at a common center/rate")));
+    option(QStringLiteral("duplex-tx-channel"), QStringLiteral("Enable armed UHD B210 1+1 or 2+2 test bursts and set the default TX port"),
+           QStringLiteral("0|1"), QString());
+    option(QStringLiteral("rx-second-gain-db"), QStringLiteral("Gain of the other UHD RX channel; defaults to --gain-db"),
+           QStringLiteral("dB"), QString());
+    option(QStringLiteral("rx-second-antenna"), QStringLiteral("Antenna of the other UHD RX channel; defaults to --antenna"),
+           QStringLiteral("name"), QString());
     option(QStringLiteral("antenna"), QStringLiteral("UHD RX antenna name"),
            QStringLiteral("name"), QString());
+    option(QStringLiteral("clock-source"), QStringLiteral("UHD reference source: auto, internal or external (10 MHz)"),
+           QStringLiteral("source"), QStringLiteral("auto"));
+    parser.addOption(QCommandLineOption(QStringLiteral("uhd-gnss"),
+        QStringLiteral("Enable explicit UHD GNSS requests on the local control port and from the network controller")));
+    option(QStringLiteral("uhd-gnss-baud"),
+           QStringLiteral("Experimental B210 GNSS UART baud. Enables UHD GNSS requests and requires compatible FPGA/UHD"),
+           QStringLiteral("9600|38400"), QString());
     option(QStringLiteral("fpga-image"), QStringLiteral("Optional UHD FPGA image path"),
            QStringLiteral("path"), QString());
     option(QStringLiteral("input"), QStringLiteral("Input: auto, rf, hf1, hf2, hf-combined"), QStringLiteral("mode"), QStringLiteral("auto"));
@@ -4806,6 +5246,49 @@ int main(int argc, char **argv) {
     if (!okay || run.rxChannel < 0 || run.rxChannel > 16)
         return fail(QStringLiteral("RX channel must be 0..16"));
     run.antenna = parser.value(QStringLiteral("antenna"));
+    run.uhdClockSource = parser.value(QStringLiteral("clock-source"));
+    if (parser.isSet(QStringLiteral("clock-source")) &&
+        (backend != BackendKind::Uhd || (run.uhdClockSource != QLatin1String("auto") &&
+         run.uhdClockSource != QLatin1String("internal") && run.uhdClockSource != QLatin1String("external"))))
+        return fail(QStringLiteral("--clock-source requires UHD and auto, internal, or external"));
+    const bool hasUhdGnssBaud = parser.isSet(QStringLiteral("uhd-gnss-baud"));
+    run.uhdGnssEnabled = parser.isSet(QStringLiteral("uhd-gnss")) || hasUhdGnssBaud;
+    if (run.uhdGnssEnabled && backend != BackendKind::Uhd)
+        return fail(QStringLiteral("UHD GNSS options require --backend uhd"));
+    if (hasUhdGnssBaud) {
+        run.uhdGnssBaud = parser.value(QStringLiteral("uhd-gnss-baud")).toInt(&okay);
+        if (!okay || (run.uhdGnssBaud != 9600 && run.uhdGnssBaud != 38400))
+            return fail(QStringLiteral("--uhd-gnss-baud must be 9600 or 38400"));
+    }
+    if (parser.isSet(QStringLiteral("rx-dual"))) {
+        if (backend != BackendKind::Uhd || run.rxChannel > 1 || run.sampleRateHz > 30.72e6)
+            return fail(QStringLiteral("--rx-dual requires UHD RX 0 or 1 and at most 30.72 MS/s per channel"));
+        const double secondGain = parser.isSet(QStringLiteral("rx-second-gain-db"))
+            ? parser.value(QStringLiteral("rx-second-gain-db")).toDouble(&okay) : run.gainDb;
+        if (!okay || !std::isfinite(secondGain) || secondGain < 0.0 || secondGain > 100.0 || run.gainDb > 100.0)
+            return fail(QStringLiteral("Dual UHD RX gain must be 0..100 dB on both channels"));
+        run.uhdSecondary = UhdRxChannelSettings{1 - run.rxChannel, secondGain,
+            parser.isSet(QStringLiteral("rx-second-antenna"))
+                ? parser.value(QStringLiteral("rx-second-antenna")) : run.antenna};
+    } else if (parser.isSet(QStringLiteral("rx-second-gain-db")) ||
+               parser.isSet(QStringLiteral("rx-second-antenna"))) {
+        return fail(QStringLiteral("Secondary RX settings require --rx-dual"));
+    }
+    if (parser.isSet(QStringLiteral("duplex-tx-channel"))) {
+        run.uhdDuplexTxChannel = parser.value(QStringLiteral("duplex-tx-channel")).toInt(&okay);
+        if (!okay || run.uhdDuplexTxChannel < 0 || run.uhdDuplexTxChannel > 1 ||
+            backend != BackendKind::Uhd || !parser.isSet(QStringLiteral("serve")) ||
+            (run.sampleRateHz != 15.36e6 && run.sampleRateHz != 30.72e6))
+            return fail(QStringLiteral("--duplex-tx-channel requires --serve, UHD RX at 15.36 or 30.72 MS/s, and TX channel 0 or 1"));
+        if (!run.uhdSecondary && run.rxChannel != run.uhdDuplexTxChannel)
+            return fail(QStringLiteral("UHD 1+1 requires matching RX and TX channel indices"));
+        if (run.antenna.isEmpty()) run.antenna = QStringLiteral("RX2");
+        if (run.uhdSecondary && run.uhdSecondary->antenna.isEmpty())
+            run.uhdSecondary->antenna = QStringLiteral("RX2");
+        if (run.antenna != QLatin1String("RX2") ||
+            (run.uhdSecondary && run.uhdSecondary->antenna != QLatin1String("RX2")))
+            return fail(QStringLiteral("UHD duplex requires the RX2 antenna on all RX channels"));
+    }
     run.fpgaImage = parser.value(QStringLiteral("fpga-image"));
     if (backend == BackendKind::File &&
         (parser.isSet(QStringLiteral("gain-db")) || parser.isSet(QStringLiteral("rx-channel")) ||

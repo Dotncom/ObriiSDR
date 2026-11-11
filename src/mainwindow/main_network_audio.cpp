@@ -99,6 +99,10 @@ void YourClassName::playNetworkAudioPcmFrame(const QJsonObject &frame,
     }
 
     if (pcmData.isEmpty() || pcmData.size() % int(sizeof(qint16)) != 0) return;
+    if (!acceptNetworkReceiverFrame()) return;
+    const bool wideFm = networkClientConfirmedSettingsJson.value(QStringLiteral("modulationType"))
+                            .toInt(pendingSettings.modulationType) == MOD_WFM;
+    remoteAudioPlayer->setWideFmNetworkBuffer(wideFm);
     static quint64 receivedAudioFrames = 0;
     static quint64 expectedSequence = 0;
     static quint64 missingFrames = 0;
