@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 9.0.1)
+project(ObriiSDR VERSION 9.0.2)
 enable_testing()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -802,6 +802,8 @@ add_library(ObriiMeasurementCore STATIC
     src/analyzer/analyzerinstrumentplan.cpp
     src/analyzer/analyzerinstrumentplan.h
     src/analyzer/analyzerinstrumentbackend.h
+    src/analyzer/analyzerinstrumentsimulation.cpp
+    src/analyzer/analyzerinstrumentsimulation.h
     src/analyzer/instrumentsweepengine.cpp
     src/analyzer/instrumentsweepengine.h
     src/analyzer/spectrummosaicengine.cpp

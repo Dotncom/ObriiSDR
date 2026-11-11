@@ -129,7 +129,7 @@ Get-ChildItem -LiteralPath $RuntimePath -Recurse -File -Force | ForEach-Object {
         '^[^/]+$' { $Allowed = $RootFiles -contains $File.Name }
         '^docs/[^/]+$' { $Allowed = $PublicDocs -contains $File.Name }
         '^dsp/[^/]+$' { $Allowed = $Relative -in @('dsp/obrii_gr_bridge.py', 'dsp/obrii_gr_resampler.py', 'dsp/obrii_gr_hier_resampler.py') }
-        '^licenses/' { $Allowed = $File.Extension -in @('', '.txt', '.md', '.json') -or $Relative -in @('licenses/lora/LICENSE.LoRaPHY', 'licenses/codec2/sources/mingw-w64-codec2-1.2.0-2.src.tar.zst') }
+        '^licenses/' { $Allowed = $File.Extension -in @('', '.txt', '.md', '.json') -or $Relative -in @('licenses/lora/LICENSE.LoRaPHY', 'licenses/libgcc/COPYING.RUNTIME', 'licenses/codec2/sources/mingw-w64-codec2-1.2.0-2.src.tar.zst') }
         '^config/' { $Allowed = $Relative -in @('config/dmr_backends.example.json', 'config/fobosapp_defaults_4.2.json') }
         '^platforms/' { $Allowed = $Relative -eq 'platforms/qwindows.dll' }
         '^imageformats/' { $Allowed = $File.Name -in @('qgif.dll', 'qico.dll', 'qjpeg.dll', 'qtiff.dll', 'qwebp.dll') }

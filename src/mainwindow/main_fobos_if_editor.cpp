@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <memory>
 
+#ifdef OBRII_LOCAL_FOBOS_IF_HEADER
 namespace {
 const QString CustomEnabledKey = QStringLiteral("receiver/customIfRulesEnabled");
 const QString CustomRulesKey = QStringLiteral("receiver/customIfRules");
@@ -334,3 +335,13 @@ void YourClassName::openFobosIfEditor() {
     connect(poll, &QTimer::timeout, dialog, updateButtons);
     updateButtons(); poll->start(); dialog->show();
 }
+#else
+bool YourClassName::applyStoredFobosIfRules(bool *changed) {
+    if (changed) *changed = false;
+    fobosActiveIfRulesFrame.clear();
+    fobosCustomIfRulesActive = false;
+    return true;
+}
+
+void YourClassName::openFobosIfEditor() {}
+#endif

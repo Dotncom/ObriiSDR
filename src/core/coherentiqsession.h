@@ -4,6 +4,7 @@
 #include "dspiqsourceregistry.h"
 
 #include <QString>
+#include <QStringList>
 
 #include <cstddef>
 #include <vector>
@@ -51,4 +52,33 @@ public:
         std::size_t maximumComplexSamples = 0);
 
     static double estimateNoisePower(const std::vector<float> &iq);
+};
+
+// A recording indexes sequential snapshot files containing separately aligned
+// receiver channels. An interrupted recording can still expose its valid prefix.
+class CoherentIqRecording final {
+public:
+    bool create(const QString &parentDirectory, QString &error);
+    bool append(const std::vector<DspIqSourceSnapshot> &channels, QString &error);
+    QString finish(const QString &interruption, QString &error) const;
+
+    bool open(const QString &manifestPath, QString &error);
+    // An empty block on success marks the end of the recording.
+    bool readNext(std::vector<DspIqSourceSnapshot> &channels, QString &error);
+    QString interruptionReason() const { return interruption; }
+
+private:
+    bool contiguous(const std::vector<DspIqSourceSnapshot> &channels, QString &error) const;
+    void advance(const std::vector<DspIqSourceSnapshot> &channels);
+
+    QString directory;
+    QString interruption;
+    QStringList segments;
+    int position = 0;
+    std::vector<DspSourceIdentity> sources;
+    QString clock;
+    double rate = 0;
+    double center = 0;
+    std::uint64_t epoch = 0;
+    std::uint64_t next = 0;
 };

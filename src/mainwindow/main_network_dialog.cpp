@@ -2,6 +2,7 @@
 #include "appsettingsutils.h"
 #include "clilaunchscript.h"
 #include "diagnosticlogging.h"
+#include "displaylevelstep.h"
 #include "remotevfoservice.h"
 #include "remotewebserver.h"
 
@@ -137,6 +138,31 @@ void YourClassName::openNetworkSettingsDialog() {
                                                                   QStringLiteral("Send full-resolution spectrum/waterfall frames (heavy LAN only)")),
                                                            &dialog);
     fullResolutionSpectrumCheck->setChecked(networkFullResolutionSpectrumFrames);
+    auto *spectrumLevelStepSpin = new QDoubleSpinBox(&dialog);
+    spectrumLevelStepSpin->setObjectName(QStringLiteral("networkSpectrumLevelStepSpin"));
+    spectrumLevelStepSpin->setDecimals(1);
+    spectrumLevelStepSpin->setRange(DisplayLevelStep::DefaultNetworkTenths / 10.0,
+                                   DisplayLevelStep::MaximumTenths / 10.0);
+    spectrumLevelStepSpin->setSingleStep(0.1);
+    spectrumLevelStepSpin->setSuffix(QStringLiteral(" dB"));
+    spectrumLevelStepSpin->setKeyboardTracking(false);
+    spectrumLevelStepSpin->setToolTip(uiText("network_spectrum_level_step_tooltip",
+        "Rounds transmitted spectrum levels. Compatible clients can receive one byte per bin when the levels fit."));
+    spectrumLevelStepSpin->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+    auto *spectrumFpsSpin = new QSpinBox(&dialog);
+    spectrumFpsSpin->setObjectName(QStringLiteral("networkSpectrumFpsSpin"));
+    spectrumFpsSpin->setRange(NETWORK_SPECTRUM_FPS_MIN, NETWORK_SPECTRUM_FPS_MAX);
+    spectrumFpsSpin->setKeyboardTracking(false);
+    spectrumFpsSpin->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+    spectrumFpsSpin->setToolTip(uiText("network_spectrum_fps_tooltip",
+        "Maximum spectrum frames per second when local display is disabled on the server."));
+    auto *spectrumOptions = new QHBoxLayout();
+    spectrumOptions->addWidget(spectrumLevelStepSpin);
+    auto *spectrumFpsLabel = new QLabel(uiText("network_spectrum_fps", "Max. frames/s"), &dialog);
+    spectrumFpsLabel->setBuddy(spectrumFpsSpin);
+    spectrumOptions->addWidget(spectrumFpsLabel);
+    spectrumOptions->addWidget(spectrumFpsSpin);
+    spectrumOptions->addStretch();
 
     QCheckBox *audioRelayTransmitCheck = new QCheckBox(uiText(QStringLiteral("audio_relay_tx"),
                                                              QStringLiteral("Send ready audio by UDP")),
@@ -202,6 +228,7 @@ void YourClassName::openNetworkSettingsDialog() {
                        remoteVfoSquelchSpin);
     formLayout->addRow("", serverDisableLocalUiCheck);
     formLayout->addRow(uiText(QStringLiteral("visual_frames"), QStringLiteral("Visual frames:")), fullResolutionSpectrumCheck);
+    formLayout->addRow(uiText("network_spectrum_level_step", "Spectrum level step"), spectrumOptions);
     formLayout->addRow(uiText(QStringLiteral("audio_relay_tx_label"), QStringLiteral("Audio relay TX:")), audioRelayTransmitCheck);
     formLayout->addRow(uiText(QStringLiteral("relay_target_ip"), QStringLiteral("Relay target IP:")), audioRelayHostEdit);
     formLayout->addRow(uiText(QStringLiteral("relay_target_port"), QStringLiteral("Relay target port:")), audioRelayPortSpin);
@@ -321,6 +348,17 @@ void YourClassName::openNetworkSettingsDialog() {
         webServerCheck->setEnabled(selectedMode == NetworkMode::Server);
         webServerPortSpin->setEnabled(selectedMode == NetworkMode::Server && webServerCheck->isChecked());
         const auto selectedProcessing = static_cast<NetworkProcessingMode>(processingCombo->currentData().toInt());
+        const bool sendsSpectrum = selectedProcessing != NetworkProcessingMode::FullIqClientSide &&
+                                   selectedProcessing != NetworkProcessingMode::RemoteVfoServerSide;
+        const bool controlsServer = selectedMode == NetworkMode::Client &&
+            networkMode == NetworkMode::Client && networkController &&
+            networkController->isControlReady() && clientCanControl;
+        spectrumLevelStepSpin->setEnabled(sendsSpectrum &&
+            (selectedMode == NetworkMode::Server || (controlsServer && remoteSpectrumLevelStepTenths > 0)));
+        const bool canSetFps = sendsSpectrum && serverDisableLocalUiCheck->isChecked() &&
+            (selectedMode == NetworkMode::Server || (controlsServer && remoteSpectrumMaxFps > 0));
+        spectrumFpsSpin->setEnabled(canSetFps);
+        spectrumFpsLabel->setEnabled(canSetFps);
         remoteVfoSquelchSpin->setEnabled(selectedMode == NetworkMode::Client &&
                                          selectedProcessing == NetworkProcessingMode::RemoteVfoServerSide);
         requestControlButton->setEnabled(selectedMode == NetworkMode::Client &&
@@ -333,12 +371,26 @@ void YourClassName::openNetworkSettingsDialog() {
                                 ? uiText(QStringLiteral("apply"), QStringLiteral("Apply"))
                                 : uiText(QStringLiteral("apply_test_channel"), QStringLiteral("Apply / Test Channel")));
     };
+    const auto showSpectrumOptions = [=]() {
+        const bool client = static_cast<NetworkMode>(modeCombo->currentData().toInt()) == NetworkMode::Client;
+        if (!spectrumLevelStepSpin->hasFocus()) {
+            spectrumLevelStepSpin->setValue((client ? remoteSpectrumLevelStepTenths
+                                                   : networkSpectrumLevelStepTenths) / 10.0);
+        }
+        if (!spectrumFpsSpin->hasFocus()) {
+            spectrumFpsSpin->setValue(client && remoteSpectrumMaxFps > 0 ? remoteSpectrumMaxFps :
+                                     client ? NETWORK_SPECTRUM_FPS_DEFAULT : networkSpectrumMaxFps);
+        }
+    };
+    connect(modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog, showSpectrumOptions);
+    showSpectrumOptions();
     connect(modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog, updateFieldState);
     connect(processingCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog, updateFieldState);
     connect(audioRelayTransmitCheck, &QCheckBox::toggled, &dialog, updateFieldState);
     connect(audioRelayReceiveCheck, &QCheckBox::toggled, &dialog, updateFieldState);
     connect(audioHttpStreamCheck, &QCheckBox::toggled, &dialog, updateFieldState);
     connect(webServerCheck, &QCheckBox::toggled, &dialog, updateFieldState);
+    connect(serverDisableLocalUiCheck, &QCheckBox::toggled, &dialog, updateFieldState);
     updateFieldState();
 
     const auto useSelectedPreset = [=]() {
@@ -466,11 +518,20 @@ void YourClassName::openNetworkSettingsDialog() {
                                    [refreshStatus](const QString &) { refreshStatus(); });
         connect(networkController, &NetworkController::controlCommandReceived, &dialog,
                 [=](const QJsonObject &command) {
-                    if (networkMode != NetworkMode::Server ||
-                        command.value(QStringLiteral("type")).toString() != QStringLiteral("control")) {
+                    if (command.value(QStringLiteral("type")).toString() != QStringLiteral("control")) {
                         return;
                     }
                     const QString action = command.value(QStringLiteral("action")).toString();
+                    if (networkMode == NetworkMode::Client) {
+                        if (action == QStringLiteral("serverState") || action == QStringLiteral("role")) {
+                            showSpectrumOptions();
+                            updateFieldState();
+                        }
+                        return;
+                    }
+                    if (networkMode != NetworkMode::Server) return;
+                    if (action == QStringLiteral("setSpectrumLevelStep") ||
+                        action == QStringLiteral("setSpectrumMaxFps")) showSpectrumOptions();
                     if (action == QStringLiteral("setProcessingMode")) {
                         const int index = processingCombo->findData(static_cast<int>(networkProcessingMode));
                         if (index >= 0) {
@@ -481,6 +542,7 @@ void YourClassName::openNetworkSettingsDialog() {
                         const QSignalBlocker blocker(serverDisableLocalUiCheck);
                         serverDisableLocalUiCheck->setChecked(serverDisableLocalVisualAudio);
                     }
+                    updateFieldState();
                 });
     }
     if (remoteWebServer) {
@@ -496,11 +558,14 @@ void YourClassName::openNetworkSettingsDialog() {
         const NetworkMode previousNetworkMode = networkMode;
         const NetworkProcessingMode previousProcessingMode = networkProcessingMode;
         const bool previousServerDisableLocalVisualAudio = serverDisableLocalVisualAudio;
+        const QString previousBindAddress = networkBindAddress;
         const QString previousServerAddress = networkServerAddress;
         const quint16 previousControlPort = networkControlPort;
         const auto selectedNetworkMode = static_cast<NetworkMode>(modeCombo->currentData().toInt());
         const auto selectedProcessingMode =
             static_cast<NetworkProcessingMode>(processingCombo->currentData().toInt());
+        const int spectrumLevelStep = qRound(spectrumLevelStepSpin->value() * 10.0);
+        const int spectrumFps = spectrumFpsSpin->value();
         if (selectedNetworkMode == NetworkMode::Client && previousNetworkMode == NetworkMode::Client &&
             networkController && networkController->isControlReady() &&
             !networkController->clientHasControl() &&
@@ -525,7 +590,12 @@ void YourClassName::openNetworkSettingsDialog() {
         remoteVfoSquelchDb = remoteVfoSquelchSpin->value();
         serverDisableLocalVisualAudio = serverDisableLocalUiCheck->isChecked();
         networkFullResolutionSpectrumFrames = fullResolutionSpectrumCheck->isChecked();
+        if (selectedNetworkMode == NetworkMode::Server) {
+            networkSpectrumLevelStepTenths = spectrumLevelStep;
+            if (spectrumFpsSpin->isEnabled()) networkSpectrumMaxFps = spectrumFps;
+        }
         networkProcessingMode = selectedProcessingMode;
+        updateSpectrumTimerInterval();
         audioRelayTransmitEnabled = audioRelayTransmitCheck->isChecked();
         audioRelayHost = audioRelayHostEdit->text().trimmed().isEmpty()
                              ? QString("127.0.0.1")
@@ -603,7 +673,11 @@ void YourClassName::openNetworkSettingsDialog() {
             networkClientRequestedProcessingMode = -1;
             networkClientRequestedServerLocalOutput = -1;
             clearRemoteReceiverDeviceList();
-            networkController->startServer(networkBindAddress, networkControlPort);
+            if (networkController->mode() != NetworkMode::Server ||
+                previousBindAddress != networkBindAddress ||
+                networkController->listeningPort() != networkControlPort) {
+                networkController->startServer(networkBindAddress, networkControlPort);
+            }
             if (previousNetworkMode == NetworkMode::Client) updateUiForRunState();
             updateRemoteWebServer();
             const bool restartRequired =
@@ -614,6 +688,7 @@ void YourClassName::openNetworkSettingsDialog() {
             } else if (runState == RadioRunState::Running && serverLocalOutputChanged) {
                 applyServerLocalOutputPolicy();
             }
+            sendServerStateToClients();
             savePersistentSettings();
             return;
         }
@@ -642,6 +717,12 @@ void YourClassName::openNetworkSettingsDialog() {
         if (reconnectClient) {
             networkController->testClientConnection(networkServerAddress, networkControlPort);
         } else {
+            if (spectrumLevelStepSpin->isEnabled() && spectrumLevelStep != remoteSpectrumLevelStepTenths)
+                sendRemoteControlCommand(QStringLiteral("setSpectrumLevelStep"),
+                    {{QStringLiteral("spectrumLevelStepTenths"), spectrumLevelStep}});
+            if (spectrumFpsSpin->isEnabled() && spectrumFps != remoteSpectrumMaxFps)
+                sendRemoteControlCommand(QStringLiteral("setSpectrumMaxFps"),
+                    {{QStringLiteral("spectrumMaxFps"), spectrumFps}});
             if (networkClientRequestedProcessingMode >= 0)
                 sendRemoteControlCommand(QStringLiteral("setProcessingMode"));
             if (networkClientRequestedServerLocalOutput >= 0)
@@ -656,6 +737,7 @@ void YourClassName::openNetworkSettingsDialog() {
     connect(stopButton, &QPushButton::clicked, &dialog, [=]() {
         const NetworkMode previousNetworkMode = networkMode;
         networkMode = NetworkMode::Disabled;
+        updateSpectrumTimerInterval();
         networkClientRequestedProcessingMode = -1;
         networkClientRequestedServerLocalOutput = -1;
         if (modeCombo) {

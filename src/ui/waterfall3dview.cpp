@@ -164,6 +164,8 @@ void Waterfall3DView::initializeGL() {
 }
 
 void Waterfall3DView::paintGL() {
+    const QSize viewport = size() * devicePixelRatioF();
+    glViewport(0, 0, viewport.width(), viewport.height());
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     renderer->render(width(), height());
     if (overviewVisible) {
@@ -172,10 +174,6 @@ void Waterfall3DView::paintGL() {
     if (densityAxes) {
         drawDensityAxes();
     }
-}
-
-void Waterfall3DView::resizeGL(int width, int height) {
-    glViewport(0, 0, width, height);
 }
 
 void Waterfall3DView::wheelEvent(QWheelEvent *event) {

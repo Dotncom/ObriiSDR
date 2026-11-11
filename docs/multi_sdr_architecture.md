@@ -128,6 +128,25 @@ The status **Aligned by signal** describes an estimate from received IQ.
 The stock USB stream can conceal a loss that is too small to detect from
 the signal. Hardware clock lock and shared sample numbering are separate.
 
+### Continuous coherent IQ recording
+
+Start a live coherent group or **Test virtual pair**, wait for the preview,
+then click **Record coherent IQ…** and choose a directory. The recorder writes
+each delay-, phase- and gain-corrected RX as a separate CF32LE channel at the
+coherent output rate. All channels in a segment have the same 64-bit sample
+range and epoch. File writes and SHA-256 run on a separate worker with a
+bounded queue. Each segment holds roughly two seconds of samples, and a
+recording can contain up to 4,096 segments.
+
+Click **Stop IQ recording** to save the final segment and commit
+`recording.json`. An IQ gap, a loss of alignment, or a full disk queue ends the
+recording and indexes the valid prefix when it can be saved. The status shows
+the reason and its tooltip shows the index path. Keep the segment folders
+with the index. After stopping the live preview, click **Replay IQ recording…**
+and select that index. Playback verifies the segment hashes and timeline,
+averages the stored aligned channels at the recorded rate, and updates the
+spectrum, waterfall and **Coherent IQ (Multi-SDR)** source for DSP Flow.
+
 ## Thread and process assessment
 
 The current hot path is already split into long-lived workers instead of
@@ -174,11 +193,9 @@ Raspberry Pi keeps the present conservative single-path defaults.
 
 ## Next functional stages
 
-1. Add bounded timestamp-aligned multi-source recording and replay around the
-   new epoch/sample-position metadata.
-2. Implement native UHD as one physical-device service owning all B210 RX/TX
+1. Implement native UHD as one physical-device service owning all B210 RX/TX
    streamers; expose channels to the manager without reopening the device.
-3. Qualify delay/phase calibration with a shared reference signal, then enable
+2. Qualify delay/phase calibration with a shared reference signal, then enable
    live complex-IQ stitching, MRC and cross-device demodulation.
-4. Qualify the new per-source PFB banks on Raspberry Pi and a multi-receiver
+3. Qualify the new per-source PFB banks on Raspberry Pi and a multi-receiver
    desktop, including CPU/memory budget, teardown and simultaneous audio.

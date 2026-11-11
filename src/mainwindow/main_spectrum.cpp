@@ -901,6 +901,7 @@ void YourClassName::updateSpectrum() {
     // Simplified mode only removes optional DSP branches. Keep the core
     // waterfall producer decoupled from GUI repaint cadence in every mode.
     const bool batchWaterfallRows =
+        !networkSpectrumCadenceActive() &&
         waterfallWidget && waterfallWidget->isVisible() && !isMinimized() &&
         spectrumSettings.fftLength < 8388608;
 

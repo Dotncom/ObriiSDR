@@ -1,4 +1,5 @@
 #include "MyGraphWidget.h"
+#include "../utils/displaylevelstep.h"
 #include "radiosettings.h"
 
 #include <algorithm>
@@ -67,8 +68,7 @@ void MyGraphWidget::initializeGL() {
     initialized = true;
 }
 
-void MyGraphWidget::resizeGL(int w, int h) {
-    glViewport(0, 0, w, h);
+void MyGraphWidget::resizeGL(int w, int) {
     if (pauseControl) {
         pauseControl->move((std::max)(2, w - pauseControl->width() - 6), 6);
         pauseControl->raise();
@@ -84,6 +84,9 @@ void MyGraphWidget::setData(const std::vector<float> &xData, const std::vector<f
     }
     this->xData = xData;
     this->yData = yData;
+    if (displayLevelStepTenths > 0) {
+        for (float &level : this->yData) level = DisplayLevelStep::rounded(level, displayLevelStepTenths);
+    }
     this->xMin = xMin;
     this->xMax = xMax;
     this->fftLength = std::max(0, fftLength);
@@ -165,9 +168,19 @@ void MyGraphWidget::updatePauseControl() {
 
 void MyGraphWidget::setOverlayData(const std::vector<float> &yData, bool enabled, bool displayOrdered) {
     overlayYData = enabled ? yData : std::vector<float>();
+    if (displayLevelStepTenths > 0) {
+        for (float &level : overlayYData) level = DisplayLevelStep::rounded(level, displayLevelStepTenths);
+    }
     overlayEnabled = enabled && !overlayYData.empty();
     overlayDisplayOrdered = overlayEnabled && displayOrdered;
     update();
+}
+
+void MyGraphWidget::setDisplayLevelStep(int tenths) {
+    if (displayLevelStepTenths == tenths) return;
+    displayLevelStepTenths = tenths;
+    persistence.clear();
+    persistenceClock.invalidate();
 }
 
 void MyGraphWidget::setLevelRange(float minLevel, float maxLevel) {
@@ -348,7 +361,8 @@ void MyGraphWidget::paintGL() {
     const bool canDrawData = !xData.empty() && !yData.empty() && fftLength > 0 &&
                              !qFuzzyCompare(xMin, xMax) && !qFuzzyCompare(yMin, yMax);
     if (canDrawData) {
-        glViewport(0, 0, width(), height());
+        const QSize viewport = size() * devicePixelRatioF();
+        glViewport(0, 0, viewport.width(), viewport.height());
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
         glOrtho(0, width(), 0, height(), -1, 1);

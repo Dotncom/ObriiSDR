@@ -98,10 +98,13 @@ bool CoherentIqLive::calibrate(const std::vector<DspIqSourceSnapshot> &inputs,
 }
 
 bool CoherentIqLive::takeBlock(const std::vector<DspIqSourceSnapshot> &inputs,
-                              DspIqSourceSnapshot &output, QString &error) {
+                              DspIqSourceSnapshot &output, QString &error,
+                              std::vector<std::vector<float>> *alignedChannels) {
     output = {};
     error.clear();
+    if (alignedChannels) alignedChannels->clear();
     const auto reject = [&](const QString &reason) {
+        if (alignedChannels) alignedChannels->clear();
         aligned.clear();
         phaseBaselineSample.reset();
         measuredDriftHz.reset();
@@ -122,6 +125,8 @@ bool CoherentIqLive::takeBlock(const std::vector<DspIqSourceSnapshot> &inputs,
         end = std::min(end, shiftIndex(input.endComplexSample, -plan.whole - (plan.fractional > 0 ? 1 : 0)));
     }
     if (end <= next || end - next < BlockSamples) return true;
+    if (alignedChannels)
+        alignedChannels->resize(inputs.size(), std::vector<float>(BlockSamples * 2));
 
     const auto phaseSamples = phaseBaselineSample ? next - *phaseBaselineSample : 0;
     const bool measurePhase = phaseSamples >= PhaseMeasurementSamples;
@@ -131,6 +136,10 @@ bool CoherentIqLive::takeBlock(const std::vector<DspIqSourceSnapshot> &inputs,
     for (int n = 0; n < BlockSamples; ++n) {
         sum[n] = sample(inputs.front(), next + n);
         referencePower += std::norm(sum[n]);
+        if (alignedChannels) {
+            (*alignedChannels)[0][2 * n] = float(sum[n].real());
+            (*alignedChannels)[0][2 * n + 1] = float(sum[n].imag());
+        }
     }
     for (std::size_t i = 1; i < inputs.size(); ++i) {
         auto &plan = aligned[i];
@@ -145,6 +154,10 @@ bool CoherentIqLive::takeBlock(const std::vector<DspIqSourceSnapshot> &inputs,
             cross += sample(inputs.front(), next + n) * std::conj(corrected);
             power += std::norm(corrected);
             sum[n] += corrected;
+            if (alignedChannels) {
+                (*alignedChannels)[i][2 * n] = float(corrected.real());
+                (*alignedChannels)[i][2 * n + 1] = float(corrected.imag());
+            }
         }
         const double norm = std::sqrt(referencePower * power);
         const double phase = std::arg(cross);

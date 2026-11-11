@@ -189,7 +189,7 @@ QJsonObject AnalyzerMeasurementSession::toJson() const {
     for (const AnalyzerMeasurementPoint &point : points) pointArray.append(point.toJson());
     QJsonArray logArray;
     for (const QString &entry : eventLog) logArray.append(entry);
-    return {{QStringLiteral("schema"), QStringLiteral("obrii-analyzer-session-v1")},
+    QJsonObject json{{QStringLiteral("schema"), QStringLiteral("obrii-analyzer-session-v1")},
             {QStringLiteral("sessionId"), sessionId},
             {QStringLiteral("applicationVersion"), applicationVersion},
             {QStringLiteral("startedUtc"), startedUtc.toUTC().toString(Qt::ISODateWithMs)},
@@ -197,12 +197,17 @@ QJsonObject AnalyzerMeasurementSession::toJson() const {
             {QStringLiteral("plan"), plan.toJson()},
             {QStringLiteral("points"), pointArray},
             {QStringLiteral("eventLog"), logArray}};
+    if (!backendId.isEmpty()) json.insert(QStringLiteral("backendId"), backendId);
+    if (!outcome.isEmpty()) json.insert(QStringLiteral("outcome"), outcome);
+    return json;
 }
 
 AnalyzerMeasurementSession AnalyzerMeasurementSession::fromJson(const QJsonObject &object) {
     AnalyzerMeasurementSession value;
     value.sessionId = object.value(QStringLiteral("sessionId")).toString();
     value.applicationVersion = object.value(QStringLiteral("applicationVersion")).toString();
+    value.backendId = object.value(QStringLiteral("backendId")).toString();
+    value.outcome = object.value(QStringLiteral("outcome")).toString();
     value.startedUtc = QDateTime::fromString(object.value(QStringLiteral("startedUtc")).toString(), Qt::ISODateWithMs);
     value.completedUtc = QDateTime::fromString(object.value(QStringLiteral("completedUtc")).toString(), Qt::ISODateWithMs);
     value.plan = AnalyzerInstrumentPlan::fromJson(object.value(QStringLiteral("plan")).toObject());

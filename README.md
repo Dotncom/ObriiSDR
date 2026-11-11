@@ -8,6 +8,10 @@ support and a separately maintained Android USB/network client. Version 9.0.0
 adds the Fobos firmware updater and Dual receiver support, improves DMR and
 receiver controls, and adds live coherent IQ in Multi-SDR. See
 `docs/release_notes_9.0.0.md` for package contents and qualification limits.
+The 9.0.2 preview adds configurable network spectrum cadence, compact
+level encoding, and fixes for Raspberry Pi display and remote zoom.
+See `docs/release_notes_9.0.2.md` for the update and its test coverage.
+
 The 9.0.1 preview adds B210 dual RX, UHD GPS status with optional GSV,
 USRP Lab jobs, and updated Raspberry Pi launch and receive behavior.
 See `docs/release_notes_9.0.1.md` for the preview and its test coverage.

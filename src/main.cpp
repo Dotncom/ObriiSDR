@@ -1,4 +1,5 @@
 #include "main.h"
+#include "displaylevelstep.h"
 #include "core/fobosifselection.h"
 #include "ffttuningguard.h"
 #include "core/audiolifecycle.h"
@@ -181,7 +182,7 @@ YourClassName::YourClassName(QWidget *parent)
     QWidget *controlsWidget = new QWidget(this);
     QScrollArea *controlsScrollArea = new QScrollArea(this);
     controlsScrollArea->setWidgetResizable(true);
-    controlsScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    controlsScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     controlsScrollArea->setWidget(controlsWidget);
     controlsWidget->setMinimumWidth(0);
     controlsWidget->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -193,7 +194,7 @@ YourClassName::YourClassName(QWidget *parent)
     controlsDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
     controlsDock->setFeatures(QDockWidget::DockWidgetMovable |
                               QDockWidget::DockWidgetFloatable);
-    controlsDock->setMinimumWidth(220);
+    controlsDock->setMinimumWidth(340);
     controlsDock->setWidget(controlsScrollArea);
     addDockWidget(Qt::LeftDockWidgetArea, controlsDock);
 
@@ -3409,9 +3410,9 @@ YourClassName::YourClassName(QWidget *parent)
     QHBoxLayout *deviceButtonLayout = new QHBoxLayout();
     deviceButtonLayout->setContentsMargins(0, 0, 0, 0);
     deviceButtonLayout->setSpacing(4);
-    deviceButtonLayout->addWidget(refreshButton, 1);
-    deviceButtonLayout->addWidget(networkButton, 1);
-    deviceButtonLayout->addWidget(appSettingsButton, 1);
+    deviceButtonLayout->addWidget(refreshButton, 4);
+    deviceButtonLayout->addWidget(networkButton, 3);
+    deviceButtonLayout->addWidget(appSettingsButton, 5);
     deviceButtonLayout->addWidget(commandConsoleButton);
 
     QHBoxLayout *gainLabelLayout = new QHBoxLayout();
@@ -4065,6 +4066,24 @@ YourClassName::YourClassName(QWidget *parent)
     markTranslatable(waterfallSpeedLabel, "waterfall_speed", "Waterfall speed");
     visualSpeedLayout->addRow(spectrumSpeedLabel, spectrumUpdateSpin);
     visualSpeedLayout->addRow(waterfallSpeedLabel, waterfallRowsSpin);
+    displayLevelStepSpin = new QDoubleSpinBox(waterfall3DSection.widget);
+    displayLevelStepSpin->setObjectName(QStringLiteral("displayLevelStepSpin"));
+    displayLevelStepSpin->setDecimals(1);
+    displayLevelStepSpin->setRange(0, DisplayLevelStep::MaximumTenths / 10.0);
+    displayLevelStepSpin->setSingleStep(0.1);
+    displayLevelStepSpin->setSuffix(QStringLiteral(" dB"));
+    displayLevelStepSpin->setSpecialValueText(uiText("display_level_step_off", "Full precision"));
+    displayLevelStepSpin->setKeyboardTracking(false);
+    auto *displayLevelStepLabel = new QLabel(waterfall3DSection.widget);
+    markTranslatable(displayLevelStepLabel, "display_level_step", "Display level step");
+    visualSpeedLayout->addRow(displayLevelStepLabel, displayLevelStepSpin);
+    connect(displayLevelStepSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, [this](double value) {
+        const int step = qRound(value * 10.0);
+        graphWidget->setDisplayLevelStep(step);
+        waterfallWidget->setDisplayLevelStep(step);
+        savePersistentSettings();
+    });
     waterfall3DSection.contentLayout->addLayout(visualSpeedLayout);
     displayReductionCombo = new QComboBox(this);
     displayReductionCombo->addItem(uiText(QStringLiteral("display_reduction_peak"),
@@ -4252,12 +4271,12 @@ YourClassName::YourClassName(QWidget *parent)
         savePersistentSettings();
     });
     connect(scaleSlider, &QSlider::sliderReleased, this, [this]() {
-        if (isNetworkClientMode() && !isFullIqProcessingMode()) {
+        if (isNetworkClientMode() && networkProcessingMode == NetworkProcessingMode::ChannelIqClientSide) {
             scheduleRemoteSettingsCommand();
         }
     });
     connect(additionalScaleDivisorSlider, &QSlider::sliderReleased, this, [this]() {
-        if (isNetworkClientMode() && !isFullIqProcessingMode()) {
+        if (isNetworkClientMode() && networkProcessingMode == NetworkProcessingMode::ChannelIqClientSide) {
             scheduleRemoteSettingsCommand();
         }
     });
@@ -4708,6 +4727,10 @@ YourClassName::YourClassName(QWidget *parent)
         if (isNetworkClientMode()) {
             networkClientReconnectPending = false;
             networkClientCanInferRunning = true;
+            remoteSpectrumLevelStepTenths = 0;
+            remoteSpectrumMaxFps = 0;
+            networkClientViewportCenterHz = std::numeric_limits<double>::quiet_NaN();
+            networkClientViewportSpanHz = std::numeric_limits<double>::quiet_NaN();
             if (runState == RadioRunState::Running) {
                 if (isClientIqProcessingMode()) {
                     startNetworkClientProcessing();
@@ -7924,6 +7947,13 @@ void YourClassName::connectDataProcessorSignals() {
     }
 }
 
+bool YourClassName::networkSpectrumCadenceActive() const {
+    return networkMode == NetworkMode::Server &&
+           serverDisableLocalVisualAudio &&
+           networkController && networkController->isControlReady() &&
+           !isFullIqProcessingMode() && !isRemoteVfoProcessingMode();
+}
+
 void YourClassName::applyServerLocalOutputPolicy() {
     const bool suppressServerLocalOutput =
         networkMode == NetworkMode::Server &&
@@ -7940,6 +7970,7 @@ void YourClassName::applyServerLocalOutputPolicy() {
     if (!updateTimer || runState != RadioRunState::Running || networkMode != NetworkMode::Server) {
         return;
     }
+    updateSpectrumTimerInterval();
 
     const bool spectrumNeededForNetwork =
         networkController &&
@@ -8286,7 +8317,10 @@ bool YourClassName::applyLiveAgileCenterRetune(uint64_t generation, const QStrin
             QTimer::singleShot(0, this, [this] { restartStreamForHardwareChange(); });
             return;
         }
-        const bool rawRestart = rawLiveTune && tuneResult == FOBOS_ERR_BUSY;
+        // The optional RAW API reports busy while its reader still owns the
+        // stream. The stock Fobos SDK headers do not define this status.
+        constexpr int RawTuneBusy = -11;
+        const bool rawRestart = rawLiveTune && tuneResult == RawTuneBusy;
         if (generation != liveCenterRetuneGeneration && (!agileContinuousRetuneEnabled || rawRestart)) {
             // The wheel may have queued many intermediate values. Only the newest
             // target is sent next; stale completion never overwrites its UI value.
@@ -8609,10 +8643,19 @@ void YourClassName::updateSpectrumTimerInterval() {
         return;
     }
 
+    if (networkSpectrumCadenceActive()) {
+        // The next tick presents the finished FFT and requests the next one.
+        // Round up so the timer itself never exceeds the configured rate.
+        const int intervalMs = (1000 + networkSpectrumMaxFps - 1) / networkSpectrumMaxFps;
+        if (updateTimer->interval() != intervalMs) updateTimer->setInterval(intervalMs);
+        return;
+    }
+
     if (spectrumUpdateIntervalMs > SPECTRUM_UPDATE_AUTO_MS) {
-        updateTimer->setInterval((std::clamp)(spectrumUpdateIntervalMs,
-                                              SPECTRUM_UPDATE_MIN_MS,
-                                              SPECTRUM_UPDATE_MAX_MS));
+        const int intervalMs = (std::clamp)(spectrumUpdateIntervalMs,
+                                            SPECTRUM_UPDATE_MIN_MS,
+                                            SPECTRUM_UPDATE_MAX_MS);
+        if (updateTimer->interval() != intervalMs) updateTimer->setInterval(intervalMs);
         return;
     }
 
@@ -8640,7 +8683,7 @@ void YourClassName::updateSpectrumTimerInterval() {
     } else if (pendingSettings.fftLength >= 65536) {
         intervalMs = 40;
     }
-    updateTimer->setInterval(intervalMs);
+    if (updateTimer->interval() != intervalMs) updateTimer->setInterval(intervalMs);
 }
 
 void YourClassName::revertHardwareControlsToSettings() {

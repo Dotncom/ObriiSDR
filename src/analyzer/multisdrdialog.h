@@ -100,6 +100,9 @@ private:
     void startCoherentLive(bool virtualPair, bool alignBySignal = false);
     void stopCoherentLive(const QString &reason = {});
     void updateCoherentLivePreview();
+    void toggleCoherentRecording();
+    void toggleCoherentReplay();
+    void updateCoherentRecording(bool hasPreview);
     void displayPreviewFrame(const AnalyzerSpectrumFrame &frame);
     void clearRemoteUhdPreview();
     QString text(const char *english, const char *ukrainian) const;
@@ -152,11 +155,15 @@ private:
     QPushButton *coherentLiveButton = nullptr;
     QPushButton *coherentVirtualButton = nullptr;
     QPushButton *coherentSignalButton = nullptr;
+    QPushButton *coherentRecordButton = nullptr;
+    QPushButton *coherentReplayButton = nullptr;
+    QLabel *coherentRecordingStatus = nullptr;
     QTimer *coherentLiveTimer = nullptr;
     std::unique_ptr<MultiSdrLiveIq> coherentLive;
     quint64 coherentPreviewSequence = 0;
     bool coherentVirtualActive = false;
     bool coherentSignalActive = false;
+    bool coherentReplayActive = false;
     QVector<CoherentIqCalibration> coherentCalibrations;
     std::vector<float> mosaicFrequencies;
     std::vector<float> mosaicLevels;

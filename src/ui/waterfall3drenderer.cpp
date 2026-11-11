@@ -1491,7 +1491,6 @@ void Waterfall3DRenderer::render(int viewportWidth, int viewportHeight) {
         return;
     }
 
-    glViewport(0, 0, viewportWidth, viewportHeight);
     glDisable(GL_TEXTURE_2D);
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);

@@ -1,6 +1,7 @@
 #include "multisdrliveiq.h"
 
 #include "coherentiqlive.h"
+#include "coherentiqsession.h"
 #include "fftplannermutex.h"
 #include "ffttransformcore.h"
 #include "multisdrsignalalignment.h"
@@ -11,6 +12,8 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <deque>
 #include <memory>
 #include <random>
 #include <system_error>
@@ -80,7 +83,122 @@ AnalyzerSpectrumFrame spectrumFrame(FftTransformCore &fft, const DspIqSourceSnap
     frame.sourceFftLength = length;
     return frame;
 }
+
+bool preparePreviewFft(FftTransformCore &fft) {
+    if (fft.allocateBuffers(CoherentIqLive::BlockSamples, FftTransformCore::Storage::OutOfPlace)) {
+        std::lock_guard<std::mutex> lock(fftwPlannerGlobalMutex());
+        fft.createPlanLocked();
+    }
+    if (!fft.ready()) return false;
+    fft.ensureWindow(FFT_WINDOW_HANN);
+    return true;
 }
+}
+
+class MultiSdrLiveIq::Recorder final {
+public:
+    explicit Recorder(const QString &directory) : writer(&Recorder::run, this, directory) {}
+    ~Recorder() { close(); join(); }
+
+    void submit(std::vector<DspIqSourceSnapshot> block) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (closing) return;
+        if (queue.size() >= 64) {
+            closing = true;
+            interruption = QStringLiteral("IQ recording disk queue overflow");
+        } else {
+            queue.push_back(std::move(block));
+        }
+        ready.notify_one();
+    }
+
+    void close(const QString &reason = {}) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (closing) return;
+        closing = true;
+        interruption = reason;
+        ready.notify_one();
+    }
+
+    void join() {
+        if (writer.joinable()) writer.join();
+    }
+
+    RecordingStatus status() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return {!closing, closing && !finished, samples, manifest, interruption};
+    }
+
+private:
+    void run(QString directory) {
+        CoherentIqRecording recording;
+        QString error;
+        std::vector<DspIqSourceSnapshot> segment;
+        if (recording.create(directory, error)) {
+            const auto flush = [&]() {
+                if (segment.empty()) return true;
+                if (!recording.append(segment, error)) return false;
+                std::lock_guard<std::mutex> lock(mutex);
+                samples += segment.front().iq.size() / 2;
+                segment.clear();
+                return true;
+            };
+            while (error.isEmpty()) {
+                std::vector<DspIqSourceSnapshot> block;
+                {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    ready.wait(lock, [&]() { return closing || !queue.empty(); });
+                    if (queue.empty()) break;
+                    block = std::move(queue.front());
+                    queue.pop_front();
+                }
+                if (segment.empty()) {
+                    segment = std::move(block);
+                } else if (block.size() == segment.size() && block.front().epoch == segment.front().epoch &&
+                           block.front().startComplexSample == segment.front().endComplexSample) {
+                    for (std::size_t i = 0; i < segment.size(); ++i) {
+                        auto &channel = segment[i];
+                        channel.iq.insert(channel.iq.end(), block[i].iq.begin(), block[i].iq.end());
+                        channel.endComplexSample = block[i].endComplexSample;
+                    }
+                } else {
+                    const auto gap = QStringLiteral("IQ recording sample timeline changed");
+                    if (flush()) error = gap;
+                }
+                if (segment.front().iq.size() / 2 >= 2 * segment.front().sampleRateHz)
+                    flush();
+            }
+            if (error.isEmpty()) flush();
+        }
+        QString reason;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            closing = true;
+            reason = error.isEmpty() ? interruption : error;
+            queue.clear();
+        }
+        QString finishError;
+        const QString path = recording.finish(reason, finishError);
+        std::lock_guard<std::mutex> lock(mutex);
+        finished = true;
+        manifest = path;
+        interruption = reason;
+        if (!finishError.isEmpty()) {
+            if (!interruption.isEmpty()) interruption += QStringLiteral(" — ");
+            interruption += finishError;
+        }
+    }
+
+    mutable std::mutex mutex;
+    std::condition_variable ready;
+    std::deque<std::vector<DspIqSourceSnapshot>> queue;
+    bool closing = false;
+    bool finished = false;
+    quint64 samples = 0;
+    QString manifest;
+    QString interruption;
+    std::thread writer;
+};
 
 MultiSdrLiveIq::~MultiSdrLiveIq() { stop(); }
 
@@ -88,10 +206,27 @@ QString MultiSdrLiveIq::start(std::vector<DspSourceIdentity> sources, int maximu
     stop();
     stopping = false;
     signalRestart = false;
+    {
+        std::lock_guard<std::mutex> lock(previewMutex);
+        recordable = true;
+    }
     try {
         worker = std::thread(&MultiSdrLiveIq::run, this, std::move(sources), maximumDelay, virtualPair, alignBySignal);
     } catch (const std::system_error &) {
+        std::lock_guard<std::mutex> lock(previewMutex);
+        recordable = false;
         return QStringLiteral("Could not start the coherent IQ worker");
+    }
+    return {};
+}
+
+QString MultiSdrLiveIq::startReplay(const QString &manifest) {
+    stop();
+    stopping = false;
+    try {
+        worker = std::thread(&MultiSdrLiveIq::runReplay, this, manifest);
+    } catch (const std::system_error &) {
+        return QStringLiteral("Could not start the IQ replay worker");
     }
     return {};
 }
@@ -99,8 +234,43 @@ QString MultiSdrLiveIq::start(std::vector<DspSourceIdentity> sources, int maximu
 void MultiSdrLiveIq::stop() {
     stopping = true;
     if (worker.joinable()) worker.join();
+    const auto current = activeRecorder();
+    if (current) {
+        current->close();
+        current->join();
+    }
     std::lock_guard<std::mutex> lock(previewMutex);
+    recordable = false;
     latest = {};
+}
+
+std::shared_ptr<MultiSdrLiveIq::Recorder> MultiSdrLiveIq::activeRecorder() const {
+    std::lock_guard<std::mutex> lock(previewMutex);
+    return recorder;
+}
+
+QString MultiSdrLiveIq::startRecording(const QString &directory) {
+    std::lock_guard<std::mutex> lock(previewMutex);
+    if (!recordable) return QStringLiteral("Start live coherent IQ before recording");
+    if (recorder) {
+        const auto status = recorder->status();
+        if (status.active || status.finishing) return QStringLiteral("IQ recording is already running");
+    }
+    try {
+        recorder = std::make_shared<Recorder>(directory);
+    } catch (const std::system_error &) {
+        return QStringLiteral("Could not start the IQ recording writer");
+    }
+    return {};
+}
+
+void MultiSdrLiveIq::stopRecording(const QString &reason) {
+    if (const auto current = activeRecorder()) current->close(reason);
+}
+
+MultiSdrLiveIq::RecordingStatus MultiSdrLiveIq::recordingStatus() const {
+    const auto current = activeRecorder();
+    return current ? current->status() : RecordingStatus{};
 }
 
 MultiSdrLiveIq::Preview MultiSdrLiveIq::preview() const {
@@ -121,12 +291,7 @@ void MultiSdrLiveIq::run(std::vector<DspSourceIdentity> sources, int maximumDela
     registry.setSubscriptions(this, keys);
     QString error;
     FftTransformCore fft;
-    if (fft.allocateBuffers(CoherentIqLive::BlockSamples, FftTransformCore::Storage::OutOfPlace)) {
-        std::lock_guard<std::mutex> lock(fftwPlannerGlobalMutex());
-        fft.createPlanLocked();
-    }
-    if (!fft.ready()) error = QStringLiteral("Could not initialize the coherent spectrum FFT");
-    else fft.ensureWindow(FFT_WINDOW_HANN);
+    if (!preparePreviewFft(fft)) error = QStringLiteral("Could not initialize the coherent spectrum FFT");
     CoherentIqLive combiner(alignBySignal ? CoherentIqLive::Timeline::Signal : CoherentIqLive::Timeline::Hardware);
     auto signal = alignBySignal ? std::make_unique<MultiSdrSignalAlignment>() : nullptr;
     VirtualPair simulation;
@@ -142,6 +307,7 @@ void MultiSdrLiveIq::run(std::vector<DspSourceIdentity> sources, int maximumDela
     std::vector<DspIqSourceSnapshot> inputs(sources.size());
     const auto waitForSignal = [&](const QString &reason) {
         if (calibrated) {
+            if (const auto current = activeRecorder()) current->close(reason);
             registry.clear(outputIdentity);
             epoch = nextEpoch.fetch_add(1, std::memory_order_relaxed);
             total = 0;
@@ -206,9 +372,13 @@ void MultiSdrLiveIq::run(std::vector<DspSourceIdentity> sources, int maximumDela
             }
         }
         if (complete && calibrated) {
+            auto current = activeRecorder();
+            if (current && !current->status().active) current.reset();
             for (int attempt = 0; attempt < (signal ? 8 : 3) && !stopping; ++attempt) {
                 DspIqSourceSnapshot output;
-                if (!combiner.takeBlock(inputs, output, error) || output.iq.empty()) break;
+                std::vector<std::vector<float>> aligned;
+                if (!combiner.takeBlock(inputs, output, error, current ? &aligned : nullptr) ||
+                    output.iq.empty()) break;
                 DspIqTimingMetadata timing;
                 timing.epoch = epoch;
                 timing.firstComplexSample = output.startComplexSample;
@@ -220,6 +390,28 @@ void MultiSdrLiveIq::run(std::vector<DspSourceIdentity> sources, int maximumDela
                 timing.nativeSampleFormat = signal ? QStringLiteral("Signal-aligned FC32") : QStringLiteral("Coherent FC32");
                 registry.publish(outputIdentity, output.iq.data(), output.iq.size(), output.sampleRateHz,
                                  output.centerHz, total == 0, &timing);
+                if (current) {
+                    std::vector<DspIqSourceSnapshot> block;
+                    block.reserve(inputs.size());
+                    for (std::size_t i = 0; i < inputs.size(); ++i) {
+                        DspIqSourceSnapshot channel;
+                        channel.source = inputs[i].source;
+                        channel.iq = std::move(aligned[i]);
+                        channel.epoch = epoch;
+                        channel.startComplexSample = output.startComplexSample;
+                        channel.endComplexSample = output.endComplexSample;
+                        channel.hostTimestampNs = timing.hostTimestampNs;
+                        channel.sampleRateHz = output.sampleRateHz;
+                        channel.centerHz = output.centerHz;
+                        channel.clockId = output.clockId;
+                        channel.sampleClockValid = true;
+                        channel.clockLocked = output.clockLocked;
+                        channel.sharedSampleTimeline = output.sharedSampleTimeline;
+                        channel.nativeSampleFormat = QStringLiteral("Aligned FC32");
+                        block.push_back(std::move(channel));
+                    }
+                    current->submit(std::move(block));
+                }
                 lastOutput = now;
                 total += output.iq.size() / 2;
                 if (now >= nextPreview) {
@@ -241,8 +433,83 @@ void MultiSdrLiveIq::run(std::vector<DspSourceIdentity> sources, int maximumDela
     }
     registry.removeSubscriptions(this);
     registry.clear(outputIdentity);
+    {
+        std::lock_guard<std::mutex> lock(previewMutex);
+        recordable = false;
+        if (recorder) recorder->close(error);
+    }
     if (!error.isEmpty()) {
         std::lock_guard<std::mutex> lock(previewMutex);
         latest = {{}, total, int(inputs.size()), error};
     }
+}
+
+void MultiSdrLiveIq::runReplay(QString manifest) {
+    const auto outputIdentity = CoherentIqLive::outputIdentity();
+    auto &registry = DspIqSourceRegistry::instance();
+    CoherentIqRecording recording;
+    QString error;
+    FftTransformCore fft;
+    if (recording.open(manifest, error) && !preparePreviewFft(fft))
+        error = QStringLiteral("Could not initialize the replay spectrum FFT");
+    std::vector<DspIqSourceSnapshot> channels;
+    auto next = Clock::now();
+    auto nextPreview = next;
+    const auto waitForBlock = [&]() {
+        while (!stopping && Clock::now() < next) {
+            // A low sample rate must not delay a user-requested stop.
+            std::this_thread::sleep_until(std::min(next, Clock::now() + 5ms));
+        }
+    };
+    quint64 total = 0;
+    quint64 sequence = 0;
+    DspIqTimingMetadata timing;
+    timing.epoch = nextEpoch.fetch_add(1, std::memory_order_relaxed);
+    timing.sampleClockValid = true;
+    timing.nativeSampleFormat = QStringLiteral("Replay FC32");
+    constexpr int Block = CoherentIqLive::BlockSamples;
+    while (!stopping && error.isEmpty() && recording.readNext(channels, error) && !channels.empty()) {
+        const auto &reference = channels.front();
+        if (reference.iq.size() % (2 * Block) != 0) {
+            error = QStringLiteral("IQ recording segment ends inside a processing block");
+            break;
+        }
+        DspIqSourceSnapshot output;
+        output.iq.resize(2 * Block);
+        output.sampleRateHz = reference.sampleRateHz;
+        output.centerHz = reference.centerHz;
+        const auto blockDuration = std::chrono::duration_cast<Clock::duration>(
+            std::chrono::duration<double>(Block / reference.sampleRateHz));
+        for (std::size_t first = 0; first < reference.iq.size() && !stopping; first += 2 * Block) {
+            waitForBlock();
+            if (stopping) break;
+            const auto now = Clock::now();
+            next = (now - next > 100ms ? now : next) + blockDuration;
+            for (std::size_t n = 0; n < output.iq.size(); ++n) {
+                double sum = 0.0;
+                for (const auto &channel : channels) sum += channel.iq[first + n];
+                output.iq[n] = float(sum / double(channels.size()));
+            }
+            timing.firstComplexSample = reference.startComplexSample + first / 2;
+            timing.hostTimestampNs = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+            registry.publish(outputIdentity, output.iq.data(), output.iq.size(), output.sampleRateHz,
+                             output.centerHz, total == 0, &timing);
+            total += Block;
+            if (now >= nextPreview) {
+                nextPreview = now + 100ms;
+                auto frame = spectrumFrame(fft, output, ++sequence);
+                std::lock_guard<std::mutex> lock(previewMutex);
+                latest = {std::move(frame), total, int(channels.size())};
+            }
+        }
+    }
+    if (!stopping && error.isEmpty() && total == 0)
+        error = QStringLiteral("IQ recording is empty");
+    if (error.isEmpty()) waitForBlock();
+    registry.clear(outputIdentity);
+    std::lock_guard<std::mutex> lock(previewMutex);
+    latest.combinedSamples = total;
+    latest.error = error;
+    latest.replayFinished = true;
+    latest.replayInterruption = recording.interruptionReason();
 }

@@ -14,9 +14,10 @@ BUILD_LITE=1 ./tools/build_linux.sh
 
 The GUI build installs **Obrii SDR (Fusion 110%)** in the application menu and
 on the desktop when a desktop directory is configured. It uses Qt Fusion and
-110% scaling. The same defaults apply
-when starting through `./tools/run_linux.sh`. To recreate the shortcut after
-moving the source tree, run `python3 tools/install_linux_shortcut.py`.
+110% scaling. In a Raspberry Pi Wayland session the shortcut uses XWayland
+when available so Qt 5 drop-down items can be selected with the mouse.
+An explicit `QT_QPA_PLATFORM` setting takes precedence. To recreate the
+shortcut after moving the source tree, run `python3 tools/install_linux_shortcut.py`.
 
 The built executable is in `build/linux-release/ObriiSDR`. This is a source
 package, not a prebuilt ARM binary. The build still compiles the main program,

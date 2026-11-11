@@ -194,6 +194,7 @@ void SpectrumFftWorker::run() {
             if (!fft) fft = std::make_unique<FFTResult>(true);
             fft->setBackendPreference(backendPreference);
             if (!batchWaterfallRows) {
+                requestedRows = 1;
                 frame.valid = fft->storeFFTResults(settings,
                                                   frame.frequencies,
                                                   frame.magnitudes,

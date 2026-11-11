@@ -464,10 +464,13 @@ void YourClassName::settingRange() {
     scaleWidget->setRange(minFrequency, maxFrequency);
     if (isNetworkClientMode() &&
         networkProcessingMode == NetworkProcessingMode::ServerSide &&
-        networkController && networkController->isControlReady()) {
+        networkController && networkController->isControlReady() &&
+        networkController->clientHasControl()) {
+        networkClientViewportCenterHz = 0.5 * (minFrequency + maxFrequency);
+        networkClientViewportSpanHz = maxFrequency - minFrequency;
         QJsonObject viewport;
-        viewport.insert(QStringLiteral("centerHz"), 0.5 * (minFrequency + maxFrequency));
-        viewport.insert(QStringLiteral("spanHz"), maxFrequency - minFrequency);
+        viewport.insert(QStringLiteral("centerHz"), networkClientViewportCenterHz);
+        viewport.insert(QStringLiteral("spanHz"), networkClientViewportSpanHz);
         sendRemoteControlCommand(QStringLiteral("setViewport"), viewport);
     }
     updateFineTuneLabel();

@@ -26,6 +26,7 @@ public:
     void setData(const std::vector<float> &xData, const std::vector<float> &yData, double xMin, double xMax, int fftLength, bool colorf, bool displayOrdered = false, bool preserveFrequencyGaps = false);
     void setOverlayData(const std::vector<float> &yData, bool enabled, bool displayOrdered = false);
     void setLevelRange(float minLevel, float maxLevel);
+    void setDisplayLevelStep(int tenths);
     void setPersistenceEnabled(bool enabled);
     void setPersistenceStyle(int style);
     void setPersistenceParameters(double seconds, int intensityPercent, int thresholdPercent = 0, int smoothingMs = 0);
@@ -87,6 +88,7 @@ protected:
     void leaveEvent(QEvent *event) override;
 
 private:
+    int displayLevelStepTenths = 0;
     void accumulatePersistence();
     bool persistenceEnabled = false;
     SpectrumPersistence persistence;

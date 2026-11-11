@@ -1,4 +1,5 @@
 #include "main.h"
+#include "displaylevelstep.h"
 #include "multivfowidget.h"
 #include "appconstants.h"
 #include "appsettingsutils.h"
@@ -880,6 +881,14 @@ void YourClassName::loadPersistentSettings() {
         const QSignalBlocker blocker(spectrumUpdateSpin);
         spectrumUpdateSpin->setValue(spectrumUpdateIntervalMs);
     }
+    if (displayLevelStepSpin) {
+        const int step = (std::clamp)(settings.value("ui/displayLevelStepTenths", 0).toInt(),
+                                      0, DisplayLevelStep::MaximumTenths);
+        const QSignalBlocker blocker(displayLevelStepSpin);
+        displayLevelStepSpin->setValue(step / 10.0);
+        graphWidget->setDisplayLevelStep(step);
+        waterfallWidget->setDisplayLevelStep(step);
+    }
     frequencyCalibrationOffsetHz =
         (std::clamp)(settings.value("calibration/frequencyOffsetHz",
                                     frequencyCalibrationOffsetHz).toDouble(),
@@ -1298,6 +1307,13 @@ void YourClassName::loadPersistentSettings() {
     serverDisableLocalVisualAudio = settings.value("network/serverDisableLocalVisualAudio", serverDisableLocalVisualAudio).toBool();
     networkFullResolutionSpectrumFrames =
         settings.value("network/fullResolutionSpectrumFrames", networkFullResolutionSpectrumFrames).toBool();
+    networkSpectrumLevelStepTenths =
+        (std::clamp)(settings.value("network/spectrumLevelStepTenths",
+                                   DisplayLevelStep::DefaultNetworkTenths).toInt(),
+                     DisplayLevelStep::DefaultNetworkTenths, DisplayLevelStep::MaximumTenths);
+    networkSpectrumMaxFps =
+        (std::clamp)(settings.value("network/spectrumMaxFps", NETWORK_SPECTRUM_FPS_DEFAULT).toInt(),
+                     NETWORK_SPECTRUM_FPS_MIN, NETWORK_SPECTRUM_FPS_MAX);
     audioRelayTransmitEnabled = settings.value("audioRelay/transmitEnabled", audioRelayTransmitEnabled).toBool();
     audioRelayHost = settings.value("audioRelay/host", audioRelayHost).toString();
     audioRelayPort = static_cast<quint16>((std::clamp)(settings.value("audioRelay/port", static_cast<int>(audioRelayPort)).toInt(), 1, 65535));
@@ -1999,6 +2015,8 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("ui/language", uiLanguage);
     settings.setValue("ui/fineTuneControlMode", fineTuneControlMode);
     settings.setValue("ui/spectrumUpdateIntervalMs", spectrumUpdateIntervalMs);
+    if (displayLevelStepSpin)
+        settings.setValue("ui/displayLevelStepTenths", qRound(displayLevelStepSpin->value() * 10.0));
     settings.setValue("ui/fftBackendPreference",
                       normalizedFftBackendPreference(fftBackendPreference));
     settings.setValue("calibration/frequencyOffsetHz", frequencyCalibrationOffsetHz);
@@ -2110,6 +2128,8 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("network/remoteVfoSquelchDb", remoteVfoSquelchDb);
     settings.setValue("network/serverDisableLocalVisualAudio", serverDisableLocalVisualAudio);
     settings.setValue("network/fullResolutionSpectrumFrames", networkFullResolutionSpectrumFrames);
+    settings.setValue("network/spectrumLevelStepTenths", networkSpectrumLevelStepTenths);
+    settings.setValue("network/spectrumMaxFps", networkSpectrumMaxFps);
     settings.setValue("audioRelay/transmitEnabled", audioRelayTransmitEnabled);
     settings.setValue("audioRelay/host", audioRelayHost);
     settings.setValue("audioRelay/port", static_cast<int>(audioRelayPort));

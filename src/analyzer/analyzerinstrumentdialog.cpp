@@ -1,5 +1,6 @@
 #include "analyzerinstrumentdialog.h"
 
+#include <QAbstractTableModel>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -10,6 +11,7 @@
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QHeaderView>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -17,17 +19,20 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QSaveFile>
 #include <QSettings>
 #include <QSpinBox>
 #include <QTabWidget>
+#include <QTableView>
 #include <QUuid>
 #include <QVBoxLayout>
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace {
 QDoubleSpinBox *frequencySpin(QWidget *parent, double value) {
@@ -47,22 +52,63 @@ std::complex<double> jsonComplex(const QJsonValue &value) {
     return {parts.at(0).toDouble(invalid), parts.at(1).toDouble(invalid)};
 }
 }
+class AnalyzerSimulationTable final : public QAbstractTableModel {
+public:
+    AnalyzerSimulationTable(QStringList headings, QObject *parent)
+        : QAbstractTableModel(parent), headings(std::move(headings)) {}
+
+    int rowCount(const QModelIndex &parent = {}) const override { return parent.isValid() ? 0 : points.size(); }
+    int columnCount(const QModelIndex &parent = {}) const override { return parent.isValid() ? 0 : headings.size(); }
+
+    QVariant headerData(int section, Qt::Orientation orientation, int role) const override {
+        if (orientation == Qt::Horizontal && role == Qt::DisplayRole && section >= 0 && section < headings.size())
+            return headings.at(section);
+        return QAbstractTableModel::headerData(section, orientation, role);
+    }
+
+    QVariant data(const QModelIndex &index, int role) const override {
+        if (!index.isValid() || index.row() >= points.size()) return {};
+        if (role == Qt::TextAlignmentRole) return int(Qt::AlignRight | Qt::AlignVCenter);
+        if (role != Qt::DisplayRole) return {};
+        const auto &point = points.at(index.row());
+        switch (index.column()) {
+        case 0: return QString::number(point.frequencyHz / 1e6, 'f', 6);
+        case 1: return QString::number(point.forwardDb, 'f', 2);
+        case 2: return QString::number(point.forwardDb - point.referenceDb, 'f', 2);
+        case 3: return QString::number(AnalyzerInstrumentPlanner::returnLossDb(point.s11Magnitude), 'f', 2);
+        case 4: return QString::number(AnalyzerInstrumentPlanner::swrFromReflectionMagnitude(point.s11Magnitude), 'f', 3);
+        case 5: return QString::number(point.phaseDegrees, 'f', 2);
+        }
+        return {};
+    }
+
+    void clear() {
+        beginResetModel();
+        points.clear();
+        endResetModel();
+    }
+
+    void append(const AnalyzerMeasurementPoint &point) {
+        beginInsertRows({}, points.size(), points.size());
+        points.append(point);
+        endInsertRows();
+    }
+
+    const QVector<AnalyzerMeasurementPoint> &measurements() const { return points; }
+
+private:
+    QStringList headings;
+    QVector<AnalyzerMeasurementPoint> points;
+};
+
 AnalyzerInstrumentDialog::AnalyzerInstrumentDialog(bool ukrainianUi, QWidget *parent)
     : QDialog(parent), ukrainian(ukrainianUi) {
-    setWindowTitle(text("Analyzer instrument laboratory (draft)",
-                        "Лабораторія приладів Analyzer (чернетка)"));
+    setWindowTitle(text("Analyzer instrument laboratory", "Лабораторія приладів Analyzer"));
     resize(820, 720);
     setMinimumSize(680, 540);
     setAttribute(Qt::WA_DeleteOnClose);
 
     auto *root = new QVBoxLayout(this);
-    auto *notice = new QLabel(text(
-        "Configuration and validation are active. RF execution remains disabled until a qualified hardware backend is connected; this window never fabricates calibrated results.",
-        "Налаштування і перевірка плану вже працюють. RF-запуск вимкнений до підключення перевіреного апаратного backend; це вікно ніколи не підміняє відкалібровані результати макетом."), this);
-    notice->setWordWrap(true);
-    notice->setStyleSheet(QStringLiteral("color:#e8c96b;padding:6px;border:1px solid #665a2b;"));
-    root->addWidget(notice);
-
     auto *tabs = new QTabWidget(this);
     root->addWidget(tabs, 1);
 
@@ -240,6 +286,46 @@ AnalyzerInstrumentDialog::AnalyzerInstrumentDialog(bool ukrainianUi, QWidget *pa
     externalLayout->addStretch();
     tabs->addTab(externalPage, text("SCPI / session", "SCPI / сесія"));
 
+    auto *simulationPage = new QWidget(tabs);
+    auto *simulationLayout = new QVBoxLayout(simulationPage);
+    auto *modelDescription = new QLabel(text(
+        "Ideal 10 MHz low-pass model. Frequency and timing come from the measurement plan.",
+        "Модель ідеального ФНЧ на 10 МГц. Частоти й затримки беруться з плану вимірювання."), simulationPage);
+    modelDescription->setWordWrap(true);
+    simulationLayout->addWidget(modelDescription);
+    auto *simulationActions = new QHBoxLayout();
+    startSimulationButton = new QPushButton(text("Run simulation", "Запустити симуляцію"), simulationPage);
+    stopSimulationButton = new QPushButton(text("Stop", "Зупинити"), simulationPage);
+    saveSimulationButton = new QPushButton(text("Save results…", "Зберегти результати…"), simulationPage);
+    stopSimulationButton->setEnabled(false);
+    saveSimulationButton->setEnabled(false);
+    simulationActions->addWidget(startSimulationButton);
+    simulationActions->addWidget(stopSimulationButton);
+    simulationActions->addWidget(saveSimulationButton);
+    simulationActions->addStretch();
+    simulationLayout->addLayout(simulationActions);
+    simulationStatus = new QLabel(simulationPage);
+    simulationStatus->setWordWrap(true);
+    simulationLayout->addWidget(simulationStatus);
+    simulationProgress = new QProgressBar(simulationPage);
+    simulationProgress->setFormat(QStringLiteral("%v / %m"));
+    simulationProgress->setRange(0, 1);
+    simulationProgress->setValue(0);
+    simulationLayout->addWidget(simulationProgress);
+    auto *resultTable = new QTableView(simulationPage);
+    simulationTable = new AnalyzerSimulationTable({
+        text("Frequency (MHz)", "Частота (МГц)"),
+        text("Forward (dBm)", "Прямий (дБм)"),
+        text("S21 (dB)", "S21 (дБ)"),
+        text("Return loss (dB)", "Зв. втрати (дБ)"),
+        text("SWR", "КСХ"),
+        text("S21 phase (°)", "Фаза S21 (°)")}, resultTable);
+    resultTable->setModel(simulationTable);
+    resultTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    resultTable->setAlternatingRowColors(true);
+    simulationLayout->addWidget(resultTable, 1);
+    tabs->addTab(simulationPage, text("Simulation", "Симуляція"));
+
     validationEdit = new QPlainTextEdit(this);
     validationEdit->setReadOnly(true);
     validationEdit->setMaximumHeight(145);
@@ -250,10 +336,10 @@ AnalyzerInstrumentDialog::AnalyzerInstrumentDialog(bool ukrainianUi, QWidget *pa
     auto *saveButton = new QPushButton(text("Save plan...", "Зберегти план..."), this);
     auto *sessionButton = new QPushButton(text("Save session template...", "Зберегти шаблон сесії..."), this);
     auto *validateButton = new QPushButton(text("Validate", "Перевірити"), this);
-    executeButton = new QPushButton(text("Execute RF", "Запустити RF"), this);
+    auto *executeButton = new QPushButton(text("Execute RF", "Запустити RF"), this);
     executeButton->setEnabled(false);
-    executeButton->setToolTip(text("Requires a qualified hardware backend; not enabled in this draft.",
-                                   "Потрібен перевірений апаратний backend; у цій чернетці запуск вимкнений."));
+    executeButton->setToolTip(text("Requires a qualified UHD or SCPI instrument adapter.",
+                                   "Потрібен перевірений адаптер приладу через UHD або SCPI."));
     auto *closeButton = new QPushButton(text("Close", "Закрити"), this);
     actions->addWidget(loadButton);
     actions->addWidget(saveButton);
@@ -287,8 +373,14 @@ AnalyzerInstrumentDialog::AnalyzerInstrumentDialog(bool ukrainianUi, QWidget *pa
     connect(saveButton, &QPushButton::clicked, this, &AnalyzerInstrumentDialog::savePlan);
     connect(sessionButton, &QPushButton::clicked, this, &AnalyzerInstrumentDialog::saveSessionTemplate);
     connect(validateButton, &QPushButton::clicked, this, &AnalyzerInstrumentDialog::updateValidation);
+    connect(startSimulationButton, &QPushButton::clicked, this, &AnalyzerInstrumentDialog::startSimulation);
+    connect(stopSimulationButton, &QPushButton::clicked, this, [this]() { simulation.cancel(); });
+    connect(saveSimulationButton, &QPushButton::clicked, this, &AnalyzerInstrumentDialog::saveSimulation);
     connect(closeButton, &QPushButton::clicked, this, &QDialog::close);
-    connect(this, &QDialog::finished, this, [this]() { persistLastPlan(); });
+    connect(this, &QDialog::finished, this, [this]() {
+        simulation.cancel();
+        persistLastPlan();
+    });
 
     restoreLastPlan();
     updateValidation();
@@ -523,16 +615,73 @@ void AnalyzerInstrumentDialog::savePlan() {
 }
 
 void AnalyzerInstrumentDialog::saveSessionTemplate() {
-    const QString path = QFileDialog::getSaveFileName(this, text("Save analyzer session template", "Зберегти шаблон сесії аналізатора"),
-                                                       QStringLiteral("analyzer-session.json"),
-                                                       QStringLiteral("Analyzer session (*.json)"));
-    if (path.isEmpty()) return;
     AnalyzerMeasurementSession session;
     session.sessionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     session.applicationVersion = QString::fromLatin1(OBRII_ANALYZER_VERSION);
     session.startedUtc = QDateTime::currentDateTimeUtc();
     session.plan = planFromUi();
     session.eventLog << QStringLiteral("Draft session created; no RF measurement was executed");
+    saveSession(session, text("Save analyzer session template", "Зберегти шаблон сесії аналізатора"),
+                QStringLiteral("analyzer-session.json"));
+}
+
+void AnalyzerInstrumentDialog::startSimulation() {
+    const auto requested = planFromUi();
+    const auto error = AnalyzerInstrumentSimulation::validationError(requested);
+    if (!error.isEmpty()) {
+        simulationStatus->setText(error);
+        return;
+    }
+    if (!simulation.start(requested,
+            [this](const AnalyzerMeasurementPoint &point) {
+                simulationTable->append(point);
+                simulationProgress->setValue(simulationTable->rowCount());
+            },
+            [this](const QString &reason) { finishSimulation(reason); })) {
+        simulationStatus->setText(text("Could not start the simulation.", "Не вдалося запустити симуляцію."));
+        return;
+    }
+    simulationTable->clear();
+    simulatedSession = {};
+    simulatedSession.sessionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    simulatedSession.applicationVersion = QString::fromLatin1(OBRII_ANALYZER_VERSION);
+    simulatedSession.startedUtc = QDateTime::currentDateTimeUtc();
+    simulatedSession.plan = AnalyzerInstrumentSimulation::simulationPlan(requested);
+    simulatedSession.backendId = simulation.backendId();
+    simulatedSession.eventLog << QStringLiteral("Simulated ideal 10 MHz low-pass response");
+    simulationProgress->setRange(0, int(AnalyzerInstrumentSimulation::pointCount(requested)));
+    simulationProgress->setValue(0);
+    simulationStatus->setText(text("Simulation running…", "Триває симуляція…"));
+    startSimulationButton->setEnabled(false);
+    stopSimulationButton->setEnabled(true);
+    saveSimulationButton->setEnabled(false);
+}
+
+void AnalyzerInstrumentDialog::finishSimulation(const QString &error) {
+    simulatedSession.completedUtc = QDateTime::currentDateTimeUtc();
+    simulatedSession.points = simulationTable->measurements();
+    simulatedSession.outcome = error.isEmpty() ? QStringLiteral("completed") : QStringLiteral("cancelled");
+    simulatedSession.eventLog << (error.isEmpty() ? QStringLiteral("Simulation completed") : error);
+    simulationStatus->setText((error.isEmpty()
+        ? text("Simulation completed · %1 points", "Симуляцію завершено · %1 точок")
+        : text("Simulation stopped · %1 points collected", "Симуляцію зупинено · зібрано %1 точок"))
+        .arg(simulatedSession.points.size()));
+    startSimulationButton->setEnabled(true);
+    stopSimulationButton->setEnabled(false);
+    saveSimulationButton->setEnabled(!simulatedSession.points.isEmpty());
+}
+
+void AnalyzerInstrumentDialog::saveSimulation() {
+    if (!simulatedSession.points.isEmpty())
+        saveSession(simulatedSession, text("Save simulated analyzer results", "Зберегти результати симуляції Analyzer"),
+                    QStringLiteral("analyzer-simulation.json"));
+}
+
+void AnalyzerInstrumentDialog::saveSession(const AnalyzerMeasurementSession &session, const QString &title,
+                                           const QString &suggestedName) {
+    const QString path = QFileDialog::getSaveFileName(this, title, suggestedName,
+                                                     QStringLiteral("Analyzer session (*.json)"));
+    if (path.isEmpty()) return;
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) {
         QMessageBox::warning(this, windowTitle(), file.errorString());

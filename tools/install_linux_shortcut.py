@@ -47,9 +47,20 @@ def main():
         launch = ("export BUILD_DIR=" + shlex.quote(str(runtime)) + "\n" +
                   "export APP=" + shlex.quote(str(runtime / "ObriiSDR")) + "\n" +
                   "exec bash " + shlex.quote(str(source / "tools/run_linux.sh")) + ' "$@"\n')
+    try:
+        raspberry_pi = b"Raspberry Pi" in Path("/proc/device-tree/model").read_bytes()
+    except OSError:
+        raspberry_pi = False
+    platform = ""
+    if raspberry_pi:
+        # Qt 5 Wayland popups in Obrii can miss clicks at fractional scale.
+        platform = ('if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -n "${DISPLAY:-}" ]; then\n'
+                    '    export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"\n'
+                    'fi\n')
     wrapper = runtime / "start-obrii-fusion.sh"
     write_file(wrapper, "#!/bin/sh\nset -eu\nunset QT_QPA_PLATFORMTHEME\n"
-               "export QT_STYLE_OVERRIDE=Fusion\nexport QT_SCALE_FACTOR=1.1\n" + launch, 0o755)
+               "export QT_STYLE_OVERRIDE=Fusion\nexport QT_SCALE_FACTOR=1.1\n" +
+               platform + launch, 0o755)
     desktop = ("[Desktop Entry]\nType=Application\nName=Obrii SDR (Fusion 110%)\n"
                "Name[uk]=Обрій SDR (Fusion 110%)\nComment=Wideband SDR receiver\n"
                "Exec=" + exec_argument(wrapper) + "\n"

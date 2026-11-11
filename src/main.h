@@ -625,6 +625,7 @@ private:
     void clearLiveSpectrumSnapshot(bool clearVisualHistory = false, uint64_t iqEpoch = 0);
     void connectDataProcessorSignals();
     void applyServerLocalOutputPolicy();
+    bool networkSpectrumCadenceActive() const;
     bool applyCenterFrequencyToHardwareIfNeeded(const RadioSettings &previousSettings, const char *reason);
     bool applyLiveAgileCenterRetune(uint64_t generation, const QString &reason, double targetHz = 0.0);
     void resetNetworkIqReceptionState(bool clearGraph, bool clearWaterfall, bool restartAudioPrebuffer);
@@ -646,6 +647,7 @@ private:
                                   bool showScanSegmentMarkers = true);
     void displayNetworkSpectrumFrame(const QJsonObject &frame);
     void displayNetworkSpectrumFrameBinary(const QJsonObject &frame, const QByteArray &payload);
+    bool networkSpectrumMatchesViewport(const QJsonObject &frame) const;
     int remoteUhdCompanionChannel() const;
     void receiveRemoteUhdSpectrum(const QJsonObject &frame, const QByteArray &payload);
     void feedRemoteUhdPrimarySpectrum(const QJsonObject &frame,
@@ -1187,8 +1189,14 @@ private:
     QString networkBindAddress = "0.0.0.0";
     quint16 networkControlPort = 21090;
     bool networkFullResolutionSpectrumFrames = false;
+    int networkSpectrumLevelStepTenths = 1;
+    int remoteSpectrumLevelStepTenths = 0;
+    int networkSpectrumMaxFps = NETWORK_SPECTRUM_FPS_DEFAULT;
+    int remoteSpectrumMaxFps = 0;
     double networkRemoteViewportCenterHz = std::numeric_limits<double>::quiet_NaN();
     double networkRemoteViewportSpanHz = std::numeric_limits<double>::quiet_NaN();
+    double networkClientViewportCenterHz = std::numeric_limits<double>::quiet_NaN();
+    double networkClientViewportSpanHz = std::numeric_limits<double>::quiet_NaN();
     bool networkWebServerEnabled = false;
     quint16 networkWebServerPort = 21093;
     QString remoteVfoSessionId;
@@ -1524,6 +1532,7 @@ private:
     QPointer<QProgressBar> spurSweepProgress;
     QPointer<QDialog> spurSweepDialog;
     QSpinBox *spectrumUpdateSpin = nullptr;
+    QDoubleSpinBox *displayLevelStepSpin = nullptr;
     QSpinBox *waterfallRowsSpin = nullptr;
     int spurCalibrationFramesDone = 0;
     int spurCalibrationTargetFrames = 32;

@@ -20,7 +20,8 @@ public:
     // A successful call with empty IQ means a source has not reached this block yet.
     // A failed call invalidates the session and requires fresh calibration.
     bool takeBlock(const std::vector<DspIqSourceSnapshot> &inputs,
-                   DspIqSourceSnapshot &output, QString &error);
+                   DspIqSourceSnapshot &output, QString &error,
+                   std::vector<std::vector<float>> *alignedChannels = nullptr);
     // Largest measured relative phase rate against the reference, in Hz.
     std::optional<double> maximumPhaseDriftHz() const { return measuredDriftHz; }
 

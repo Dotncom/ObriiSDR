@@ -48,6 +48,7 @@ void YourClassName::sendNetworkAudioFrame(const QByteArray &pcmData) {
     frame["channels"] = 1;
     frame["sampleFormat"] = "pcm_s16le";
     static quint64 sentAudioFrames = 0;
+    static quint64 skippedAudioDeliveries = 0;
     frame["sequence"] = QString::number(++sentAudioFrames);
     frame["sourceTimeMs"] = QString::number(QDateTime::currentMSecsSinceEpoch());
     quint64 slowPeers = 0;
@@ -69,11 +70,14 @@ void YourClassName::sendNetworkAudioFrame(const QByteArray &pcmData) {
             networkController->sendControlCommandToPeer(peerId, legacyFrame);
         }
     }
+    skippedAudioDeliveries += slowPeers;
     if (fobosVerboseLoggingEnabled() && sentAudioFrames % 200 == 1) {
         qDebug() << "[NetworkAudio] sent PCM frame"
                  << "frames" << static_cast<qulonglong>(sentAudioFrames)
                  << "bytes" << pcmData.size()
-                 << "slowPeers" << slowPeers;
+                 << "slowPeers" << slowPeers
+                 << "skippedDeliveries" << skippedAudioDeliveries;
+        skippedAudioDeliveries = 0;
     }
 }
 

@@ -2,6 +2,7 @@
 #define ANALYZERINSTRUMENTDIALOG_H
 
 #include "analyzerinstrumentplan.h"
+#include "analyzerinstrumentsimulation.h"
 
 #include <QDateTime>
 #include <QDialog>
@@ -12,8 +13,10 @@ class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
+class QProgressBar;
 class QPushButton;
 class QSpinBox;
+class AnalyzerSimulationTable;
 
 class AnalyzerInstrumentDialog final : public QDialog {
 public:
@@ -28,6 +31,11 @@ private:
     void loadPlan();
     void savePlan();
     void saveSessionTemplate();
+    void startSimulation();
+    void finishSimulation(const QString &error);
+    void saveSimulation();
+    void saveSession(const AnalyzerMeasurementSession &session, const QString &title,
+                     const QString &suggestedName);
     void correctReflectionFile();
     void restoreLastPlan();
     void persistLastPlan() const;
@@ -85,8 +93,15 @@ private:
     QPlainTextEdit *commentEdit = nullptr;
     QLabel *gridSummaryLabel = nullptr;
     QPlainTextEdit *validationEdit = nullptr;
-    QPushButton *executeButton = nullptr;
     QDateTime calibrationCapturedUtc;
+    AnalyzerMeasurementSession simulatedSession;
+    AnalyzerInstrumentSimulation simulation;
+    AnalyzerSimulationTable *simulationTable = nullptr;
+    QLabel *simulationStatus = nullptr;
+    QProgressBar *simulationProgress = nullptr;
+    QPushButton *startSimulationButton = nullptr;
+    QPushButton *stopSimulationButton = nullptr;
+    QPushButton *saveSimulationButton = nullptr;
 };
 
 #endif

@@ -717,8 +717,10 @@ void YourClassName::openApplicationSettings() {
                                             : QStringLiteral("Custom rule; A/B test required");
                 else {
                     basis=uiText("fobos_if_table_provisional", "Survey/model; awaiting A/B test");
+#ifdef OBRII_LOCAL_FOBOS_IF_HEADER
                     if (middle>=OBRII_IF_AUTO_FROM_HZ && middle<OBRII_IF_AUTO_TO_HZ)
                         basis=uiText("fobos_if_table_measured", "Measured LO6 bypass");
+#endif
                     if (middle>=2929e6 && middle<2946e6)
                         basis=uiText("fobos_if_table_conflict", "Both IFs may have interference");
                 }

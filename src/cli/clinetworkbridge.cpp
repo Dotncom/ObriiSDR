@@ -54,11 +54,9 @@ CliNetworkBridge::CliNetworkBridge(QObject *parent) : network(parent) {
             if (count < 2 || count > 65536) return;
             std::vector<float> magnitudes;
             const QString format = command.value(QStringLiteral("binFormat")).toString();
-            if (format == QStringLiteral("s16le-db10")) {
+            if (format == QStringLiteral("s16le-db10") || format == QStringLiteral("u8-level-step")) {
                 std::vector<float> reference;
-                if (!DisplaySpectrumCodec::decodeDb10(payload, count,
-                    command.value(QStringLiteral("hasReferenceMagnitudes")).toBool(),
-                    &magnitudes, &reference)) return;
+                if (!DisplaySpectrumCodec::decodeCompact(command, payload, &magnitudes, &reference)) return;
             } else if (format == QStringLiteral("f32le") && payload.size() >= count * 4) {
                 magnitudes.resize(static_cast<std::size_t>(count));
                 std::memcpy(magnitudes.data(), payload.constData(), static_cast<std::size_t>(count) * 4);

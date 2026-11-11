@@ -227,6 +227,10 @@ bool NetworkController::peerSupportsCompactSpectrum(const QString &peerIdValue) 
     return compactSpectrumPeers.contains(peerForId(peerIdValue));
 }
 
+bool NetworkController::peerSupportsPackedSpectrum(const QString &peerIdValue) const {
+    return packedSpectrumPeers.contains(peerForId(peerIdValue));
+}
+
 bool NetworkController::peerSupportsBinaryAudio(const QString &peerIdValue) const {
     return binaryAudioPeers.contains(peerForId(peerIdValue));
 }
@@ -519,6 +523,7 @@ void NetworkController::closePeerSocket(QTcpSocket *socket) {
         peerPriorityKeys.remove(peer);
         peerStreamProfiles.remove(peer);
         compactSpectrumPeers.remove(peer);
+        packedSpectrumPeers.remove(peer);
         binaryAudioPeers.remove(peer);
         uhdRxSpectrumPeers.remove(peer);
         peerLastMessageTimers.remove(peer);
@@ -554,6 +559,7 @@ void NetworkController::closePeerSocket(QTcpSocket *socket) {
     peerPriorityKeys.clear();
     peerStreamProfiles.clear();
     compactSpectrumPeers.clear();
+    packedSpectrumPeers.clear();
     binaryAudioPeers.clear();
     uhdRxSpectrumPeers.clear();
     peerLastMessageTimers.clear();
@@ -878,6 +884,7 @@ void NetworkController::processLine(QTcpSocket *socket, const QByteArray &line) 
             QJsonObject capabilities;
             capabilities[QStringLiteral("type")] = QStringLiteral("capabilities");
             capabilities[QStringLiteral("compactSpectrumS16")] = true;
+            capabilities[QStringLiteral("compactSpectrumU8")] = true;
             capabilities[QStringLiteral("binaryAudioPcmS16")] = true;
             if (uhdRxSpectrumEnabled)
                 capabilities[QStringLiteral("uhdRxSpectrum")] = true;
@@ -916,6 +923,10 @@ void NetworkController::processLine(QTcpSocket *socket, const QByteArray &line) 
             compactSpectrumPeers.insert(socket);
         else
             compactSpectrumPeers.remove(socket);
+        if (command.value(QStringLiteral("compactSpectrumU8")).toBool(false))
+            packedSpectrumPeers.insert(socket);
+        else
+            packedSpectrumPeers.remove(socket);
         if (command.value(QStringLiteral("binaryAudioPcmS16")).toBool(false))
             binaryAudioPeers.insert(socket);
         else

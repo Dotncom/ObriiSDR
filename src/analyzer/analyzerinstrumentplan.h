@@ -128,6 +128,8 @@ struct AnalyzerMeasurementSession {
     AnalyzerInstrumentPlan plan;
     QVector<AnalyzerMeasurementPoint> points;
     QStringList eventLog;
+    QString backendId;
+    QString outcome;
 
     QJsonObject toJson() const;
     static AnalyzerMeasurementSession fromJson(const QJsonObject &object);

@@ -8,6 +8,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTemporaryDir>
@@ -167,17 +168,20 @@ void testLivePhaseDrift() {
 
 void testVirtualWorker() {
     MultiSdrLiveIq worker;
+    QTemporaryDir directory;
+    require(directory.isValid(), "Could not create IQ recording fixture directory");
     auto &registry = DspIqSourceRegistry::instance();
     const auto source = CoherentIqLive::outputIdentity();
     registry.setSubscriptions(&source, {source.key()});
     require(worker.start({}, 32, true).isEmpty(), "Could not start virtual Multi-SDR");
+    require(worker.startRecording(directory.path()).isEmpty(), "Could not start virtual IQ recording");
     QElapsedTimer elapsed;
     elapsed.start();
     std::uint64_t epoch = 0;
     std::uint64_t endFloat = 0;
     std::uint64_t endSample = 0;
     std::size_t samples = 0;
-    while (elapsed.elapsed() < 3500 && samples < 96000) {
+    while (elapsed.elapsed() < 4500 && samples < 106000) {
         QThread::msleep(10);
         require(worker.preview().error.isEmpty(), "Virtual Multi-SDR worker stopped prematurely");
         DspIqSourceSnapshot frame;
@@ -192,7 +196,7 @@ void testVirtualWorker() {
         endSample = frame.endComplexSample;
         samples += frame.iq.size() / 2;
     }
-    require(samples >= 96000, "Virtual worker did not sustain 48 kS/s");
+    require(samples >= 106000, "Virtual worker did not sustain 48 kS/s");
     const auto preview = worker.preview();
     require(preview.frame.sequence >= 12 && preview.sourceCount == 2 &&
             preview.frame.levelsDb.size() == CoherentIqLive::BlockSamples, "No live spectrum preview");
@@ -200,12 +204,116 @@ void testVirtualWorker() {
     const double peakHz = preview.frame.minimumHz + (peak - preview.frame.levelsDb.begin()) *
                           48000.0 / CoherentIqLive::BlockSamples;
     require(std::abs(peakHz - 145503700) <= 48, "Virtual pilot is at the wrong frequency");
+    worker.stopRecording();
+    elapsed.restart();
+    while (worker.recordingStatus().finishing && elapsed.elapsed() < 2500) QThread::msleep(5);
+    const auto saved = worker.recordingStatus();
+    require(saved.error.isEmpty() && !saved.manifest.isEmpty() && saved.samples >= 106000,
+            "Continuous virtual IQ recording did not finalize");
+    DspIqSourceSnapshot live;
+    require(registry.snapshotSince(source, 0, 0, 2 * 1024 * 1024, live, false),
+            "No live IQ to compare against the recording");
     worker.stop();
     DspIqSourceSnapshot afterStop;
     require(!registry.snapshotSince(source, 0, 0, 32768, afterStop), "Virtual IQ was retained after Stop");
+
+    CoherentIqRecording reader;
+    QString error;
+    require(reader.open(saved.manifest, error), "Cannot open the continuous IQ recording");
+    std::vector<DspIqSourceSnapshot> channels;
+    int segments = 0;
+    std::uint64_t total = 0;
+    std::uint64_t next = 0;
+    std::vector<float> firstBlock;
+    while (reader.readNext(channels, error) && !channels.empty()) {
+        const auto &a = channels[0];
+        const auto &b = channels[1];
+        require(channels.size() == 2 && a.source != b.source && a.iq != b.iq &&
+                a.startComplexSample == b.startComplexSample && a.endComplexSample == b.endComplexSample &&
+                a.startComplexSample >= live.startComplexSample && a.endComplexSample <= live.endComplexSample &&
+                (!segments || a.startComplexSample == next), "Recording lost a channel or the shared sample timeline");
+        const auto offset = std::size_t(a.startComplexSample - live.startComplexSample) * 2;
+        for (std::size_t n = 0; n < a.iq.size(); ++n)
+            require(std::abs(0.5 * (double(a.iq[n]) + b.iq[n]) - live.iq[offset + n]) < 1e-7,
+                    "Recorded channels no longer reconstruct the live waveform");
+        if (!segments) firstBlock.assign(live.iq.begin() + offset, live.iq.begin() + offset + 2048);
+        next = a.endComplexSample;
+        total += a.iq.size() / 2;
+        ++segments;
+    }
+    require(error.isEmpty() && segments >= 2 && total == saved.samples,
+            "Recording index did not recover all full and partial segments");
+
+    require(worker.startReplay(saved.manifest).isEmpty(), "Could not start coherent IQ replay");
+    elapsed.restart();
+    bool firstBlockMatched = false;
+    while (!worker.preview().replayFinished && elapsed.elapsed() < 5000) {
+        if (!firstBlockMatched) {
+            DspIqSourceSnapshot playback;
+            if (registry.snapshotSince(source, 0, 0, 32768, playback, false)) {
+                require(playback.sampleRateHz == 48000 && playback.centerHz == 145500000 &&
+                        playback.iq.size() >= firstBlock.size() && !playback.sharedSampleTimeline,
+                        "Replay did not preserve RF metadata or asserted a live clock");
+                for (std::size_t n = 0; n < firstBlock.size(); ++n)
+                    require(std::abs(playback.iq[n] - firstBlock[n]) < 1e-7f, "Replay changed the IQ waveform");
+                firstBlockMatched = true;
+            }
+        }
+        QThread::msleep(5);
+    }
+    const auto replay = worker.preview();
+    require(firstBlockMatched && replay.replayFinished && replay.error.isEmpty() &&
+            replay.combinedSamples == total && replay.frame.sequence >= 12,
+            "Replay lost IQ or did not finish");
+    worker.stop();
     registry.removeSubscriptions(&source);
+
+    QFile indexFile(saved.manifest);
+    require(indexFile.open(QIODevice::ReadOnly), "Cannot open capture index fixture");
+    auto index = QJsonDocument::fromJson(indexFile.readAll()).object();
+    indexFile.close();
+    auto entries = index.value(QStringLiteral("segments")).toArray();
+    const auto first = entries.at(0);
+    entries.replace(0, entries.at(1));
+    entries.replace(1, first);
+    index.insert(QStringLiteral("segments"), entries);
+    require(indexFile.open(QIODevice::WriteOnly | QIODevice::Truncate), "Cannot alter capture index fixture");
+    const auto altered = QJsonDocument(index).toJson();
+    require(indexFile.write(altered) == altered.size(), "Cannot write the reordered capture index");
+    indexFile.close();
+    require(reader.open(saved.manifest, error) && reader.readNext(channels, error) && !channels.empty() &&
+            !reader.readNext(channels, error) && channels.empty() && error.contains(QStringLiteral("timeline")),
+            "Reordered recording segments were stitched together");
     std::cout << "Virtual Multi-SDR: " << samples << " continuous IQ samples, peak "
               << (peakHz - 145500000) << " Hz from center, " << preview.frame.sequence << " previews\n";
+    std::cout << "Coherent IQ recording: " << total << " samples per RX, " << segments
+              << " segments, replay matched live IQ, reordered segments rejected\n";
+}
+
+void testInterruptedRecording() {
+    QTemporaryDir directory;
+    MultiSdrLiveIq worker;
+    require(directory.isValid() && worker.start({}, 32, true).isEmpty() &&
+            worker.startRecording(directory.path()).isEmpty(), "Could not start recording for the IQ gap test");
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (worker.preview().combinedSamples < 4096 && elapsed.elapsed() < 2000) QThread::msleep(5);
+    require(worker.preview().combinedSamples >= 4096, "No IQ before simulated recording gap");
+    DspIqSourceRegistry::instance().clear(
+        DspSourceIdentity::normalized(QStringLiteral("coherent-virtual-b"), QStringLiteral("rx0")));
+    elapsed.restart();
+    while (worker.recordingStatus().manifest.isEmpty() && elapsed.elapsed() < 2000) QThread::msleep(5);
+    const auto status = worker.recordingStatus();
+    require(!status.manifest.isEmpty() && status.samples >= 4096 &&
+            status.error.contains(QStringLiteral("IQ gap")), "Recording did not preserve the prefix before an IQ gap");
+    CoherentIqRecording recording;
+    std::vector<DspIqSourceSnapshot> channels;
+    QString error;
+    require(recording.open(status.manifest, error) && recording.interruptionReason() == status.error &&
+            recording.readNext(channels, error) && channels.size() == 2 &&
+            channels[0].iq.size() / 2 == status.samples &&
+            recording.readNext(channels, error) && channels.empty(), "Interrupted recording index is inconsistent");
+    std::cout << "Interrupted recording retained " << status.samples << " samples per RX and the gap reason\n";
 }
 }
 
@@ -317,6 +425,7 @@ int main(int argc, char **argv) {
         testLiveAlignment();
         testLivePhaseDrift();
         testVirtualWorker();
+        testInterruptedRecording();
         std::cout << "Coherent IQ delay, phase, gain and alignment self-test passed\n";
         return 0;
     } catch (const std::exception &error) {

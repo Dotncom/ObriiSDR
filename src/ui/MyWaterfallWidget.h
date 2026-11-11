@@ -76,6 +76,7 @@ public:
     void setAlternativeSpectrumGradientFill(bool enabled);
     void setAlternativeSpectrumGradientOpacity(int percent);
     void setLevelRange(float minLevel, float maxLevel);
+    void setDisplayLevelStep(int tenths) { displayLevelStepTenths = tenths; }
     void setBandMarkersEnabled(bool generalEnabled, bool amateurEnabled);
     void setBandMarkersCompact(bool compact);
     void setBandMarkers(const QVector<GraphBandMarker> &markers);
@@ -175,6 +176,7 @@ private:
     QColor valueToColors(float value) const;
     float normalizedLevel(float value) const;
     float yMin, yMax, contrast, sensitivity, levelMin, levelMax;
+    int displayLevelStepTenths = 0;
     double xMin, xMax;
     double metadataCenterFrequencyHz = 0.0;
     double metadataListeningFrequencyHz = 0.0;

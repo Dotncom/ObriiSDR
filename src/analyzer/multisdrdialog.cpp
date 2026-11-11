@@ -16,6 +16,7 @@
 #include <QDialogButtonBox>
 #include <QFrame>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QGridLayout>
@@ -228,7 +229,7 @@ void MultiSdrDialog::updateCoherentSubscriptions() {
 
 void MultiSdrDialog::invalidateCoherentCalibration(const QString &reason) {
     if (restoringSettings) return;
-    if (coherentLive && !coherentVirtualActive) {
+    if (coherentLive && !coherentVirtualActive && !coherentReplayActive) {
         if (coherentSignalActive)
             coherentLive->reacquireSignal();
         else
@@ -303,6 +304,7 @@ void MultiSdrDialog::startCoherentLive(bool virtualPair, bool alignBySignal) {
     coherentLiveButton->setEnabled(!virtualPair && !alignBySignal);
     coherentVirtualButton->setEnabled(virtualPair);
     coherentSignalButton->setEnabled(alignBySignal);
+    coherentReplayButton->setEnabled(false);
     if (alignBySignal) coherentReferenceCombo->setEnabled(false);
     auto *stopButton = virtualPair ? coherentVirtualButton : alignBySignal ? coherentSignalButton : coherentLiveButton;
     stopButton->setText(text("Stop coherent IQ", "Зупинити когерентний IQ"));
@@ -312,15 +314,22 @@ void MultiSdrDialog::startCoherentLive(bool virtualPair, bool alignBySignal) {
 void MultiSdrDialog::stopCoherentLive(const QString &reason) {
     if (!coherentLive) return;
     coherentLiveTimer->stop();
+    if (!reason.isEmpty()) coherentLive->stopRecording(reason);
+    coherentLive->stop();
+    updateCoherentRecording(false);
     coherentLive.reset();
     coherentVirtualActive = false;
     coherentSignalActive = false;
+    coherentReplayActive = false;
     coherentLiveButton->setText(text("Start live coherent IQ", "Запустити живий когерентний IQ"));
     coherentVirtualButton->setText(text("Test virtual pair", "Перевірити віртуальну пару"));
     coherentSignalButton->setText(text("Align by signal (Fobos)", "Вирівняти за сигналом (Фобос)"));
     coherentLiveButton->setEnabled(true);
     coherentVirtualButton->setEnabled(true);
     coherentSignalButton->setEnabled(true);
+    coherentRecordButton->setEnabled(false);
+    coherentReplayButton->setEnabled(true);
+    coherentReplayButton->setText(text("Replay IQ recording…", "Відтворити запис IQ…"));
     coherentReferenceCombo->setEnabled(true);
     coherentLiveStatus->setToolTip({});
     coherentLiveStatus->setText(reason.isEmpty() ? text("Live IQ stopped.", "Живий IQ зупинено.") : reason);
@@ -332,8 +341,16 @@ void MultiSdrDialog::stopCoherentLive(const QString &reason) {
 
 void MultiSdrDialog::updateCoherentLivePreview() {
     const auto preview = coherentLive->preview();
+    updateCoherentRecording(preview.waiting.isEmpty() && preview.frame.sequence != 0);
     if (!preview.error.isEmpty()) {
         stopCoherentLive(preview.error);
+        return;
+    }
+    if (preview.replayFinished) {
+        const auto summary = text("Playback finished · %1 samples", "Відтворення завершено · %1 відліків")
+            .arg(preview.combinedSamples);
+        stopCoherentLive(preview.replayInterruption.isEmpty()
+            ? summary : summary + QStringLiteral(" — ") + preview.replayInterruption);
         return;
     }
     if (!preview.waiting.isEmpty()) {
@@ -350,7 +367,10 @@ void MultiSdrDialog::updateCoherentLivePreview() {
     if (preview.frame.sequence == coherentPreviewSequence) return;
     coherentPreviewSequence = preview.frame.sequence;
     displayPreviewFrame(preview.frame);
-    const auto format = coherentSignalActive
+    const auto format = coherentReplayActive
+        ? text("IQ playback · %1 · %2 RX · %3 kS/s · %4 samples",
+               "Відтворення IQ · %1 · %2 RX · %3 ксемпл/с · %4 відліків")
+        : coherentSignalActive
         ? text("Aligned by signal · %1 · %2 RX · %3 kS/s · %4 samples",
                "Вирівняно за сигналом · %1 · %2 RX · %3 ксемпл/с · %4 відліків")
         : text("Live coherent IQ · %1 · %2 RX · %3 kS/s · %4 samples",
@@ -368,6 +388,84 @@ void MultiSdrDialog::updateCoherentLivePreview() {
         : QString{});
     coherentLiveStatus->setText(status);
     statusLabel->setText(status);
+}
+
+void MultiSdrDialog::toggleCoherentRecording() {
+    if (!coherentLive || coherentReplayActive) return;
+    const auto status = coherentLive->recordingStatus();
+    if (status.active) {
+        coherentLive->stopRecording();
+    } else if (!status.finishing) {
+        QSettings settings;
+        const auto key = QStringLiteral("multiSdr/coherentRecordingDirectory");
+        const auto directory = QFileDialog::getExistingDirectory(this,
+            text("Save coherent IQ recording", "Зберегти запис когерентного IQ"),
+            settings.value(key, QDir::homePath()).toString());
+        if (directory.isEmpty() || !coherentLive || coherentReplayActive) return;
+        const auto error = coherentLive->startRecording(directory);
+        if (!error.isEmpty()) {
+            coherentRecordingStatus->setText(error);
+            return;
+        }
+        settings.setValue(key, directory);
+    }
+    updateCoherentRecording(true);
+}
+
+void MultiSdrDialog::updateCoherentRecording(bool hasPreview) {
+    const auto status = coherentLive->recordingStatus();
+    coherentRecordButton->setEnabled(!coherentReplayActive && !status.finishing &&
+                                    (status.active || hasPreview));
+    coherentRecordButton->setText(status.active
+        ? text("Stop IQ recording", "Зупинити запис IQ")
+        : text("Record coherent IQ…", "Записати когерентний IQ…"));
+    if (status.active) {
+        coherentRecordingStatus->setText(text("Recording · %1 samples saved per RX",
+            "Запис · збережено %1 відліків на RX").arg(status.samples));
+    } else if (status.finishing) {
+        coherentRecordingStatus->setText(text("Finishing IQ recording…", "Завершення запису IQ…"));
+    } else if (!status.manifest.isEmpty()) {
+        auto message = text("Recording saved · %1 samples per RX", "Запис збережено · %1 відліків на RX")
+            .arg(status.samples);
+        if (!status.error.isEmpty()) message += QStringLiteral(" — ") + status.error;
+        coherentRecordingStatus->setText(message);
+        coherentRecordingStatus->setToolTip(status.manifest);
+    } else if (!status.error.isEmpty()) {
+        coherentRecordingStatus->setText(status.error);
+    }
+}
+
+void MultiSdrDialog::toggleCoherentReplay() {
+    if (coherentReplayActive) {
+        stopCoherentLive();
+        return;
+    }
+    if (coherentLive) return;
+    QSettings settings;
+    const auto last = coherentRecordingStatus->toolTip();
+    const auto initial = QFileInfo(last).isFile() ? last :
+        settings.value(QStringLiteral("multiSdr/coherentRecordingDirectory"), QDir::homePath()).toString();
+    const auto path = QFileDialog::getOpenFileName(this,
+        text("Open coherent IQ recording", "Відкрити запис когерентного IQ"),
+        initial,
+        text("IQ recording (recording.json)", "Запис IQ (recording.json)"));
+    if (path.isEmpty() || coherentLive) return;
+    coherentLive = std::make_unique<MultiSdrLiveIq>();
+    const auto error = coherentLive->startReplay(path);
+    if (!error.isEmpty()) {
+        stopCoherentLive(error);
+        return;
+    }
+    coherentReplayActive = true;
+    coherentPreviewSequence = 0;
+    spectrum->clear();
+    previewWaterfall->clear();
+    coherentLiveButton->setEnabled(false);
+    coherentVirtualButton->setEnabled(false);
+    coherentSignalButton->setEnabled(false);
+    coherentReplayButton->setText(text("Stop IQ playback", "Зупинити відтворення IQ"));
+    coherentLiveStatus->setText(text("Opening IQ recording…", "Відкриття запису IQ…"));
+    coherentLiveTimer->start();
 }
 
 void MultiSdrDialog::calibrateCoherentGroup() {
@@ -642,6 +740,14 @@ void MultiSdrDialog::buildUi() {
     coherentLayout->addWidget(coherentVirtualButton, 2, 2, 1, 3);
     coherentLayout->addWidget(coherentSignalButton, 2, 5, 1, 2);
     coherentLayout->addWidget(coherentLiveStatus, 3, 0, 1, 7);
+    coherentRecordButton = new QPushButton(text("Record coherent IQ…", "Записати когерентний IQ…"), coherentBox);
+    coherentRecordButton->setEnabled(false);
+    coherentReplayButton = new QPushButton(text("Replay IQ recording…", "Відтворити запис IQ…"), coherentBox);
+    coherentRecordingStatus = new QLabel(coherentBox);
+    coherentRecordingStatus->setWordWrap(true);
+    coherentLayout->addWidget(coherentRecordButton, 4, 0, 1, 2);
+    coherentLayout->addWidget(coherentReplayButton, 4, 2, 1, 3);
+    coherentLayout->addWidget(coherentRecordingStatus, 4, 5, 1, 2);
     coherentLiveTimer = new QTimer(this);
     coherentLiveTimer->setInterval(100);
     coherentLayout->setColumnStretch(7, 1);
@@ -966,6 +1072,8 @@ void MultiSdrDialog::buildUi() {
     connect(coherentLiveButton, &QPushButton::clicked, this, [this]() { startCoherentLive(false); });
     connect(coherentVirtualButton, &QPushButton::clicked, this, [this]() { startCoherentLive(true); });
     connect(coherentSignalButton, &QPushButton::clicked, this, [this]() { startCoherentLive(false, true); });
+    connect(coherentRecordButton, &QPushButton::clicked, this, &MultiSdrDialog::toggleCoherentRecording);
+    connect(coherentReplayButton, &QPushButton::clicked, this, &MultiSdrDialog::toggleCoherentReplay);
     connect(coherentLiveTimer, &QTimer::timeout, this, &MultiSdrDialog::updateCoherentLivePreview);
     connect(this, &QDialog::finished, this, [this]() { stopCoherentLive(); });
     connect(coherentReferenceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),

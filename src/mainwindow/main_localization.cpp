@@ -772,6 +772,8 @@ void YourClassName::applyUiLanguage() {
         spectrumUpdateSpin->setSpecialValueText(uiText("auto", "Auto"));
         spectrumUpdateSpin->setToolTip(uiText("spectrum_update_interval_tooltip", "Spectrum and waterfall update interval. Auto keeps the FFT-dependent default."));
     }
+    if (displayLevelStepSpin)
+        displayLevelStepSpin->setSpecialValueText(uiText("display_level_step_off", "Full precision"));
     if (waterfallRowsSpin) {
         waterfallRowsSpin->setSuffix(uiLanguage == QStringLiteral("uk") ? QStringLiteral(" рядків/кадр") : QStringLiteral(" rows/frame"));
         waterfallRowsSpin->setToolTip(uiText("waterfall_speed_tooltip", "Visual waterfall scroll speed. Higher values move more rows per FFT frame without increasing FFT load."));

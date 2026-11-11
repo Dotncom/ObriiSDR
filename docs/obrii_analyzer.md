@@ -126,7 +126,7 @@ recording and experiment-bundle paths.
   by 1-100. This permits sub-pixel-Hz inspection of a 50 MS/s capture when the
   source FFT has sufficient resolution; left-drag pans inside the source span.
 
-## Instrument laboratory foundation
+## Instrument laboratory
 
 The **Instrument lab...** button opens a hardware-gated workspace for every
 planned analyzer instrument stage:
@@ -145,14 +145,17 @@ frequency-grid generation, return-loss/SWR formulas and JSON round trips. A
 small backend interface is the future boundary for native UHD, so RF handles do
 not leak into the UI and capability/safety checks cannot be bypassed.
 
-This is deliberately a draft execution layer. The UI can create, validate,
-save and reopen plans and empty session templates, but **Execute RF** remains
-disabled until a hardware adapter has been qualified. Checking a calibration
-box records a completed procedure; it does not fabricate coefficients. SNA,
-return-loss and VNA data must stay labelled diagnostic until the required
-normalization or fixture calibration is present. This lets development pause
-safely until the B210-class receiver arrives without presenting a simulated
-instrument as a finished one.
+Set the frequencies and timing under **Measurement plan**, then open
+**Simulation → Run simulation**. The virtual DUT is an ideal one-pole low-pass
+with a 10 MHz cutoff. The table shows forward level, S21, return loss, SWR
+and S21 phase. The run uses the plan's settle, dwell and averaging values.
+A bidirectional run starts the return pass at the next lower frequency.
+**Stop** keeps the completed points. **Save results…** writes a session JSON
+with the simulation backend ID and a completed or cancelled outcome.
+
+**Execute RF** requires a qualified hardware adapter. Physical SNA,
+return-loss and VNA measurements require their corresponding normalization
+or fixture calibration.
 
 Plan validation rejects non-finite source/safety levels, invalid hardware
 frequency ranges and reference impedance, and available RX/TX devices without

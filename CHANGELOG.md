@@ -1,5 +1,14 @@
 # Changelog
 
+## 9.0.2 Preview - 2026-11-11
+
+- Pace network spectrum updates independently when the GUI server's local display is disabled. Compute one FFT per update and expose a configurable 1–60 frames/s limit.
+- Add separate display and network level steps. Compatible peers can receive one byte per bin at coarser steps while keeping the selected frequency resolution.
+- Give PCM room on the shared TCP stream and keep client zoom stable when delayed viewport frames arrive.
+- Improve Qt Fusion layouts, fractional-DPI waterfall rendering, and popup interaction over XWayland on Raspberry Pi.
+- Record and replay aligned coherent IQ in Multi-SDR.
+- Run and export simulated filter sweeps in Analyzer Instrument Lab.
+
 ## 9.0.1 Preview - 2026-11-11
 
 - Add native UHD receiver controls for B210, dual RX on the CLI server, per-channel settings in Multi-SDR, and timed shared RX/TX test bursts.

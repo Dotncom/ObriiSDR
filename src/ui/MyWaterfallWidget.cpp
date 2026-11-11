@@ -1,4 +1,5 @@
 #include "MyWaterfallWidget.h"
+#include "../utils/displaylevelstep.h"
 #include "radiosettings.h"
 #include "waterfall3drenderer.h"
 
@@ -666,7 +667,6 @@ qDebug() << "MyWaterfallWidget::initializeGL done";
 }
 
 void MyWaterfallWidget::resizeGL(int w, int h) {
-        glViewport(0, 0, w, h);
         if (pauseControl) {
             pauseControl->move((std::max)(2, w - pauseControl->width() - 6), 6);
             pauseControl->raise();
@@ -896,8 +896,9 @@ void MyWaterfallWidget::setData(const std::vector<float> &sourceXData,
                 const std::size_t index = static_cast<std::size_t>(x);
                 pixelFrequencyData[index] = static_cast<float>(
                     this->xMin + (static_cast<double>(x) + 0.5) * span / static_cast<double>(lineWidth));
-                pixelLevelData[index] = pixelMaxData[index];
-                writeWaterfallColor(normalizedLevel(pixelMaxData[index]),
+                const float level = DisplayLevelStep::rounded(pixelMaxData[index], displayLevelStepTenths);
+                pixelLevelData[index] = level;
+                writeWaterfallColor(normalizedLevel(level),
                                     contrastFactor,
                                     sensitivityFactor,
                                     &lineData[index * 3]);
@@ -1621,7 +1622,6 @@ void MyWaterfallWidget::drawMiniWaterfallOverlay(float vStart) {
     const float bottom = top - overlayHeight;
     const float border = 3.0f;
 
-    glViewport(0, 0, width(), height());
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     glOrtho(0.0, width(), 0.0, height(), -1.0, 1.0);
@@ -1920,6 +1920,10 @@ void MyWaterfallWidget::paintGL() {
         return;
     }
 	painter.beginNativePainting();
+    // Keep projections and input in widget coordinates, with a viewport that
+    // covers the physical framebuffer at fractional display scales.
+    const QSize viewport = size() * devicePixelRatioF();
+    glViewport(0, 0, viewport.width(), viewport.height());
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     bool drawSegmentOverlay = true;
     std::vector<float> secondGraphLevels;
@@ -1965,7 +1969,6 @@ void MyWaterfallWidget::paintGL() {
 	    } else {
         //waterfall
 
-        glViewport(0, 0, width(), height());
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
         glOrtho(0, width(), 0, height(), -1, 1);

@@ -1,4 +1,5 @@
 #include "coherentiqsession.h"
+#include "coherentiqlive.h"
 
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -8,6 +9,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QUuid>
 #include <QtEndian>
@@ -22,6 +24,7 @@ namespace {
 constexpr int SchemaVersion = 2;
 constexpr std::size_t MaximumSources = 8;
 constexpr std::size_t MaximumFloatsPerSource = 2U * 1024U * 1024U;
+constexpr int MaximumRecordingSegments = 4096;
 
 QString number(std::uint64_t value) { return QString::number(value); }
 
@@ -118,6 +121,148 @@ std::complex<double> sampleAt(const std::vector<float> &iq, double position) {
 }
 }
 
+bool CoherentIqRecording::create(const QString &parentDirectory, QString &error) {
+    *this = {};
+    QDir parent(parentDirectory);
+    const QString name = QStringLiteral("obrii-iq-recording-%1")
+        .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    if (!QDir::isAbsolutePath(parentDirectory) || !parent.mkdir(name)) {
+        error = QStringLiteral("Cannot create the IQ recording directory");
+        return false;
+    }
+    directory = parent.absoluteFilePath(name);
+    return true;
+}
+
+bool CoherentIqRecording::contiguous(const std::vector<DspIqSourceSnapshot> &channels, QString &error) const {
+    if (channels.size() < 2 || channels.size() > MaximumSources ||
+        (!sources.empty() && channels.size() != sources.size())) {
+        error = QStringLiteral("Invalid IQ recording channel count");
+        return false;
+    }
+    const auto &reference = channels.front();
+    if (reference.epoch == 0 || !std::isfinite(reference.sampleRateHz) ||
+        reference.sampleRateHz < 1.0 || reference.sampleRateHz > CoherentIqLive::MaximumRate ||
+        (!sources.empty() && (reference.epoch != epoch || reference.startComplexSample != next ||
+                             reference.sampleRateHz != rate || reference.centerHz != center ||
+                             reference.clockId != clock))) {
+        error = QStringLiteral("IQ recording sample timeline changed");
+        return false;
+    }
+    for (std::size_t i = 0; i < channels.size(); ++i) {
+        const auto &channel = channels[i];
+        if (channel.gap || !channel.sampleClockValid || channel.clockId != reference.clockId ||
+            channel.startComplexSample != reference.startComplexSample ||
+            channel.endComplexSample != reference.endComplexSample || channel.epoch != reference.epoch ||
+            channel.sampleRateHz != reference.sampleRateHz || channel.centerHz != reference.centerHz ||
+            (!sources.empty() && channel.source != sources[i])) {
+            error = QStringLiteral("IQ recording channels do not share the same sample range");
+            return false;
+        }
+    }
+    return true;
+}
+
+void CoherentIqRecording::advance(const std::vector<DspIqSourceSnapshot> &channels) {
+    const auto &reference = channels.front();
+    if (sources.empty()) {
+        for (const auto &channel : channels) sources.push_back(channel.source);
+        clock = reference.clockId;
+        rate = reference.sampleRateHz;
+        center = reference.centerHz;
+        epoch = reference.epoch;
+    }
+    next = reference.endComplexSample;
+}
+
+bool CoherentIqRecording::append(const std::vector<DspIqSourceSnapshot> &channels, QString &error) {
+    if (segments.size() >= MaximumRecordingSegments) {
+        error = QStringLiteral("IQ recording segment limit reached");
+        return false;
+    }
+    if (!contiguous(channels, error)) return false;
+    QString manifest;
+    if (!CoherentIqSession::write(directory, channels, {}, manifest, error)) return false;
+    segments.append(QFileInfo(QFileInfo(manifest).absolutePath()).fileName());
+    advance(channels);
+    return true;
+}
+
+QString CoherentIqRecording::finish(const QString &reason, QString &error) const {
+    if (segments.isEmpty()) {
+        error = QStringLiteral("No coherent IQ was recorded");
+        return {};
+    }
+    const QJsonObject index{
+        {QStringLiteral("format"), QStringLiteral("obrii-coherent-iq-recording")},
+        {QStringLiteral("schemaVersion"), 1},
+        {QStringLiteral("segments"), QJsonArray::fromStringList(segments)},
+        {QStringLiteral("interruption"), reason}
+    };
+    QSaveFile file(QDir(directory).filePath(QStringLiteral("recording.json")));
+    file.setDirectWriteFallback(false);
+    if (!file.open(QIODevice::WriteOnly) ||
+        !writeAll(file, QJsonDocument(index).toJson(QJsonDocument::Indented)) || !file.commit()) {
+        error = QStringLiteral("Cannot commit IQ recording index in %1").arg(directory);
+        return {};
+    }
+    return file.fileName();
+}
+
+bool CoherentIqRecording::open(const QString &manifestPath, QString &error) {
+    *this = {};
+    QFile file(manifestPath);
+    if (!file.open(QIODevice::ReadOnly) || file.size() > 1024 * 1024) {
+        error = QStringLiteral("Cannot open the IQ recording index");
+        return false;
+    }
+    const auto index = QJsonDocument::fromJson(file.readAll()).object();
+    const auto entries = index.value(QStringLiteral("segments")).toArray();
+    if (index.value(QStringLiteral("format")).toString() != QStringLiteral("obrii-coherent-iq-recording") ||
+        index.value(QStringLiteral("schemaVersion")).toInt() != 1 ||
+        entries.isEmpty() || entries.size() > MaximumRecordingSegments) {
+        error = QStringLiteral("Unsupported IQ recording index");
+        return false;
+    }
+    const QRegularExpression segmentName(QStringLiteral("\\Aobrii-coherent-[0-9]{8}-[0-9]{6}-[0-9]{3}-[a-f0-9]{8}\\z"));
+    QSet<QString> seen;
+    QStringList validated;
+    for (const auto &entry : entries) {
+        const QString name = entry.toString();
+        if (!segmentName.match(name).hasMatch() || seen.contains(name)) {
+            error = QStringLiteral("Invalid or duplicate IQ recording segment");
+            return false;
+        }
+        seen.insert(name);
+        validated.append(name);
+    }
+    directory = QFileInfo(manifestPath).absolutePath();
+    interruption = index.value(QStringLiteral("interruption")).toString();
+    segments = std::move(validated);
+    return true;
+}
+
+bool CoherentIqRecording::readNext(std::vector<DspIqSourceSnapshot> &channels, QString &error) {
+    channels.clear();
+    if (position >= segments.size()) return true;
+    const QFileInfo segment(QDir(directory).filePath(segments[position]));
+    const QFileInfo manifest(QDir(segment.filePath()).filePath(QStringLiteral("manifest.json")));
+    if (!segment.isDir() || segment.isSymLink() || segment.isJunction() ||
+        !manifest.isFile() || manifest.isSymLink()) {
+        error = QStringLiteral("Missing or redirected IQ recording segment");
+        return false;
+    }
+    std::vector<CoherentIqCalibration> unused;
+    if (!CoherentIqSession::read(manifest.filePath(), channels, unused, error) ||
+        !contiguous(channels, error)) {
+        channels.clear();
+        return false;
+    }
+    advance(channels);
+    ++position;
+    return true;
+}
+
 bool CoherentIqSession::write(
     const QString &parentDirectory,
     const std::vector<DspIqSourceSnapshot> &sources,
@@ -182,6 +327,7 @@ bool CoherentIqSession::write(
             {QStringLiteral("sampleClockValid"), source.sampleClockValid},
             {QStringLiteral("hardwareTimestamp"), source.hardwareTimestamp},
             {QStringLiteral("clockLocked"), source.clockLocked},
+            {QStringLiteral("sharedSampleTimeline"), source.sharedSampleTimeline},
             {QStringLiteral("nativeAdcBits"), source.nativeAdcBits},
             {QStringLiteral("nativeSampleFormat"), source.nativeSampleFormat},
             {QStringLiteral("normalizedFullScale"), source.normalizedFullScale}
@@ -293,6 +439,7 @@ bool CoherentIqSession::read(
         source.sampleClockValid = entry.value(QStringLiteral("sampleClockValid")).toBool();
         source.hardwareTimestamp = entry.value(QStringLiteral("hardwareTimestamp")).toBool();
         source.clockLocked = entry.value(QStringLiteral("clockLocked")).toBool();
+        source.sharedSampleTimeline = entry.value(QStringLiteral("sharedSampleTimeline")).toBool();
         source.nativeAdcBits = entry.value(QStringLiteral("nativeAdcBits")).toInt();
         source.nativeSampleFormat = entry.value(QStringLiteral("nativeSampleFormat")).toString();
         source.normalizedFullScale = entry.value(QStringLiteral("normalizedFullScale")).toDouble(1.0);

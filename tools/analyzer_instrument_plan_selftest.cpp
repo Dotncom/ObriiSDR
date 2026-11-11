@@ -1,6 +1,8 @@
 #include "analyzerinstrumentplan.h"
+#include "analyzerinstrumentsimulation.h"
 
 #include <QCoreApplication>
+#include <QEventLoop>
 #include <QJsonDocument>
 #include <QTextStream>
 
@@ -14,6 +16,79 @@ void check(bool condition, const QString &message) {
     if (condition) return;
     QTextStream(stderr) << "FAIL: " << message << '\n';
     ++failures;
+}
+
+void testSimulation() {
+    AnalyzerInstrumentSimulation simulation;
+    AnalyzerInstrumentPlan plan;
+    plan.mode = AnalyzerInstrumentMode::VectorNetworkAnalyzer;
+    plan.startHz = 5e6;
+    plan.stopHz = 15e6;
+    plan.points = 3;
+    plan.bidirectionalSweep = true;
+    plan.settleMs = 1.0;
+    plan.dwellMs = 1.0;
+    plan.averages = 2;
+    plan.useExternalGenerator = true;
+    plan.scpi.enabled = true;
+    plan.scpi.resource = QStringLiteral("fixture");
+    plan.calibration.openMeasured = true;
+    QVector<AnalyzerMeasurementPoint> points;
+    QString completion;
+    int completions = 0;
+    QEventLoop loop;
+    const auto run = [&](bool cancel) {
+        points.clear();
+        completion.clear();
+        completions = 0;
+        const auto report = [&](const AnalyzerMeasurementPoint &point) {
+            points.append(point);
+            if (cancel && points.size() == 2) simulation.cancel();
+        };
+        const auto done = [&](const QString &error) {
+            ++completions;
+            completion = error;
+            loop.quit();
+        };
+        check(simulation.start(plan, report, done), QStringLiteral("simulation start"));
+        check(points.isEmpty(), QStringLiteral("simulation start must return before measurements"));
+        check(!simulation.start(plan, report, done), QStringLiteral("reject concurrent simulation"));
+        QTimer deadline;
+        deadline.setSingleShot(true);
+        QObject::connect(&deadline, &QTimer::timeout, &loop, &QEventLoop::quit);
+        deadline.start(2000);
+        loop.exec();
+        check(completions == 1, QStringLiteral("simulation completes once"));
+        simulation.cancel();
+        check(completions == 1, QStringLiteral("cancel after completion is idempotent"));
+    };
+    run(false);
+    QVector<double> frequencies;
+    for (const auto &point : points) frequencies.append(point.frequencyHz);
+    check(completion.isEmpty() && frequencies == QVector<double>{5e6, 10e6, 15e6, 10e6, 5e6},
+          QStringLiteral("both passes visit the expected frequencies once per direction"));
+    if (points.size() >= 2) {
+        const auto &corner = points.at(1);
+        const double expected = std::cos(0.002) / std::sqrt(2.0);
+        check(corner.valid && std::abs(corner.s21Magnitude - expected) < 1e-12 &&
+              std::abs(corner.s11Magnitude - expected) < 1e-12 &&
+              std::abs(corner.phaseDegrees + 45.0) < 1e-12,
+              QStringLiteral("averaged complex S-parameters at the 10 MHz corner"));
+    }
+    run(true);
+    check(!completion.isEmpty() && points.size() == 2, QStringLiteral("stop keeps the measured prefix"));
+    run(false);
+    check(completion.isEmpty() && points.size() == 5, QStringLiteral("restart after cancellation"));
+
+    const auto saved = AnalyzerInstrumentSimulation::simulationPlan(plan);
+    check(!saved.useExternalGenerator && !saved.scpi.enabled && saved.scpi.resource.isEmpty() &&
+          !saved.calibration.openMeasured && !simulation.capabilities().transmitterAvailable,
+          QStringLiteral("simulation uses no SCPI, TX or claimed hardware calibration"));
+    plan.points = std::numeric_limits<int>::max();
+    check(!AnalyzerInstrumentSimulation::validationError(plan).isEmpty(), QStringLiteral("simulation rejects oversized plans"));
+    plan.points = 8000;
+    check(!AnalyzerInstrumentSimulation::validationError(plan).isEmpty(),
+          QStringLiteral("both directions count toward the simulation limit"));
 }
 }
 
@@ -60,6 +135,8 @@ int main(int argc, char **argv) {
     measured.valid = true;
     session.points.append(measured);
     session.eventLog.append(QStringLiteral("fixture"));
+    session.backendId = QStringLiteral("simulation-ideal-low-pass");
+    session.outcome = QStringLiteral("cancelled");
     const AnalyzerMeasurementSession restoredSession =
         AnalyzerMeasurementSession::fromJson(session.toJson());
     check(restoredSession.points.size() == 1 && restoredSession.points.first().valid,
@@ -67,6 +144,8 @@ int main(int argc, char **argv) {
     check(restoredSession.eventLog.size() == 1 &&
               restoredSession.eventLog.first() == QStringLiteral("fixture"),
           QStringLiteral("session event-log JSON round-trip"));
+    check(restoredSession.backendId == session.backendId && restoredSession.outcome == session.outcome,
+          QStringLiteral("simulation provenance and outcome JSON round-trip"));
 
     const QVector<double> grid = AnalyzerInstrumentPlanner::frequencyGrid(draft);
     check(grid.size() == draft.points, QStringLiteral("frequency grid size"));
@@ -147,7 +226,8 @@ int main(int argc, char **argv) {
     check(!AnalyzerInstrumentPlanner::correctOnePort(standards, readings, measure(expected), corrected),
           QStringLiteral("singular Open/Short/Load calibration must be rejected"));
 
-    QTextStream(stdout) << "Analyzer instrument plan self-test: "
+    testSimulation();
+    QTextStream(stdout) << "Analyzer instrument plan and simulation self-test: "
                         << (failures == 0 ? "PASS" : "FAIL") << '\n';
     return failures == 0 ? 0 : 1;
 }
