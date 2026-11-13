@@ -89,7 +89,7 @@ bool VirtualTransmitterBackend::writeIq(const std::complex<float> *samples, int 
     }
     if (!pollConnection()) {
         nextDiscontinuity = true;
-        if (currentConfiguration.liveSource) {
+        if (currentConfiguration.liveSource && currentConfiguration.modulation != TxModulation::M17Voice) {
             if (error) error->clear();
             return true;
         }
@@ -102,6 +102,8 @@ bool VirtualTransmitterBackend::writeIq(const std::complex<float> *samples, int 
         const quint32 sampleRate = static_cast<quint32>((std::max)(1, currentConfiguration.sampleRate));
         if (!sampleEpochNs || nextDiscontinuity) {
             sampleEpochNs = QDateTime::currentMSecsSinceEpoch() * 1000000LL;
+            if (currentConfiguration.liveSource && currentConfiguration.modulation == TxModulation::M17Voice)
+                sampleEpochNs += 100000000LL; // Cover one retained M17 frame and microphone callback jitter.
             sampleCursor = 0;
         }
         VirtualSignalFrame frame;
@@ -122,7 +124,7 @@ bool VirtualTransmitterBackend::writeIq(const std::complex<float> *samples, int 
         if (!writeFrame(frame, error)) {
             resetConnection();
             nextDiscontinuity = true;
-            if (currentConfiguration.liveSource) {
+            if (currentConfiguration.liveSource && currentConfiguration.modulation != TxModulation::M17Voice) {
                 if (error) error->clear();
                 return true;
             }

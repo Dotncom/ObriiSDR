@@ -310,7 +310,7 @@ void YourClassName::populateSampleRates() {
     }
     if (isSoapySdrSelected() || isUhdNativeSelected()) {
         sampleBox->clear();
-        const QVector<double> soapyRates = {
+        QVector<double> receiverRates = {
             1000000.0,
             1024000.0,
             1536000.0,
@@ -319,10 +319,11 @@ void YourClassName::populateSampleRates() {
             3200000.0,
             8000000.0,
             10000000.0,
-            20000000.0,
-            50000000.0
+            20000000.0
         };
-        for (const double rate : soapyRates) {
+        if (isUhdNativeSelected()) receiverRates.append(30720000.0);
+        receiverRates.append(50000000.0);
+        for (const double rate : receiverRates) {
             sampleBox->addItem(formatSampleRate(rate), rate);
         }
         if (sampleBox->findData(pendingSettings.sampleRate) < 0) {
@@ -332,7 +333,8 @@ void YourClassName::populateSampleRates() {
         if (index >= 0) {
             sampleBox->setCurrentIndex(index);
         }
-        qDebug() << "[SoapySDR] using generic Soapy sample-rate list";
+        qDebug() << (isUhdNativeSelected() ? "[UHD] using native sample-rate list"
+                                          : "[SoapySDR] using generic Soapy sample-rate list");
         return;
     }
     if (isRtlBackendSelected()) {
@@ -1528,11 +1530,7 @@ void YourClassName::updateSpectrum() {
                  << "magCount" << displayMagnitudes.size()
                  << "scanVisual" << scanVisualActive;
     }
-    const bool suppressLocalVisual =
-        networkMode == NetworkMode::Server &&
-        serverDisableLocalVisualAudio &&
-        networkController &&
-        networkController->isControlReady();
+    const bool suppressLocalVisual = serverLocalOutputSuppressed();
     if (!suppressLocalVisual) {
         const bool presentMainSpectrum = graphWidget && graphWidget->isVisible() && !isMinimized();
         const bool presentMainWaterfall = waterfallWidget && waterfallWidget->isVisible() && !isMinimized();

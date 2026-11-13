@@ -484,6 +484,14 @@ void DataProcessor::run() {
         runVirtualSignalReader(readerStream);
         return;
     }
+#ifdef __linux__
+    if (readerStreamKind == ReceiverBackendStreamKind::FobosStandard) {
+        // A raw IQ pair occupies four bytes. Keep every read a multiple of the
+        // 1024-byte SuperSpeed packet so a full packet fits at the end of the read.
+        constexpr uint32_t samplesPerUsbPacket = 1024 / 4;
+        readBlockSamples -= readBlockSamples % samplesPerUsbPacket;
+    }
+#endif
     if (readerApiKind == FobosApiKind::Agile && requestedAgileScanEnabled.load()) {
         readBlockSamples = (std::max)(readBlockSamples, MIN_SYNC_BLOCK_SAMPLES);
     }

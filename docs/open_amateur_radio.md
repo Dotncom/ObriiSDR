@@ -32,8 +32,9 @@ The virtual TX queue holds up to 16 waiting frames. Disabling TX, stopping KISS
 or closing the lab discards queued frames. If the virtual receiver connection
 fails during TX, the app disables TX and shows the error. In CLI, the RX module
 and `ObriiCli module tx kiss 8002 obrii-virtual-iq 144.8M` use separate ports.
-The TX command listens on loopback and writes 48 kS/s IQ to local IPC. RF PTT
-and G3RUH still require separate integration.
+The TX command listens on loopback and writes 48 kS/s IQ to local IPC. The
+CLI also supports AX.25 UI bursts through UHD with `module tx kiss-uhd`.
+See [Obrii CLI](obrii_cli.md) for its options. G3RUH remains separate work.
 
 ### M17
 
@@ -52,9 +53,22 @@ The lab distinguishes raw packet bytes from the M17 SMS application form
 (`0x05`, UTF-8 text, terminating null) instead of silently treating every text
 box as an application-compatible message.
 
-This is real protocol framing, but not yet a release claim for live RF timing,
-symbol recovery from audio/IQ, Codec 2 voice, or interoperability. Those require the optional
-RF/audio modem path and repeatable real-air captures.
+`ObriiCli module tx m17` emits M17 SMS packets as IQ for file, virtual or
+explicitly selected RF output. The file generator has been verified through
+the production M17 receiver.
+
+For voice, select **M17 voice (Codec2 3200)** in the TX dialog and enter the
+source callsign, destination and CAN. Choose **Microphone** for a continuous
+call, **Microphone PTT** to speak while holding the key, or **Audio file** to
+send a WAV recording. In PTT mode, press Start, then hold the button, hold Space
+with the button focused, or hold F12 in the TX window. Release ends the call.
+Microphone modes generate IQ at 48 kS/s. The CLI command
+`ObriiCli module tx m17-voice` accepts a WAV recording. The encoder loads the optional
+Codec2 runtime and forms clear 40 ms voice frames, cycling the link setup
+information so a receiver can acquire an ongoing transmission. The last frame
+is padded to 40 ms and marked as the end of the stream. The 48 kS/s IQ path
+has been tested through Obrii's own receiver. Interoperability testing with
+physical radios remains pending. [M17 protocol specification](https://spec.m17project.org/files/M17_spec.pdf)
 
 ## Backend Contract
 

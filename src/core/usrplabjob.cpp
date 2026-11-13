@@ -29,7 +29,9 @@ namespace {
 const QString zmqAction = QStringLiteral("zmq-loopback");
 const QStringList actions{QStringLiteral("contracts"), QStringLiteral("wifi-loopback"),
     QStringLiteral("lte-zmq"), QStringLiteral("gsm-demo"), QStringLiteral("gsm-decode"),
-    QStringLiteral("gsm-replay"), QStringLiteral("umts-decode"), zmqAction};
+    QStringLiteral("gsm-replay"), QStringLiteral("umts-decode"), QStringLiteral("umts-demo"), zmqAction};
+const QStringList umtsDemoScenarios{QStringLiteral("prach"), QStringLiteral("rrc"),
+    QStringLiteral("attach"), QStringLiteral("ipv4"), QStringLiteral("rlc-recovery")};
 constexpr qint64 maxResultBytes = 64 * 1024;
 constexpr int maxDiagnosticBytes = 4096;
 
@@ -60,6 +62,11 @@ QString interpreter() {
 #ifdef Q_OS_WIN
     return QStandardPaths::findExecutable(QStringLiteral("python.exe"));
 #else
+    const auto root = labRoot();
+    if (!root.isEmpty()) {
+        const QFileInfo bundled(QDir(root).filePath(QStringLiteral(".venv/bin/python")));
+        if (bundled.isFile() && bundled.isExecutable()) return bundled.absoluteFilePath();
+    }
     return QStandardPaths::findExecutable(QStringLiteral("python3"));
 #endif
 }
@@ -98,6 +105,12 @@ UsrpLabJob *UsrpLabJob::forOwner(QObject *owner) {
 QJsonObject UsrpLabJob::arguments(const QStringList &words) {
     const QString action = words.value(0, QStringLiteral("status"));
     QJsonObject request{{"action", action}};
+    if (action == QStringLiteral("umts-demo")) {
+        const auto scenario = words.value(1, QStringLiteral("ipv4"));
+        if (words.size() > 2 || !umtsDemoScenarios.contains(scenario)) return {};
+        request.insert("scenario", scenario);
+        return request;
+    }
     if (action == QStringLiteral("umts-decode")) {
         if (words.size() < 3 || words.size() > 6) return {};
         bool valid = false;
@@ -160,8 +173,17 @@ QJsonObject UsrpLabJob::command(const QJsonObject &request) {
 
     QJsonObject payload{{"schema", 1}, {"action", action}};
     const bool umts = action == QStringLiteral("umts-decode");
+    const bool demo = action == QStringLiteral("umts-demo");
     const bool decode = action == QStringLiteral("gsm-decode");
     const bool replay = action == QStringLiteral("gsm-replay");
+    if (demo) {
+        const auto scenario = request.value("scenario").toString(QStringLiteral("ipv4"));
+        if (!umtsDemoScenarios.contains(scenario) ||
+            (request.contains("scenario") && !request.value("scenario").isString()) ||
+            request.size() != (request.contains("scenario") ? 2 : 1))
+            return error(QStringLiteral("Choose a supported UMTS demo scenario."));
+        payload.insert("scenario", scenario);
+    }
     if (decode || replay) {
         const QFileInfo input(request.value("input").toString());
         const int arfcn = request.value("arfcn").toInt(-1);
@@ -207,7 +229,7 @@ QJsonObject UsrpLabJob::command(const QJsonObject &request) {
         payload.insert("offset", offset);
         payload.insert("format", format);
         payload.insert("start", start);
-    } else if (payload.size() != request.size() + 1)
+    } else if (!demo && payload.size() != request.size() + 1)
         return error(QStringLiteral("Unexpected arguments for this USRP lab action."));
 
     const QString root = labRoot();

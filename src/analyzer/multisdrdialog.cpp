@@ -249,6 +249,7 @@ void MultiSdrDialog::startCoherentLive(bool virtualPair, bool alignBySignal) {
         stopCoherentLive();
         return;
     }
+    const bool stitchBands = coherentStitchBands->isChecked() && !alignBySignal;
     std::vector<DspSourceIdentity> identities;
     if (!virtualPair) {
         const int referenceIndex = coherentReferenceCombo->currentData().toInt();
@@ -285,8 +286,10 @@ void MultiSdrDialog::startCoherentLive(bool virtualPair, bool alignBySignal) {
         }
     }
     coherentLive = std::make_unique<MultiSdrLiveIq>();
+    const CoherentIqLiveOptions options{!stitchBands && coherentNoiseWeighted->isChecked(),
+                                        !stitchBands && coherentTrackPhase->isChecked()};
     const auto error = coherentLive->start(std::move(identities), virtualPair ? 32 : coherentMaxDelaySpin->value(),
-                                           virtualPair, alignBySignal);
+                                           virtualPair, alignBySignal, stitchBands, options);
     if (!error.isEmpty()) {
         stopCoherentLive(error);
         return;
@@ -297,7 +300,8 @@ void MultiSdrDialog::startCoherentLive(bool virtualPair, bool alignBySignal) {
     spectrum->clear();
     previewWaterfall->clear();
     coherentLiveStatus->setToolTip({});
-    coherentLiveStatus->setText(alignBySignal ? text("Searching for a common signal…", "Пошук спільного сигналу…")
+    coherentLiveStatus->setText(stitchBands ? text("Waiting for synchronized bands…", "Очікуємо синхронізовані смуги…")
+        : alignBySignal ? text("Searching for a common signal…", "Пошук спільного сигналу…")
                                              : text("Waiting for synchronized IQ and calibration…",
                                                     "Очікуємо синхронізовані IQ та калібрування…"));
     statusLabel->setText(coherentLiveStatus->text());
@@ -305,6 +309,9 @@ void MultiSdrDialog::startCoherentLive(bool virtualPair, bool alignBySignal) {
     coherentVirtualButton->setEnabled(virtualPair);
     coherentSignalButton->setEnabled(alignBySignal);
     coherentReplayButton->setEnabled(false);
+    coherentStitchBands->setEnabled(false);
+    coherentNoiseWeighted->setEnabled(false);
+    coherentTrackPhase->setEnabled(false);
     if (alignBySignal) coherentReferenceCombo->setEnabled(false);
     auto *stopButton = virtualPair ? coherentVirtualButton : alignBySignal ? coherentSignalButton : coherentLiveButton;
     stopButton->setText(text("Stop coherent IQ", "Зупинити когерентний IQ"));
@@ -327,6 +334,9 @@ void MultiSdrDialog::stopCoherentLive(const QString &reason) {
     coherentLiveButton->setEnabled(true);
     coherentVirtualButton->setEnabled(true);
     coherentSignalButton->setEnabled(true);
+    coherentStitchBands->setEnabled(true);
+    coherentNoiseWeighted->setEnabled(true);
+    coherentTrackPhase->setEnabled(true);
     coherentRecordButton->setEnabled(false);
     coherentReplayButton->setEnabled(true);
     coherentReplayButton->setText(text("Replay IQ recording…", "Відтворити запис IQ…"));
@@ -373,6 +383,9 @@ void MultiSdrDialog::updateCoherentLivePreview() {
         : coherentSignalActive
         ? text("Aligned by signal · %1 · %2 RX · %3 kS/s · %4 samples",
                "Вирівняно за сигналом · %1 · %2 RX · %3 ксемпл/с · %4 відліків")
+        : coherentStitchBands->isChecked()
+        ? text("Stitched IQ · %1 · %2 RX · %3 kS/s · %4 samples",
+               "Зшитий IQ · %1 · %2 RX · %3 ксемпл/с · %4 відліків")
         : text("Live coherent IQ · %1 · %2 RX · %3 kS/s · %4 samples",
                "Живий когерентний IQ · %1 · %2 RX · %3 ксемпл/с · %4 відліків");
     const auto status = format
@@ -381,17 +394,25 @@ void MultiSdrDialog::updateCoherentLivePreview() {
                             .arg((preview.frame.maximumHz - preview.frame.minimumHz) *
                                  preview.frame.sourceFftLength / (preview.frame.sourceFftLength - 1) / 1000, 0, 'f', 1)
                             .arg(preview.combinedSamples);
-    coherentLiveStatus->setToolTip(preview.maximumPhaseDriftHz
-        ? text("Estimated maximum relative phase drift: %1 Hz",
-               "Оцінка найбільшого відносного дрейфу фази: %1 Гц")
-              .arg(*preview.maximumPhaseDriftHz, 0, 'f', 2)
-        : QString{});
+    QStringList details;
+    if (preview.maximumPhaseDriftHz)
+        details.append(text("Estimated maximum relative phase drift: %1 Hz",
+                            "Оцінка найбільшого відносного дрейфу фази: %1 Гц")
+                           .arg(*preview.maximumPhaseDriftHz, 0, 'f', 2));
+    if (!preview.combiningWeights.empty()) {
+        QStringList values;
+        for (const double weight : preview.combiningWeights)
+            values.append(QStringLiteral("%1%").arg(weight * 100, 0, 'f', 1));
+        details.append(text("Combining weights (reference first): %1", "Ваги комбінування (опорний перший): %1")
+                           .arg(values.join(QStringLiteral(" / "))));
+    }
+    coherentLiveStatus->setToolTip(details.join(QLatin1Char('\n')));
     coherentLiveStatus->setText(status);
     statusLabel->setText(status);
 }
 
 void MultiSdrDialog::toggleCoherentRecording() {
-    if (!coherentLive || coherentReplayActive) return;
+    if (!coherentLive || coherentReplayActive || (coherentStitchBands->isChecked() && !coherentSignalActive)) return;
     const auto status = coherentLive->recordingStatus();
     if (status.active) {
         coherentLive->stopRecording();
@@ -414,7 +435,8 @@ void MultiSdrDialog::toggleCoherentRecording() {
 
 void MultiSdrDialog::updateCoherentRecording(bool hasPreview) {
     const auto status = coherentLive->recordingStatus();
-    coherentRecordButton->setEnabled(!coherentReplayActive && !status.finishing &&
+    const bool stitching = coherentStitchBands->isChecked() && !coherentSignalActive;
+    coherentRecordButton->setEnabled(!coherentReplayActive && !stitching && !status.finishing &&
                                     (status.active || hasPreview));
     coherentRecordButton->setText(status.active
         ? text("Stop IQ recording", "Зупинити запис IQ")
@@ -463,6 +485,9 @@ void MultiSdrDialog::toggleCoherentReplay() {
     coherentLiveButton->setEnabled(false);
     coherentVirtualButton->setEnabled(false);
     coherentSignalButton->setEnabled(false);
+    coherentStitchBands->setEnabled(false);
+    coherentNoiseWeighted->setEnabled(false);
+    coherentTrackPhase->setEnabled(false);
     coherentReplayButton->setText(text("Stop IQ playback", "Зупинити відтворення IQ"));
     coherentLiveStatus->setText(text("Opening IQ recording…", "Відкриття запису IQ…"));
     coherentLiveTimer->start();
@@ -724,7 +749,22 @@ void MultiSdrDialog::buildUi() {
     coherentLayout->addWidget(coherentMaxDelaySpin, 0, 4);
     coherentLayout->addWidget(coherentCalibrateButton, 0, 5);
     coherentLayout->addWidget(coherentSaveButton, 0, 6);
-    coherentLayout->addWidget(coherentStatusLabel, 1, 0, 1, 7);
+    coherentLayout->addWidget(coherentStatusLabel, 1, 0, 1, 5);
+    coherentStitchBands = new QCheckBox(text("Stitch IQ bands", "Зшити смуги IQ"), coherentBox);
+    coherentStitchBands->setToolTip(text(
+        "Two synchronized RX at the same rate with centers spaced by that rate. Applies to live and virtual pairs.",
+        "Два синхронізовані RX з однаковим семплрейтом і відстанню між центрами в один семплрейт. Для живої й віртуальної пари."));
+    coherentLayout->addWidget(coherentStitchBands, 1, 5, 1, 2);
+    coherentNoiseWeighted = new QCheckBox(text("Weight by noise (MRC)", "Зважувати за шумом (MRC)"), coherentBox);
+    coherentNoiseWeighted->setToolTip(text(
+        "Estimate the noise floor during calibration and weight aligned IQ channels for same-center reception.",
+        "Оцінює шум під час калібрування та зважує вирівняні IQ-канали для приймання на одному центрі."));
+    coherentTrackPhase = new QCheckBox(text("Track phase drift", "Компенсувати дрейф фази"), coherentBox);
+    coherentTrackPhase->setToolTip(text(
+        "Continuously correct slow relative phase changes in same-center reception.",
+        "Плавно компенсує повільні зміни відносної фази під час приймання на одному центрі."));
+    coherentLayout->addWidget(coherentNoiseWeighted, 2, 0, 1, 3);
+    coherentLayout->addWidget(coherentTrackPhase, 2, 3, 1, 4);
     coherentLiveButton = new QPushButton(text("Start live coherent IQ", "Запустити живий когерентний IQ"), coherentBox);
     coherentLiveButton->setToolTip(text(
         "Use all running RX at one center and rate with a verified shared sample timeline. Live search is capped at ±512 samples.",
@@ -736,18 +776,18 @@ void MultiSdrDialog::buildUi() {
         "Два RF-входи Фобоса з однаковим центром і 8 MS/s. Подайте спільну опору 10 МГц і спільний модульований сигнал. Вихід 125 ксемпл/с."));
     coherentLiveStatus = new QLabel(coherentBox);
     coherentLiveStatus->setWordWrap(true);
-    coherentLayout->addWidget(coherentLiveButton, 2, 0, 1, 2);
-    coherentLayout->addWidget(coherentVirtualButton, 2, 2, 1, 3);
-    coherentLayout->addWidget(coherentSignalButton, 2, 5, 1, 2);
-    coherentLayout->addWidget(coherentLiveStatus, 3, 0, 1, 7);
+    coherentLayout->addWidget(coherentLiveButton, 3, 0, 1, 2);
+    coherentLayout->addWidget(coherentVirtualButton, 3, 2, 1, 3);
+    coherentLayout->addWidget(coherentSignalButton, 3, 5, 1, 2);
+    coherentLayout->addWidget(coherentLiveStatus, 4, 0, 1, 7);
     coherentRecordButton = new QPushButton(text("Record coherent IQ…", "Записати когерентний IQ…"), coherentBox);
     coherentRecordButton->setEnabled(false);
     coherentReplayButton = new QPushButton(text("Replay IQ recording…", "Відтворити запис IQ…"), coherentBox);
     coherentRecordingStatus = new QLabel(coherentBox);
     coherentRecordingStatus->setWordWrap(true);
-    coherentLayout->addWidget(coherentRecordButton, 4, 0, 1, 2);
-    coherentLayout->addWidget(coherentReplayButton, 4, 2, 1, 3);
-    coherentLayout->addWidget(coherentRecordingStatus, 4, 5, 1, 2);
+    coherentLayout->addWidget(coherentRecordButton, 5, 0, 1, 2);
+    coherentLayout->addWidget(coherentReplayButton, 5, 2, 1, 3);
+    coherentLayout->addWidget(coherentRecordingStatus, 5, 5, 1, 2);
     coherentLiveTimer = new QTimer(this);
     coherentLiveTimer->setInterval(100);
     coherentLayout->setColumnStretch(7, 1);
@@ -1080,6 +1120,8 @@ void MultiSdrDialog::buildUi() {
             this, [this](int) { invalidateCoherentCalibration(); saveSettings(); });
     connect(coherentMaxDelaySpin, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [this](int) { saveSettings(); });
+    connect(coherentNoiseWeighted, &QCheckBox::toggled, this, [this]() { saveSettings(); });
+    connect(coherentTrackPhase, &QCheckBox::toggled, this, [this]() { saveSettings(); });
     connect(autoAlignCheckbox, &QCheckBox::toggled, this, [this](bool enabled) {
         alignmentOverlapSpin->setEnabled(enabled);
         if (enabled) alignEnabledSources();
@@ -2048,6 +2090,8 @@ void MultiSdrDialog::saveSettings() const {
     settings.setValue(QStringLiteral("coherentCapture"), coherentCaptureCheckbox->isChecked());
     settings.setValue(QStringLiteral("coherentReference"), coherentReferenceCombo->currentData().toInt());
     settings.setValue(QStringLiteral("coherentMaxDelay"), coherentMaxDelaySpin->value());
+    settings.setValue(QStringLiteral("coherentNoiseWeighted"), coherentNoiseWeighted->isChecked());
+    settings.setValue(QStringLiteral("coherentTrackPhase"), coherentTrackPhase->isChecked());
     QJsonArray calibrationArray;
     for (const CoherentIqCalibration &calibration : coherentCalibrations) {
         if (!calibration.valid) continue;
@@ -2115,6 +2159,8 @@ void MultiSdrDialog::restoreSettings() {
         settings.value(QStringLiteral("coherentCapture"), false).toBool());
     coherentMaxDelaySpin->setValue(
         settings.value(QStringLiteral("coherentMaxDelay"), 4096).toInt());
+    coherentNoiseWeighted->setChecked(settings.value(QStringLiteral("coherentNoiseWeighted"), false).toBool());
+    coherentTrackPhase->setChecked(settings.value(QStringLiteral("coherentTrackPhase"), false).toBool());
     coherentReferenceCombo->setProperty(
         "savedReference", settings.value(QStringLiteral("coherentReference"), 0));
     coherentCalibrations.clear();

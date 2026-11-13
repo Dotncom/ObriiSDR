@@ -355,11 +355,17 @@ void YourClassName::loadPersistentSettings() {
     qthLongitude = (std::clamp)(settings.value("gpsQth/longitude", qthLongitude).toDouble(), -180.0, 180.0);
     qthPositionVisible = settings.value("gpsQth/positionVisible", qthPositionVisible).toBool();
     qthSource = settings.value("gpsQth/source", qthSource).toString().trimmed();
+    uhdGnssValidationEnabled = settings.value("gpsQth/uhdValidationEnabled", false).toBool();
+    uhdGnssReferenceLocator = settings.value("gpsQth/uhdReferenceLocator").toString().trimmed().toUpper();
+    uhdGnssMaxDistanceKm = (std::clamp)(settings.value("gpsQth/uhdMaxDistanceKm", 10.0).toDouble(), 0.0, 1000.0);
+    uhdGnssMaxTimeErrorSeconds = (std::clamp)(settings.value("gpsQth/uhdMaxTimeErrorSeconds", 5.0).toDouble(), 0.0, 3600.0);
+    uhdGnssLogRejections = settings.value("gpsQth/uhdLogRejections", false).toBool();
+    uhdGnssShowRejections = settings.value("gpsQth/uhdShowRejections", false).toBool();
     if (qthSource.isEmpty()) {
         qthSource = QStringLiteral("manual");
     }
     qthPositionBeforeUhd.reset();
-    if (qthSource == QLatin1String("uhd")) {
+    if (isUhdGnssSource(qthSource)) {
         qthPositionBeforeUhd = QPointF(qthLongitude, qthLatitude);
         qthPositionVisibleBeforeUhd = qthPositionVisible;
         qthPositionVisible = false;
@@ -994,6 +1000,7 @@ void YourClassName::loadPersistentSettings() {
     if (graphWidget) graphWidget->setPersistenceEnabled(spectrumDisplayMode == 1);
     waterfallDisplayMode =
         (std::clamp)(settings.value("ui/waterfallDisplayMode", waterfallDisplayMode).toInt(), 0, 2);
+    applyWaterfallColorPalette(settings.value("ui/waterfallColorPalette", waterfallColorPalette).toInt());
     multiSdrViewMode =
         (std::clamp)(settings.value("ui/multiSdrViewMode", multiSdrViewMode).toInt(), 0, 1);
     if (multiSdrViewModeCombo) {
@@ -1315,10 +1322,13 @@ void YourClassName::loadPersistentSettings() {
         (std::clamp)(settings.value("network/spectrumMaxFps", NETWORK_SPECTRUM_FPS_DEFAULT).toInt(),
                      NETWORK_SPECTRUM_FPS_MIN, NETWORK_SPECTRUM_FPS_MAX);
     audioRelayTransmitEnabled = settings.value("audioRelay/transmitEnabled", audioRelayTransmitEnabled).toBool();
+    audioRelayDisableLocalVisualAudio = settings.value("audioRelay/disableLocalVisualAudio", false).toBool();
     audioRelayHost = settings.value("audioRelay/host", audioRelayHost).toString();
     audioRelayPort = static_cast<quint16>((std::clamp)(settings.value("audioRelay/port", static_cast<int>(audioRelayPort)).toInt(), 1, 65535));
     audioRelayReceiveEnabled = settings.value("audioRelay/receiveEnabled", audioRelayReceiveEnabled).toBool();
     audioRelayListenPort = static_cast<quint16>((std::clamp)(settings.value("audioRelay/listenPort", static_cast<int>(audioRelayListenPort)).toInt(), 1, 65535));
+    audioRelayBufferMs = (std::clamp)(settings.value("audioRelay/bufferMs", AUDIO_RELAY_BUFFER_DEFAULT_MS).toInt(),
+                                      AUDIO_RELAY_BUFFER_MIN_MS, AUDIO_RELAY_BUFFER_MAX_MS);
     audioHttpStreamEnabled = settings.value("audioHttpStream/enabled", audioHttpStreamEnabled).toBool();
     audioHttpStreamPort = static_cast<quint16>((std::clamp)(settings.value("audioHttpStream/port", static_cast<int>(audioHttpStreamPort)).toInt(), 1, 65535));
     digitalDecodeEnabled = settings.value("digital/decodeEnabled", digitalDecodeEnabled).toBool();
@@ -1763,6 +1773,12 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("gpsQth/longitude", qthPositionBeforeUhd ? qthPositionBeforeUhd->x() : qthLongitude);
     settings.setValue("gpsQth/positionVisible", qthPositionBeforeUhd ? qthPositionVisibleBeforeUhd : qthPositionVisible);
     settings.setValue("gpsQth/source", qthSource);
+    settings.setValue("gpsQth/uhdValidationEnabled", uhdGnssValidationEnabled);
+    settings.setValue("gpsQth/uhdReferenceLocator", uhdGnssReferenceLocator);
+    settings.setValue("gpsQth/uhdMaxDistanceKm", uhdGnssMaxDistanceKm);
+    settings.setValue("gpsQth/uhdMaxTimeErrorSeconds", uhdGnssMaxTimeErrorSeconds);
+    settings.setValue("gpsQth/uhdLogRejections", uhdGnssLogRejections);
+    settings.setValue("gpsQth/uhdShowRejections", uhdGnssShowRejections);
     settings.setValue("gpsQth/nmeaSerialPort", gnssSerialPortName);
     settings.setValue("gpsQth/nmeaSerialBaud", gnssSerialBaud);
     settings.setValue("gpsQth/positionPolicy", normalizedGnssPositionPolicy(gnssPositionPolicy));
@@ -2054,6 +2070,7 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("ui/spectrumPersistenceSmoothingMs", spectrumPersistenceSmoothingMs);
     settings.setValue("ui/spectrumPersistenceStyle", spectrumPersistenceStyle);
     settings.setValue("ui/waterfallDisplayMode", waterfallDisplayMode);
+    settings.setValue("ui/waterfallColorPalette", waterfallColorPalette);
     settings.setValue("ui/multiSdrViewMode", multiSdrViewMode);
     settings.setValue("ui/waterfall3DResolutionDivisor", waterfall3DResolutionDivisor);
     settings.setValue("ui/waterfall3DSurfaceStyle", waterfall3DSurfaceStyle);
@@ -2131,10 +2148,12 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("network/spectrumLevelStepTenths", networkSpectrumLevelStepTenths);
     settings.setValue("network/spectrumMaxFps", networkSpectrumMaxFps);
     settings.setValue("audioRelay/transmitEnabled", audioRelayTransmitEnabled);
+    settings.setValue("audioRelay/disableLocalVisualAudio", audioRelayDisableLocalVisualAudio);
     settings.setValue("audioRelay/host", audioRelayHost);
     settings.setValue("audioRelay/port", static_cast<int>(audioRelayPort));
     settings.setValue("audioRelay/receiveEnabled", audioRelayReceiveEnabled);
     settings.setValue("audioRelay/listenPort", static_cast<int>(audioRelayListenPort));
+    settings.setValue("audioRelay/bufferMs", audioRelayBufferMs);
     settings.setValue("audioHttpStream/enabled", audioHttpStreamEnabled);
     settings.setValue("audioHttpStream/port", static_cast<int>(audioHttpStreamPort));
     settings.setValue("digital/decodeEnabled", digitalDecodeEnabled);

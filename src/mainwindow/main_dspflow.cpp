@@ -2640,6 +2640,7 @@ void YourClassName::openDspBlockReference(const QString &type, const QString &id
                                           actionButton(qthMapButton, text("Карта", "Map"))}));
         form->addRow(QString(), buttonRow({actionButton(gnssUbxSystemsButton, QStringLiteral("UBX CFG-GNSS")),
                                           actionButton(gnssUbxSaveButton, text("Зберегти в модуль", "Save to module"))}));
+        form->addRow(QString(), actionButton(gnssInterferenceButton, text("Монітор завад…", "Interference monitor…")));
         form->addRow(QString(), buttonRow({actionButton(gnssNmeaLogButton, QStringLiteral("NMEA log")),
                                           actionButton(gnssSerialRawLogButton, QStringLiteral("Raw UBX/NMEA")),
                                           actionButton(gnssNmeaReplayButton, text("Реплей", "Replay"))}));

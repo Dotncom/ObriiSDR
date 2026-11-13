@@ -33,6 +33,8 @@ class QToolButton;
 class QIODevice;
 class TxWaveformPreviewWidget;
 class DmrTransmitEncoder;
+class M17VoiceStream;
+class IqChannelizer;
 class SignalLabDialog;
 #ifdef _WIN32
 class WindowsMicrophoneCapture;
@@ -84,6 +86,8 @@ private:
     void pumpVirtualIq();
     void stopTransmission(const QString &reason = QString());
     void startTextSimulation(const TxConfiguration &configuration);
+    void startGeneratedWaveform(const TxConfiguration &configuration, const TxGenerationResult &generated);
+    void startM17VoiceFile(TxConfiguration configuration);
     void beginTextWaveform();
     void startMicrophoneSimulation(TxConfiguration configuration);
     void startManualCw(TxConfiguration configuration);
@@ -97,6 +101,8 @@ private:
     bool configureDmrEncoder(const TxConfiguration &configuration, QString *error);
     bool beginDmrCall(QString *error);
     bool finishDmrCall(QString *error);
+    bool beginM17Call(QString *error);
+    bool finishM17Call(QString *error);
     void setLiveKey(bool pressed);
     void chooseMediaFile();
     void editMediaImage();
@@ -122,6 +128,8 @@ private:
     std::unique_ptr<DmrTransmitEncoder> dmrEncoder;
     bool dmrCallActive = false;
     bool dmrFinishing = false;
+    std::unique_ptr<M17VoiceStream> m17VoiceStream;
+    std::unique_ptr<IqChannelizer> m17AudioResampler;
 
     QComboBox *backendCombo = nullptr;
     QComboBox *deviceCombo = nullptr;
@@ -157,6 +165,12 @@ private:
     QCheckBox *invertDataCheck = nullptr;
     QCheckBox *ft8UtcCheck = nullptr;
     QGroupBox *dmrBox = nullptr;
+    QGroupBox *m17Box = nullptr;
+    QLabel *m17SourceLabel = nullptr;
+    QLabel *m17DestinationLabel = nullptr;
+    QLineEdit *m17SourceEdit = nullptr;
+    QLineEdit *m17DestinationEdit = nullptr;
+    QSpinBox *m17CanSpin = nullptr;
     QSpinBox *dmrColorCodeSpin = nullptr;
     QComboBox *dmrTimeslotCombo = nullptr;
     QSpinBox *dmrSourceIdSpin = nullptr;
@@ -237,6 +251,7 @@ private:
     bool automaticFt8Active = false;
     bool pttMode = false;
     bool liveKeyPressed = false;
+    bool liveKeyArmingClick = false;
     float microphoneRmsDb = -120.0f;
     float microphonePeakDb = -120.0f;
     float microphoneSoftwareGain = 1.0f;
@@ -252,6 +267,7 @@ private:
     QAudioInput *audioInput = nullptr;
     QIODevice *audioDevice = nullptr;
     int audioCaptureChannels = 1;
+    int audioCaptureRate = 48000;
     int audioCaptureSampleSize = 16;
     int audioCaptureSampleType = 0;
     bool audioCaptureLittleEndian = true;

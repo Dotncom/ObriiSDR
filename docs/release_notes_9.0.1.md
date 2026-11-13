@@ -23,7 +23,7 @@ measurement. No satellite had a measured signal and no position fix was
 available during that measurement. The updated Raspberry GUI showed GSV and
 completed a 10 MS/s receive test with zero UHD overflows or timeouts.
 
-See the [B210 guide](usrp_b210_plan.md) for compatible-image setup and the
+See the [B210 guide](usrp_b210_setup.md) for compatible-image setup and the
 scope of the single- and dual-channel tests. The normal package uses a
 separately installed compatible UHD runtime and an image supplied by the
 operator. Redistribution of the tested custom B210 images remains pending

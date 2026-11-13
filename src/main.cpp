@@ -970,6 +970,7 @@ YourClassName::YourClassName(QWidget *parent)
     remoteVfoService = new RemoteVfoService(this);
     remoteWebServer = new RemoteWebServer(remoteVfoService, this);
     remoteAudioPlayer = new RemoteAudioPlayer(this);
+    audioRelayPlayer = new RemoteAudioPlayer(this);
     audioRelaySocket = new QUdpSocket(this);
     gnssNtpSocket = new QUdpSocket(this);
     gnssSerialPort = new QSerialPort(this);
@@ -2719,6 +2720,9 @@ YourClassName::YourClassName(QWidget *parent)
     qthSourceCombo->addItem(QStringLiteral("NMEA GPS"), QStringLiteral("nmea"));
     qthSourceCombo->addItem(uiText(QStringLiteral("os_location"), QStringLiteral("OS location")), QStringLiteral("os"));
     qthSourceCombo->addItem(QStringLiteral("UHD GPS"), QStringLiteral("uhd"));
+    qthSourceCombo->addItem(QStringLiteral("UHD GPS + NMEA"), QStringLiteral("uhd_nmea"));
+    uhdGnssValidationButton = new QPushButton(qthBox);
+    connect(uhdGnssValidationButton, &QPushButton::clicked, this, &YourClassName::showUhdGnssValidationSettings);
     uhdGnssPollTimer = new QTimer(this);
     uhdGnssPollTimer->setInterval(2500);
     connect(uhdGnssPollTimer, &QTimer::timeout, this, &YourClassName::refreshUhdGnssPosition);
@@ -2850,7 +2854,7 @@ YourClassName::YourClassName(QWidget *parent)
         QStringLiteral("Serial port for an external NMEA GNSS receiver, for example COM4 or /dev/ttyUSB0.")));
     gnssSerialBaudSpin = new QSpinBox(qthBox);
     gnssSerialBaudSpin->setRange(1200, 921600);
-    gnssSerialBaudSpin->setSingleStep(4800);
+    gnssSerialBaudSpin->setSingleStep(1200);
     gnssSerialBaudSpin->setValue(gnssSerialBaud);
     gnssSerialBaudSpin->setMaximumWidth(86);
     gnssSerialBaudSpin->setToolTip(uiText(
@@ -2877,6 +2881,8 @@ YourClassName::YourClassName(QWidget *parent)
         QStringLiteral("gnss_raw_serial_log_tooltip"),
         QStringLiteral("Start or stop a raw binary UBX/NMEA serial capture in recordings/gnss_raw.")));
     gnssUbxSystemsButton = new QPushButton("UBX sys", qthBox);
+    gnssInterferenceButton = new QPushButton(QStringLiteral("Interference monitor…"), qthBox);
+    markTranslatable(gnssInterferenceButton, QStringLiteral("gnss_interference_monitor"), QStringLiteral("Interference monitor…"));
     markTranslatable(gnssUbxSystemsButton, QStringLiteral("gnss_ubx_systems"), QStringLiteral("UBX sys"));
     gnssUbxSystemsButton->setToolTip(uiText(
         QStringLiteral("gnss_ubx_systems_tooltip"),
@@ -3149,6 +3155,7 @@ YourClassName::YourClassName(QWidget *parent)
              gnssNmeaReplayButton,
              gnssSerialRawLogButton,
              gnssUbxSystemsButton,
+             gnssInterferenceButton,
              gnssUbxSaveButton,
              gnssNetworkTimeButton,
              gnssPlotButton,
@@ -3196,8 +3203,12 @@ YourClassName::YourClassName(QWidget *parent)
     qthLayout->setContentsMargins(6, 8, 6, 6);
     qthLayout->setHorizontalSpacing(6);
     qthLayout->setVerticalSpacing(4);
-    qthLayout->addWidget(qthSourceLabel, 0, 0);
-    qthLayout->addWidget(qthSourceCombo, 0, 1, 1, 2);
+    auto *qthSourceControls = new QVBoxLayout;
+    qthSourceControls->setSpacing(4);
+    qthSourceControls->addWidget(qthSourceCombo);
+    qthSourceControls->addWidget(uhdGnssValidationButton);
+    qthLayout->addWidget(qthSourceLabel, 0, 0, Qt::AlignTop);
+    qthLayout->addLayout(qthSourceControls, 0, 1, 1, 2);
     qthLayout->addWidget(gnssSystemLabel, 1, 0);
     qthLayout->addWidget(gnssSystemCombo, 1, 1, 1, 2);
     qthLayout->addWidget(gnssIntegrationLabel, 2, 0);
@@ -3228,7 +3239,11 @@ YourClassName::YourClassName(QWidget *parent)
     qthLayout->addWidget(gnssSerialRawLogButton, 12, 0);
     qthLayout->addWidget(gnssUbxSystemsButton, 12, 1);
     qthLayout->addWidget(gnssUbxSaveButton, 12, 2);
-    qthLayout->addWidget(gnssSerialStatusLabel, 13, 0, 1, 3);
+    auto *gnssSerialStatusLayout = new QVBoxLayout;
+    gnssSerialStatusLayout->setSpacing(4);
+    gnssSerialStatusLayout->addWidget(gnssInterferenceButton);
+    gnssSerialStatusLayout->addWidget(gnssSerialStatusLabel);
+    qthLayout->addLayout(gnssSerialStatusLayout, 13, 0, 1, 3);
     qthLayout->addWidget(gnssTuneButton, 14, 0);
     qthLayout->addWidget(gnssScanButton, 14, 1);
     qthLayout->addWidget(gnssSelfTestButton, 14, 2);
@@ -4135,6 +4150,31 @@ YourClassName::YourClassName(QWidget *parent)
         savePersistentSettings();
     });
     waterfall3DSection.contentLayout->addLayout(waterfallDisplayModeLayout);
+    auto *waterfallColorPaletteRow = new QHBoxLayout();
+    auto *waterfallColorPaletteLabel = new QLabel(waterfall3DSection.widget);
+    markTranslatable(waterfallColorPaletteLabel, QStringLiteral("waterfall_color_palette"),
+                     QStringLiteral("Palette"));
+    waterfallColorPaletteCombo = new QComboBox(waterfall3DSection.widget);
+    waterfallColorPaletteCombo->setIconSize(QSize(48, 12));
+    waterfallColorPaletteCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    waterfallColorPaletteCombo->setMinimumContentsLength(6);
+    waterfallColorPaletteCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    using ColorPalette = MyWaterfallWidget::ColorPalette;
+    for (const ColorPalette palette : {ColorPalette::Classic, ColorPalette::Thermal, ColorPalette::Ice,
+                                       ColorPalette::VioletYellow, ColorPalette::Amber, ColorPalette::Grayscale}) {
+        waterfallColorPaletteCombo->addItem(MyWaterfallWidget::colorPalettePreview(palette),
+                                            QString(), static_cast<int>(palette));
+    }
+    waterfallColorPaletteLabel->setBuddy(waterfallColorPaletteCombo);
+    waterfallColorPaletteRow->addWidget(waterfallColorPaletteLabel);
+    waterfallColorPaletteRow->addWidget(waterfallColorPaletteCombo);
+    waterfall3DSection.contentLayout->addLayout(waterfallColorPaletteRow);
+    connect(waterfallColorPaletteCombo, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int index) {
+                if (index < 0) return;
+                applyWaterfallColorPalette(waterfallColorPaletteCombo->itemData(index).toInt());
+                savePersistentSettings();
+            });
     waterfall3DSection.contentLayout->addLayout(spectrumDisplayModeLayout);
     waterfall3DSection.contentLayout->addLayout(persistenceControlsLayout);
     waterfall3DSection.contentLayout->addLayout(multiSdrViewModeLayout);
@@ -4293,6 +4333,7 @@ YourClassName::YourClassName(QWidget *parent)
         if (remoteAudioPlayer) {
             remoteAudioPlayer->setVolume(volume);
         }
+        audioRelayPlayer->setVolume(volume);
     });
     connect(audioLowPassSlider, &QSlider::valueChanged, this, [this](int value) {
         pendingSettings.audioLowPassHz = audioLowPassSliderValueToHz(value);
@@ -4400,15 +4441,23 @@ YourClassName::YourClassName(QWidget *parent)
     });
     connect(qthSourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         const QString nextSource = qthSourceCombo->currentData().toString();
-        if (qthSource == QLatin1String("uhd") && nextSource != qthSource && qthPositionBeforeUhd) {
+        const bool wasUhd = isUhdGnssSource(qthSource);
+        const bool nextUhd = isUhdGnssSource(nextSource);
+        if (wasUhd && !nextUhd && qthPositionBeforeUhd) {
             qthLatitude = qthPositionBeforeUhd->y();
             qthLongitude = qthPositionBeforeUhd->x();
             qthPositionVisible = qthPositionVisibleBeforeUhd;
         }
-        if (nextSource == QLatin1String("uhd") && nextSource != qthSource) {
+        if (!wasUhd && nextUhd) {
             qthPositionBeforeUhd = QPointF(qthLongitude, qthLatitude);
             qthPositionVisibleBeforeUhd = qthPositionVisible;
+        }
+        if (nextUhd && nextSource != qthSource) {
             qthPositionVisible = false;
+            combinedSerialGgaAge.invalidate();
+            combinedSerialRmcAge.invalidate();
+            lastUhdGnssRejectedSample.clear();
+            uhdGnssRejectedMarkers.clear();
         }
         qthSource = nextSource;
         updateQthControls();
@@ -4455,6 +4504,7 @@ YourClassName::YourClassName(QWidget *parent)
     connect(gnssNmeaReplayButton, &QPushButton::clicked, this, &YourClassName::replayGnssNmeaLog);
     connect(gnssSerialRawLogButton, &QPushButton::clicked, this, &YourClassName::toggleGnssRawSerialLogging);
     connect(gnssUbxSystemsButton, &QPushButton::clicked, this, &YourClassName::applyGnssUbxConstellationConfig);
+    connect(gnssInterferenceButton, &QPushButton::clicked, this, &YourClassName::showGnssInterferenceMonitor);
     connect(gnssUbxSaveButton, &QPushButton::clicked, this, &YourClassName::saveGnssUbxConfigurationToModule);
     connect(gnssPositionPolicyCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         gnssPositionPolicy = normalizedGnssPositionPolicy(gnssPositionPolicyCombo
@@ -5417,11 +5467,7 @@ YourClassName::YourClassName(QWidget *parent)
                     sendAudioHttpFrame(pcmData);
                 }
 #if !defined(_WIN32) && defined(FOBOSAPP_HAS_QT_AUDIO)
-                const bool suppressServerLocalOutput =
-                    networkMode == NetworkMode::Server &&
-                    serverDisableLocalVisualAudio &&
-                    networkController &&
-                    networkController->isControlReady();
+                const bool suppressServerLocalOutput = serverLocalOutputSuppressed();
                 const bool localQtPlayback =
                     remoteAudioPlayer &&
                     audioCheckbox &&
@@ -7215,11 +7261,7 @@ bool YourClassName::restartStreamForHardwareChange(bool forceFrequencyApply) {
     const bool serverChannelIqStreaming = networkMode == NetworkMode::Server && isChannelIqProcessingMode();
     const bool channelIqRecording = isChannelIqRecordingActive();
     const bool eventIq = spectrumEventIqProducerNeeded();
-    const bool suppressServerLocalOutput =
-        networkMode == NetworkMode::Server &&
-        serverDisableLocalVisualAudio &&
-        networkController &&
-        networkController->isControlReady();
+    const bool suppressServerLocalOutput = serverLocalOutputSuppressed();
     const bool serverAudioStreamingForFullIq = serverFullIqStreaming && pendingSettings.audioEnabled;
     const bool serverLocalAudioEnabled =
         pendingSettings.audioEnabled &&
@@ -7948,18 +7990,20 @@ void YourClassName::connectDataProcessorSignals() {
 }
 
 bool YourClassName::networkSpectrumCadenceActive() const {
-    return networkMode == NetworkMode::Server &&
-           serverDisableLocalVisualAudio &&
+    return networkMode == NetworkMode::Server && serverLocalOutputSuppressed() &&
            networkController && networkController->isControlReady() &&
            !isFullIqProcessingMode() && !isRemoteVfoProcessingMode();
 }
 
+bool YourClassName::serverLocalOutputSuppressed() const {
+    if (networkMode == NetworkMode::Client) return false;
+    return (audioRelayTransmitEnabled && audioRelayDisableLocalVisualAudio) ||
+           (networkMode == NetworkMode::Server && serverDisableLocalVisualAudio &&
+            networkController && networkController->isControlReady());
+}
+
 void YourClassName::applyServerLocalOutputPolicy() {
-    const bool suppressServerLocalOutput =
-        networkMode == NetworkMode::Server &&
-        serverDisableLocalVisualAudio &&
-        networkController &&
-        networkController->isControlReady();
+    const bool suppressServerLocalOutput = serverLocalOutputSuppressed();
 
     if (audioProcessor) {
         audioProcessor->setLocalPlaybackEnabled(!suppressServerLocalOutput);
@@ -7967,12 +8011,13 @@ void YourClassName::applyServerLocalOutputPolicy() {
     updateVideoProcessorMode();
     updateIqFrameProducerSettings();
 
-    if (!updateTimer || runState != RadioRunState::Running || networkMode != NetworkMode::Server) {
+    if (!updateTimer || runState != RadioRunState::Running || networkMode == NetworkMode::Client) {
         return;
     }
     updateSpectrumTimerInterval();
 
     const bool spectrumNeededForNetwork =
+        networkMode == NetworkMode::Server &&
         networkController &&
         networkController->isControlReady() &&
         !isFullIqProcessingMode();
@@ -9461,17 +9506,6 @@ void YourClassName::startFobosProcessing() {
     const bool externalBackendSelected = rtlBackendSelected || soapySdrSelected || uhdNativeSelected ||
                                          bladeRfNativeSelected || hackRfNativeSelected ||
                                          virtualSignalSelected;
-    if (!externalBackendSelected && !hasActiveFobosDevice()) {
-        // A USB re-enumeration may outlast the automatic recovery attempt.
-        // A subsequent manual Start must reopen the receiver, not repeatedly
-        // reject a missing prepared session until the whole app is restarted.
-        if (!prepareFobosSessionFromSettings(QStringLiteral("Start after USB reconnect"))) {
-            clearLiveSpectrumSnapshot();
-            runState = RadioRunState::Idle;
-            updateUiForRunState();
-            return;
-        }
-    }
     if (rtlBackendSelected) {
         normalizeRtlSdrSettings();
     }
@@ -9568,6 +9602,15 @@ void YourClassName::startFobosProcessing() {
             return;
         }
     } else {
+        // A sample-rate change or USB reconnect can leave Start without a session.
+        if (!hasActiveFobosDevice() &&
+            !prepareFobosSessionFromSettings(QStringLiteral("Start without an open Fobos session"))) {
+            clearLiveSpectrumSnapshot();
+            runState = RadioRunState::Idle;
+            updateUiForRunState();
+            return;
+        }
+
         bool fobosSessionAlreadyPrepared =
             hasActiveFobosDevice() &&
             hardwareSettingsApplied &&
@@ -9652,11 +9695,7 @@ void YourClassName::startFobosProcessing() {
     const bool serverChannelIqStreaming = networkMode == NetworkMode::Server && isChannelIqProcessingMode();
     const bool channelIqRecording = isChannelIqRecordingActive();
     const bool eventIq = spectrumEventIqProducerNeeded();
-    const bool suppressServerLocalOutput =
-        networkMode == NetworkMode::Server &&
-        serverDisableLocalVisualAudio &&
-        networkController &&
-        networkController->isControlReady();
+    const bool suppressServerLocalOutput = serverLocalOutputSuppressed();
     const bool serverAudioStreamingForFullIq = serverFullIqStreaming && pendingSettings.audioEnabled;
     const bool serverLocalAudioEnabled =
         pendingSettings.audioEnabled &&

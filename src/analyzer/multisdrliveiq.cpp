@@ -30,7 +30,7 @@ std::atomic<std::uint64_t> nextEpoch{1};
 
 class VirtualPair final {
 public:
-    void publish(const std::vector<DspSourceIdentity> &sources, std::uint64_t epoch) {
+    void publish(const std::vector<DspSourceIdentity> &sources, std::uint64_t epoch, bool stitchBands) {
         const auto gain = std::polar(0.65, 73.0 * Tau / 360.0);
         std::array<std::array<float, VirtualBlock * 2>, 2> iq;
         for (int i = 0; i < VirtualBlock; ++i) {
@@ -40,8 +40,8 @@ public:
             const auto delayed = delay[cursor];
             delay[cursor] = signal;
             cursor = (cursor + 1) % delay.size();
-            const auto a = signal + 0.02 * noise();
-            const auto b = gain * delayed + 0.02 * noise();
+            const auto a = stitchBands ? std::polar(0.6, Tau * 3750 * seconds) : signal + 0.02 * noise();
+            const auto b = stitchBands ? std::polar(0.4, -Tau * 7500 * seconds) : gain * delayed + 0.02 * noise();
             iq[0][2 * i] = float(a.real()); iq[0][2 * i + 1] = float(a.imag());
             iq[1][2 * i] = float(b.real()); iq[1][2 * i + 1] = float(b.imag());
         }
@@ -51,9 +51,11 @@ public:
         timing.clockId = QStringLiteral("virtual-coherent-pair");
         timing.sharedSampleTimeline = timing.sampleClockValid = timing.clockLocked = true;
         timing.nativeSampleFormat = QStringLiteral("Virtual FC32");
-        for (std::size_t i = 0; i < iq.size(); ++i)
+        for (std::size_t i = 0; i < iq.size(); ++i) {
+            const auto center = VirtualCenter + (stitchBands ? (double(i) - 0.5) * VirtualRate : 0.0);
             DspIqSourceRegistry::instance().publish(sources[i], iq[i].data(), iq[i].size(),
-                VirtualRate, VirtualCenter, false, &timing);
+                VirtualRate, center, false, &timing);
+        }
         first += VirtualBlock;
     }
 
@@ -100,13 +102,14 @@ public:
     explicit Recorder(const QString &directory) : writer(&Recorder::run, this, directory) {}
     ~Recorder() { close(); join(); }
 
-    void submit(std::vector<DspIqSourceSnapshot> block) {
+    void submit(std::vector<DspIqSourceSnapshot> block, const std::vector<double> &combiningWeights) {
         std::lock_guard<std::mutex> lock(mutex);
         if (closing) return;
         if (queue.size() >= 64) {
             closing = true;
             interruption = QStringLiteral("IQ recording disk queue overflow");
         } else {
+            if (weights.empty() && !combiningWeights.empty()) weights = combiningWeights;
             queue.push_back(std::move(block));
         }
         ready.notify_one();
@@ -165,7 +168,7 @@ private:
                     const auto gap = QStringLiteral("IQ recording sample timeline changed");
                     if (flush()) error = gap;
                 }
-                if (segment.front().iq.size() / 2 >= 2 * segment.front().sampleRateHz)
+                if (!segment.empty() && segment.front().iq.size() / 2 >= 2 * segment.front().sampleRateHz)
                     flush();
             }
             if (error.isEmpty()) flush();
@@ -178,7 +181,7 @@ private:
             queue.clear();
         }
         QString finishError;
-        const QString path = recording.finish(reason, finishError);
+        const QString path = recording.finish(reason, finishError, weights);
         std::lock_guard<std::mutex> lock(mutex);
         finished = true;
         manifest = path;
@@ -197,21 +200,26 @@ private:
     quint64 samples = 0;
     QString manifest;
     QString interruption;
+    std::vector<double> weights;
     std::thread writer;
 };
 
 MultiSdrLiveIq::~MultiSdrLiveIq() { stop(); }
 
-QString MultiSdrLiveIq::start(std::vector<DspSourceIdentity> sources, int maximumDelay, bool virtualPair, bool alignBySignal) {
+QString MultiSdrLiveIq::start(std::vector<DspSourceIdentity> sources, int maximumDelay, bool virtualPair,
+                              bool alignBySignal, bool stitchBands, CoherentIqLiveOptions options) {
+    if (stitchBands && (alignBySignal || (!virtualPair && sources.size() != 2)))
+        return QStringLiteral("IQ band stitching requires two synchronized sources");
     stop();
     stopping = false;
     signalRestart = false;
     {
         std::lock_guard<std::mutex> lock(previewMutex);
-        recordable = true;
+        recordable = !stitchBands;
     }
     try {
-        worker = std::thread(&MultiSdrLiveIq::run, this, std::move(sources), maximumDelay, virtualPair, alignBySignal);
+        worker = std::thread(&MultiSdrLiveIq::run, this, std::move(sources), maximumDelay,
+                             virtualPair, alignBySignal, stitchBands, options);
     } catch (const std::system_error &) {
         std::lock_guard<std::mutex> lock(previewMutex);
         recordable = false;
@@ -278,7 +286,8 @@ MultiSdrLiveIq::Preview MultiSdrLiveIq::preview() const {
     return latest;
 }
 
-void MultiSdrLiveIq::run(std::vector<DspSourceIdentity> sources, int maximumDelay, bool virtualPair, bool alignBySignal) {
+void MultiSdrLiveIq::run(std::vector<DspSourceIdentity> sources, int maximumDelay, bool virtualPair,
+                         bool alignBySignal, bool stitchBands, CoherentIqLiveOptions options) {
     auto &registry = DspIqSourceRegistry::instance();
     const auto outputIdentity = CoherentIqLive::outputIdentity();
     if (virtualPair) {
@@ -292,7 +301,8 @@ void MultiSdrLiveIq::run(std::vector<DspSourceIdentity> sources, int maximumDela
     QString error;
     FftTransformCore fft;
     if (!preparePreviewFft(fft)) error = QStringLiteral("Could not initialize the coherent spectrum FFT");
-    CoherentIqLive combiner(alignBySignal ? CoherentIqLive::Timeline::Signal : CoherentIqLive::Timeline::Hardware);
+    CoherentIqLive combiner(alignBySignal ? CoherentIqLive::Timeline::Signal : CoherentIqLive::Timeline::Hardware, options);
+    CoherentIqBandJoin bandJoin;
     auto signal = alignBySignal ? std::make_unique<MultiSdrSignalAlignment>() : nullptr;
     VirtualPair simulation;
     auto lastOutput = Clock::now();
@@ -324,7 +334,7 @@ void MultiSdrLiveIq::run(std::vector<DspSourceIdentity> sources, int maximumDela
                 break;
             }
             while (now >= nextVirtual) {
-                simulation.publish(sources, epoch);
+                simulation.publish(sources, epoch, stitchBands);
                 nextVirtual += 10ms;
             }
         }
@@ -362,7 +372,8 @@ void MultiSdrLiveIq::run(std::vector<DspSourceIdentity> sources, int maximumDela
         if (!signal && complete && !calibrated && now >= nextCalibration) {
             nextCalibration = now + 50ms;
             QString calibrationError;
-            calibrated = combiner.calibrate(inputs, maximumDelay, calibrationError);
+            calibrated = stitchBands ? bandJoin.configure(inputs, calibrationError)
+                                     : combiner.calibrate(inputs, maximumDelay, calibrationError);
             if (!calibrated && (now - lastOutput > 2s ||
                 std::any_of(inputs.begin(), inputs.end(), [](const auto &input) {
                     return !input.sharedSampleTimeline || input.sampleRateHz > CoherentIqLive::MaximumRate;
@@ -377,8 +388,9 @@ void MultiSdrLiveIq::run(std::vector<DspSourceIdentity> sources, int maximumDela
             for (int attempt = 0; attempt < (signal ? 8 : 3) && !stopping; ++attempt) {
                 DspIqSourceSnapshot output;
                 std::vector<std::vector<float>> aligned;
-                if (!combiner.takeBlock(inputs, output, error, current ? &aligned : nullptr) ||
-                    output.iq.empty()) break;
+                const bool ready = stitchBands ? bandJoin.takeBlock(inputs, output, error)
+                    : combiner.takeBlock(inputs, output, error, current ? &aligned : nullptr);
+                if (!ready || output.iq.empty()) break;
                 DspIqTimingMetadata timing;
                 timing.epoch = epoch;
                 timing.firstComplexSample = output.startComplexSample;
@@ -387,7 +399,8 @@ void MultiSdrLiveIq::run(std::vector<DspSourceIdentity> sources, int maximumDela
                 timing.sampleClockValid = true;
                 timing.sharedSampleTimeline = output.sharedSampleTimeline;
                 timing.clockLocked = output.clockLocked;
-                timing.nativeSampleFormat = signal ? QStringLiteral("Signal-aligned FC32") : QStringLiteral("Coherent FC32");
+                timing.nativeSampleFormat = stitchBands ? QStringLiteral("Stitched FC32") :
+                    signal ? QStringLiteral("Signal-aligned FC32") : QStringLiteral("Coherent FC32");
                 registry.publish(outputIdentity, output.iq.data(), output.iq.size(), output.sampleRateHz,
                                  output.centerHz, total == 0, &timing);
                 if (current) {
@@ -410,7 +423,7 @@ void MultiSdrLiveIq::run(std::vector<DspSourceIdentity> sources, int maximumDela
                         channel.nativeSampleFormat = QStringLiteral("Aligned FC32");
                         block.push_back(std::move(channel));
                     }
-                    current->submit(std::move(block));
+                    current->submit(std::move(block), combiner.combiningWeights());
                 }
                 lastOutput = now;
                 total += output.iq.size() / 2;
@@ -418,7 +431,8 @@ void MultiSdrLiveIq::run(std::vector<DspSourceIdentity> sources, int maximumDela
                     nextPreview = now + 100ms;
                     auto frame = spectrumFrame(fft, output, ++sequence);
                     std::lock_guard<std::mutex> lock(previewMutex);
-                    latest = {std::move(frame), total, int(inputs.size()), {}, {}, combiner.maximumPhaseDriftHz()};
+                    latest = {std::move(frame), total, int(inputs.size()), {}, {}, combiner.maximumPhaseDriftHz(),
+                              false, {}, combiner.combiningWeights()};
                 }
             }
         }
@@ -452,6 +466,7 @@ void MultiSdrLiveIq::runReplay(QString manifest) {
     FftTransformCore fft;
     if (recording.open(manifest, error) && !preparePreviewFft(fft))
         error = QStringLiteral("Could not initialize the replay spectrum FFT");
+    const auto &weights = recording.combiningWeights();
     std::vector<DspIqSourceSnapshot> channels;
     auto next = Clock::now();
     auto nextPreview = next;
@@ -487,8 +502,9 @@ void MultiSdrLiveIq::runReplay(QString manifest) {
             next = (now - next > 100ms ? now : next) + blockDuration;
             for (std::size_t n = 0; n < output.iq.size(); ++n) {
                 double sum = 0.0;
-                for (const auto &channel : channels) sum += channel.iq[first + n];
-                output.iq[n] = float(sum / double(channels.size()));
+                for (std::size_t i = 0; i < channels.size(); ++i)
+                    sum += channels[i].iq[first + n] * (weights.empty() ? 1.0 : weights[i]);
+                output.iq[n] = float(weights.empty() ? sum / double(channels.size()) : sum);
             }
             timing.firstComplexSample = reference.startComplexSample + first / 2;
             timing.hostTimestampNs = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
@@ -499,7 +515,7 @@ void MultiSdrLiveIq::runReplay(QString manifest) {
                 nextPreview = now + 100ms;
                 auto frame = spectrumFrame(fft, output, ++sequence);
                 std::lock_guard<std::mutex> lock(previewMutex);
-                latest = {std::move(frame), total, int(channels.size())};
+                latest = {std::move(frame), total, int(channels.size()), {}, {}, {}, false, {}, weights};
             }
         }
     }

@@ -142,20 +142,27 @@ planned analyzer instrument stage:
 
 The shared measurement core now owns the capability model, validation rules,
 frequency-grid generation, return-loss/SWR formulas and JSON round trips. A
-small backend interface is the future boundary for native UHD, so RF handles do
-not leak into the UI and capability/safety checks cannot be bypassed.
+backend interface lets the TCP SCPI sweep run in a worker while the Analyzer
+stays responsive.
 
 Set the frequencies and timing under **Measurement plan**, then open
-**Simulation → Run simulation**. The virtual DUT is an ideal one-pole low-pass
+**Results → Run simulation**. The virtual DUT is an ideal one-pole low-pass
 with a 10 MHz cutoff. The table shows forward level, S21, return loss, SWR
 and S21 phase. The run uses the plan's settle, dwell and averaging values.
 A bidirectional run starts the return pass at the next lower frequency.
 **Stop** keeps the completed points. **Save results…** writes a session JSON
 with the simulation backend ID and a completed or cancelled outcome.
 
-**Execute RF** requires a qualified hardware adapter. Physical SNA,
-return-loss and VNA measurements require their corresponding normalization
-or fixture calibration.
+For **Run SCPI sweep**, select the tracking-generator mode and the external
+SCPI source. Enter a `TCPIP0::HOST::PORT::SOCKET` resource for an instrument
+that can both generate the stimulus and read received power. The profile
+configures its frequency, power, RF output and read command. The instrument
+must support `*OPC?` and `SYST:ERR?`. The read command must return one
+numeric dBm value. Set the maximum output in the hardware limits and confirm
+RF before starting. The run averages in linear power and requests output OFF
+on completion or cancellation. The Results tab and JSON store measured
+forward power. Calibrated SNA, return-loss and VNA still require their
+corresponding adapters and fixtures.
 
 Plan validation rejects non-finite source/safety levels, invalid hardware
 frequency ranges and reference impedance, and available RX/TX devices without
@@ -182,5 +189,5 @@ does not start RF or capture calibration data.
 The current Windows bundle contains UHD command-line/runtime components used by
 the wireless toolchain, but not a SoapyUHD device module. A future USRP can be
 used through this acquisition path once a matching SoapyUHD module is deployed;
-native UHD transport is tracked separately in `usrp_b210_plan.md` so the
+native UHD transport is tracked separately in `usrp_b210_setup.md` so the
 analyzer does not silently depend on Wi-Fi tooling.

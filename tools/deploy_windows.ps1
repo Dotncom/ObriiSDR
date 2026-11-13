@@ -268,7 +268,7 @@ $ReleaseDocFiles = @(
     "docs\cli_scan_example.json",
     "docs\cli_iq_trigger_example.json",
     "docs\multi_sdr_architecture.md",
-    "docs\usrp_b210_plan.md"
+    "docs\usrp_b210_setup.md"
 )
 foreach ($DocFile in $ReleaseDocFiles) {
     $DocPath = Join-Path $Workspace $DocFile

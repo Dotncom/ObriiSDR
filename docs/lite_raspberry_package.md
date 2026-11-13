@@ -29,5 +29,5 @@ ObriiSDR configuration directory; no personal settings are shipped.
 If the package includes experimental B210 Kintex-7 FPGA images, find them
 under `fpga/b210/`. To use one, select a compatible `.bin` in **USRP UHD RX**.
 The UHD library and its standard images are installed separately. See
-[`usrp_b210_plan.md`](usrp_b210_plan.md) for the image profiles, GPS / QTH
+[`usrp_b210_setup.md`](usrp_b210_setup.md) for the image profiles, GPS / QTH
 setup and bench coverage.

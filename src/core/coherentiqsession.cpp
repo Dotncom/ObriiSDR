@@ -19,12 +19,19 @@
 #include <complex>
 #include <cstring>
 #include <limits>
+#include <numeric>
 
 namespace {
 constexpr int SchemaVersion = 2;
 constexpr std::size_t MaximumSources = 8;
 constexpr std::size_t MaximumFloatsPerSource = 2U * 1024U * 1024U;
 constexpr int MaximumRecordingSegments = 4096;
+
+bool validWeights(const std::vector<double> &weights) {
+    return weights.size() >= 2 && weights.size() <= MaximumSources &&
+           std::all_of(weights.begin(), weights.end(), [](double weight) { return weight >= 0 && weight <= 1; }) &&
+           std::abs(std::accumulate(weights.begin(), weights.end(), 0.0) - 1.0) <= 1e-9;
+}
 
 QString number(std::uint64_t value) { return QString::number(value); }
 
@@ -136,6 +143,7 @@ bool CoherentIqRecording::create(const QString &parentDirectory, QString &error)
 
 bool CoherentIqRecording::contiguous(const std::vector<DspIqSourceSnapshot> &channels, QString &error) const {
     if (channels.size() < 2 || channels.size() > MaximumSources ||
+        (!weights.empty() && channels.size() != weights.size()) ||
         (!sources.empty() && channels.size() != sources.size())) {
         error = QStringLiteral("Invalid IQ recording channel count");
         return false;
@@ -188,17 +196,27 @@ bool CoherentIqRecording::append(const std::vector<DspIqSourceSnapshot> &channel
     return true;
 }
 
-QString CoherentIqRecording::finish(const QString &reason, QString &error) const {
+QString CoherentIqRecording::finish(const QString &reason, QString &error,
+                                    const std::vector<double> &combiningWeights) const {
     if (segments.isEmpty()) {
         error = QStringLiteral("No coherent IQ was recorded");
         return {};
     }
-    const QJsonObject index{
+    QJsonObject index{
         {QStringLiteral("format"), QStringLiteral("obrii-coherent-iq-recording")},
         {QStringLiteral("schemaVersion"), 1},
         {QStringLiteral("segments"), QJsonArray::fromStringList(segments)},
         {QStringLiteral("interruption"), reason}
     };
+    if (!combiningWeights.empty()) {
+        if (combiningWeights.size() != sources.size() || !validWeights(combiningWeights)) {
+            error = QStringLiteral("Invalid IQ recording combining weights");
+            return {};
+        }
+        QJsonArray values;
+        for (const double weight : combiningWeights) values.append(weight);
+        index.insert(QStringLiteral("combiningWeights"), values);
+    }
     QSaveFile file(QDir(directory).filePath(QStringLiteral("recording.json")));
     file.setDirectWriteFallback(false);
     if (!file.open(QIODevice::WriteOnly) ||
@@ -235,6 +253,17 @@ bool CoherentIqRecording::open(const QString &manifestPath, QString &error) {
         }
         seen.insert(name);
         validated.append(name);
+    }
+    if (index.contains(QStringLiteral("combiningWeights"))) {
+        const auto values = index.value(QStringLiteral("combiningWeights")).toArray();
+        std::vector<double> parsed;
+        if (values.size() <= int(MaximumSources))
+            for (const auto &value : values) parsed.push_back(value.toDouble(-1));
+        if (!validWeights(parsed)) {
+            error = QStringLiteral("Invalid IQ recording combining weights");
+            return false;
+        }
+        weights = std::move(parsed);
     }
     directory = QFileInfo(manifestPath).absolutePath();
     interruption = index.value(QStringLiteral("interruption")).toString();

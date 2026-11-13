@@ -26,6 +26,11 @@ struct UserMarker {
     double longitude = 0.0;
 };
 
+struct RejectedFixMarker {
+    GeoPosition position;
+    QString tooltip;
+};
+
 bool isValidLatitude(double latitude);
 bool isValidLongitude(double longitude);
 QString maidenheadLocator(double latitude, double longitude, int length = 6);

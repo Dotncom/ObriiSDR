@@ -11,6 +11,10 @@ receiver controls, and adds live coherent IQ in Multi-SDR. See
 The 9.0.2 preview adds configurable network spectrum cadence, compact
 level encoding, and fixes for Raspberry Pi display and remote zoom.
 See `docs/release_notes_9.0.2.md` for the update and its test coverage.
+The 9.0.3 preview adds M17 microphone and push-to-talk transmission,
+Mesh collision simulation, and combined GNSS satellite display.
+Download the Windows x64 package or the Raspberry Pi ARM64 package and
+follow [the installation guide](docs/install.md).
 
 The 9.0.1 preview adds B210 dual RX, UHD GPS status with optional GSV,
 USRP Lab jobs, and updated Raspberry Pi launch and receive behavior.

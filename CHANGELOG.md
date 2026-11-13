@@ -1,5 +1,14 @@
 # Changelog
 
+## 9.0.3 Preview - 2026-11-13
+
+- Transmit clear Codec2 3200 M17 voice from WAV, a live microphone or a push-to-talk microphone. The CLI sends M17 voice from WAV and continues to support M17 SMS.
+- Set channel bitrate in the Mesh packet simulation to include airtime, collisions and half-duplex losses. Saved scenarios reproduce those outcomes in ObriiMeshSim.
+- Add optional noise weighting and drift correction to live coherent IQ. Add node positions, motion and a configurable link radius to the packet lab.
+- Show satellite observations from UHD GPS and a serial GNSS module together. Add fix validation and map markers for rejected UHD fixes.
+- Add a configurable UDP audio receive buffer and six waterfall palettes. Correct CPU waterfall alignment at fractional display scales. Improve Raspberry Pi Fobos startup across sample-rate changes.
+- Add TCP SCPI scalar sweeps, offline OSL correction for recorded S11, and synthetic UMTS IQ demos.
+
 ## 9.0.2 Preview - 2026-11-11
 
 - Pace network spectrum updates independently when the GUI server's local display is disabled. Compute one FFT per update and expose a configurable 1–60 frames/s limit.

@@ -25,7 +25,8 @@ enum class TxModulation {
     Bpsk,
     Qpsk,
     Rtty,
-    Dmr
+    Dmr,
+    M17Voice
 };
 
 struct TxConfiguration {

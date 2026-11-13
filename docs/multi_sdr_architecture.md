@@ -97,6 +97,15 @@ DSP Flow uses its usual branch conditions: main reception must be active and
 the simplified audio channelizer disabled. The Multi-SDR preview can run the
 virtual pair on its own.
 
+Select **Stitch IQ bands** before starting the live group or the virtual pair
+to combine two adjacent bands. Both receivers need a verified common timeline,
+the same sample rate up to 192 kS/s and centers separated by that rate. The
+result has twice the sample rate and a center halfway between the inputs.
+The filters leave guard bands at the seam and edges. The preview and the
+same DSP Flow source carry the joined IQ. The coherent multichannel recorder
+requires two aligned streams at one center. The virtual stitch test uses
+48 kS/s per input and verifies both signals at 96 kS/s.
+
 **Start live coherent IQ** uses the running receivers in the
 Multi-SDR group, with the selected RX as the reference. Live mode requires a
 single center frequency, a common rate up to 192 kS/s, and a verified shared
@@ -109,8 +118,21 @@ validation and the corresponding backend support are separate work.
 
 The live status tooltip reports the largest estimated relative phase drift
 against the reference receiver in Hz. The estimate uses consecutive coherent
-blocks and clears on recalibration or loss of continuity. It does not steer
-the receiver clocks or change the IQ combiner.
+blocks and clears on recalibration or loss of continuity.
+
+For same-center reception, **Weight by noise (MRC)** estimates each channel's
+noise floor from short spectra during calibration and gives quieter channels
+more weight after gain and phase alignment. The tooltip shows the weights,
+starting with the reference receiver. The weights stay fixed until
+recalibration. When the calibration spectra cannot separate signal and noise
+reliably, the combiner uses equal weights.
+
+**Track phase drift** uses cross-correlation against the reference to rotate IQ
+continuously across block boundaries. It corrects slow relative phase changes
+while the streams remain aligned. A sudden phase jump, weak correlation or IQ
+gap still invalidates the calibration. Both options start disabled and work
+with the virtual pair. They apply to same-center reception, including **Align
+by signal (Fobos)**. Band stitching uses its own combiner.
 
 **Align by signal (Fobos)** is a separate software mode for two receivers
 using the existing Agile or Standard IQ APIs. Set both RF inputs to the same
@@ -143,9 +165,10 @@ Click **Stop IQ recording** to save the final segment and commit
 recording and indexes the valid prefix when it can be saved. The status shows
 the reason and its tooltip shows the index path. Keep the segment folders
 with the index. After stopping the live preview, click **Replay IQ recording…**
-and select that index. Playback verifies the segment hashes and timeline,
-averages the stored aligned channels at the recorded rate, and updates the
-spectrum, waterfall and **Coherent IQ (Multi-SDR)** source for DSP Flow.
+and select that index. Playback verifies the segment hashes and timeline and
+combines the stored aligned channels at the recorded rate. It uses the saved
+weights when present and equal weights for older recordings. The combined IQ
+feeds the spectrum, waterfall and **Coherent IQ (Multi-SDR)** source for DSP Flow.
 
 ## Thread and process assessment
 

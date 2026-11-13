@@ -8,6 +8,8 @@
 
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
@@ -19,6 +21,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <memory>
 
 namespace {
 
@@ -144,6 +147,163 @@ bool normalizeM8nUbxConstellationSelection(bool &useGps,
 }
 
 } // namespace
+
+void YourClassName::showGnssInterferenceMonitor() {
+    if (gnssInterferenceDialog) {
+        gnssInterferenceDialog->show();
+        gnssInterferenceDialog->raise();
+        gnssInterferenceDialog->activateWindow();
+        return;
+    }
+
+    const bool uk = uiLanguage.startsWith(QLatin1String("uk"));
+    const auto text = [uk](const char *ua, const char *en) { return QString::fromUtf8(uk ? ua : en); };
+    auto *dialog = new QDialog(this);
+    gnssInterferenceDialog = dialog;
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(text(u8"Монітор завад u-blox", "u-blox interference monitor"));
+    auto *layout = new QVBoxLayout(dialog);
+    auto *enabled = new QCheckBox(text(u8"Увімкнути монітор завад", "Enable interference monitor"), dialog);
+    enabled->setEnabled(false);
+    auto *configuration = new QLabel(dialog);
+    configuration->setWordWrap(true);
+    auto *hardware = new QLabel(dialog);
+    hardware->setWordWrap(true);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+    layout->addWidget(enabled);
+    layout->addWidget(configuration);
+    layout->addWidget(hardware);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
+
+    struct State {
+        QByteArray config;
+        QByteArray expected;
+        std::optional<bool> requested;
+        QElapsedTimer portAge;
+        QElapsedTimer configPollAge;
+        QElapsedTimer writeAge;
+        QElapsedTimer hardwareAge;
+    };
+    const auto state = std::make_shared<State>();
+    const auto send = [this](quint8 messageClass, quint8 id, const QByteArray &payload = {}) {
+        if (!gnssSerialPort || !gnssSerialPort->isOpen() || !gnssSerialPort->isWritable()) return false;
+        const QByteArray frame = makeUbxFrame(messageClass, id, payload);
+        const bool written = gnssSerialPort->write(frame) == frame.size();
+        gnssSerialPort->flush();
+        return written;
+    };
+    const auto syncControl = [state, enabled] {
+        const auto current = ubxItfmEnabled(state->config);
+        const QSignalBlocker blocker(enabled);
+        enabled->setChecked(current.value_or(false));
+        enabled->setEnabled(current.has_value() && !state->requested.has_value());
+    };
+    const auto pollConfig = [state, send] {
+        state->configPollAge.start();
+        return send(0x06, 0x39); // CFG-ITFM readback
+    };
+    const auto finish = [state, configuration, syncControl](const QString &message) {
+        state->requested.reset();
+        state->expected.clear();
+        configuration->setText(message);
+        syncControl();
+    };
+    connect(enabled, &QCheckBox::toggled, dialog, [=](bool checked) {
+        state->requested = checked;
+        state->expected.clear();
+        state->writeAge.start();
+        enabled->setEnabled(false);
+        configuration->setText(text(u8"Читання поточної конфігурації модуля…", "Reading current receiver configuration…"));
+        if (!pollConfig()) finish(text(u8"Запит UBX не надіслано.", "Could not send the UBX request."));
+    });
+
+    connect(this, &YourClassName::gnssInterferenceUbxFrame, dialog, [=](quint8 messageClass, quint8 id, const QByteArray &payload) {
+        if (messageClass == 0x06 && id == 0x39) {
+            const auto actual = ubxItfmEnabled(payload);
+            if (!actual.has_value()) return;
+            const bool firstRead = state->config.isEmpty();
+            state->config = payload;
+            if (!state->requested.has_value()) {
+                if (firstRead) configuration->setText(text(u8"Стан зчитано з модуля.", "State read from the receiver."));
+                syncControl();
+                return;
+            }
+            if (state->expected.isEmpty()) {
+                state->expected = ubxItfmWithEnabled(payload, *state->requested);
+                if (payload != state->expected) {
+                    if (!send(0x06, 0x39, state->expected)) {
+                        finish(text(u8"Не вдалося надіслати зміну монітора.", "Could not send the monitor change."));
+                        return;
+                    }
+                    configuration->setText(text(u8"Перевірка нового стану…", "Verifying the new state…"));
+                    return;
+                }
+            }
+            if (payload == state->expected) {
+                qDebug() << "[GNSS UBX] CFG-ITFM verified enabled" << *actual;
+                finish(text(u8"Стан підтверджено читанням із модуля.", "State confirmed by receiver readback."));
+            }
+            return;
+        }
+        if (messageClass == 0x05 && state->requested.has_value() && !state->expected.isEmpty()) {
+            if (id == 0x00) finish(text(u8"Модуль відхилив зміну CFG-ITFM.", "The receiver rejected the CFG-ITFM change."));
+            else if (id == 0x01) pollConfig();
+            return;
+        }
+        if (messageClass != 0x0A || id != 0x09) return;
+        const auto sample = parseUbxMonHw(payload);
+        if (!sample) return;
+        state->hardwareAge.start();
+        const QString jamming[] = {
+            text(u8"невідомо", "unknown"), text(u8"значних завад не виявлено", "no significant interference detected"),
+            text(u8"попередження", "warning"), text(u8"критично", "critical")
+        };
+        const QString antenna[] = {
+            text(u8"ініціалізація", "initializing"), text(u8"невідомо", "unknown"), QStringLiteral("OK"),
+            text(u8"коротке замикання", "short"), text(u8"розрив", "open")
+        };
+        const QString antennaState = sample->antennaStatus < 5 ? antenna[sample->antennaStatus] : antenna[1];
+        const QString power = sample->antennaPower == 1 ? text(u8"увімкнено", "on")
+            : (sample->antennaPower == 0 ? text(u8"вимкнено", "off") : antenna[1]);
+        hardware->setText(text(u8"Стан завад: %1\nІндикатор вузькосмугових завад: %2 / 255\nШум: %3 · AGC: %4 / 8191\nАнтена: %5 · живлення: %6",
+                              "Interference state: %1\nNarrowband interference indicator: %2 / 255\nNoise: %3 · AGC: %4 / 8191\nAntenna: %5 · power: %6")
+            .arg(jamming[sample->jammingState]).arg(sample->cwIndicator).arg(sample->noisePerMs).arg(sample->agc)
+            .arg(antennaState, power));
+    });
+
+    auto *timer = new QTimer(dialog);
+    timer->setInterval(1000);
+    const auto refresh = [=] {
+        if (!gnssSerialPort || !gnssSerialPort->isOpen()) {
+            *state = State{};
+            syncControl();
+            configuration->setText(text(u8"Підключіть зовнішній GNSS-модуль у GPS / QTH.", "Connect the external GNSS module in GPS / QTH."));
+            hardware->clear();
+            return;
+        }
+        if (!state->portAge.isValid()) {
+            state->portAge.start();
+            configuration->setText(text(u8"Очікування відповіді CFG-ITFM…", "Waiting for a CFG-ITFM response…"));
+        }
+        if (state->requested.has_value() && state->writeAge.hasExpired(3500)) {
+            finish(text(u8"Модуль не підтвердив зміну CFG-ITFM.", "The receiver did not confirm the CFG-ITFM change."));
+        }
+        if (state->config.isEmpty() && state->portAge.hasExpired(3500) && !state->requested.has_value()) {
+            configuration->setText(text(u8"Відповіді CFG-ITFM немає.", "No CFG-ITFM response."));
+        }
+        if (!state->configPollAge.isValid() || state->configPollAge.hasExpired(state->requested ? 900 : 2900)) pollConfig();
+        if (!state->hardwareAge.isValid() || state->hardwareAge.hasExpired(3500)) {
+            hardware->setText(text(u8"Очікування даних MON-HW…", "Waiting for MON-HW data…"));
+        }
+        send(0x0A, 0x09); // MON-HW
+    };
+    connect(timer, &QTimer::timeout, dialog, refresh);
+    refresh();
+    timer->start();
+    dialog->show();
+}
+
 void YourClassName::toggleGnssSerial() {
     if (gnssSerialPort && gnssSerialPort->isOpen()) {
         stopGnssSerial();
@@ -187,6 +347,8 @@ void YourClassName::startGnssSerial() {
         gnssSerialBaud = gnssSerialBaudSpin->value();
     }
     gnssSerialBaud = (std::clamp)(gnssSerialBaud, 1200, 921600);
+    combinedSerialGgaAge.invalidate();
+    combinedSerialRmcAge.invalidate();
     gnssSerialBuffer.clear();
     gnssSerialSentenceCount = 0;
     gnssSerialUbxFrameCount = 0;
@@ -248,7 +410,7 @@ void YourClassName::startGnssSerial() {
         return;
     }
 
-    if (qthSource != QLatin1String("uhd")) {
+    if (!isUhdGnssSource(qthSource)) {
         qthSource = QStringLiteral("nmea");
         qthPositionVisible = false;
     }
@@ -271,6 +433,8 @@ void YourClassName::startGnssSerial() {
 }
 
 void YourClassName::stopGnssSerial() {
+    combinedSerialGgaAge.invalidate();
+    combinedSerialRmcAge.invalidate();
     if (gnssSerialPort && gnssSerialPort->isOpen()) {
         qDebug() << "[GNSS serial] close" << "port" << gnssSerialPort->portName();
         gnssSerialPort->close();
@@ -416,6 +580,17 @@ void YourClassName::processGnssNmeaLine(const QString &line, bool fromReplay, bo
     }
 
     ++gnssSerialSentenceCount;
+    if (qthSource == QLatin1String("uhd_nmea") && !fromReplay && !fromSdr && trimmed.size() > 6 &&
+        trimmed.at(6) == QLatin1Char(',')) {
+        const auto kind = trimmed.midRef(3, 3);
+        if (kind == QLatin1String("GGA")) {
+            combinedSerialGga = trimmed;
+            combinedSerialGgaAge.start();
+        } else if (kind == QLatin1String("RMC")) {
+            combinedSerialRmc = trimmed;
+            combinedSerialRmcAge.start();
+        }
+    }
     if (gnssNmeaLogFile && gnssNmeaLogFile->isOpen() && !fromReplay) {
         gnssNmeaLogFile->write(trimmed.toLatin1());
         gnssNmeaLogFile->write("\n");
@@ -423,7 +598,9 @@ void YourClassName::processGnssNmeaLine(const QString &line, bool fromReplay, bo
             gnssNmeaLogFile->flush();
         }
     }
-    updateGnssNmeaSatellitesFromSentence(trimmed);
+    if (qthSource != QLatin1String("uhd_nmea") || (!fromReplay && !fromSdr)) {
+        updateGnssNmeaSatellitesFromSentence(trimmed);
+    }
 
     const NmeaSerialStatus serialStatus = parseNmeaSerialStatusSentence(trimmed);
     if (serialStatus.recognized) {
@@ -540,7 +717,7 @@ void YourClassName::processGnssNmeaLine(const QString &line, bool fromReplay, bo
                                       QStringLiteral("NMEA serial: fix ignored by satellite filters")));
         return;
     }
-    if (qthSource != QLatin1String("uhd") && applyNmeaPositionText(trimmed, &status, false)) {
+    if (!isUhdGnssSource(qthSource) && applyNmeaPositionText(trimmed, &status, false)) {
         ++gnssSerialFixCount;
         QStringList extras;
         if (std::isfinite(gnssSerialHdop)) extras << QStringLiteral("HDOP %1").arg(gnssSerialHdop, 0, 'f', 1);
@@ -560,6 +737,12 @@ void YourClassName::processGnssNmeaLine(const QString &line, bool fromReplay, bo
 void YourClassName::processGnssUbxFrame(quint8 messageClass, quint8 messageId, const QByteArray &payload) {
     ++gnssSerialUbxFrameCount;
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+
+    if ((messageClass == 0x06 && messageId == 0x39) || (messageClass == 0x0A && messageId == 0x09) ||
+        (messageClass == 0x05 && payload.size() == 2 && payload.at(0) == char(0x06) && payload.at(1) == char(0x39))) {
+        emit gnssInterferenceUbxFrame(messageClass, messageId, payload);
+        return;
+    }
 
     if (messageClass == 0x05 && payload.size() >= 2) {
         const QString ackType = messageId == 0x01 ? QStringLiteral("ACK")
@@ -795,7 +978,7 @@ void YourClassName::processGnssUbxFrame(quint8 messageClass, quint8 messageId, c
                                               QStringLiteral("NMEA serial: fix ignored by satellite filters")));
                 return;
             }
-            if (qthSource == QLatin1String("uhd")) return;
+            if (isUhdGnssSource(qthSource)) return;
             qthLatitude = lat;
             qthLongitude = lon;
             qthSource = QStringLiteral("nmea");

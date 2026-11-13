@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 9.0.2)
+project(ObriiSDR VERSION 9.0.3)
 enable_testing()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -238,6 +238,7 @@ endif()
 
 add_executable(ObriiCli
     src/cli/obriicli.cpp
+    src/cli/climcp.cpp src/cli/climcp.h
     src/cli/clivirtualiqsource.cpp src/cli/clivirtualiqsource.h
     src/cli/clicalibration.cpp src/cli/clicalibration.h
     src/research/receivercalibrationtable.cpp
@@ -560,6 +561,7 @@ endif()
 
 add_executable(ObriiCliTxModule
     src/cli/obriiclitxmodule.cpp
+    src/openradio/m17adapter.cpp src/openradio/m17adapter.h
     src/openradio/kissvirtualtx.cpp src/openradio/kissvirtualtx.h
     src/openradio/kisscodec.cpp src/openradio/kisscodec.h
     src/cli/clilivetransmit.cpp src/cli/clilivetransmit.h
@@ -589,7 +591,7 @@ target_include_directories(ObriiCliTxModule PRIVATE
     src src/transmit src/openradio src/core src/utils src/backends third_party/ft8_lib
     third_party/tiny_aes ${FFTW_INCLUDE_DIR}
     FobosDMRVoiceBackend-gpl/include)
-target_link_libraries(ObriiCliTxModule PRIVATE Qt5::Core Qt5::Gui Qt5::Network Qt5::Concurrent ObriiDmrCrypto ${FFTW_FLOAT_LIBRARY})
+target_link_libraries(ObriiCliTxModule PRIVATE Qt5::Core Qt5::Gui Qt5::Network Qt5::Concurrent ObriiDmrCrypto ObriiM17 ${FFTW_FLOAT_LIBRARY})
 if(WIN32)
     target_link_libraries(ObriiCliTxModule PRIVATE winmm ole32)
 else()
@@ -802,6 +804,8 @@ add_library(ObriiMeasurementCore STATIC
     src/analyzer/analyzerinstrumentplan.cpp
     src/analyzer/analyzerinstrumentplan.h
     src/analyzer/analyzerinstrumentbackend.h
+    src/analyzer/analyzerinstrumentscpi.cpp
+    src/analyzer/analyzerinstrumentscpi.h
     src/analyzer/analyzerinstrumentsimulation.cpp
     src/analyzer/analyzerinstrumentsimulation.h
     src/analyzer/instrumentsweepengine.cpp

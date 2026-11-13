@@ -46,9 +46,8 @@ using AMBE-capable binaries.
 3. libusb runtime
    File used in the Windows package:
    - libusb-1.0.dll
-   The Obrii Windows runtime may use libusb 1.0.30 with the IOCP priority
-   extension. The optional Fobos compatibility DLLs use the vendor libusb,
-   installed separately as fobos-compat/usb-vendor.dll.
+   The Windows package uses the libusb DLL supplied with the RigExpert SDKs.
+   Raspberry Pi OS uses its system libusb package.
 
    Upstream: https://github.com/libusb/libusb
    License: GNU Lesser General Public License version 2.1 or later.
@@ -60,13 +59,10 @@ using AMBE-capable binaries.
    - fobos.h
    - fobos.dll
    - fobos.lib
-   - fobos-compat/fobos_stock.dll (optional RigExpert Standard 2.4.0
-     compatibility build with the asynchronous Stop fix)
 
    Upstream/vendor: RigExpert / Fobos SDR SDK
-   The published library source distributed in third_party/patched/libfobos
-   contains the GNU LGPL 2.1 license. Preserve its source notices and the
-   licenses/fobos/standard-COPYING.txt text when redistributing the runtime.
+   Official library source and Windows SDK: https://github.com/rigexpert/libfobos
+   The package preserves licenses/fobos/standard-COPYING.txt.
 
 5. RigExpert Fobos SDR agile API library
    Files used for build/runtime:
@@ -75,9 +71,8 @@ using AMBE-capable binaries.
    - fobos_sdr.lib
 
    Upstream/vendor: RigExpert / Fobos SDR agile SDK
-   The published library source in third_party/patched/libfobos-sdr-agile
-   contains the GNU LGPL 2.1 license. The package preserves this text in
-   licenses/fobos/agile-COPYING.txt and keeps the manufacturer's source notices.
+   Official library source and Windows SDK: https://github.com/rigexpert/libfobos-sdr-agile
+   The package preserves licenses/fobos/agile-COPYING.txt.
 
 6. Microsoft Visual C++ runtime
    Files used in the Windows package:

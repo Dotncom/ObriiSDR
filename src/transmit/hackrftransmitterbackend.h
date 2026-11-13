@@ -23,6 +23,7 @@ public:
     bool start(const TxConfiguration &configuration, QString *error) override;
     bool writeIq(const std::complex<float> *samples, int count, QString *error) override;
     bool writeFiniteBurst(const std::complex<float> *samples, int count, QString *error);
+    bool finishLiveBurst(const std::complex<float> *samples, int count, QString *error);
     bool finiteBurstComplete() const;
     bool finiteBurstSucceeded() const;
     bool setOutputEnabled(bool enabled, QString *error) override;
@@ -45,6 +46,8 @@ private:
     static void flushCallback(void *context, int success);
     int fillTransfer(HackRfTransfer *transfer);
     bool stageFiniteBurst(const std::complex<float> *samples, int count, QString *error);
+    bool stageLiveBurstEnd(const std::complex<float> *samples, int count, QString *error);
+    bool configureTxFlush(QString *error);
     bool beginStreaming(QString *error);
     void closeDevice();
 

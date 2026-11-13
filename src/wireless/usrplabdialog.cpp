@@ -44,6 +44,7 @@ void showUsrpLabDialog(QWidget *owner, bool ukrainian) {
     auto *mode = new QComboBox(dialog);
     mode->addItem(text("GSM BCCH / PDCH from IQ", "GSM BCCH / PDCH із IQ"), QStringLiteral("gsm-decode"));
     mode->addItem(text("UMTS cell and BCH from IQ", "Сота UMTS і BCH із IQ"), QStringLiteral("umts-decode"));
+    mode->addItem(text("UMTS synthetic IQ demo", "UMTS: демо із синтетичного IQ"), QStringLiteral("umts-demo"));
     mode->addItem(text("GSM synthetic IQ demo", "GSM: демо із синтетичного IQ"), QStringLiteral("gsm-demo"));
     mode->addItem(text("GPRS replay from MAC JSONL", "GPRS: повторний розбір MAC JSONL"), QStringLiteral("gsm-replay"));
     mode->addItem(QStringLiteral("Wi-Fi PHY loopback"), QStringLiteral("wifi-loopback"));
@@ -85,6 +86,14 @@ void showUsrpLabDialog(QWidget *owner, bool ukrainian) {
     form->addRow(text("UMTS IQ format", "Формат IQ UMTS"), format);
     auto *startSample = new QLineEdit(QStringLiteral("0"), dialog);
     form->addRow(text("First UMTS sample", "Перший відлік UMTS"), startSample);
+    auto *scenario = new QComboBox(dialog);
+    scenario->addItem(QStringLiteral("PRACH / AICH"), QStringLiteral("prach"));
+    scenario->addItem(text("RRC connection", "З’єднання RRC"), QStringLiteral("rrc"));
+    scenario->addItem(text("NAS attach", "Реєстрація NAS"), QStringLiteral("attach"));
+    scenario->addItem(text("IPv4 exchange over DTCH", "Обмін IPv4 через DTCH"), QStringLiteral("ipv4"));
+    scenario->addItem(text("RLC AM loss recovery", "Відновлення після втрат RLC AM"), QStringLiteral("rlc-recovery"));
+    scenario->setCurrentIndex(scenario->findData(QStringLiteral("ipv4")));
+    form->addRow(text("UMTS scenario", "Сценарій UMTS"), scenario);
 
     auto *buttons = new QHBoxLayout;
     layout->addLayout(buttons);
@@ -105,6 +114,7 @@ void showUsrpLabDialog(QWidget *owner, bool ukrainian) {
         const bool decode = mode->currentData().toString() == QStringLiteral("gsm-decode");
         const bool replay = mode->currentData().toString() == QStringLiteral("gsm-replay");
         const bool umts = mode->currentData().toString() == QStringLiteral("umts-decode");
+        const bool umtsDemo = mode->currentData().toString() == QStringLiteral("umts-demo");
         const bool zmq = mode->currentData().toString() == QStringLiteral("zmq-loopback");
         const bool available = state.value(zmq ? "zmqPythonAvailable" : "available").toBool();
         mode->setEnabled(!active);
@@ -120,6 +130,9 @@ void showUsrpLabDialog(QWidget *owner, bool ukrainian) {
             if (auto *label = form->labelForField(field)) label->setVisible(umts);
             field->setEnabled(!active);
         }
+        scenario->setVisible(umtsDemo);
+        form->labelForField(scenario)->setVisible(umtsDemo);
+        scenario->setEnabled(!active);
         start->setEnabled(!active && available);
         cancel->setEnabled(active && !state.value("cancelling").toBool());
         const auto result = state.value("lastResult").toObject();
@@ -138,6 +151,14 @@ void showUsrpLabDialog(QWidget *owner, bool ukrainian) {
                 message += text("UMTS: %1    PSC: %2    BCH blocks: %3\n", "UMTS: %1    PSC: %2    Блоки BCH: %3\n")
                     .arg(summary.value("status").toString()).arg(codes.join(QStringLiteral(", ")))
                     .arg(summary.value("bchBlocks").toInt());
+            } else if (summary.contains("stages")) {
+                message += text("UMTS scenario: %1    Verified files: %2\n",
+                                "Сценарій UMTS: %1    Звірені файли: %2\n")
+                    .arg(summary.value("scenario").toString()).arg(summary.value("artifacts").toInt());
+                const auto stages = summary.value("stages").toObject();
+                for (const auto *key : {"aich", "rrc-complete", "nas-attach-finish", "nas-pdp-activate", "ipv4-dtch"})
+                    if (stages.contains(QLatin1String(key)))
+                        message += stages.value(QLatin1String(key)).toString() + QLatin1Char('\n');
             } else if (summary.contains("cells")) {
                 message += text("Cells: %1    PDCH blocks: %2\n", "Соти: %1    Блоки PDCH: %2\n")
                     .arg(summary.value("cells").toInt()).arg(summary.value("pdchBlocks").toInt());
@@ -159,6 +180,9 @@ void showUsrpLabDialog(QWidget *owner, bool ukrainian) {
         } else if (!available) {
             message = text("Local lab unavailable. Set OBRII_USRP_LAB_ROOT and install Python 3.11+.",
                            "Локальний стенд недоступний. Задайте OBRII_USRP_LAB_ROOT і встановіть Python 3.11+.");
+        } else if (umtsDemo) {
+            message = text("Generates synthetic IQ and verifies the selected exchange offline. Requires NumPy.",
+                           "Генерує синтетичний IQ і перевіряє вибраний обмін офлайн. Потрібен NumPy.");
         } else if (zmq) {
             message = text("Requires PyZMQ in the selected Python environment.",
                            "У вибраному середовищі Python потрібен PyZMQ.");
@@ -192,6 +216,8 @@ void showUsrpLabDialog(QWidget *owner, bool ukrainian) {
                 output->setPlainText(text("Enter a valid first sample index.", "Вкажіть коректний номер першого відліку."));
                 return;
             }
+        } else if (action == QStringLiteral("umts-demo")) {
+            request.insert("scenario", scenario->currentData().toString());
         }
         const auto reply = job->command(request);
         if (!reply.value("ok").toBool()) output->setPlainText(reply.value("error").toString());

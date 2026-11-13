@@ -37,25 +37,30 @@ void KissVirtualTx::disable() {
     transmitter.stop();
 }
 
-bool KissVirtualTx::enqueue(const KissFrame &frame, QString *error) {
+bool validateKissTxFrame(const KissFrame &frame, QString *error) {
     QString reason;
     Ax25UiFrame decoded;
-    if (!enabled) {
-        reason = QStringLiteral("Virtual KISS TX is disabled");
-    } else if (frame.port != 0 || frame.command != 0) {
-        reason = QStringLiteral("Virtual KISS TX accepts data frames on port 0");
+    if (frame.port != 0 || frame.command != 0) {
+        reason = QStringLiteral("KISS TX accepts data frames on port 0");
     } else if (frame.payload.size() > MaximumAx25Bytes ||
                !Ax25Codec::decodeUiFrame(frame.payload, &decoded, false) ||
                (decoded.control & ~0x10) != 0x03 || decoded.information.size() > MaximumInfoBytes) {
         reason = QStringLiteral("Expected an AX.25 UI frame without FCS, up to 256 information bytes");
-    } else if (pending.size() >= MaximumPendingFrames) {
-        reason = QStringLiteral("Virtual KISS TX queue is full");
-    } else {
-        pending.enqueue(frame.payload);
-        if (!timer.isActive()) timer.start();
     }
     if (error) *error = reason;
     return reason.isEmpty();
+}
+
+bool KissVirtualTx::enqueue(const KissFrame &frame, QString *error) {
+    if (!enabled || pending.size() >= MaximumPendingFrames) {
+        if (error) *error = enabled ? QStringLiteral("Virtual KISS TX queue is full")
+                                    : QStringLiteral("Virtual KISS TX is disabled");
+        return false;
+    }
+    if (!validateKissTxFrame(frame, error)) return false;
+    pending.enqueue(frame.payload);
+    if (!timer.isActive()) timer.start();
+    return true;
 }
 
 void KissVirtualTx::abortBurst(const QString &error) {

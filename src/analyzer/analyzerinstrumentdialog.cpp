@@ -71,6 +71,7 @@ public:
         if (role == Qt::TextAlignmentRole) return int(Qt::AlignRight | Qt::AlignVCenter);
         if (role != Qt::DisplayRole) return {};
         const auto &point = points.at(index.row());
+        if (point.forwardOnly && index.column() > 1) return QStringLiteral("—");
         switch (index.column()) {
         case 0: return QString::number(point.frequencyHz / 1e6, 'f', 6);
         case 1: return QString::number(point.forwardDb, 'f', 2);
@@ -109,7 +110,7 @@ AnalyzerInstrumentDialog::AnalyzerInstrumentDialog(bool ukrainianUi, QWidget *pa
     setAttribute(Qt::WA_DeleteOnClose);
 
     auto *root = new QVBoxLayout(this);
-    auto *tabs = new QTabWidget(this);
+    tabs = new QTabWidget(this);
     root->addWidget(tabs, 1);
 
     auto *planPage = new QWidget(tabs);
@@ -287,12 +288,8 @@ AnalyzerInstrumentDialog::AnalyzerInstrumentDialog(bool ukrainianUi, QWidget *pa
     tabs->addTab(externalPage, text("SCPI / session", "SCPI / сесія"));
 
     auto *simulationPage = new QWidget(tabs);
+    resultsPage = simulationPage;
     auto *simulationLayout = new QVBoxLayout(simulationPage);
-    auto *modelDescription = new QLabel(text(
-        "Ideal 10 MHz low-pass model. Frequency and timing come from the measurement plan.",
-        "Модель ідеального ФНЧ на 10 МГц. Частоти й затримки беруться з плану вимірювання."), simulationPage);
-    modelDescription->setWordWrap(true);
-    simulationLayout->addWidget(modelDescription);
     auto *simulationActions = new QHBoxLayout();
     startSimulationButton = new QPushButton(text("Run simulation", "Запустити симуляцію"), simulationPage);
     stopSimulationButton = new QPushButton(text("Stop", "Зупинити"), simulationPage);
@@ -324,7 +321,7 @@ AnalyzerInstrumentDialog::AnalyzerInstrumentDialog(bool ukrainianUi, QWidget *pa
     resultTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     resultTable->setAlternatingRowColors(true);
     simulationLayout->addWidget(resultTable, 1);
-    tabs->addTab(simulationPage, text("Simulation", "Симуляція"));
+    tabs->addTab(simulationPage, text("Results", "Результати"));
 
     validationEdit = new QPlainTextEdit(this);
     validationEdit->setReadOnly(true);
@@ -336,10 +333,8 @@ AnalyzerInstrumentDialog::AnalyzerInstrumentDialog(bool ukrainianUi, QWidget *pa
     auto *saveButton = new QPushButton(text("Save plan...", "Зберегти план..."), this);
     auto *sessionButton = new QPushButton(text("Save session template...", "Зберегти шаблон сесії..."), this);
     auto *validateButton = new QPushButton(text("Validate", "Перевірити"), this);
-    auto *executeButton = new QPushButton(text("Execute RF", "Запустити RF"), this);
+    executeButton = new QPushButton(text("Run SCPI sweep", "Запустити SCPI-прогін"), this);
     executeButton->setEnabled(false);
-    executeButton->setToolTip(text("Requires a qualified UHD or SCPI instrument adapter.",
-                                   "Потрібен перевірений адаптер приладу через UHD або SCPI."));
     auto *closeButton = new QPushButton(text("Close", "Закрити"), this);
     actions->addWidget(loadButton);
     actions->addWidget(saveButton);
@@ -368,17 +363,24 @@ AnalyzerInstrumentDialog::AnalyzerInstrumentDialog(bool ukrainianUi, QWidget *pa
                 calibrationCapturedUtc = QDateTime::currentDateTimeUtc();
         });
     }
-    connect(scpiResourceEdit, &QLineEdit::textChanged, this, [this]() { updateValidation(); });
+    for (auto *edit : {scpiResourceEdit, scpiIdnEdit, scpiFrequencyEdit, scpiPowerEdit,
+                       scpiOutputEdit, scpiTriggerEdit, scpiReadEdit})
+        connect(edit, &QLineEdit::textChanged, this, [this]() { updateValidation(); });
     connect(loadButton, &QPushButton::clicked, this, &AnalyzerInstrumentDialog::loadPlan);
     connect(saveButton, &QPushButton::clicked, this, &AnalyzerInstrumentDialog::savePlan);
     connect(sessionButton, &QPushButton::clicked, this, &AnalyzerInstrumentDialog::saveSessionTemplate);
     connect(validateButton, &QPushButton::clicked, this, &AnalyzerInstrumentDialog::updateValidation);
     connect(startSimulationButton, &QPushButton::clicked, this, &AnalyzerInstrumentDialog::startSimulation);
-    connect(stopSimulationButton, &QPushButton::clicked, this, [this]() { simulation.cancel(); });
+    connect(executeButton, &QPushButton::clicked, this, &AnalyzerInstrumentDialog::startScpi);
+    connect(stopSimulationButton, &QPushButton::clicked, this, [this]() {
+        if (measuringScpi) scpi.cancel();
+        else simulation.cancel();
+    });
     connect(saveSimulationButton, &QPushButton::clicked, this, &AnalyzerInstrumentDialog::saveSimulation);
     connect(closeButton, &QPushButton::clicked, this, &QDialog::close);
     connect(this, &QDialog::finished, this, [this]() {
         simulation.cancel();
+        scpi.cancel();
         persistLastPlan();
     });
 
@@ -562,8 +564,13 @@ void AnalyzerInstrumentDialog::updateValidation() {
                                   .arg(step, 0, 'g', 8)
                                   .arg(durationSeconds, 0, 'f', 2));
     QString display = validation.summary();
-    display += text("\nBACKEND: no qualified RF executor is connected in this build.",
-                    "\nBACKEND: у цій збірці не підключено перевірений RF-виконавець.");
+    const auto scpiError = AnalyzerInstrumentScpi::validationError(plan);
+    display += QLatin1Char('\n') + (scpiError.isEmpty()
+        ? text("SCPI ready. The read query must return a single value in dBm.",
+               "SCPI готовий. Запит вимірювання має повертати одне значення в дБм.")
+        : scpiError);
+    executeButton->setEnabled(scpiError.isEmpty() && !stopSimulationButton->isEnabled());
+    executeButton->setToolTip(scpiError);
     validationEdit->setPlainText(display);
     validationEdit->setStyleSheet(validation.errors.isEmpty() && validation.requirements.isEmpty()
                                       ? QStringLiteral("color:#8fe0c2;")
@@ -632,13 +639,31 @@ void AnalyzerInstrumentDialog::startSimulation() {
         simulationStatus->setText(error);
         return;
     }
-    if (!simulation.start(requested,
+    beginSweep(AnalyzerInstrumentSimulation::simulationPlan(requested), simulation.backendId(), false);
+}
+
+void AnalyzerInstrumentDialog::startScpi() {
+    const auto requested = planFromUi();
+    if (!AnalyzerInstrumentScpi::validationError(requested).isEmpty()) return;
+    const auto message = text("Enable RF at %1 dBm on %2? Verify the instrument, connections and load.",
+                              "Увімкнути RF на %1 дБм на %2? Перевірте прилад, підключення та навантаження.")
+        .arg(requested.sourceLevelDbm).arg(requested.scpi.resource);
+    if (QMessageBox::question(this, windowTitle(), message, QMessageBox::Yes | QMessageBox::No,
+                              QMessageBox::No) != QMessageBox::Yes) return;
+    beginSweep(requested, scpi.backendId(), true);
+}
+
+void AnalyzerInstrumentDialog::beginSweep(const AnalyzerInstrumentPlan &requested,
+                                          const QString &backend, bool useScpi) {
+    auto &instrument = useScpi ? static_cast<AnalyzerInstrumentBackend &>(scpi)
+                               : static_cast<AnalyzerInstrumentBackend &>(simulation);
+    if (!instrument.start(requested,
             [this](const AnalyzerMeasurementPoint &point) {
                 simulationTable->append(point);
                 simulationProgress->setValue(simulationTable->rowCount());
             },
             [this](const QString &reason) { finishSimulation(reason); })) {
-        simulationStatus->setText(text("Could not start the simulation.", "Не вдалося запустити симуляцію."));
+        simulationStatus->setText(text("Could not start the sweep.", "Не вдалося запустити прогін."));
         return;
     }
     simulationTable->clear();
@@ -646,13 +671,18 @@ void AnalyzerInstrumentDialog::startSimulation() {
     simulatedSession.sessionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     simulatedSession.applicationVersion = QString::fromLatin1(OBRII_ANALYZER_VERSION);
     simulatedSession.startedUtc = QDateTime::currentDateTimeUtc();
-    simulatedSession.plan = AnalyzerInstrumentSimulation::simulationPlan(requested);
-    simulatedSession.backendId = simulation.backendId();
-    simulatedSession.eventLog << QStringLiteral("Simulated ideal 10 MHz low-pass response");
+    simulatedSession.plan = requested;
+    simulatedSession.backendId = backend;
+    simulatedSession.eventLog << (useScpi ? QStringLiteral("SCPI power readback in dBm")
+                                         : QStringLiteral("Simulated ideal 10 MHz low-pass response"));
     simulationProgress->setRange(0, int(AnalyzerInstrumentSimulation::pointCount(requested)));
     simulationProgress->setValue(0);
-    simulationStatus->setText(text("Simulation running…", "Триває симуляція…"));
+    measuringScpi = useScpi;
+    tabs->setCurrentWidget(resultsPage);
+    simulationStatus->setText(useScpi ? text("SCPI sweep running…", "Триває SCPI-прогін…")
+                                     : text("Simulating a 10 MHz low-pass filter…", "Симуляція ФНЧ 10 МГц…"));
     startSimulationButton->setEnabled(false);
+    executeButton->setEnabled(false);
     stopSimulationButton->setEnabled(true);
     saveSimulationButton->setEnabled(false);
 }
@@ -660,21 +690,21 @@ void AnalyzerInstrumentDialog::startSimulation() {
 void AnalyzerInstrumentDialog::finishSimulation(const QString &error) {
     simulatedSession.completedUtc = QDateTime::currentDateTimeUtc();
     simulatedSession.points = simulationTable->measurements();
-    simulatedSession.outcome = error.isEmpty() ? QStringLiteral("completed") : QStringLiteral("cancelled");
-    simulatedSession.eventLog << (error.isEmpty() ? QStringLiteral("Simulation completed") : error);
-    simulationStatus->setText((error.isEmpty()
-        ? text("Simulation completed · %1 points", "Симуляцію завершено · %1 точок")
-        : text("Simulation stopped · %1 points collected", "Симуляцію зупинено · зібрано %1 точок"))
-        .arg(simulatedSession.points.size()));
+    simulatedSession.outcome = error.isEmpty() ? QStringLiteral("completed")
+        : measuringScpi ? QStringLiteral("stopped") : QStringLiteral("cancelled");
+    simulatedSession.eventLog << (error.isEmpty() ? QStringLiteral("Sweep completed") : error);
+    const auto summary = text("Collected points · %1", "Зібрано точок · %1").arg(simulatedSession.points.size());
+    simulationStatus->setText(error.isEmpty() ? summary : error + QLatin1Char('\n') + summary);
     startSimulationButton->setEnabled(true);
     stopSimulationButton->setEnabled(false);
     saveSimulationButton->setEnabled(!simulatedSession.points.isEmpty());
+    updateValidation();
 }
 
 void AnalyzerInstrumentDialog::saveSimulation() {
     if (!simulatedSession.points.isEmpty())
-        saveSession(simulatedSession, text("Save simulated analyzer results", "Зберегти результати симуляції Analyzer"),
-                    QStringLiteral("analyzer-simulation.json"));
+        saveSession(simulatedSession, text("Save analyzer results", "Зберегти результати Analyzer"),
+                    measuringScpi ? QStringLiteral("analyzer-scpi.json") : QStringLiteral("analyzer-simulation.json"));
 }
 
 void AnalyzerInstrumentDialog::saveSession(const AnalyzerMeasurementSession &session, const QString &title,

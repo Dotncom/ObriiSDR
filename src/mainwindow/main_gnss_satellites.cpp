@@ -165,7 +165,7 @@ void YourClassName::sortGnssSatelliteRows(QVector<GnssNmeaSatellite> &satellites
 
 void YourClassName::setGnssSatelliteRowsEnabled(bool enabled) {
     bool changed = false;
-    for (const GnssNmeaSatellite &satellite : gnssNmeaSatellites) {
+    for (const GnssNmeaSatellite &satellite : gnssSatellitesForDisplay()) {
         if (!isGnssNmeaSystemEnabled(satellite.system)) {
             continue;
         }
@@ -261,10 +261,51 @@ void YourClassName::updateGnssNmeaSatellitesFromSentence(const QString &line) {
             ++it;
         }
     }
+    gnssSatelliteTableDirty = true;
     updateGnssSatelliteView();
 }
 
+void YourClassName::updateUhdGnssSatellites(const UhdGnssSkySummary &sky, int used, int fixQuality) {
+    uhdGnssSatellites.clear();
+    uhdGnssSatellitesUsed = used;
+    uhdGnssFixQuality = fixQuality;
+    uhdGnssHasSkyReport = sky.satellitesInView >= 0;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    for (const auto &entry : sky.satellites) {
+        GnssNmeaSatellite satellite;
+        satellite.key = QStringLiteral("UHD:") + gnssSatelliteKey(entry.talker, entry.id);
+        satellite.source = QStringLiteral("UHD");
+        satellite.talker = entry.talker;
+        satellite.system = gnssSystemForTalker(entry.talker, entry.id);
+        satellite.prn = entry.id;
+        satellite.elevationDeg = entry.elevationDeg;
+        satellite.azimuthDeg = entry.azimuthDeg;
+        satellite.cn0DbHz = entry.cn0DbHz;
+        satellite.lastSeenMs = nowMs;
+        uhdGnssSatellites.insert(satellite.key, satellite);
+    }
+    gnssSatelliteTableDirty = true;
+    updateGnssSatelliteView();
+}
+
+QMap<QString, GnssNmeaSatellite> YourClassName::gnssSatellitesForDisplay() const {
+    if (!isUhdGnssSource(qthSource)) return gnssNmeaSatellites;
+    if (qthSource != QLatin1String("uhd_nmea") || !gnssSerialPort || !gnssSerialPort->isOpen()) {
+        return uhdGnssSatellites;
+    }
+    auto satellites = uhdGnssSatellites;
+    const qint64 staleBeforeMs = QDateTime::currentMSecsSinceEpoch() - 30000;
+    for (auto it = gnssNmeaSatellites.cbegin(); it != gnssNmeaSatellites.cend(); ++it) {
+        if (it->lastSeenMs >= staleBeforeMs) satellites.insert(it.key(), it.value());
+    }
+    return satellites;
+}
+
 void YourClassName::updateGnssSatelliteView(bool forceTableRefresh) {
+    const bool uhd = isUhdGnssSource(qthSource);
+    const bool combined = qthSource == QLatin1String("uhd_nmea");
+    forceTableRefresh |= (gnssSatelliteViewSource != qthSource);
+    gnssSatelliteViewSource = qthSource;
     if (gnssUseGpsCheckbox) {
         QSignalBlocker blocker(gnssUseGpsCheckbox);
         gnssUseGpsCheckbox->setChecked(gnssUseGps);
@@ -294,9 +335,10 @@ void YourClassName::updateGnssSatelliteView(bool forceTableRefresh) {
         gnssUseOtherCheckbox->setChecked(gnssUseOther);
     }
 
+    const auto &sourceSatellites = gnssSatellitesForDisplay();
     QVector<GnssNmeaSatellite> satellites;
-    satellites.reserve(gnssNmeaSatellites.size());
-    for (const GnssNmeaSatellite &satellite : gnssNmeaSatellites) {
+    satellites.reserve(sourceSatellites.size());
+    for (const GnssNmeaSatellite &satellite : sourceSatellites) {
         if (isGnssNmeaSystemEnabled(satellite.system)) {
             satellites.append(satellite);
         }
@@ -310,12 +352,15 @@ void YourClassName::updateGnssSatelliteView(bool forceTableRefresh) {
     int cn0Count = 0;
     int ubxRows = 0;
     int nmeaRows = 0;
+    int uhdRows = 0;
     int ignoredCount = 0;
     for (const GnssNmeaSatellite &satellite : satellites) {
         if (satellite.source == QStringLiteral("UBX")) {
             ++ubxRows;
         } else if (satellite.source == QStringLiteral("NMEA")) {
             ++nmeaRows;
+        } else if (satellite.source == QStringLiteral("UHD")) {
+            ++uhdRows;
         }
         const bool rowEnabled = isGnssSatelliteEnabled(satellite.key);
         if (rowEnabled) {
@@ -385,20 +430,37 @@ void YourClassName::updateGnssSatelliteView(bool forceTableRefresh) {
                 .arg(title.toHtmlEscaped(), value.toHtmlEscaped(), accent);
         };
         QStringList chips;
-        chips << chip(uiText(QStringLiteral("fix"), QStringLiteral("Fix")), fixText(gnssSerialFixQuality, gnssSerialFixMode),
-                      gnssSerialFixQuality > 0 ? QStringLiteral("#8ee38e") : QStringLiteral("#f08a7a"));
-        chips << chip(uiText(QStringLiteral("policy"), QStringLiteral("Policy")), policyText, QStringLiteral("#d9e2ec"));
+        const int fixQuality = uhd ? uhdGnssFixQuality : gnssSerialFixQuality;
+        const int satellitesUsed = uhd ? uhdGnssSatellitesUsed
+                                       : (gnssSerialSatellitesUsed >= 0 ? gnssSerialSatellitesUsed : usedCount);
+        const auto formatCount = [](int count) { return count < 0 ? QStringLiteral("-") : QString::number(count); };
+        const bool serialOpen = gnssSerialPort && gnssSerialPort->isOpen();
+        const QString fixSummary = fixQuality < 0 ? QStringLiteral("-") : fixText(fixQuality, uhd ? 0 : gnssSerialFixMode);
+        const QString serialFix = serialOpen && (gnssSerialFixQuality >= 0 || gnssSerialFixMode >= 0)
+            ? fixText(gnssSerialFixQuality, gnssSerialFixMode) : QStringLiteral("-");
+        chips << chip(uiText(QStringLiteral("fix"), QStringLiteral("Fix")),
+                      combined ? QStringLiteral("UHD %1 / NMEA %2").arg(fixSummary, serialFix) : fixSummary,
+                      combined ? QStringLiteral("#d9e2ec") : (fixQuality > 0 ? QStringLiteral("#8ee38e") : QStringLiteral("#f08a7a")));
+        if (!uhd) {
+            chips << chip(uiText(QStringLiteral("policy"), QStringLiteral("Policy")), policyText,
+                          QStringLiteral("#d9e2ec"));
+        }
+        const auto countText = uiText(QStringLiteral("gnss_satellite_count_summary"), QStringLiteral("%1 used / %2 visible"));
+        const auto uhdCount = countText.arg(formatCount(satellitesUsed),
+            uhd && !uhdGnssHasSkyReport ? QStringLiteral("-") : QString::number(uhd ? uhdRows : satellites.size()));
+        const auto serialCount = countText.arg(formatCount(serialOpen ? gnssSerialSatellitesUsed : -1),
+            serialOpen ? QString::number(nmeaRows + ubxRows) : QStringLiteral("-"));
         chips << chip(uiText(QStringLiteral("satellites"), QStringLiteral("Satellites")),
-                      uiText(QStringLiteral("gnss_satellite_count_summary"), QStringLiteral("%1 used / %2 visible"))
-                          .arg(gnssSerialSatellitesUsed >= 0 ? gnssSerialSatellitesUsed : usedCount)
-                          .arg(satellites.size()),
+                      combined ? QStringLiteral("UHD %1 · NMEA %2").arg(uhdCount, serialCount) : uhdCount,
                       QStringLiteral("#d9e2ec"));
-        chips << chip(QStringLiteral("DOP"),
-                      QStringLiteral("H %1  V %2  P %3")
-                          .arg(std::isfinite(gnssSerialHdop) ? QString::number(gnssSerialHdop, 'f', 2) : QStringLiteral("-"))
-                          .arg(std::isfinite(gnssSerialVdop) ? QString::number(gnssSerialVdop, 'f', 2) : QStringLiteral("-"))
-                          .arg(std::isfinite(gnssSerialPdop) ? QString::number(gnssSerialPdop, 'f', 2) : QStringLiteral("-")),
-                      QStringLiteral("#d9e2ec"));
+        if (!uhd) {
+            chips << chip(QStringLiteral("DOP"),
+                          QStringLiteral("H %1  V %2  P %3")
+                              .arg(std::isfinite(gnssSerialHdop) ? QString::number(gnssSerialHdop, 'f', 2) : QStringLiteral("-"))
+                              .arg(std::isfinite(gnssSerialVdop) ? QString::number(gnssSerialVdop, 'f', 2) : QStringLiteral("-"))
+                              .arg(std::isfinite(gnssSerialPdop) ? QString::number(gnssSerialPdop, 'f', 2) : QStringLiteral("-")),
+                          QStringLiteral("#d9e2ec"));
+        }
         chips << chip(uiText(QStringLiteral("signal"), QStringLiteral("Signal")),
                       uiText(QStringLiteral("gnss_signal_summary"), QStringLiteral("%1 avg C/N0, %2 enabled, %3 ignored"))
                           .arg(averageCn0Text)
@@ -406,19 +468,23 @@ void YourClassName::updateGnssSatelliteView(bool forceTableRefresh) {
                           .arg(ignoredCount),
                       QStringLiteral("#d9e2ec"));
         chips << chip(uiText(QStringLiteral("source"), QStringLiteral("Source")),
-                      QStringLiteral("UBX %1 / NMEA %2").arg(ubxRows).arg(nmeaRows),
+                      combined ? QStringLiteral("UHD %1 / NMEA %2 / UBX %3").arg(uhdRows).arg(nmeaRows).arg(ubxRows)
+                               : (uhd ? QStringLiteral("UHD") : QStringLiteral("UBX %1 / NMEA %2").arg(ubxRows).arg(nmeaRows)),
                       QStringLiteral("#d9e2ec"));
-        chips << chip(uiText(QStringLiteral("position"), QStringLiteral("Position")),
-                      QStringLiteral("%1 m").arg(std::isfinite(gnssSerialAltitudeM)
-                                                     ? QString::number(gnssSerialAltitudeM, 'f', 1)
-                                                     : QStringLiteral("-")),
-                      QStringLiteral("#d9e2ec"));
-        chips << chip(uiText(QStringLiteral("motion"), QStringLiteral("Motion")),
-                      QStringLiteral("%1 km/h  %2 deg")
-                          .arg(std::isfinite(gnssSerialSpeedKmh) ? QString::number(gnssSerialSpeedKmh, 'f', 1) : QStringLiteral("-"))
-                          .arg(std::isfinite(gnssSerialCourseDeg) ? QString::number(gnssSerialCourseDeg, 'f', 1) : QStringLiteral("-")),
-                      QStringLiteral("#d9e2ec"));
-        chips << chip(uiText(QStringLiteral("time"), QStringLiteral("Time")), formattedGnssUtc(), QStringLiteral("#d9e2ec"));
+        if (!uhd) {
+            chips << chip(uiText(QStringLiteral("position"), QStringLiteral("Position")),
+                          QStringLiteral("%1 m").arg(std::isfinite(gnssSerialAltitudeM)
+                                                         ? QString::number(gnssSerialAltitudeM, 'f', 1)
+                                                         : QStringLiteral("-")),
+                          QStringLiteral("#d9e2ec"));
+            chips << chip(uiText(QStringLiteral("motion"), QStringLiteral("Motion")),
+                          QStringLiteral("%1 km/h  %2 deg")
+                              .arg(std::isfinite(gnssSerialSpeedKmh) ? QString::number(gnssSerialSpeedKmh, 'f', 1) : QStringLiteral("-"))
+                              .arg(std::isfinite(gnssSerialCourseDeg) ? QString::number(gnssSerialCourseDeg, 'f', 1) : QStringLiteral("-")),
+                          QStringLiteral("#d9e2ec"));
+            chips << chip(uiText(QStringLiteral("time"), QStringLiteral("Time")), formattedGnssUtc(),
+                          QStringLiteral("#d9e2ec"));
+        }
         gnssSatelliteStatusLabel->setText(QStringLiteral(
             "<table cellspacing='3' cellpadding='0'><tr>%1</tr></table>").arg(chips.join(QString())));
     }
@@ -551,9 +617,11 @@ void YourClassName::updateGnssNmeaSkyPlot() {
         return;
     }
 
+    const bool combined = qthSource == QLatin1String("uhd_nmea");
+    const auto &sourceSatellites = gnssSatellitesForDisplay();
     QVector<GnssNmeaSatellite> satellites;
-    satellites.reserve(gnssNmeaSatellites.size());
-    for (const GnssNmeaSatellite &satellite : gnssNmeaSatellites) {
+    satellites.reserve(sourceSatellites.size());
+    for (const GnssNmeaSatellite &satellite : sourceSatellites) {
         if (isGnssNmeaSystemEnabled(satellite.system)) {
             satellites.append(satellite);
         }
@@ -582,6 +650,16 @@ void YourClassName::updateGnssNmeaSkyPlot() {
     painter.setPen(QColor(220, 226, 232));
     painter.drawText(12, 16, uiText(QStringLiteral("gnss_sky_title"),
                                     QStringLiteral("GNSS sky view / C/N0")));
+    if (combined) {
+        const int legendX = width / 2 + 20;
+        painter.setPen(QColor(205, 214, 222));
+        painter.setBrush(QColor(205, 214, 222));
+        painter.drawEllipse(QPoint(legendX + 5, 12), 4, 4);
+        painter.drawText(legendX + 14, 16, QStringLiteral("UHD"));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(legendX + 53, 8, 8, 8);
+        painter.drawText(legendX + 66, 16, QStringLiteral("NMEA / UBX"));
+    }
 
     const int skySize = (std::min)(height - 42, width / 2 - 28);
     const QPoint center(28 + skySize / 2, 30 + skySize / 2);
@@ -635,13 +713,21 @@ void YourClassName::updateGnssNmeaSkyPlot() {
         if (!rowEnabled) {
             color = color.darker(220);
         }
-        painter.setBrush(color);
-        painter.setPen(QPen(satellite.usedInFix ? QColor(255, 255, 255) : QColor(20, 24, 28),
-                            satellite.usedInFix ? 2 : 1));
-        painter.drawEllipse(point, 7, 7);
+        const bool square = combined && satellite.source != QLatin1String("UHD");
+        if (square) {
+            painter.setBrush(Qt::NoBrush);
+            painter.setPen(QPen(color, satellite.usedInFix ? 3 : 2));
+            painter.drawRect(QRect(point - QPoint(9, 9), QSize(18, 18)));
+        } else {
+            painter.setBrush(color);
+            painter.setPen(QPen(satellite.usedInFix ? QColor(255, 255, 255) : QColor(20, 24, 28),
+                                satellite.usedInFix ? 2 : 1));
+            painter.drawEllipse(point, 7, 7);
+        }
         painter.setPen(rowEnabled ? QColor(235, 240, 245) : QColor(135, 145, 155));
-        painter.drawText(point + QPoint(9, 4),
-                         QStringLiteral("%1%2").arg(systemShort(satellite.system)).arg(satellite.prn));
+        const auto label = QStringLiteral("%1%2").arg(systemShort(satellite.system)).arg(satellite.prn);
+        const int labelX = square ? -11 - painter.fontMetrics().horizontalAdvance(label) : 9;
+        painter.drawText(point + QPoint(labelX, 4), label);
     }
 
     const QRect barRect(width / 2 + 20, 32, width / 2 - 42, height - 54);
@@ -664,9 +750,9 @@ void YourClassName::updateGnssNmeaSkyPlot() {
             const int barWidth = static_cast<int>((std::clamp)(cn0, 0, 55) / 55.0 * (barRect.width() - 96));
             const bool rowEnabled = isGnssSatelliteEnabled(satellite.key);
             painter.setPen(rowEnabled ? QColor(205, 214, 222) : QColor(120, 130, 140));
-            painter.drawText(barRect.left() + 6,
-                             y + rowHeight - 4,
-                             QStringLiteral("%1%2").arg(systemShort(satellite.system)).arg(satellite.prn, 2));
+            const auto label = QStringLiteral("%1%2").arg(systemShort(satellite.system)).arg(satellite.prn, 2);
+            const auto prefix = satellite.source == QLatin1String("UHD") ? QStringLiteral("U ") : QStringLiteral("N ");
+            painter.drawText(barRect.left() + 6, y + rowHeight - 4, combined ? prefix + label : label);
             QColor barColor = colorForCn0(satellite.cn0DbHz);
             if (!rowEnabled) {
                 barColor = barColor.darker(220);
@@ -686,6 +772,7 @@ void YourClassName::updateQthMapSatelliteOverlay() {
     if (!qthMapWidget) {
         return;
     }
+    const bool combined = qthSource == QLatin1String("uhd_nmea");
 
     auto systemShort = [](const QString &system) {
         if (system == QStringLiteral("GLONASS")) return QStringLiteral("R");
@@ -697,9 +784,10 @@ void YourClassName::updateQthMapSatelliteOverlay() {
         return QStringLiteral("?");
     };
 
+    const auto &sourceSatellites = gnssSatellitesForDisplay();
     QVector<QthMapWidget::SatelliteMarker> markers;
-    markers.reserve(gnssNmeaSatellites.size());
-    for (const GnssNmeaSatellite &satellite : gnssNmeaSatellites) {
+    markers.reserve(sourceSatellites.size());
+    for (const GnssNmeaSatellite &satellite : sourceSatellites) {
         if (!isGnssNmeaSystemEnabled(satellite.system) ||
             satellite.elevationDeg < 0 ||
             satellite.azimuthDeg < 0) {
@@ -713,6 +801,7 @@ void YourClassName::updateQthMapSatelliteOverlay() {
         marker.cn0DbHz = satellite.cn0DbHz;
         marker.usedInFix = satellite.usedInFix;
         marker.enabled = isGnssSatelliteEnabled(satellite.key);
+        marker.outlinedSquare = combined && satellite.source != QLatin1String("UHD");
         markers.append(marker);
     }
     qthMapWidget->setSatelliteMarkers(markers);

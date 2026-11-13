@@ -15,11 +15,13 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFormLayout>
 #include <QHeaderView>
 #include <QHostInfo>
 #include <QInputDialog>
@@ -34,6 +36,7 @@
 #include <QRegularExpression>
 #include <QSerialPortInfo>
 #include <QSignalBlocker>
+#include <QStandardPaths>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTextCursor>
@@ -44,6 +47,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <limits>
 
 namespace {
@@ -169,18 +173,191 @@ bool normalizeM8nUbxConstellationSelection(bool &useGps,
     return true;
 }
 
+QString uhdGnssRejectionLogPath() {
+    const auto overridePath = qEnvironmentVariable("OBRII_UHD_GNSS_FIX_LOG");
+    if (!overridePath.isEmpty()) return overridePath;
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+        .filePath(QStringLiteral("uhd-gnss-fixes.jsonl"));
+}
+
+QStringList uhdGnssRejectionLabels(const QStringList &reasons, bool uk) {
+    static const struct { const char *code; const char *english; const char *ukrainian; } labels[] = {
+        {"invalid_reference", "invalid reference locator", u8"некоректний контрольний квадрат"},
+        {"invalid_gga", "no valid GGA fix", u8"немає валідного фікса GGA"},
+        {"invalid_rmc", "no valid RMC fix", u8"немає валідного фікса RMC"},
+        {"gga_rmc_position_mismatch", "GGA and RMC positions differ", u8"позиції GGA і RMC розходяться"},
+        {"outside_reference_area", "outside the reference area", u8"поза допуском від контрольного квадрата"},
+        {"gga_rmc_epoch_mismatch", "GGA and RMC timestamps differ", u8"час GGA і RMC розходиться"},
+        {"invalid_utc", "invalid or missing UTC", u8"UTC відсутній або некоректний"},
+        {"utc_outside_tolerance", "UTC differs from the system clock", u8"UTC поза допуском від системного часу"},
+        {"uhd_no_consistent_fix", "waiting for a consistent UHD fix", u8"очікування узгодженого фікса UHD"},
+        {"serial_no_consistent_fix", "waiting for a consistent external fix", u8"очікування узгодженого фікса зовнішнього модуля"},
+        {"receiver_position_mismatch", "receiver positions differ by more than 100 m", u8"позиції приймачів розходяться більш ніж на 100 м"},
+        {"receiver_utc_mismatch", "receiver UTC differs by more than 3 s", u8"UTC приймачів розходиться більш ніж на 3 с"},
+    };
+    QStringList result;
+    for (const auto &reason : reasons) {
+        const auto label = std::find_if(std::begin(labels), std::end(labels), [&](const auto &item) {
+            return reason == QLatin1String(item.code);
+        });
+        result << (label == std::end(labels) ? reason : QString::fromUtf8(uk ? label->ukrainian : label->english));
+    }
+    return result;
+}
+
+bool appendUhdGnssFixLog(const QString &path, const UhdGnssStatus &reading, const QDateTime &hostUtc,
+                         const QString &event, const QString &selected, const QStringList &reasons = {},
+                         const UhdGnssStatus *external = nullptr, const QStringList &externalReasons = {}) {
+    QJsonObject entry{
+        {QStringLiteral("hostUtc"), hostUtc.toString(Qt::ISODateWithMs)},
+        {QStringLiteral("event"), event},
+        {QStringLiteral("selected"), selected},
+        {QStringLiteral("gga"), reading.gga},
+        {QStringLiteral("rmc"), reading.rmc},
+    };
+    if (!reasons.isEmpty()) entry.insert(QStringLiteral("reasons"), QJsonArray::fromStringList(reasons));
+    if (!reading.ubxHex.isEmpty())
+        entry.insert(QStringLiteral("ubxHex"), QJsonArray::fromStringList(reading.ubxHex.split(QLatin1Char('\n'))));
+    if (external) {
+        entry.insert(QStringLiteral("serialGga"), external->gga);
+        entry.insert(QStringLiteral("serialRmc"), external->rmc);
+        entry.insert(QStringLiteral("serialReasons"), QJsonArray::fromStringList(externalReasons));
+    }
+    const QByteArray line = QJsonDocument(entry).toJson(QJsonDocument::Compact) + '\n';
+    QFile log(path);
+    if (!QDir().mkpath(QFileInfo(path).absolutePath()) || !log.open(QIODevice::WriteOnly | QIODevice::Append) ||
+#ifdef Q_OS_UNIX
+        !log.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner) ||
+#endif
+        log.write(line) != line.size() || !log.flush()) {
+        qWarning() << "[UHD GPS] Could not save fix to local log" << path << log.errorString();
+        return false;
+    }
+    return true;
+}
+
+void recordUhdGnssFix(const UhdGnssStatus &reading, const ParsedNmeaPosition &fix, const QDateTime &hostUtc,
+                      bool firstFix, double previousLatitude, double previousLongitude,
+                      const UhdGnssStatus *external = nullptr) {
+    const QString path = qEnvironmentVariable("OBRII_UHD_GNSS_FIX_LOG");
+    if (path.isEmpty()) return;
+
+    constexpr double positionJumpMeters = 100000.0;
+    if (!firstFix && vectorNorm(geodeticToEcef(fix.latitude, fix.longitude, 0.0) -
+                               geodeticToEcef(previousLatitude, previousLongitude, 0.0)) < positionJumpMeters) return;
+    appendUhdGnssFixLog(path, reading, hostUtc,
+                        firstFix ? QStringLiteral("fix_acquired") : QStringLiteral("position_jump"), fix.sentence, {}, external);
+}
+
 } // namespace
 
-void YourClassName::showUhdGnssStatus(const QString &status) {
+void YourClassName::showUhdGnssValidationSettings() {
+    const bool uk = uiLanguage.startsWith(QLatin1String("uk"));
+    const auto text = [uk](const char *ua, const char *en) { return QString::fromUtf8(uk ? ua : en); };
+    QDialog dialog(this);
+    dialog.setWindowTitle(text(u8"Перевірка фікса UHD GPS", "UHD GPS fix validation"));
+    QFormLayout layout(&dialog);
+    QCheckBox enable(text(u8"Перевіряти фікси UHD GPS", "Validate UHD GPS fixes"), &dialog);
+    enable.setChecked(uhdGnssValidationEnabled);
+    QLineEdit locator(uhdGnssReferenceLocator, &dialog);
+    locator.setMaxLength(8);
+    locator.setPlaceholderText(QStringLiteral("JN58TD"));
+    locator.setToolTip(text(u8"Квадрат Maidenhead із 4, 6 або 8 символів", "Maidenhead locator with 4, 6 or 8 characters"));
+    QDoubleSpinBox distance(&dialog), time(&dialog);
+    distance.setRange(0, 1000);
+    distance.setSuffix(text(u8" км", " km"));
+    distance.setValue(uhdGnssMaxDistanceKm);
+    time.setRange(0, 3600);
+    time.setSuffix(text(u8" с", " s"));
+    time.setValue(uhdGnssMaxTimeErrorSeconds);
+    QCheckBox log(text(u8"Логувати відхилені фікси", "Log rejected fixes"), &dialog);
+    log.setChecked(uhdGnssLogRejections);
+    log.setToolTip(QDir::toNativeSeparators(uhdGnssRejectionLogPath()));
+    QCheckBox show(text(u8"Показувати відхилені фікси на карті", "Show rejected fixes on the map"), &dialog);
+    show.setChecked(uhdGnssShowRejections);
+    QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout.addRow(&enable);
+    layout.addRow(text(u8"Контрольний квадрат", "Reference Maidenhead locator"), &locator);
+    layout.addRow(text(u8"Допуск від межі квадрата", "Distance beyond locator boundary"), &distance);
+    layout.addRow(text(u8"Допуск від системного UTC", "Difference from system UTC"), &time);
+    layout.addRow(&log);
+    layout.addRow(&show);
+    layout.addRow(&buttons);
+    const auto update = [&] {
+        const bool enabled = enable.isChecked();
+        const auto grid = locator.text().trimmed();
+        buttons.button(QDialogButtonBox::Ok)->setEnabled(!enabled || (grid.size() >= 4 && qth::maidenheadBounds(grid).valid));
+        log.setEnabled(enabled || qthSource == QLatin1String("uhd_nmea"));
+        show.setEnabled(enabled || qthSource == QLatin1String("uhd_nmea"));
+    };
+    connect(&enable, &QCheckBox::toggled, &dialog, update);
+    connect(&locator, &QLineEdit::textChanged, &dialog, update);
+    connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    update();
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    const auto grid = locator.text().trimmed().toUpper();
+    const bool criteriaChanged = uhdGnssValidationEnabled != enable.isChecked() || uhdGnssReferenceLocator != grid ||
+                                 uhdGnssMaxDistanceKm != distance.value() || uhdGnssMaxTimeErrorSeconds != time.value();
+    uhdGnssValidationEnabled = enable.isChecked();
+    uhdGnssReferenceLocator = grid;
+    uhdGnssMaxDistanceKm = distance.value();
+    uhdGnssMaxTimeErrorSeconds = time.value();
+    uhdGnssLogRejections = log.isChecked();
+    uhdGnssShowRejections = show.isChecked();
+    lastUhdGnssRejectedSample.clear();
+    if (criteriaChanged || !uhdGnssShowRejections) uhdGnssRejectedMarkers.clear();
+    if (isUhdGnssSource(qthSource) && criteriaChanged) qthPositionVisible = false;
+    updateQthControls();
+    savePersistentSettings();
+    refreshUhdGnssPosition();
+}
+
+UhdGnssStatus YourClassName::combinedGnssSerialReading() const {
+    if (!gnssSerialPort || !gnssSerialPort->isOpen()) return {QStringLiteral("closed"), {}, {}, {}};
+    constexpr qint64 maxAgeMs = 3500;
+    const auto gga = combinedSerialGgaAge.isValid() && !combinedSerialGgaAge.hasExpired(maxAgeMs)
+        ? combinedSerialGga : QString();
+    const auto rmc = combinedSerialRmcAge.isValid() && !combinedSerialRmcAge.hasExpired(maxAgeMs)
+        ? combinedSerialRmc : QString();
+    return {QStringLiteral("available"), gga, rmc, {}};
+}
+
+QString YourClassName::combinedGnssSerialStatus() const {
+    if (qthSource != QLatin1String("uhd_nmea")) return {};
+    const auto reading = combinedGnssSerialReading();
+    const bool uk = uiLanguage.startsWith(QLatin1String("uk"));
+    if (reading.state == QLatin1String("closed")) {
+        return uk ? QStringLiteral("\nNMEA GPS: порт закрито.") : QStringLiteral("\nNMEA GPS: serial port closed.");
+    }
+    if (reading.gga.isEmpty() || reading.rmc.isEmpty()) {
+        return uk ? QStringLiteral("\nNMEA GPS: очікування свіжої пари GGA/RMC…")
+                  : QStringLiteral("\nNMEA GPS: waiting for a fresh GGA/RMC pair…");
+    }
+    ParsedNmeaPosition fix;
+    if (parseNmeaPositionSentence(reading.gga, &fix) && parseNmeaPositionSentence(reading.rmc, &fix)) {
+        return uk ? QStringLiteral("\nNMEA GPS: модуль повідомив фікс.")
+                  : QStringLiteral("\nNMEA GPS: module reports a fix.");
+    }
+    return uk ? QStringLiteral("\nNMEA GPS: очікування фікса…") : QStringLiteral("\nNMEA GPS: waiting for a fix…");
+}
+
+void YourClassName::showUhdGnssStatus(const QString &status, bool keepSatelliteReport) {
+    if (!keepSatelliteReport &&
+        (uhdGnssHasSkyReport || uhdGnssSatellitesUsed >= 0 || uhdGnssFixQuality >= 0)) {
+        updateUhdGnssSatellites({}, -1, -1);
+    }
     if (qthPositionVisible) {
         qthPositionVisible = false;
         updateQthControls();
     }
-    if (qthStatusLabel) qthStatusLabel->setText(status);
+    if (qthStatusLabel) qthStatusLabel->setText(status + combinedGnssSerialStatus());
 }
 
 void YourClassName::applyUhdGnssReading(const UhdGnssStatus &reading) {
     const bool uk = uiLanguage.startsWith(QLatin1String("uk"));
+    const auto hostUtc = QDateTime::currentDateTimeUtc();
     if (reading.state == QLatin1String("unsupported")) {
         showUhdGnssStatus(uk ? QStringLiteral("UHD GPS: датчики недоступні в поточній збірці FPGA/UHD.")
                             : QStringLiteral("UHD GPS: sensors unavailable in this FPGA/UHD build."));
@@ -192,12 +369,18 @@ void YourClassName::applyUhdGnssReading(const UhdGnssStatus &reading) {
         return;
     }
     QString details;
-    const int used = parseNmeaIntField(nmeaBodyFields(reading.gga), 7);
+    if (!reading.ubxHex.isEmpty()) {
+        details += (uk ? QStringLiteral("\nПакетів UBX: %1.")
+                       : QStringLiteral("\nUBX packets: %1.")).arg(1 + reading.ubxHex.count(QLatin1Char('\n')));
+    }
+    const auto gga = nmeaBodyFields(reading.gga);
+    const int used = parseNmeaIntField(gga, 7);
     if (used >= 0) {
         details += (uk ? QStringLiteral("\nВикористано для фікса: %1.")
                        : QStringLiteral("\nSatellites used for fix: %1.")).arg(used);
     }
     const auto sky = summarizeUhdGnssGsv(reading.gsv);
+    updateUhdGnssSatellites(sky, used, parseNmeaIntField(gga, 6));
     if (sky.satellitesInView >= 0) {
         details += (uk ? QStringLiteral("\nУ полі зору за GSV: %1, із виміряним сигналом: %2.")
                        : QStringLiteral("\nIn view (GSV): %1, with measured signal: %2."))
@@ -214,16 +397,66 @@ void YourClassName::applyUhdGnssReading(const UhdGnssStatus &reading) {
 
     ParsedNmeaPosition fix;
     if (!parseNmeaPositionSentence(reading.gga, &fix) && !parseNmeaPositionSentence(reading.rmc, &fix)) {
-        showUhdGnssStatus((uk ? QStringLiteral("UHD GPS: NMEA надходить, очікування координат…")
-                             : QStringLiteral("UHD GPS: receiving NMEA, waiting for a fix…")) + details);
+        showUhdGnssStatus((uk ? QStringLiteral("UHD GPS: дані надходять, очікування координат…")
+                             : QStringLiteral("UHD GPS: receiving data, waiting for a fix…")) + details, true);
         return;
     }
 
+    const bool combined = qthSource == QLatin1String("uhd_nmea");
+    const auto external = combined ? combinedGnssSerialReading() : UhdGnssStatus{};
+    const auto checkReference = [&](const UhdGnssStatus &candidate) {
+        return uhdGnssFixRejections(candidate.gga, candidate.rmc, uhdGnssReferenceLocator,
+                                    uhdGnssMaxDistanceKm, uhdGnssMaxTimeErrorSeconds, hostUtc);
+    };
+    QStringList reasons, externalReasons;
+    if (uhdGnssValidationEnabled) reasons = checkReference(reading);
+    if (combined) {
+        const auto agreement = combinedGnssFixRejections(reading.gga, reading.rmc, external.gga, external.rmc, hostUtc);
+        reasons.append(agreement);
+        if (uhdGnssValidationEnabled && !agreement.contains(QStringLiteral("serial_no_consistent_fix"))) {
+            externalReasons = checkReference(external);
+        }
+    }
+    if (!reasons.isEmpty() || !externalReasons.isEmpty()) {
+        const auto title = combined
+            ? (uk ? QStringLiteral("UHD GPS + NMEA: фікс не підтверджено") : QStringLiteral("UHD GPS + NMEA: fix unconfirmed"))
+            : (uk ? QStringLiteral("UHD GPS: фікс відхилено") : QStringLiteral("UHD GPS: fix rejected"));
+        QString description = title;
+        if (!reasons.isEmpty()) description += QLatin1Char('\n') + uhdGnssRejectionLabels(reasons, uk).join(QLatin1Char('\n'));
+        for (const auto &reason : uhdGnssRejectionLabels(externalReasons, uk)) {
+            description += QStringLiteral("\nNMEA GPS: ") + reason;
+        }
+        if (uhdGnssLogRejections) {
+            const auto key = QStringList{reading.gga, reading.rmc, external.gga, external.rmc,
+                                         reasons.join(QLatin1Char(',')), externalReasons.join(QLatin1Char(','))}.join(QLatin1Char('\n'));
+            if (key != lastUhdGnssRejectedSample &&
+                appendUhdGnssFixLog(uhdGnssRejectionLogPath(), reading, hostUtc, QStringLiteral("fix_rejected"),
+                                    fix.sentence, reasons, combined ? &external : nullptr, externalReasons)) {
+                lastUhdGnssRejectedSample = key;
+            }
+        }
+        if (uhdGnssShowRejections) {
+            auto &markers = uhdGnssRejectedMarkers;
+            const auto previous = std::find_if(markers.begin(), markers.end(), [&](const auto &marker) {
+                return marker.position.latitude == fix.latitude && marker.position.longitude == fix.longitude;
+            });
+            if (previous != markers.end()) markers.erase(previous);
+            if (markers.size() >= 32) markers.removeFirst();
+            markers.append({{fix.latitude, fix.longitude}, description});
+            if (qthMapWidget) qthMapWidget->setRejectedFixMarkers(markers);
+        }
+        showUhdGnssStatus(description + details, true);
+        return;
+    }
+    lastUhdGnssRejectedSample.clear();
     if (!qthPositionBeforeUhd) {
         qthPositionBeforeUhd = QPointF(qthLongitude, qthLatitude);
         qthPositionVisibleBeforeUhd = qthPositionVisible;
     }
     const bool firstFix = !qthPositionVisible;
+    if (!isNetworkClientMode()) {
+        recordUhdGnssFix(reading, fix, hostUtc, firstFix, qthLatitude, qthLongitude, combined ? &external : nullptr);
+    }
     if (firstFix || qthLatitude != fix.latitude || qthLongitude != fix.longitude) {
         qthLatitude = fix.latitude;
         qthLongitude = fix.longitude;
@@ -232,16 +465,17 @@ void YourClassName::applyUhdGnssReading(const UhdGnssStatus &reading) {
         if (firstFix && qthMapWidget) qthMapWidget->centerOn(qthLatitude, qthLongitude);
     }
     if (qthStatusLabel) {
-        qthStatusLabel->setText(
-            (uk ? QStringLiteral("UHD GPS: координати %1°, %2° (%3)")
-                : QStringLiteral("UHD GPS: fix %1°, %2° (%3)"))
-                .arg(QString::number(fix.latitude, 'f', 6), QString::number(fix.longitude, 'f', 6),
-                     qth::maidenheadLocator(fix.latitude, fix.longitude, 6)) + details);
+        const auto title = combined
+            ? (uk ? QStringLiteral("UHD GPS + NMEA: фікс підтверджено") : QStringLiteral("UHD GPS + NMEA: fix confirmed"))
+            : (uk ? QStringLiteral("UHD GPS: координати") : QStringLiteral("UHD GPS: fix"));
+        qthStatusLabel->setText(title + QStringLiteral(" %1°, %2° (%3)")
+            .arg(QString::number(fix.latitude, 'f', 6), QString::number(fix.longitude, 'f', 6),
+                 qth::maidenheadLocator(fix.latitude, fix.longitude, 6)) + details + combinedGnssSerialStatus());
     }
 }
 
 void YourClassName::refreshUhdGnssPosition() {
-    if (qthSource != QLatin1String("uhd")) return;
+    if (!isUhdGnssSource(qthSource)) return;
 
     const bool uk = uiLanguage.startsWith(QLatin1String("uk"));
     const bool remote = isNetworkClientMode();
@@ -310,7 +544,7 @@ void YourClassName::refreshUhdGnssPosition() {
 }
 
 void YourClassName::handleUhdGnssReply(const QJsonObject &command) {
-    if (qthSource != QLatin1String("uhd") || uhdGnssRequestId.isEmpty() ||
+    if (!isUhdGnssSource(qthSource) || uhdGnssRequestId.isEmpty() ||
         !isNetworkClientMode() || isRemoteVfoProcessingMode() || runState != RadioRunState::Running ||
         !networkController || !networkController->isControlReady() || !networkController->clientHasControl() ||
         command.value(QStringLiteral("type")) != QLatin1String("control") ||
@@ -322,7 +556,8 @@ void YourClassName::handleUhdGnssReply(const QJsonObject &command) {
     applyUhdGnssReading({reading.value(QStringLiteral("state")).toString(),
                         reading.value(QStringLiteral("gga")).toString(),
                         reading.value(QStringLiteral("rmc")).toString(),
-                        reading.value(QStringLiteral("gsv")).toString()});
+                        reading.value(QStringLiteral("gsv")).toString(),
+                        validatedUhdGnssUbx(reading.value(QStringLiteral("ubxHex")).toString().toLatin1())});
 }
 
 void YourClassName::updateQthControls() {
@@ -337,6 +572,11 @@ void YourClassName::updateQthControls() {
         QSignalBlocker blocker(qthSourceCombo);
         const int index = qthSourceCombo->findData(qthSource);
         qthSourceCombo->setCurrentIndex(index >= 0 ? index : qthSourceCombo->findData(QStringLiteral("manual")));
+    }
+    if (uhdGnssValidationButton) {
+        uhdGnssValidationButton->setVisible(isUhdGnssSource(qthSource));
+        uhdGnssValidationButton->setText(uiLanguage.startsWith(QLatin1String("uk"))
+            ? QStringLiteral("Перевірка фікса…") : QStringLiteral("Fix validation…"));
     }
     if (gnssSystemCombo) {
         QSignalBlocker blocker(gnssSystemCombo);
@@ -356,12 +596,12 @@ void YourClassName::updateQthControls() {
     if (qthLatitudeSpin) {
         QSignalBlocker blocker(qthLatitudeSpin);
         qthLatitudeSpin->setValue(qthLatitude);
-        qthLatitudeSpin->setReadOnly(qthSource == QLatin1String("uhd"));
+        qthLatitudeSpin->setReadOnly(isUhdGnssSource(qthSource));
     }
     if (qthLongitudeSpin) {
         QSignalBlocker blocker(qthLongitudeSpin);
         qthLongitudeSpin->setValue(qthLongitude);
-        qthLongitudeSpin->setReadOnly(qthSource == QLatin1String("uhd"));
+        qthLongitudeSpin->setReadOnly(isUhdGnssSource(qthSource));
     }
     if (gnssSerialPortEdit) {
         const QList<QSerialPortInfo> ports = QSerialPortInfo::availablePorts();
@@ -386,7 +626,7 @@ void YourClassName::updateQthControls() {
                                               QStringLiteral("NMEA serial: disconnected")));
     }
     if (qthLocatorLabel) {
-        qthLocatorLabel->setText(qthSource == QLatin1String("uhd") && !qthPositionVisible ? QString() : locator);
+        qthLocatorLabel->setText(isUhdGnssSource(qthSource) && !qthPositionVisible ? QString() : locator);
     }
     if (gnssMonitorCheckbox) {
         QSignalBlocker blocker(gnssMonitorCheckbox);
@@ -418,10 +658,12 @@ void YourClassName::updateQthControls() {
         qthMapWidget->setGridPrecision(qthGridPrecision);
         qthMapWidget->setOverlayMode(static_cast<QthMapWidget::OverlayMode>((std::clamp)(qthMapOverlayMode, 0, 3)));
         qthMapWidget->setUserMarkers(qthUserMarkers);
+        qthMapWidget->setRejectedFixMarkers(isUhdGnssSource(qthSource) && uhdGnssShowRejections
+                                               ? uhdGnssRejectedMarkers : QVector<qth::RejectedFixMarker>{});
         updateQthMapSatelliteOverlay();
     }
     updateQthMapControls();
-    if (qthSource == QLatin1String("uhd")) {
+    if (isUhdGnssSource(qthSource)) {
         if (!uhdGnssPollTimer->isActive()) {
             uhdGnssPollTimer->start();
             applyUhdGnssReading({});

@@ -297,20 +297,43 @@ Routing is a centralized **known-graph, minimum-hop reference model**, with
 lexical node-ID tie-breaking. Each relay computes the next hop from the current
 graph, and topology changes invalidate route caches. It is not AODV, OLSR,
 distributed discovery or a model of their convergence/control traffic. Delay
-is one base virtual millisecond plus the directed link delay per hop. Gain,
-frequency, IQ, modulation, RF range, bitrate/airtime, half-duplex contention,
-ACK/retry and random channel errors are not simulated by this packet engine.
-The virtual IQ hub remains a separate RF-sample model and does not gain automatic
-packet forwarding merely because a packet route exists here.
+is one base virtual millisecond plus the directed link delay per hop. The
+packet engine uses a single shared channel with no gain, frequency, IQ,
+modulation, automatic ACK/retry or random errors. The virtual IQ hub models
+RF samples separately.
+
+In **Nodes**, select a row and use **Coordinates and velocity…** to set the
+current position in metres and constant velocity in metres per second.
+The X/Y values advance with virtual time. A positive **Link radius** limits
+the existing directed links to nodes within that distance. The default
+**Unlimited** uses the directed graph alone. A relay can move out of range
+and later restore a route. The arrival check reports `out_of_range` when a
+packet's link exceeds the radius in transit. This model applies in packet
+mode and uses the coordinates entered here. Constructor positions are
+screen coordinates.
+
+In the same tab, set **Air bitrate** to a positive value (up to 1 Mbit/s)
+to add airtime for the payload and eight bytes of simulated overhead per hop.
+The transmission occupies its sender for that airtime, rounded up to a
+millisecond. Link delay is added after airtime. If another transmission
+starts before airtime ends and its sender can be heard over an enabled,
+in-range link to the receiver, the affected reception ends as `collision`.
+A node transmitting during a reception loses that reception as
+`half_duplex`. Attempting to send again from a busy transmitter yields
+`tx_busy`. Audibility is evaluated at the start of the overlap. The model
+assumes simultaneous arrival on the shared channel and reports per-hop
+results with no power capture or MAC backoff. Zero disables the airtime
+model. Change the bitrate with an empty queue.
 
 **Pause** stops the GUI clock; **Step** processes one scheduled event and jumps
-to its due time. Automatic mode advances in bounded 20-ms virtual ticks, at most
-512 events per UI callback. It stops its timer when there is no queued work.
+to its due time. When only node motion remains, **Step** advances by 20 ms.
+Automatic mode advances in bounded 20-ms virtual ticks, at most 512 events per
+UI callback. It stops its timer when queued work and node motion have ended.
 New commands settle events already due at the current time before applying the
 command; new-hop delays are at least one millisecond. Wall-clock execution may
 slow under load and is not the latency reported by the simulation.
 
-**Scenario** pauses and saves the topology, chronological send/link/node actions
+**Scenario** pauses and saves the topology, chronological send/link/node/motion/range/airtime actions
 and current virtual stop time. **Results** saves counters, retained results and
 hop trace. Export settles currently due events; future deliveries can remain
 pending. **Open** validates/replays a packet scenario using the same core and
@@ -339,11 +362,16 @@ places it in `build/linux-release/src/mesh/ObriiMeshSim`. Installation puts the
 executables together in `bin`.
 
 Scenario schema is `obrii-packet-scenario`, version 1. `topology.nodes` contains
-`id`, `name`, optional `enabled` (default true); links contain `tx`, `rx`,
-`enabled`, `delayMs` (0..60000). `actions` must be chronological whole virtual
+`id`, `name`, optional `enabled` (default true) and optional `motion`
+(`xM`, `yM`, `vxMps`, `vyMps`). Links contain `tx`, `rx`, `enabled` and
+`delayMs` (0..60000). Optional `topology.radioRangeM` and
+`topology.airBitrate` set the initial radius and bitrate.
+`actions` must be chronological whole virtual
 milliseconds via `atMs`. Operations are `send` (`id`, `source`, `destination`,
 `ttl`, canonical `payloadBase64`), `link` (same fields as a topology link), or
-`node` (`id`, `enabled`). Optional `untilMs` preserves a partial experiment;
+`node` (`id`, `enabled`), `motion` (`id`, `motion` at that time), or
+`range` (`meters`), or `airtime` (`bitrate` in bits per second).
+Optional `untilMs` preserves a partial experiment;
 without it replay drains the queue. Equal-time events/commands have stable order.
 Duplicate identity is `(source, packet ID)`; retries with that ID can be discarded
 while present in a node's finite deduplication window. There is no automatic ARQ.
@@ -359,10 +387,10 @@ Per-node `received` includes locally injected ingress and relay arrivals;
 node events, including in-flight arrivals, not a physical receiver FIFO.
 The JSON loader accepts at most 16 MiB. Invalid configuration/replay never
 partially replaces the active experiment. No optional packet work occurs when
-the dialog/tool is not running; paused/empty GUI simulations have no active timer.
+the dialog/tool is not running. Paused GUI simulations have no active timer.
 
 `ObriiPacketSelfTest` exercises exact binary delivery, per-hop delays, TTL,
-duplicates, node/link failure, route repair at an intermediate relay, queue
+duplicates, node/link failure, motion across the link radius, route repair at an intermediate relay, queue
 overload, evidence/action bounds, time/ID exhaustion and identical full/partial
 scenario replay. `ObriiMeshSelfTest` also drives the production packet dialog,
 pause/step/reset and independent failure controls without starting IQ processes.
@@ -397,6 +425,12 @@ worker failure produces `modem_stopped`, not synthetic delivery. Link/node edits
 are available between datagrams. Reset cancels the old worker/session before
 creating new endpoints; late old callbacks cannot complete the new experiment.
 
+In IQ mode, set **Повторів IQ** to 0–2. A timeout resends the same hop with
+a fresh flight ID and the same TTL. Enable **Обходити недоступні зв’язки 30 с**
+to route later datagrams around a hop that exhausted its retries. Both
+settings default to off. The packet engine observes decoder outcomes locally
+and selects a path from the existing topology.
+
 IQ mode follows real elapsed time: Pause/Step and deterministic scenario import/
 export are unavailable. Results export retains actual paths/outcomes, modem and
 sample counters, and the IQ topology/gains. It is evidence of this run, not a
@@ -413,9 +447,8 @@ mode selector, Send and Reset as well as the packet-only GUI.
 ### Local IQ Hardware Limits
 
 This fixed-AFSK packet laboratory exposes no physical sink. Its internal OBRII
-AX.25 address is a laboratory identifier, not a user's on-air callsign. Carrier
-sensing, automatic ARQ and learned routing are absent from this mode. Its
-loopback samples and collision medium do not qualify RF hardware or duplex use.
+AX.25 address is a laboratory identifier. On-air acknowledgements, carrier
+sensing and exchange of routing advertisements would require an RF link protocol.
 
 The separate distributed node service already has AFSK/LoRa WireModem paths,
 locally authorized RX capture and gated native Meshtastic/RNS UHD/HackRF TX

@@ -39,7 +39,7 @@ engines, notices and source materials listed in `THIRD_PARTY_LICENSES.txt`.
 Reticulum is optional and **not bundled**: install the pinned RNS environment
 as documented in `docs/reticulum_module.md`, then configure its local executable
 and private state paths. UHD/vendor FPGA images remain separate; see
-`docs/usrp_b210_plan.md`. Never automatically flash the Kintex-7 clone.
+`docs/usrp_b210_setup.md`. Never automatically flash the Kintex-7 clone.
 Linux dependencies and optional engine setup are documented under `tools/`
 and in the corresponding module guides.
 

@@ -3,7 +3,10 @@
 #include "meshiqbearer.h"
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDialogButtonBox>
+#include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QFormLayout>
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QJsonDocument>
@@ -17,6 +20,7 @@
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QVBoxLayout>
+#include <array>
 
 namespace Mesh {
 namespace {
@@ -25,7 +29,8 @@ QString pathText(const QJsonArray &a){QStringList p;for(const auto &v:a)p<<v.toS
 QTableWidgetItem *cell(const QString &text){auto item=new QTableWidgetItem(text);item->setFlags(item->flags()&~Qt::ItemIsEditable);return item;}
 QString statusText(const QString &code){
     static const QMap<QString,QString> names{{"delivered",u("Доставлено")},{"no_route",u("Немає маршруту")},{"ttl_expired",u("Вичерпано TTL")},
-        {"duplicate",u("Дублікат")},{"queue_full",u("Черга заповнена")},{"link_down",u("Розрив зв'язку")},{"node_down",u("Вузол вимкнений")},{"time_limit",u("Межа часу")},
+        {"duplicate",u("Дублікат")},{"queue_full",u("Черга заповнена")},{"link_down",u("Розрив зв'язку")},{"out_of_range",u("Поза радіусом")},{"node_down",u("Вузол вимкнений")},{"time_limit",u("Межа часу")},
+        {"collision",u("Колізія")},{"half_duplex",u("Приймач передає")},{"tx_busy",u("Передавач зайнятий")},
         {"modem_timeout",u("Модем: немає декодування")},{"modem_tx_rejected",u("Модем: TX відхилено")},{"modem_stopped",u("Модем зупинено")}};
     return names.value(code,code);
 }
@@ -41,7 +46,7 @@ PacketDialog::PacketDialog(const Project &project,QWidget *parent):QDialog(paren
         auto b=new QPushButton(style()->standardIcon(icon),name,this);b->setToolTip(tip);commands->addWidget(b);return b;
     };
     run=button(QStyle::SP_MediaPause,u("Пауза / автовиконання"),u("Автовиконання"));run->setCheckable(true);run->setChecked(true);run->setMinimumWidth(160);run->setObjectName("packetRun");
-    step=button(QStyle::SP_MediaSkipForward,u("Одна подія"),{});step->setObjectName("packetStep");
+    step=button(QStyle::SP_MediaSkipForward,u("Наступна подія або 20 мс руху"),{});step->setObjectName("packetStep");
     auto reset=button(QStyle::SP_BrowserReload,u("Скинути експеримент"),{});reset->setObjectName("packetReset");
     commands->addStretch();
     auto load=button(QStyle::SP_DialogOpenButton,u("Відкрити пакетний сценарій"),{});
@@ -56,6 +61,21 @@ PacketDialog::PacketDialog(const Project &project,QWidget *parent):QDialog(paren
     text=new QLineEdit;text->setMaxLength(1024);text->setObjectName("packetText");text->setText("TEST");
     sendButton=new QPushButton(style()->standardIcon(QStyle::SP_ArrowRight),u("Надіслати"));sendButton->setObjectName("packetSend");
     form->addWidget(new QLabel("UTF-8"),1,0);form->addWidget(text,1,1,1,4);form->addWidget(sendButton,1,5);form->setColumnStretch(1,1);form->setColumnStretch(3,1);layout->addLayout(form);
+    auto *recovery = new QWidget(this);
+    auto *recoveryLayout = new QHBoxLayout(recovery);
+    recoveryLayout->setContentsMargins(0,0,0,0);
+    retries = new QSpinBox(recovery);
+    retries->setRange(0,2);
+    retries->setToolTip(u("Повтор того самого IQ-переходу після 15 с без декодування"));
+    avoidFailedLinks = new QCheckBox(u("Обходити недоступні зв’язки 30 с"),recovery);
+    recoveryLayout->addWidget(new QLabel(u("Повторів IQ"),recovery));
+    recoveryLayout->addWidget(retries);
+    recoveryLayout->addWidget(avoidFailedLinks);
+    recoveryLayout->addStretch();
+    layout->addWidget(recovery);
+    recovery->hide();
+    connect(mode,QOverload<int>::of(&QComboBox::currentIndexChanged),recovery,
+            [recovery](int index){recovery->setVisible(index==1);});
     routeLabel=new QLabel;routeLabel->setWordWrap(true);routeLabel->setObjectName("packetRoute");layout->addWidget(routeLabel);
     metrics=new QLabel;metrics->setWordWrap(true);metrics->setObjectName("packetMetrics");layout->addWidget(metrics);
     errorLabel=new QLabel;errorLabel->setWordWrap(true);layout->addWidget(errorLabel);
@@ -66,8 +86,62 @@ PacketDialog::PacketDialog(const Project &project,QWidget *parent):QDialog(paren
     packets->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);packets->horizontalHeader()->setStretchLastSection(true);packetLayout->addWidget(packets,1);
     encoding=new QComboBox;encoding->addItems({"UTF-8","HEX"});packetLayout->addWidget(encoding);
     payload=new QPlainTextEdit;payload->setReadOnly(true);payload->setMaximumHeight(90);packetLayout->addWidget(payload);tabs->addTab(packetPage,u("Пакети"));
-    nodes=new QTableWidget(0,8);nodes->setObjectName("packetNodes");nodes->setHorizontalHeaderLabels({"ID",u("Назва"),u("Доступний"),u("Черга"),u("Вхід"),u("Переслано"),u("Доставлено"),u("Втрати")});
-    nodes->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);nodes->horizontalHeader()->setStretchLastSection(true);tabs->addTab(nodes,u("Вузли"));
+    auto *nodePage = new QWidget;
+    auto *nodeLayout = new QVBoxLayout(nodePage);
+    auto *motionControls = new QHBoxLayout;
+    radioRange = new QDoubleSpinBox(nodePage);
+    radioRange->setObjectName(QStringLiteral("packetRadioRange"));
+    radioRange->setRange(0, PacketEngine::MaximumCoordinateM);
+    radioRange->setDecimals(3);
+    radioRange->setSuffix(u(" м"));
+    radioRange->setSpecialValueText(u("Без обмеження"));
+    radioRange->setKeyboardTracking(false);
+    editMotion = new QPushButton(u("Координати й швидкість…"), nodePage);
+    editMotion->setObjectName(QStringLiteral("packetEditMotion"));
+    editMotion->setEnabled(false);
+    motionControls->addWidget(new QLabel(u("Радіус зв’язку"), nodePage));
+    motionControls->addWidget(radioRange);
+    motionControls->addWidget(editMotion);
+    airBitrate = new QSpinBox(nodePage);
+    airBitrate->setObjectName(QStringLiteral("packetAirBitrate"));
+    airBitrate->setRange(0, PacketEngine::MaximumAirBitrate);
+    airBitrate->setSingleStep(1000);
+    airBitrate->setSuffix(u(" біт/с"));
+    airBitrate->setSpecialValueText(u("Вимкнено"));
+    airBitrate->setToolTip(u("Моделює час передачі, колізії й напівдуплекс на спільному каналі."));
+    airBitrate->setKeyboardTracking(false);
+    motionControls->addWidget(new QLabel(u("Бітрейт каналу"), nodePage));
+    motionControls->addWidget(airBitrate);
+    motionControls->addStretch();
+    nodeLayout->addLayout(motionControls);
+    nodes=new QTableWidget(0,10);nodes->setObjectName("packetNodes");nodes->setHorizontalHeaderLabels({"ID",u("Назва"),u("Доступний"),u("Черга"),u("Вхід"),u("Переслано"),u("Доставлено"),u("Втрати"),u("X, м"),u("Y, м")});
+    nodes->setSelectionBehavior(QAbstractItemView::SelectRows);
+    nodes->setSelectionMode(QAbstractItemView::SingleSelection);
+    nodes->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);nodes->horizontalHeader()->setStretchLastSection(true);
+    nodeLayout->addWidget(nodes, 1);
+    tabs->addTab(nodePage,u("Вузли"));
+    connect(nodes, &QTableWidget::itemSelectionChanged, this, [this] {
+        editMotion->setEnabled(mode->currentIndex() == 0 && nodes->currentRow() >= 0);
+    });
+    connect(editMotion, &QPushButton::clicked, this, &PacketDialog::editNodeMotion);
+    connect(radioRange, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double meters) {
+        QString error;
+        if (!engine.setRadioRange(meters, &error)) {
+            const QSignalBlocker block(radioRange);
+            radioRange->setValue(engine.radioRange());
+        }
+        errorLabel->setText(error);
+        refresh();
+    });
+    connect(airBitrate, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int bitrate) {
+        QString error;
+        if (!engine.setAirBitrate(bitrate, &error)) {
+            const QSignalBlocker block(airBitrate);
+            airBitrate->setValue(engine.airBitrate());
+        }
+        errorLabel->setText(error);
+        refresh();
+    });
     links=new QTableWidget(0,4);links->setObjectName("packetLinks");links->setHorizontalHeaderLabels({"TX","RX",u("Увімкнений"),u("Затримка, ms")});
     links->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);links->horizontalHeader()->setStretchLastSection(true);tabs->addTab(links,u("Зв'язки"));
     for(auto table:{packets,nodes,links})table->setStyleSheet(
@@ -77,7 +151,11 @@ PacketDialog::PacketDialog(const Project &project,QWidget *parent):QDialog(paren
     connect(sendButton,&QPushButton::clicked,this,&PacketDialog::send);
     connect(text,&QLineEdit::returnPressed,this,&PacketDialog::send);
     connect(run,&QPushButton::toggled,this,[this](bool on){run->setIcon(style()->standardIcon(on?QStyle::SP_MediaPause:QStyle::SP_MediaPlay));run->setText(on?u("Автовиконання"):u("Пауза"));refresh();});
-    connect(step,&QPushButton::clicked,this,[this]{engine.step();refresh();});
+    connect(step,&QPushButton::clicked,this,[this]{
+        if (!engine.step() && engine.hasMovingNodes())
+            engine.advanceTo(qMin(PacketEngine::MaximumTimeMs, engine.now() + 20));
+        refresh();
+    });
     connect(reset,&QPushButton::clicked,this,&PacketDialog::restartMode);
     connect(mode,QOverload<int>::of(&QComboBox::currentIndexChanged),this,&PacketDialog::restartMode);
     connect(load,&QPushButton::clicked,this,&PacketDialog::open);connect(scenario,&QPushButton::clicked,this,[this]{save(false);});connect(result,&QPushButton::clicked,this,[this]{save(true);});
@@ -119,13 +197,17 @@ void PacketDialog::restartMode() {
 void PacketDialog::populate() {
     busy=true;const auto from=source->currentData().toString(),to=destination->currentData().toString();
     source->clear();destination->clear();nodes->setRowCount(0);links->setRowCount(0);packets->setRowCount(0);shown=0;payload->clear();
+    const QSignalBlocker blockRange(radioRange);
+    radioRange->setValue(engine.radioRange());
+    const QSignalBlocker blockBitrate(airBitrate);
+    airBitrate->setValue(engine.airBitrate());
     const auto topology=engine.topology();
     for(const auto &v:topology.value("nodes").toArray()){
         const auto n=v.toObject();const auto id=n.value("id").toString(),name=n.value("name").toString();
         source->addItem(name+" ["+id+"]",id);destination->addItem(name+" ["+id+"]",id);
         const int row=nodes->rowCount();nodes->insertRow(row);nodes->setItem(row,0,cell(id));nodes->setItem(row,1,cell(name));
         auto box=new QCheckBox;box->setChecked(n.value("enabled").toBool());nodes->setCellWidget(row,2,box);
-        for(int col=3;col<8;++col)nodes->setItem(row,col,cell("0"));
+        for(int col=3;col<10;++col)nodes->setItem(row,col,cell("0"));
         connect(box,&QCheckBox::toggled,this,[this,id,box](bool on){if(busy)return;QString error;if(!engine.setNodeEnabled(id,on,&error)){QSignalBlocker block(box);box->setChecked(!on);errorLabel->setText(error);}else {if(bearer)bearer->updateNode(id,on);errorLabel->clear();}refresh();});
     }
     source->setCurrentIndex(qMax(0,source->findData(from)));destination->setCurrentIndex(to.isEmpty()?qMin(2,destination->count()-1):qMax(0,destination->findData(to)));
@@ -139,6 +221,44 @@ void PacketDialog::populate() {
     }
     busy=false;
 }
+void PacketDialog::editNodeMotion() {
+    const auto *selected = nodes->item(nodes->currentRow(), 0);
+    if (!selected || mode->currentIndex() != 0) return;
+    const auto id = selected->text();
+    const bool wasRunning = run->isChecked();
+    run->setChecked(false);
+    const auto motion = engine.nodeMotion(id);
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("packetMotionDialog"));
+    dialog.setWindowTitle(u("Рух вузла %1").arg(id));
+    auto *form = new QFormLayout(&dialog);
+    const std::array<double, 4> values{motion.position.x(), motion.position.y(), motion.velocity.x(), motion.velocity.y()};
+    const std::array<const char *, 4> labels{"X, м", "Y, м", "Vx, м/с", "Vy, м/с"};
+    const std::array<const char *, 4> names{"packetMotionX", "packetMotionY", "packetMotionVx", "packetMotionVy"};
+    std::array<QDoubleSpinBox *, 4> fields{};
+    for (std::size_t i = 0; i < fields.size(); ++i) {
+        auto *field = new QDoubleSpinBox(&dialog);
+        field->setObjectName(QLatin1String(names[i]));
+        const double limit = i < 2 ? PacketEngine::MaximumPositionM : PacketEngine::MaximumVelocityMps;
+        field->setRange(-limit, limit);
+        field->setDecimals(3);
+        field->setValue(values[i]);
+        form->addRow(u(labels[i]), field);
+        fields[i] = field;
+    }
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    form->addRow(buttons);
+    if (dialog.exec() == QDialog::Accepted) {
+        QString error;
+        engine.setNodeMotion(id, {{fields[0]->value(), fields[1]->value()},
+                                  {fields[2]->value(), fields[3]->value()}}, &error);
+        errorLabel->setText(error);
+    }
+    run->setChecked(wasRunning);
+    refresh();
+}
 void PacketDialog::updateLink(const QString &tx,const QString &rx,QCheckBox *box,QSpinBox *delay) {
     if(busy)return;const auto previous=engine.topology().value("links").toArray();QString error;
     if(!engine.setLink(tx,rx,box->isChecked(),delay->value(),&error)){
@@ -148,7 +268,10 @@ void PacketDialog::updateLink(const QString &tx,const QString &rx,QCheckBox *box
 }
 void PacketDialog::send() {
     if(mode->currentIndex()==1&&(!bearer||!bearer->ready()||engine.pending()))return;
-    if(bearer)engine.advanceTo(qMin(PacketEngine::MaximumTimeMs,iqClock.elapsed()),512);
+    if(bearer){
+        engine.advanceTo(qMin(PacketEngine::MaximumTimeMs,iqClock.elapsed()),512);
+        if(!engine.setIqRecovery(retries->value(),avoidFailedLinks->isChecked()))return;
+    }
     QString error;const auto id=engine.send(source->currentData().toString(),destination->currentData().toString(),text->text().toUtf8(),ttl->value(),&error);
     errorLabel->setText(id.isEmpty()?error:QString());refresh();
 }
@@ -163,6 +286,9 @@ void PacketDialog::refresh() {
     if(mode->currentIndex()==1){
         const auto stats=bearer?bearer->statistics():QJsonObject();
         routeLabel->setText(routeLabel->text()+QString::fromUtf8(" · IQ 48 kS/s · %1 · TX %2 / RX %3 · ≤256 B").arg(bearer&&bearer->ready()?u("готовий"):u("не готовий")).arg(stats.value("txBursts").toString("0"),stats.value("decoded").toString("0")));
+        if(state.value("iqRetries").toString()!="0"||state.value("iqLinksOnHold").toInt()>0)
+            routeLabel->setText(routeLabel->text()+u(" · Повтори %1 · Тимчасово обійдено %2")
+                .arg(state.value("iqRetries").toString()).arg(state.value("iqLinksOnHold").toInt()));
     }
     for(const auto &v:engine.results(shown)){
         const auto r=v.toObject();const int row=packets->rowCount();packets->insertRow(row);
@@ -172,17 +298,31 @@ void PacketDialog::refresh() {
         packets->item(row,0)->setData(Qt::UserRole,r);shown=r.value("serial").toString().toULongLong();
         if(packets->rowCount()>256)packets->removeRow(0);
     }
+    const bool iq=mode->currentIndex()==1;
     const auto stats=state.value("nodes").toArray();
     for(int row=0;row<nodes->rowCount()&&row<stats.size();++row){const auto n=stats[row].toObject();if(n.value("id")==nodes->item(row,0)->text()){
         const QStringList fields{QString::number(n.value("queued").toInt()),n.value("received").toString(),n.value("forwarded").toString(),n.value("delivered").toString(),n.value("dropped").toString()};
         for(int i=0;i<fields.size();++i)nodes->item(row,i+3)->setText(fields[i]);
+        const auto motion = n.value("motion").toObject();
+        if (!iq) {
+            nodes->item(row,8)->setText(QString::number(motion.value("xM").toDouble(), 'f', 2));
+            nodes->item(row,9)->setText(QString::number(motion.value("yM").toDouble(), 'f', 2));
+        }
     }}
-    const bool iq=mode->currentIndex()==1;
-    mode->setEnabled(!engine.pending());run->setEnabled(!iq);step->setEnabled(!iq&&!run->isChecked()&&engine.pending()>0);
+    const bool moving = engine.hasMovingNodes() && engine.now() < PacketEngine::MaximumTimeMs;
+    mode->setEnabled(!engine.pending());run->setEnabled(!iq);step->setEnabled(!iq&&!run->isChecked()&&(engine.pending()>0||moving));
+    radioRange->setEnabled(!iq);
+    airBitrate->setEnabled(!iq && !engine.pending());
+    editMotion->setEnabled(!iq && nodes->currentRow() >= 0);
+    nodes->setColumnHidden(8, iq);
+    nodes->setColumnHidden(9, iq);
+    retries->setEnabled(!engine.pending());avoidFailedLinks->setEnabled(!engine.pending());
     sendButton->setEnabled(!iq||(bearer&&bearer->ready()&&!engine.pending()));
     nodes->setEnabled(!iq||!engine.pending());links->setEnabled(!iq||!engine.pending());
     loadButton->setEnabled(!iq);scenarioButton->setEnabled(!iq);
-    if(run->isChecked()&&engine.pending()>0){if(!timer.isActive())timer.start();}else timer.stop();
+    if(run->isChecked()&&(engine.pending()>0||moving||state.value("iqLinksOnHold").toInt()>0)){
+        if(!timer.isActive())timer.start();
+    }else timer.stop();
 }
 void PacketDialog::displayPayload() {
     const int row=packets->currentRow();if(row<0||!packets->item(row,0)){payload->clear();return;}

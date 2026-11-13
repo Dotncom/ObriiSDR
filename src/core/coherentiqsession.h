@@ -60,12 +60,14 @@ class CoherentIqRecording final {
 public:
     bool create(const QString &parentDirectory, QString &error);
     bool append(const std::vector<DspIqSourceSnapshot> &channels, QString &error);
-    QString finish(const QString &interruption, QString &error) const;
+    QString finish(const QString &interruption, QString &error,
+                   const std::vector<double> &weights = {}) const;
 
     bool open(const QString &manifestPath, QString &error);
     // An empty block on success marks the end of the recording.
     bool readNext(std::vector<DspIqSourceSnapshot> &channels, QString &error);
     QString interruptionReason() const { return interruption; }
+    const std::vector<double> &combiningWeights() const { return weights; }
 
 private:
     bool contiguous(const std::vector<DspIqSourceSnapshot> &channels, QString &error) const;
@@ -74,6 +76,7 @@ private:
     QString directory;
     QString interruption;
     QStringList segments;
+    std::vector<double> weights;
     int position = 0;
     std::vector<DspSourceIdentity> sources;
     QString clock;

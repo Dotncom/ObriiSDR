@@ -26,6 +26,40 @@ void require(bool condition, const char *message) {
     if (!condition) throw std::runtime_error(message);
 }
 
+void testBandStitching() {
+    auto &registry = DspIqSourceRegistry::instance();
+    const auto source = CoherentIqLive::outputIdentity();
+    MultiSdrLiveIq worker;
+    registry.setSubscriptions(&source, {source.key()});
+    require(worker.start({}, 32, true, false, true).isEmpty(), "Could not start virtual band stitching");
+    QElapsedTimer timer;
+    timer.start();
+    DspIqSourceSnapshot frame;
+    while (timer.elapsed() < 3000) {
+        QThread::msleep(10);
+        require(worker.preview().error.isEmpty(), "Virtual stitching stopped prematurely");
+        if (registry.snapshotSince(source, 0, 0, 4096, frame, false) && frame.iq.size() == 4096) break;
+    }
+    worker.stop();
+    registry.removeSubscriptions(&source);
+    require(frame.iq.size() == 4096 && frame.sampleRateHz == 96000 && frame.centerHz == 145500000 &&
+                frame.sharedSampleTimeline, "Stitched IQ metadata or samples missing");
+    const auto amplitude = [&](double offset) {
+        std::complex<double> correlation{};
+        for (std::size_t i = 0; i < frame.iq.size() / 2; ++i) {
+            const auto iq = std::complex<double>(frame.iq[2 * i], frame.iq[2 * i + 1]);
+            const double phase = -6.283185307179586 * offset * double(i) / frame.sampleRateHz;
+            correlation += iq * std::polar(1.0, phase);
+        }
+        return std::abs(correlation) / (frame.iq.size() / 2);
+    };
+    require(amplitude(-20250) > 0.29 && amplitude(16500) > 0.19,
+            "Stitched IQ lost one of the two source signals");
+    require(amplitude(27750) < 0.001 && amplitude(-31500) < 0.001,
+            "Stitched IQ retained interpolation images");
+    std::cout << "Virtual IQ stitching: both bands present at 96 kS/s, interpolation images suppressed\n";
+}
+
 void testLiveAlignment() {
     constexpr std::uint64_t origin = (1ULL << 53) + 100;
     constexpr std::size_t length = 8192;
@@ -122,7 +156,7 @@ void testLivePhaseDrift() {
     constexpr double driftHz = -0.50;
     constexpr double radiansPerSample = 6.283185307179586 * driftHz / rate;
     constexpr std::size_t calibrationSamples = 4096;
-    constexpr std::size_t length = 16384;
+    constexpr std::size_t length = 163840;
     std::vector<DspIqSourceSnapshot> inputs(2);
     std::mt19937 random(481);
     std::uniform_real_distribution<float> distribution(-0.5f, 0.5f);
@@ -161,19 +195,95 @@ void testLivePhaseDrift() {
     const auto measured = combiner.maximumPhaseDriftHz();
     require(measured && std::abs(*measured - std::abs(driftHz)) < 0.02,
             "Did not recover the known relative phase drift");
+    CoherentIqLive tracked(CoherentIqLive::Timeline::Hardware, {false, true});
+    require(tracked.calibrate(calibration, 0, error), "Could not calibrate the phase tracker");
+    double squareError = 0;
+    std::size_t compared = 0;
+    for (std::size_t block = 0; block + 1 < (length - calibrationSamples) / CoherentIqLive::BlockSamples; ++block) {
+        require(tracked.takeBlock(inputs, output, error) && !output.iq.empty(),
+                "Phase tracker lost the known slow drift");
+        if (block < 24) continue;
+        const auto first = std::size_t(output.startComplexSample) * 2;
+        for (std::size_t n = 0; n < output.iq.size(); ++n)
+            squareError += std::pow(output.iq[n] - inputs[0].iq[first + n], 2);
+        compared += output.iq.size();
+    }
+    const double rms = std::sqrt(squareError / compared);
+    require(rms < 0.005 && tracked.maximumPhaseDriftHz() &&
+            std::abs(*tracked.maximumPhaseDriftHz() - std::abs(driftHz)) < 0.02,
+            "Phase tracker did not hold the reference waveform");
+    require(tracked.calibrate(calibration, 0, error), "Could not reset the phase tracker");
+    for (auto &value : inputs[1].iq) value = -value;
+    require(!tracked.takeBlock(inputs, output, error) && error.contains(QStringLiteral("phase lock")),
+            "Phase tracker accepted an abrupt phase reversal");
+    for (auto &value : inputs[1].iq) value = -value;
     ++inputs[1].continuityId;
     require(!combiner.takeBlock(inputs, output, error) && !combiner.maximumPhaseDriftHz(),
             "Retained stale phase drift after an IQ gap");
+    std::cout << "Live phase tracking: 0.50 Hz relative drift, waveform RMS error " << rms << '\n';
 }
 
-void testVirtualWorker() {
+void testLiveNoiseWeights() {
+    constexpr int length = 16384;
+    constexpr int calibrationSamples = 4096;
+    constexpr int count = length - calibrationSamples - CoherentIqLive::BlockSamples;
+    std::vector<DspIqSourceSnapshot> inputs(2);
+    std::mt19937 random(189);
+    std::normal_distribution<float> noise;
+    std::vector<float> clean(2 * length);
+    for (int n = 0; n < length; ++n) {
+        const auto value = std::polar(0.4f, float(0.087 * n)) + std::polar(0.3f, float(-0.43 * n));
+        clean[2 * n] = value.real();
+        clean[2 * n + 1] = value.imag();
+    }
+    for (std::size_t i = 0; i < inputs.size(); ++i) {
+        auto &input = inputs[i];
+        input.source = DspSourceIdentity::normalized(QStringLiteral("noise-test-%1").arg(i), QStringLiteral("rx0"));
+        input.sampleRateHz = 48000;
+        input.centerHz = 145500000;
+        input.clockId = QStringLiteral("noise-test-clock");
+        input.sampleClockValid = input.sharedSampleTimeline = input.clockLocked = true;
+        input.continuityId = 1;
+        input.endComplexSample = length;
+        const float gain = i == 0 ? 1.0f : 0.55f;
+        const float sigma = i == 0 ? 0.025f : 0.095f;
+        for (float value : clean) input.iq.push_back(gain * value + sigma * noise(random));
+    }
+    auto calibration = inputs;
+    for (auto &input : calibration) {
+        input.iq.resize(2 * calibrationSamples);
+        input.endComplexSample = calibrationSamples;
+    }
+    QString error;
+    const auto mse = [&](CoherentIqLive &combiner) {
+        require(combiner.calibrate(calibration, 0, error), "Could not calibrate the noisy virtual pair");
+        double squareError = 0;
+        DspIqSourceSnapshot block;
+        for (int n = calibrationSamples; n < calibrationSamples + count; n += CoherentIqLive::BlockSamples) {
+            require(combiner.takeBlock(inputs, block, error) && !block.iq.empty(), "Missing virtual IQ after weighting");
+            for (std::size_t i = 0; i < block.iq.size(); ++i)
+                squareError += std::pow(block.iq[i] - clean[2 * n + i], 2);
+        }
+        return squareError / (2 * count);
+    };
+    CoherentIqLive average;
+    CoherentIqLive weighted(CoherentIqLive::Timeline::Hardware, {true, false});
+    const auto improvementDb = 10 * std::log10(mse(average) / mse(weighted));
+    const auto weights = weighted.combiningWeights();
+    require(weights.size() == 2 && weights[0] > 0.9 && weights[1] > 0 &&
+            std::abs(weights[0] + weights[1] - 1) < 1e-9 && improvementDb > 6,
+            "MRC did not reduce the contribution of the noisier channel");
+    std::cout << "Live MRC: " << improvementDb << " dB lower waveform MSE for unequal virtual channels\n";
+}
+
+void testVirtualWorker(CoherentIqLiveOptions options = {}) {
     MultiSdrLiveIq worker;
     QTemporaryDir directory;
     require(directory.isValid(), "Could not create IQ recording fixture directory");
     auto &registry = DspIqSourceRegistry::instance();
     const auto source = CoherentIqLive::outputIdentity();
     registry.setSubscriptions(&source, {source.key()});
-    require(worker.start({}, 32, true).isEmpty(), "Could not start virtual Multi-SDR");
+    require(worker.start({}, 32, true, false, false, options).isEmpty(), "Could not start virtual Multi-SDR");
     require(worker.startRecording(directory.path()).isEmpty(), "Could not start virtual IQ recording");
     QElapsedTimer elapsed;
     elapsed.start();
@@ -220,6 +330,11 @@ void testVirtualWorker() {
     CoherentIqRecording reader;
     QString error;
     require(reader.open(saved.manifest, error), "Cannot open the continuous IQ recording");
+    const auto &weights = reader.combiningWeights();
+    require(options.noiseWeighted ? weights.size() == 2 && weights == preview.combiningWeights : weights.empty(),
+            "Recording did not preserve its combining weights");
+    const double weightA = weights.empty() ? 0.5 : weights[0];
+    const double weightB = weights.empty() ? 0.5 : weights[1];
     std::vector<DspIqSourceSnapshot> channels;
     int segments = 0;
     std::uint64_t total = 0;
@@ -234,7 +349,7 @@ void testVirtualWorker() {
                 (!segments || a.startComplexSample == next), "Recording lost a channel or the shared sample timeline");
         const auto offset = std::size_t(a.startComplexSample - live.startComplexSample) * 2;
         for (std::size_t n = 0; n < a.iq.size(); ++n)
-            require(std::abs(0.5 * (double(a.iq[n]) + b.iq[n]) - live.iq[offset + n]) < 1e-7,
+            require(std::abs(weightA * a.iq[n] + weightB * b.iq[n] - live.iq[offset + n]) < 1e-7,
                     "Recorded channels no longer reconstruct the live waveform");
         if (!segments) firstBlock.assign(live.iq.begin() + offset, live.iq.begin() + offset + 2048);
         next = a.endComplexSample;
@@ -272,6 +387,14 @@ void testVirtualWorker() {
     require(indexFile.open(QIODevice::ReadOnly), "Cannot open capture index fixture");
     auto index = QJsonDocument::fromJson(indexFile.readAll()).object();
     indexFile.close();
+    if (options.noiseWeighted) {
+        auto invalid = index;
+        invalid.insert(QStringLiteral("combiningWeights"), QJsonArray{0.5, 0.25});
+        require(indexFile.open(QIODevice::WriteOnly | QIODevice::Truncate), "Cannot write invalid weights");
+        indexFile.write(QJsonDocument(invalid).toJson());
+        indexFile.close();
+        require(!reader.open(saved.manifest, error), "Accepted a recording with invalid weights");
+    }
     auto entries = index.value(QStringLiteral("segments")).toArray();
     const auto first = entries.at(0);
     entries.replace(0, entries.at(1));
@@ -424,7 +547,10 @@ int main(int argc, char **argv) {
                     restoredSnapshots.size() == 2U, "Legacy coherent-session support was lost");
         testLiveAlignment();
         testLivePhaseDrift();
+        testLiveNoiseWeights();
         testVirtualWorker();
+        testVirtualWorker({true, true});
+        testBandStitching();
         testInterruptedRecording();
         std::cout << "Coherent IQ delay, phase, gain and alignment self-test passed\n";
         return 0;

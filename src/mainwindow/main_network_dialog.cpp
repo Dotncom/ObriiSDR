@@ -168,6 +168,10 @@ void YourClassName::openNetworkSettingsDialog() {
                                                              QStringLiteral("Send ready audio by UDP")),
                                                        &dialog);
     audioRelayTransmitCheck->setChecked(audioRelayTransmitEnabled);
+    auto *audioRelayDisableLocalCheck = new QCheckBox(uiText(
+        QStringLiteral("audio_relay_disable_local"), QStringLiteral("Disable local display and sound during UDP TX")),
+        &dialog);
+    audioRelayDisableLocalCheck->setChecked(audioRelayDisableLocalVisualAudio);
 
     QLineEdit *audioRelayHostEdit = new QLineEdit(audioRelayHost, &dialog);
     audioRelayHostEdit->setPlaceholderText(uiText(QStringLiteral("target_ip_placeholder"),
@@ -185,6 +189,20 @@ void YourClassName::openNetworkSettingsDialog() {
     QSpinBox *audioRelayListenPortSpin = new QSpinBox(&dialog);
     audioRelayListenPortSpin->setRange(1, 65535);
     audioRelayListenPortSpin->setValue(audioRelayListenPort);
+
+    auto *audioRelayBufferSpin = new QSpinBox(&dialog);
+    audioRelayBufferSpin->setRange(AUDIO_RELAY_BUFFER_MIN_MS, AUDIO_RELAY_BUFFER_MAX_MS);
+    audioRelayBufferSpin->setSingleStep(20);
+    audioRelayBufferSpin->setValue(audioRelayBufferMs);
+    audioRelayBufferSpin->setToolTip(uiText("audio_relay_buffer_tooltip",
+        "Audio to accumulate before playback starts or resumes after the queue empties."));
+    auto *audioRelayBufferLabel = new QLabel(uiText("audio_relay_buffer", "Buffer (ms)"), &dialog);
+    audioRelayBufferLabel->setBuddy(audioRelayBufferSpin);
+    auto *audioRelayListenOptions = new QHBoxLayout();
+    audioRelayListenOptions->addWidget(audioRelayListenPortSpin);
+    audioRelayListenOptions->addWidget(audioRelayBufferLabel);
+    audioRelayListenOptions->addWidget(audioRelayBufferSpin);
+    audioRelayListenOptions->addStretch();
 
     QCheckBox *audioHttpStreamCheck = new QCheckBox(uiText(QStringLiteral("audio_http_stream"),
                                                           QStringLiteral("Serve VLC-compatible HTTP/WAV audio")),
@@ -232,8 +250,9 @@ void YourClassName::openNetworkSettingsDialog() {
     formLayout->addRow(uiText(QStringLiteral("audio_relay_tx_label"), QStringLiteral("Audio relay TX:")), audioRelayTransmitCheck);
     formLayout->addRow(uiText(QStringLiteral("relay_target_ip"), QStringLiteral("Relay target IP:")), audioRelayHostEdit);
     formLayout->addRow(uiText(QStringLiteral("relay_target_port"), QStringLiteral("Relay target port:")), audioRelayPortSpin);
+    formLayout->addRow(QString(), audioRelayDisableLocalCheck);
     formLayout->addRow(uiText(QStringLiteral("audio_relay_rx_label"), QStringLiteral("Audio relay RX:")), audioRelayReceiveCheck);
-    formLayout->addRow(uiText(QStringLiteral("relay_listen_port"), QStringLiteral("Relay listen port:")), audioRelayListenPortSpin);
+    formLayout->addRow(uiText(QStringLiteral("relay_listen_port"), QStringLiteral("Relay listen port:")), audioRelayListenOptions);
     formLayout->addRow(uiText(QStringLiteral("vlc_http_audio"), QStringLiteral("VLC HTTP audio:")), audioHttpStreamCheck);
     formLayout->addRow(uiText(QStringLiteral("http_audio_port"), QStringLiteral("HTTP audio port:")), audioHttpStreamPortSpin);
 
@@ -365,7 +384,10 @@ void YourClassName::openNetworkSettingsDialog() {
                                          selectedProcessing != NetworkProcessingMode::RemoteVfoServerSide);
         audioRelayHostEdit->setEnabled(audioRelayTransmitCheck->isChecked());
         audioRelayPortSpin->setEnabled(audioRelayTransmitCheck->isChecked());
+        audioRelayDisableLocalCheck->setEnabled(selectedMode != NetworkMode::Client && audioRelayTransmitCheck->isChecked());
         audioRelayListenPortSpin->setEnabled(audioRelayReceiveCheck->isChecked());
+        audioRelayBufferLabel->setEnabled(audioRelayReceiveCheck->isChecked());
+        audioRelayBufferSpin->setEnabled(audioRelayReceiveCheck->isChecked());
         audioHttpStreamPortSpin->setEnabled(audioHttpStreamCheck->isChecked());
         testButton->setText(selectedMode == NetworkMode::Disabled
                                 ? uiText(QStringLiteral("apply"), QStringLiteral("Apply"))
@@ -558,6 +580,7 @@ void YourClassName::openNetworkSettingsDialog() {
         const NetworkMode previousNetworkMode = networkMode;
         const NetworkProcessingMode previousProcessingMode = networkProcessingMode;
         const bool previousServerDisableLocalVisualAudio = serverDisableLocalVisualAudio;
+        const bool previousLocalOutputSuppressed = serverLocalOutputSuppressed();
         const QString previousBindAddress = networkBindAddress;
         const QString previousServerAddress = networkServerAddress;
         const quint16 previousControlPort = networkControlPort;
@@ -597,12 +620,14 @@ void YourClassName::openNetworkSettingsDialog() {
         networkProcessingMode = selectedProcessingMode;
         updateSpectrumTimerInterval();
         audioRelayTransmitEnabled = audioRelayTransmitCheck->isChecked();
+        audioRelayDisableLocalVisualAudio = audioRelayDisableLocalCheck->isChecked();
         audioRelayHost = audioRelayHostEdit->text().trimmed().isEmpty()
                              ? QString("127.0.0.1")
                              : audioRelayHostEdit->text().trimmed();
         audioRelayPort = static_cast<quint16>(audioRelayPortSpin->value());
         audioRelayReceiveEnabled = audioRelayReceiveCheck->isChecked();
         audioRelayListenPort = static_cast<quint16>(audioRelayListenPortSpin->value());
+        audioRelayBufferMs = audioRelayBufferSpin->value();
         audioHttpStreamEnabled = audioHttpStreamCheck->isChecked();
         audioHttpStreamPort = static_cast<quint16>(audioHttpStreamPortSpin->value());
         updateAudioRelaySocket();
@@ -639,13 +664,6 @@ void YourClassName::openNetworkSettingsDialog() {
                 stopNetworkClientProcessing();
                 clearRemoteReceiverDeviceList();
                 runState = RadioRunState::Idle;
-            } else if (previousNetworkMode == NetworkMode::Server && runState == RadioRunState::Running) {
-                if (audioProcessor) {
-                    audioProcessor->setLocalPlaybackEnabled(true);
-                }
-                if (updateTimer) {
-                    updateTimer->start();
-                }
             }
             if (remoteAudioPlayer) {
                 remoteAudioPlayer->stop();
@@ -654,7 +672,7 @@ void YourClassName::openNetworkSettingsDialog() {
             if (previousNetworkMode == NetworkMode::Client) updateUiForRunState();
             updateRemoteWebServer();
             if (runState == RadioRunState::Running) {
-                updateIqFrameProducerSettings();
+                applyServerLocalOutputPolicy();
             }
             savePersistentSettings();
             return;
@@ -685,7 +703,8 @@ void YourClassName::openNetworkSettingsDialog() {
                 (networkModeChanged || processingModeChanged);
             if (restartRequired) {
                 restartStreamForHardwareChange();
-            } else if (runState == RadioRunState::Running && serverLocalOutputChanged) {
+            } else if (runState == RadioRunState::Running &&
+                       (serverLocalOutputChanged || previousLocalOutputSuppressed != serverLocalOutputSuppressed())) {
                 applyServerLocalOutputPolicy();
             }
             sendServerStateToClients();

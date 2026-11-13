@@ -1,6 +1,7 @@
 #ifndef UHD_BACKEND_H
 #define UHD_BACKEND_H
 
+#include <QByteArray>
 #include <QString>
 #include <QStringList>
 #include <array>
@@ -72,6 +73,17 @@ struct UhdGnssStatus {
     QString gga;
     QString rmc;
     QString gsv;
+    QString ubxHex;
+};
+
+QString validatedUhdGnssUbx(const QByteArray &payload);
+
+struct UhdGnssSatellite {
+    QString talker;
+    int id = -1;
+    int elevationDeg = -1;
+    int azimuthDeg = -1;
+    int cn0DbHz = -1;
 };
 
 struct UhdGnssSkySummary {
@@ -79,6 +91,7 @@ struct UhdGnssSkySummary {
     int satellitesWithSignal = 0;
     int strongestCn0DbHz = -1;
     bool incomplete = false;
+    std::vector<UhdGnssSatellite> satellites;
 };
 
 UhdGnssSkySummary summarizeUhdGnssGsv(const QString &gsv);
@@ -177,6 +190,7 @@ private:
     const char *gnssGgaSensor_ = nullptr;
     const char *gnssRmcSensor_ = nullptr;
     const char *gnssGsvSensor_ = nullptr;
+    const char *gnssUbxSensor_ = nullptr;
 };
 
 #endif // UHD_BACKEND_H

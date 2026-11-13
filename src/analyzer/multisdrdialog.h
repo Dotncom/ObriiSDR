@@ -155,6 +155,9 @@ private:
     QPushButton *coherentLiveButton = nullptr;
     QPushButton *coherentVirtualButton = nullptr;
     QPushButton *coherentSignalButton = nullptr;
+    QCheckBox *coherentStitchBands = nullptr;
+    QCheckBox *coherentNoiseWeighted = nullptr;
+    QCheckBox *coherentTrackPhase = nullptr;
     QPushButton *coherentRecordButton = nullptr;
     QPushButton *coherentReplayButton = nullptr;
     QLabel *coherentRecordingStatus = nullptr;

@@ -206,6 +206,10 @@ public:
     void onFineTuneDialReleased();
     void populateSampleRates();
     void populateAudioDevices();
+
+signals:
+    void gnssInterferenceUbxFrame(quint8 messageClass, quint8 messageId, const QByteArray &payload);
+
 private slots:
 	void settingRange();
     void onDirectSamplingChanged(int index);
@@ -492,11 +496,18 @@ private:
     void refreshUhdGnssPosition();
     void handleUhdGnssReply(const QJsonObject &command);
     void applyUhdGnssReading(const UhdGnssStatus &reading);
-    void showUhdGnssStatus(const QString &status);
+    static bool isUhdGnssSource(const QString &source) {
+        return source == QLatin1String("uhd") || source == QLatin1String("uhd_nmea");
+    }
+    QString combinedGnssSerialStatus() const;
+    UhdGnssStatus combinedGnssSerialReading() const;
+    void showUhdGnssValidationSettings();
+    void showUhdGnssStatus(const QString &status, bool keepSatelliteReport = false);
     void showGnssSdrPvt();
     void showLrptDecoder();
     void processGnssUbxFrame(quint8 messageClass, quint8 messageId, const QByteArray &payload);
     void sendGnssUbxConfiguration(bool enabled);
+    void showGnssInterferenceMonitor();
     void applyGnssUbxConstellationConfig();
     void saveGnssUbxConfigurationToModule();
     void handleGnssSerialError(QSerialPort::SerialPortError error);
@@ -506,6 +517,8 @@ private:
     void replayGnssNmeaLog();
     void resetGnssNmeaSatellites();
     void updateGnssNmeaSatellitesFromSentence(const QString &line);
+    void updateUhdGnssSatellites(const UhdGnssSkySummary &sky, int used, int fixQuality);
+    QMap<QString, GnssNmeaSatellite> gnssSatellitesForDisplay() const;
     void updateGnssSatelliteView(bool forceTableRefresh = false);
     void updateGnssNmeaSkyPlot();
     void updateQthMapSatelliteOverlay();
@@ -625,6 +638,7 @@ private:
     void clearLiveSpectrumSnapshot(bool clearVisualHistory = false, uint64_t iqEpoch = 0);
     void connectDataProcessorSignals();
     void applyServerLocalOutputPolicy();
+    bool serverLocalOutputSuppressed() const;
     bool networkSpectrumCadenceActive() const;
     bool applyCenterFrequencyToHardwareIfNeeded(const RadioSettings &previousSettings, const char *reason);
     bool applyLiveAgileCenterRetune(uint64_t generation, const QString &reason, double targetHz = 0.0);
@@ -723,6 +737,7 @@ private:
     QCheckBox *fftBinWidthModeCheckbox = nullptr;
     QDoubleSpinBox *fftBinWidthSpin = nullptr;
     QComboBox *waterfallDisplayModeCombo = nullptr;
+    QComboBox *waterfallColorPaletteCombo = nullptr;
     QComboBox *spectrumDisplayModeCombo = nullptr;
     int spectrumDisplayMode = 0;
     QDoubleSpinBox *spectrumPersistenceTimeSpin = nullptr;
@@ -736,6 +751,7 @@ private:
     QComboBox *spectrumPersistenceStyleCombo = nullptr;
     int spectrumPersistenceStyle = 0;
     void syncSpectrumPersistenceControls();
+    void applyWaterfallColorPalette(int palette);
     QComboBox *multiSdrViewModeCombo = nullptr;
     QCheckBox *alternativeSpectrumGradientCheckbox = nullptr;
     QComboBox *waterfall3DResolutionCombo = nullptr;
@@ -769,6 +785,7 @@ private:
     QComboBox *spectrumEventModeCombo = nullptr;
     QLineEdit *dsdNeoProgramEdit = nullptr;
     QComboBox *qthSourceCombo = nullptr;
+    QPushButton *uhdGnssValidationButton = nullptr;
     QComboBox *gnssSystemCombo = nullptr;
     QComboBox *gnssPositionPolicyCombo = nullptr;
     QComboBox *gnssTimeZoneCombo = nullptr;
@@ -849,6 +866,8 @@ private:
     QPushButton *gnssNmeaReplayButton = nullptr;
     QPushButton *gnssSerialRawLogButton = nullptr;
     QPushButton *gnssUbxSystemsButton = nullptr;
+    QPushButton *gnssInterferenceButton = nullptr;
+    QPointer<QDialog> gnssInterferenceDialog;
     QPushButton *gnssUbxSaveButton = nullptr;
     QPushButton *gnssTuneButton = nullptr;
     QPushButton *gnssPvtButton = nullptr;
@@ -1272,6 +1291,7 @@ private:
     bool presetManagerOpen = false;
     int waterfallRowsPerFrame = 1;
     int waterfallDisplayMode = static_cast<int>(MyWaterfallWidget::DisplayMode::Waterfall2D);
+    int waterfallColorPalette = static_cast<int>(MyWaterfallWidget::ColorPalette::Classic);
     int multiSdrViewMode = 0;
     bool alternativeInterfaceMode = false;
     bool useCorrectedFobosCommands = true;
@@ -1616,6 +1636,11 @@ private:
     std::unique_ptr<QFile> gnssRawSerialLogFile;
     QString gnssRawSerialLogPath;
     QMap<QString, GnssNmeaSatellite> gnssNmeaSatellites;
+    QMap<QString, GnssNmeaSatellite> uhdGnssSatellites;
+    int uhdGnssSatellitesUsed = -1;
+    int uhdGnssFixQuality = -1;
+    bool uhdGnssHasSkyReport = false;
+    QString gnssSatelliteViewSource;
     QMap<QString, bool> gnssNmeaSatelliteEnabled;
     QSet<QString> gnssDisabledSatelliteKeys;
     QElapsedTimer gnssSatelliteTableUpdateTimer;
@@ -1648,6 +1673,18 @@ private:
     QPointer<DataProcessor> uhdGnssProcessor;
     QString uhdGnssRequestId;
     QElapsedTimer uhdGnssRequestAge;
+    QString uhdGnssReferenceLocator;
+    QString lastUhdGnssRejectedSample;
+    QString combinedSerialGga;
+    QString combinedSerialRmc;
+    QElapsedTimer combinedSerialGgaAge;
+    QElapsedTimer combinedSerialRmcAge;
+    QVector<qth::RejectedFixMarker> uhdGnssRejectedMarkers;
+    double uhdGnssMaxDistanceKm = 10.0;
+    double uhdGnssMaxTimeErrorSeconds = 5.0;
+    bool uhdGnssValidationEnabled = false;
+    bool uhdGnssLogRejections = false;
+    bool uhdGnssShowRejections = false;
     std::optional<QPointF> qthPositionBeforeUhd;
     bool qthPositionVisibleBeforeUhd = false;
     double qthLatitude = 0.0;
@@ -1708,12 +1745,15 @@ private:
     bool networkClientAwaitingSettingsAck = false;
     quint64 networkClientSettingsRequestCounter = 0;
     bool audioRelayTransmitEnabled = false;
+    bool audioRelayDisableLocalVisualAudio = false;
     QString audioRelayHost = "127.0.0.1";
     quint16 audioRelayPort = 21091;
     bool audioRelayReceiveEnabled = false;
     quint16 audioRelayListenPort = 21091;
+    int audioRelayBufferMs = AUDIO_RELAY_BUFFER_DEFAULT_MS;
     uint32_t audioRelaySequence = 0;
     QUdpSocket *audioRelaySocket = nullptr;
+    RemoteAudioPlayer *audioRelayPlayer = nullptr;
     bool audioHttpStreamEnabled = false;
     quint16 audioHttpStreamPort = 21092;
     QTcpServer *audioHttpServer = nullptr;

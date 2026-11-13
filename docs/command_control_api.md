@@ -2,10 +2,9 @@
 
 `CommandControlServer` exposes the current application's `CommandDispatcher`
 through an explicitly enabled, authenticated JSON-line socket on IPv4 loopback.
-This is `obrii-jsonl-v1`, not native MCP: catalog/status report `mcp: false`.
-An MCP adapter would be a separate integration. No cloud connection, shell,
-file service, RF transmitter, receiver, or background worker is started by this
-transport.
+Catalog and status describe the socket transport as `obrii-jsonl-v1`.
+`ObriiCli mcp PORT` provides a separate read-only stdio MCP adapter. See
+[Obrii CLI](obrii_cli.md) for the session token and the local-model command.
 
 In the GUI, open **Console** in Receiver (or `>_` on the DSP board), then its
 Agent API settings tool. Start the service there; port 0 chooses a free port.

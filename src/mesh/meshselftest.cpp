@@ -13,6 +13,7 @@
 #include <QTableWidget>
 #include <QCheckBox>
 #include <QDockWidget>
+#include <QDoubleSpinBox>
 #include <QPushButton>
 #include <QLabel>
 #include <QComboBox>
@@ -22,6 +23,7 @@
 #include <QJsonDocument>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTimer>
 #include <QTcpSocket>
 #include <QHostAddress>
 #include <iostream>
@@ -134,6 +136,49 @@ int main(int argc,char **argv) {
             if(argc>2){check(lab->grab().save(QString::fromLocal8Bit(argv[2])+"-packets.png"),"packet lab screenshot");lab->resize(760,560);app.processEvents();check(lab->grab().save(QString::fromLocal8Bit(argv[2])+"-packets-compact.png"),"compact packet lab screenshot");}
             auto reset=lab->findChild<QPushButton *>("packetReset");if(reset)reset->click();
             check(reset&&lab->simulation().pending()==0&&lab->simulation().snapshot(false).value("submitted")=="0"&&table&&table->rowCount()==0,"reset clears packet state and pending work");
+            auto *nodeTable = lab->findChild<QTableWidget *>("packetNodes");
+            auto *range = lab->findChild<QDoubleSpinBox *>("packetRadioRange");
+            auto *motion = lab->findChild<QPushButton *>("packetEditMotion");
+            bool edited = false;
+            if (nodeTable && range && motion) {
+                nodeTable->selectRow(1);
+                range->setValue(100);
+                if (motion->isEnabled()) {
+                    QTimer::singleShot(0, lab, [&] {
+                        auto *dialog = lab->findChild<QDialog *>("packetMotionDialog");
+                        if (!dialog) return;
+                        auto *x = dialog->findChild<QDoubleSpinBox *>("packetMotionX");
+                        auto *vx = dialog->findChild<QDoubleSpinBox *>("packetMotionVx");
+                        if (x && vx) {
+                            x->setValue(99);
+                            vx->setValue(100);
+                            edited = true;
+                        }
+                        dialog->done(edited ? QDialog::Accepted : QDialog::Rejected);
+                    });
+                    motion->click();
+                }
+            }
+            check(edited && lab->simulation().radioRange() == 100 &&
+                  lab->simulation().route("node1", "node3").size() == 3 &&
+                  lab->simulation().nodeMotion("node2").velocity.x() == 100,
+                  "packet dialog edits a relay's position, velocity and range");
+            step->click();
+            check(lab->simulation().nodeMotion("node2").position.x() == 101 &&
+                  lab->simulation().route("node1", "node3").isEmpty(),
+                  "manual motion step updates the packet route");
+            reset->click();
+            auto *bitrate = lab->findChild<QSpinBox *>("packetAirBitrate");
+            if (bitrate) bitrate->setValue(8000);
+            if (send) send->click();
+            if (step) step->click();
+            check(bitrate && lab->simulation().airBitrate() == 8000 &&
+                  !bitrate->isEnabled() && lab->simulation().pending() == 1,
+                  "packet dialog sets airtime and locks the bitrate while packets are in flight");
+            if (step) { step->click(); step->click(); }
+            check(bitrate && bitrate->isEnabled() && lab->simulation().snapshot(false).value("delivered") == "1",
+                  "packet dialogue delivers after the simulated airtime");
+            reset->click();
             auto bearerMode=lab->findChild<QComboBox *>("packetBearer");
             if(bearerMode)bearerMode->setCurrentIndex(1);
             check(bearerMode&&waitFor([&]{return send->isEnabled();}),"production IQ modem mode becomes ready");

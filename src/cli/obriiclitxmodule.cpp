@@ -9,6 +9,7 @@
 #include "virtualtransmitterbackend.h"
 #include "clilivetransmit.h"
 #include "kissvirtualtx.h"
+#include "m17adapter.h"
 
 extern "C" {
 #include "ft8/constants.h"
@@ -28,6 +29,7 @@ extern "C" {
 #include <QImageReader>
 #include <QHostAddress>
 #include <QPainter>
+#include <QQueue>
 #include <QSysInfo>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -152,6 +154,154 @@ int runKissVirtualTx(QCoreApplication &app) {
     report({{"ok", true}, {"event", "ready"}, {"address", "127.0.0.1"}, {"port", port},
             {"virtualIqChannel", channel}, {"centerHz", center}, {"rate", 48000}});
     return app.exec();
+}
+
+int runKissUhdTx(QCoreApplication &app) {
+    QCommandLineParser parser;
+    parser.setApplicationDescription(QStringLiteral("ObriiCli module tx kiss-uhd PORT CENTER_HZ --rf-confirm"));
+    parser.addHelpOption();
+    parser.addOption({QStringLiteral("rf-confirm"), QStringLiteral("Arm burst transmission from local KISS frames")});
+    parser.addOption({QStringLiteral("tx-device"), QStringLiteral("UHD device index"), QStringLiteral("index"), QStringLiteral("0")});
+    parser.addOption({QStringLiteral("tx-channel"), QStringLiteral("UHD TX channel"), QStringLiteral("index"), QStringLiteral("0")});
+    parser.addOption({QStringLiteral("tx-gain-db"), QStringLiteral("UHD TX gain"), QStringLiteral("dB"), QStringLiteral("0")});
+    parser.addOption({QStringLiteral("tx-fpga-image"), QStringLiteral("Optional UHD FPGA image"), QStringLiteral("path")});
+    parser.addOption({QStringLiteral("seconds"), QStringLiteral("RF session length, at most 300 seconds"), QStringLiteral("N"), QStringLiteral("60")});
+    parser.addPositionalArgument(QStringLiteral("port"), QStringLiteral("Local TCP port"));
+    parser.addPositionalArgument(QStringLiteral("center"), QStringLiteral("RF frequency"));
+    parser.process(app.arguments().mid(2));
+    const auto args = parser.positionalArguments();
+    if (args.size() != 2 || !parser.isSet(QStringLiteral("rf-confirm")))
+        return fail(parser.applicationDescription());
+    bool portOk = false, frequencyOk = false, deviceOk = false, channelOk = false, gainOk = false, durationOk = false;
+    const quint16 port = args[0].toUShort(&portOk);
+    const double center = number(args[1], &frequencyOk);
+    const int device = parser.value(QStringLiteral("tx-device")).toInt(&deviceOk);
+    const int channel = parser.value(QStringLiteral("tx-channel")).toInt(&channelOk);
+    const double gain = number(parser.value(QStringLiteral("tx-gain-db")), &gainOk);
+    const int seconds = parser.value(QStringLiteral("seconds")).toInt(&durationOk);
+    if (!portOk || !port || !frequencyOk || center < 70e6 || center > 6e9 ||
+        !deviceOk || device < 0 || device > 64 || !channelOk || channel < 0 || channel > 1 ||
+        !gainOk || gain < 0 || gain > 100 || !durationOk || seconds < 1 || seconds > 300)
+        return fail(QStringLiteral("Invalid KISS UHD port, center, TX channel, gain or duration"));
+    const auto image = parser.value(QStringLiteral("tx-fpga-image"));
+    constexpr int AudioRate = 48000;
+    constexpr int DeviceRate = 480000;
+    constexpr int ChunkSamples = 4096;
+    TxConfiguration config;
+    config.frequencyHz = center;
+    config.sampleRate = DeviceRate;
+    config.modulation = TxModulation::Nfm;
+    config.deviationHz = 3000;
+
+    QTcpServer server;
+    if (!server.listen(QHostAddress::LocalHost, port)) return fail(server.errorString());
+    UhdTxSession transmitter;
+    QTcpSocket *client = nullptr;
+    QQueue<QByteArray> pending;
+    QVector<std::complex<float>> iq;
+    int offset = 0;
+    int frameBytes = 0;
+    bool opened = false;
+    bool inBurst = false;
+    QElapsedTimer elapsed;
+    elapsed.start();
+    const auto closeBurst = [&] {
+        if (!inBurst) return true;
+        inBurst = false;
+        QString error;
+        if (transmitter.finish(&error)) return true;
+        fail(error);
+        return false;
+    };
+    QObject::connect(&server, &QTcpServer::newConnection, &app, [&] {
+        while (auto *socket = server.nextPendingConnection()) {
+            if (client) {
+                socket->abort();
+                socket->deleteLater();
+                continue;
+            }
+            client = socket;
+            socket->setReadBufferSize(16 * 1024);
+            auto consume = [&, socket, decoder = KissStreamDecoder{}]() mutable {
+                for (const auto &frame : decoder.push(socket->readAll())) {
+                    if (pending.size() < 16 && validateKissTxFrame(frame, nullptr))
+                        pending.enqueue(frame.payload);
+                }
+            };
+            consume();
+            QObject::connect(socket, &QTcpSocket::readyRead, &server, std::move(consume));
+            QObject::connect(socket, &QTcpSocket::disconnected, &server, [&, socket] {
+                client = nullptr;
+                pending.clear();
+                socket->deleteLater();
+                if (!closeBurst()) app.exit(1);
+                iq.clear();
+                transmitter.close();
+                opened = false;
+            });
+        }
+    });
+    interrupted = false;
+    std::signal(SIGINT, interruptHandler);
+    std::signal(SIGTERM, interruptHandler);
+    QTimer pump;
+    pump.setTimerType(Qt::PreciseTimer);
+    QObject::connect(&pump, &QTimer::timeout, &app, [&] {
+        if (interrupted || elapsed.hasExpired(seconds * 1000)) {
+            app.quit();
+            return;
+        }
+        if (iq.isEmpty()) {
+            if (pending.isEmpty()) return;
+            const auto frame = pending.dequeue();
+            frameBytes = frame.size();
+            QString error;
+            const auto audio = Ax25Afsk1200::modulate(frame, AudioRate, 32, &error);
+            iq = TransmitWaveformGenerator::modulateAudio(config,
+                TransmitMediaGenerator::resampleAudio(audio, AudioRate, DeviceRate));
+            if (iq.isEmpty() || (!opened && !transmitter.open(device, channel, DeviceRate, center, gain,
+                    0.0, QStringLiteral("TX/RX"), image, &error))) {
+                fail(error.isEmpty() ? QStringLiteral("Could not start KISS UHD burst") : error);
+                app.exit(1);
+                return;
+            }
+            opened = true;
+            offset = 0;
+        }
+        if (interrupted || elapsed.hasExpired(seconds * 1000)) {
+            app.quit();
+            return;
+        }
+        QString error;
+        const int count = (std::min)(ChunkSamples, iq.size() - offset);
+        inBurst = true;
+        if (!transmitter.send(iq.constData() + offset, std::size_t(count), offset == 0, &error, 0.25)) {
+            fail(error);
+            app.exit(1);
+            return;
+        }
+        offset += count;
+        if (offset == iq.size()) {
+            if (!closeBurst()) {
+                app.exit(1);
+                return;
+            }
+            iq.clear();
+            report({{"ok", true}, {"event", "sent"}, {"frameBytes", frameBytes}});
+        }
+    });
+    pump.start(3);
+    report({{"ok", true}, {"event", "ready"}, {"sink", "uhd"}, {"port", port}, {"centerHz", center}, {"seconds", seconds}});
+    const int result = app.exec();
+    pump.stop();
+    if (client) {
+        QObject::disconnect(client, nullptr, &server, nullptr);
+        client->abort();
+    }
+    server.close();
+    const bool stopped = closeBurst();
+    transmitter.close();
+    return stopped ? result : 1;
 }
 
 bool loadLabPreset(const QString &path, SignalLabConfiguration *configuration,
@@ -315,6 +465,8 @@ int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     if (app.arguments().value(1) == QStringLiteral("tx") && app.arguments().value(2) == QStringLiteral("kiss"))
         return runKissVirtualTx(app);
+    if (app.arguments().value(1) == QStringLiteral("tx") && app.arguments().value(2) == QStringLiteral("kiss-uhd"))
+        return runKissUhdTx(app);
     if (app.arguments().size() >= 3 && app.arguments()[1] == QStringLiteral("tx") &&
         QStringList{QStringLiteral("microphone"), QStringLiteral("manual-cw"), QStringLiteral("microphones"), QStringLiteral("control")}.contains(app.arguments()[2]))
         return runCliLiveTransmit(app);
@@ -366,7 +518,7 @@ int main(int argc, char **argv) {
                       QStringLiteral("Hz"), QStringLiteral("48000")});
     parser.addOption({QStringLiteral("lab-preset"), QStringLiteral("Signal-lab JSON preset for lab TX"),
                       QStringLiteral("path")});
-    parser.addOption({QStringLiteral("wav-file"), QStringLiteral("Audio TX input: RIFF/WAVE file"),
+    parser.addOption({QStringLiteral("wav-file"), QStringLiteral("Audio or M17 voice input: RIFF/WAVE file"),
                       QStringLiteral("path")});
     parser.addOption({QStringLiteral("image-file"), QStringLiteral("SSTV TX input image"),
                       QStringLiteral("path")});
@@ -395,6 +547,11 @@ int main(int argc, char **argv) {
                       QStringLiteral("call"), QStringLiteral("APRS")});
     parser.addOption({QStringLiteral("ax25-path"), QStringLiteral("Comma-separated digipeater path"),
                       QStringLiteral("calls")});
+    parser.addOption({QStringLiteral("m17-source"), QStringLiteral("M17 source callsign"), QStringLiteral("call")});
+    parser.addOption({QStringLiteral("m17-destination"), QStringLiteral("M17 destination callsign"),
+                      QStringLiteral("call"), QStringLiteral("@ALL")});
+    parser.addOption({QStringLiteral("m17-can"), QStringLiteral("M17 channel access number 0..15"),
+                      QStringLiteral("number"), QStringLiteral("0")});
     if (!parser.parse(app.arguments())) return fail(parser.errorText());
     if (parser.isSet(QStringLiteral("help"))) {
         std::fputs(parser.helpText().toUtf8().constData(), stdout);
@@ -402,9 +559,11 @@ int main(int argc, char **argv) {
     }
     const QStringList args = parser.positionalArguments();
     if ((args.size() != 3 && args.size() != 2) || args[0] != QStringLiteral("tx"))
-        return fail(QStringLiteral("Usage: module tx ft8|ft4|cw|rtty MESSAGE, tx ax25 APRS_INFO --ax25-source CALL, tx dmr --pcm-file PATH, tx lab --lab-preset JSON, tx audio --wav-file WAV, or tx sstv --image-file IMAGE"));
+        return fail(QStringLiteral("Usage: module tx ft8|ft4|cw|rtty MESSAGE, tx ax25 APRS_INFO --ax25-source CALL, tx m17 MESSAGE --m17-source CALL, tx m17-voice --wav-file WAV --m17-source CALL, tx dmr --pcm-file PATH, tx lab --lab-preset JSON, tx audio --wav-file WAV, or tx sstv --image-file IMAGE"));
     TxConfiguration configuration;
     const QString mode = args[1].toLower();
+    const bool m17Voice = mode == QStringLiteral("m17-voice");
+    const bool m17Mode = m17Voice || mode == QStringLiteral("m17");
     if (mode == QStringLiteral("ft8")) configuration.modulation = TxModulation::Ft8;
     else if (mode == QStringLiteral("ft4")) configuration.modulation = TxModulation::Ft8;
     else if (mode == QStringLiteral("cw")) configuration.modulation = TxModulation::Cw;
@@ -414,7 +573,8 @@ int main(int argc, char **argv) {
         configuration.deviationHz = 85.0;
     }
     else if (mode == QStringLiteral("dmr")) configuration.modulation = TxModulation::Dmr;
-    else if (mode == QStringLiteral("ax25")) configuration.modulation = TxModulation::Nfm;
+    else if (m17Voice) configuration.modulation = TxModulation::M17Voice;
+    else if (mode == QStringLiteral("ax25") || m17Mode) configuration.modulation = TxModulation::Nfm;
     else if (mode == QStringLiteral("audio") || mode == QStringLiteral("sstv")) {
         const QString voice = parser.value(QStringLiteral("voice-mode")).toLower();
         const QMap<QString, TxModulation> voices{
@@ -423,16 +583,16 @@ int main(int argc, char **argv) {
             {QStringLiteral("usb"), TxModulation::Usb}, {QStringLiteral("lsb"), TxModulation::Lsb}};
         if (!voices.contains(voice)) return fail(QStringLiteral("--voice-mode must be am, nfm, wfm, dsb, usb or lsb"));
         configuration.modulation = voices.value(voice);
-    } else if (mode != QStringLiteral("lab")) return fail(QStringLiteral("TX module supports ft8, ft4, cw, rtty, ax25, dmr, lab, audio and sstv"));
+    } else if (mode != QStringLiteral("lab")) return fail(QStringLiteral("TX module supports ft8, ft4, cw, rtty, ax25, m17, m17-voice, dmr, lab, audio and sstv"));
     const bool mediaMode = mode == QStringLiteral("audio") || mode == QStringLiteral("sstv");
-    if ((mode == QStringLiteral("dmr") || mode == QStringLiteral("lab") || mediaMode) != (args.size() == 2))
-        return fail(QStringLiteral("DMR, lab, audio and SSTV use file options without MESSAGE; text modes require MESSAGE"));
+    if ((mode == QStringLiteral("dmr") || mode == QStringLiteral("lab") || mediaMode || m17Voice) != (args.size() == 2))
+        return fail(QStringLiteral("DMR, M17 voice, lab, audio and SSTV use file options without MESSAGE; text modes require MESSAGE"));
     if (mode != QStringLiteral("dmr") && parser.isSet(QStringLiteral("pcm-file")))
         return fail(QStringLiteral("--pcm-file applies to DMR only"));
     if (mode != QStringLiteral("lab") && parser.isSet(QStringLiteral("lab-preset")))
         return fail(QStringLiteral("--lab-preset applies to lab only"));
-    if (mode != QStringLiteral("audio") && parser.isSet(QStringLiteral("wav-file")))
-        return fail(QStringLiteral("--wav-file applies to audio TX only"));
+    if (mode != QStringLiteral("audio") && !m17Voice && parser.isSet(QStringLiteral("wav-file")))
+        return fail(QStringLiteral("--wav-file applies to audio and M17 voice TX"));
     if (mode != QStringLiteral("sstv") && (parser.isSet(QStringLiteral("image-file")) ||
                                              parser.isSet(QStringLiteral("sstv-mode"))))
         return fail(QStringLiteral("--image-file and --sstv-mode apply to SSTV only"));
@@ -445,6 +605,10 @@ int main(int argc, char **argv) {
          parser.isSet(QStringLiteral("ax25-destination")) ||
          parser.isSet(QStringLiteral("ax25-path"))))
         return fail(QStringLiteral("--ax25-* options apply to AX.25 only"));
+    if (!m17Mode &&
+        (parser.isSet(QStringLiteral("m17-source")) || parser.isSet(QStringLiteral("m17-destination")) ||
+         parser.isSet(QStringLiteral("m17-can"))))
+        return fail(QStringLiteral("--m17-* options apply to M17 only"));
     const QString sink = parser.value(QStringLiteral("tx-sink")).toLower();
     const bool rfSink = sink == QStringLiteral("hackrf") || sink == QStringLiteral("uhd");
     if (sink != QStringLiteral("file") && sink != QStringLiteral("virtual") && !rfSink)
@@ -465,8 +629,13 @@ int main(int argc, char **argv) {
     configuration.frequencyHz = number(parser.value(QStringLiteral("freq")), &okay);
     if (!okay || configuration.frequencyHz <= 0.0)
         return fail(QStringLiteral("--freq must be a positive RF center frequency"));
-    const double rate = number(mode == QStringLiteral("dmr") && !parser.isSet(QStringLiteral("rate"))
-        ? QStringLiteral("192000") : parser.value(QStringLiteral("rate")), &okay);
+    QString rateText = parser.value(QStringLiteral("rate"));
+    if (!parser.isSet(QStringLiteral("rate"))) {
+        if (mode == QStringLiteral("dmr")) rateText = QStringLiteral("192000");
+        if (m17Mode && sink == QStringLiteral("uhd"))
+            rateText = parser.value(QStringLiteral("device-rate"));
+    }
+    const double rate = number(rateText, &okay);
     const double maxRate = mode == QStringLiteral("lab") ? 1e9 :
         mediaMode ? 200000.0 : sink == QStringLiteral("uhd") ? 61440000.0 : 192000.0;
     if (!okay || rate < 8000.0 || rate > maxRate ||
@@ -478,6 +647,8 @@ int main(int argc, char **argv) {
     if (mode == QStringLiteral("ax25") &&
         (configuration.sampleRate < 12000 || configuration.sampleRate % 1200))
         return fail(QStringLiteral("AX.25 AFSK rate must be 12..192 ksps and divisible by 1200"));
+    if (m17Mode && (configuration.sampleRate < 48000 || configuration.sampleRate > 2000000))
+        return fail(QStringLiteral("M17 waveform rate must be 48 kS/s..2 MS/s, subject to the selected sink"));
     configuration.toneHz = number(parser.isSet(QStringLiteral("tx-tone"))
         ? parser.value(QStringLiteral("tx-tone"))
         : mode == QStringLiteral("rtty") ? QStringLiteral("2210") : QStringLiteral("1000"),
@@ -645,6 +816,34 @@ int main(int argc, char **argv) {
         generated.durationSeconds = static_cast<double>(generated.iq.size()) /
                                     configuration.sampleRate;
         generated.summary = QStringLiteral("AX.25 AFSK1200 UI frame");
+    } else if (m17Mode) {
+        const int can = parser.value(QStringLiteral("m17-can")).toInt(&okay);
+        if (!okay || can < 0 || can > 15) return fail(QStringLiteral("M17 CAN must be 0..15"));
+        if (!parser.isSet(QStringLiteral("m17-source"))) return fail(QStringLiteral("M17 requires --m17-source CALLSIGN"));
+        const QString source = parser.value(QStringLiteral("m17-source"));
+        const QString destination = parser.value(QStringLiteral("m17-destination"));
+        if (m17Voice) {
+            const QFileInfo input(parser.value(QStringLiteral("wav-file")));
+            if (!input.isFile() || input.size() > 32 * 1024 * 1024)
+                return fail(QStringLiteral("--wav-file must name a readable WAVE file of at most 32 MiB"));
+            const auto media = TransmitMediaGenerator::loadWav(input.absoluteFilePath(),
+                M17Adapter::VoiceSampleRate, M17Adapter::MaximumVoiceSamples);
+            if (!media.ok()) return fail(media.error);
+            generated.iq = M17Adapter::modulateVoice(source, destination, can, media.samples,
+                configuration.level, configuration.sampleRate, &generated.error);
+            generated.summary = QStringLiteral("M17 voice (Codec2 3200, 4FSK)");
+        } else {
+            QByteArray payload = args[2].toUtf8();
+            if (payload.isEmpty() || payload.contains('\0')) return fail(QStringLiteral("Enter a nonempty M17 SMS"));
+            payload.prepend(char(0x05));
+            payload.append('\0');
+            const auto packet = M17Adapter::buildPacket(source, destination, payload, can, &generated.error);
+            if (packet.symbols.isEmpty()) return fail(generated.error);
+            generated.iq = M17Adapter::modulatePacket(packet, configuration.level, configuration.sampleRate);
+            if (generated.iq.isEmpty()) return fail(QStringLiteral("Cannot modulate the M17 packet"));
+            generated.summary = QStringLiteral("M17 SMS packet (4FSK)");
+        }
+        generated.durationSeconds = double(generated.iq.size()) / configuration.sampleRate;
     } else if (mode == QStringLiteral("lab")) {
         SignalLabConfiguration lab;
         if (!loadLabPreset(parser.value(QStringLiteral("lab-preset")), &lab,

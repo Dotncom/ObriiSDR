@@ -653,11 +653,7 @@ void YourClassName::openSpectrumFrameReplay() {
                 sendAudioRelayFrame(pcmData);
                 sendAudioHttpFrame(pcmData);
 #if !defined(_WIN32) && defined(FOBOSAPP_HAS_QT_AUDIO)
-                const bool suppressServerLocalOutput =
-                    networkMode == NetworkMode::Server &&
-                    serverDisableLocalVisualAudio &&
-                    networkController &&
-                    networkController->isControlReady();
+                const bool suppressServerLocalOutput = serverLocalOutputSuppressed();
                 if (remoteAudioPlayer && !suppressServerLocalOutput) {
                     remoteAudioPlayer->playPcmFrame(pcmData);
                 }

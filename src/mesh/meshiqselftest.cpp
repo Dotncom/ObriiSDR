@@ -55,5 +55,29 @@ int main(int argc,char **argv) {
     check(!engine.send("A","C","lost",2,&error).isEmpty()&&engine.advanceTo(15000)&&engine.snapshot(false).value("delivered")=="0"&&engine.results().last().toObject().value("status")=="modem_timeout","missing decode produces timeout, never simulated delivery");
     engine.send("A","C","cancel",2,&error);engine.advanceTo(engine.now());engine.abortIq();
     check(engine.pending()==0&&engine.results().last().toObject().value("status")=="modem_stopped","cancellation releases pending IQ queues with an explicit outcome");
+    quint64 first=0,retry=0;
+    Mesh::PacketEngine::Datagram retriedPacket;
+    check(engine.configure(topology(),&error)&&engine.attachIqBearer(
+        [&](quint64 id,const QString &,const QString &,const Mesh::PacketEngine::Datagram &packet,QString *){
+            if(!first)first=id;else retry=id;
+            retriedPacket=packet;
+            return true;
+        },&error)&&engine.setIqRecovery(1,true),"enable one IQ retry and temporary route recovery");
+    engine.send("A","B","recover",2,&error);
+    check(engine.advanceTo(15000)&&first&&retry>first&&retriedPacket.ttl==1&&engine.pending()==1,
+          "missing decode retries with a fresh ID and the same TTL");
+    check(!engine.receiveIq(first,"A","B",retriedPacket,&error)&&
+          engine.receiveIq(retry,"A","B",retriedPacket,&error)&&engine.advanceTo(15000)&&
+          engine.results().last().toObject().value("status")=="delivered","only the current retry can deliver");
+    auto alternate=topology();
+    auto links=alternate.value("links").toArray();
+    links.append(QJsonObject{{"tx","A"},{"rx","C"},{"enabled",true},{"delayMs",0}});
+    alternate.insert("links",links);
+    check(engine.configure(alternate,&error)&&engine.attachIqBearer(
+        [](quint64,const QString &,const QString &,const Mesh::PacketEngine::Datagram &,QString *){return true;},&error)&&
+        engine.setIqRecovery(0,true)&&engine.route("A","C")==QStringList{"A","C"},"route initially uses the direct link");
+    engine.send("A","C","learn",2,&error);
+    check(engine.advanceTo(15000)&&engine.route("A","C")==QStringList{"A","B","C"}&&
+          engine.advanceTo(45000)&&engine.route("A","C")==QStringList{"A","C"},"decoded-hop timeout bypasses link for 30 seconds");
     std::printf("IQ packet bridge self-test passed\n");return 0;
 }

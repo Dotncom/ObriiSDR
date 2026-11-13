@@ -574,6 +574,9 @@ void YourClassName::updateUiFromPendingSettings() {
     if (remoteAudioPlayer) {
         remoteAudioPlayer->setVolume(volume);
     }
+    if (audioRelayPlayer) {
+        audioRelayPlayer->setVolume(volume);
+    }
     if (graphWidget) {
         graphWidget->setLevelRange(displayLevelMin, displayLevelMax);
     }
@@ -585,6 +588,18 @@ void YourClassName::updateUiFromPendingSettings() {
     settingRange();
     updateDigitalDecoderMode();
     updateVideoProcessorMode();
+}
+
+void YourClassName::applyWaterfallColorPalette(int palette) {
+    if (!waterfallColorPaletteCombo) return;
+    int index = waterfallColorPaletteCombo->findData(palette);
+    if (index < 0) index = 0;
+    const QSignalBlocker blocker(waterfallColorPaletteCombo);
+    waterfallColorPaletteCombo->setCurrentIndex(index);
+    waterfallColorPalette = waterfallColorPaletteCombo->itemData(index).toInt();
+    if (waterfallWidget) {
+        waterfallWidget->setColorPalette(static_cast<MyWaterfallWidget::ColorPalette>(waterfallColorPalette));
+    }
 }
 
 void YourClassName::syncSpectrumProcessingControls() {

@@ -152,17 +152,20 @@ void YourClassName::updateAudioRelaySocket() {
     }
 
     if (!audioRelayReceiveEnabled) {
+        audioRelayPlayer->stop();
         if (audioRelaySocket->state() != QAbstractSocket::UnconnectedState) {
             audioRelaySocket->close();
         }
         return;
     }
 
+    audioRelayPlayer->setRelayBufferMs(audioRelayBufferMs);
     if (audioRelaySocket->state() != QAbstractSocket::UnconnectedState &&
         audioRelaySocket->localPort() == audioRelayListenPort) {
         return;
     }
 
+    audioRelayPlayer->stop();
     audioRelaySocket->close();
     const bool bound = audioRelaySocket->bind(QHostAddress::AnyIPv4,
                                               audioRelayListenPort,
@@ -238,7 +241,7 @@ void YourClassName::receiveAudioRelayDatagrams() {
         }
 
         const quint32 payloadBytes = readLe32(datagram.constData() + 8);
-        if (payloadBytes == 0 ||
+        if (payloadBytes == 0 || payloadBytes % sizeof(qint16) != 0 ||
             payloadBytes > static_cast<quint32>(datagram.size() - AUDIO_RELAY_HEADER_BYTES)) {
             continue;
         }
@@ -253,15 +256,7 @@ void YourClassName::receiveAudioRelayDatagrams() {
                      << "bytes" << pcmData.size()
                      << "port" << audioRelayListenPort;
         }
-        if (remoteAudioPlayer) {
-            remoteAudioPlayer->playPcmFrame(pcmData);
-        } else if (fobosVerboseLoggingEnabled()) {
-            static bool loggedMissingPlayer = false;
-            if (!loggedMissingPlayer) {
-                loggedMissingPlayer = true;
-                qDebug() << "[AudioRelay] received PCM but no remote audio player is available";
-            }
-        }
+        audioRelayPlayer->playRelayPcmFrame(pcmData);
     }
 }
 

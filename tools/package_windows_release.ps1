@@ -90,7 +90,7 @@ $PublicDocs = @(
     'lite_windows_package.md', 'lite_raspberry_package.md'
     'dsp_stream_protocol.md', 'dsp_stream_manager.md', 'network_multi_user.md', 'open_amateur_radio.md', 'gnu_radio_bridge_usage.md'
     'pfb_channelizer.md', 'dsp_board_coverage.md', 'experiment_bundle.md', 'obrii_analyzer.md',
-    'multi_sdr_architecture.md', 'usrp_b210_plan.md', 'obrii_cli.md',
+    'multi_sdr_architecture.md', 'usrp_b210_setup.md', 'obrii_cli.md',
     'cli_signal_lab_ofdm.json', 'cli_spectrum_monitor.json', 'cli_scan_example.json',
     'cli_dsp_graph_example.json', 'cli_multisdr_graph_example.json',
     'cli_iq_trigger_example.json', 'virtual_iq_link_scenario.json'

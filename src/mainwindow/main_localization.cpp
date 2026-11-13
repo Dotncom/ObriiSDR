@@ -240,6 +240,23 @@ void YourClassName::applyUiLanguage() {
                      static_cast<int>(MyWaterfallWidget::DisplayMode::Waterfall3DWithMini),
                      QStringLiteral("waterfall_display_3d_mini"),
                      QStringLiteral("3D + mini waterfall"));
+    using ColorPalette = MyWaterfallWidget::ColorPalette;
+    setComboItemText(waterfallColorPaletteCombo, static_cast<int>(ColorPalette::Classic),
+                     QStringLiteral("waterfall_palette_classic"), QStringLiteral("Classic"));
+    setComboItemText(waterfallColorPaletteCombo, static_cast<int>(ColorPalette::Thermal),
+                     QStringLiteral("waterfall_palette_thermal"), QStringLiteral("Thermal"));
+    setComboItemText(waterfallColorPaletteCombo, static_cast<int>(ColorPalette::Ice),
+                     QStringLiteral("waterfall_palette_ice"), QStringLiteral("Ice"));
+    setComboItemText(waterfallColorPaletteCombo, static_cast<int>(ColorPalette::VioletYellow),
+                     QStringLiteral("waterfall_palette_violet"), QStringLiteral("Violet"));
+    setComboItemText(waterfallColorPaletteCombo, static_cast<int>(ColorPalette::Amber),
+                     QStringLiteral("waterfall_palette_amber"), QStringLiteral("Amber"));
+    setComboItemText(waterfallColorPaletteCombo, static_cast<int>(ColorPalette::Grayscale),
+                     QStringLiteral("waterfall_palette_grayscale"), QStringLiteral("Grayscale"));
+    if (waterfallColorPaletteCombo) {
+        waterfallColorPaletteCombo->setToolTip(uiText(QStringLiteral("waterfall_palette_tooltip"),
+            QStringLiteral("Color palette for new rows of the main waterfall.")));
+    }
     if (waterfallDisplayModeCombo) {
         waterfallDisplayModeCombo->setToolTip(waterfall3DAlternativeView
             ? uiText(QStringLiteral("alternative_interface_mode_locked"),

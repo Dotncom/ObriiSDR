@@ -6,6 +6,7 @@
 #include <QStringList>
 
 #include <limits>
+#include <optional>
 
 struct NmeaSerialStatus {
     bool recognized = false;
@@ -40,6 +41,19 @@ qint16 ubxI2(const QByteArray &bytes, int offset);
 qint32 ubxI4(const QByteArray &bytes, int offset);
 QByteArray makeUbxFrame(quint8 messageClass, quint8 messageId, const QByteArray &payload);
 bool hasValidUbxChecksum(const QByteArray &frame);
+
+struct UbxInterferenceStatus {
+    int jammingState = 0;
+    int cwIndicator = 0;
+    int noisePerMs = 0;
+    int agc = 0;
+    int antennaStatus = 0;
+    int antennaPower = 0;
+};
+
+std::optional<bool> ubxItfmEnabled(const QByteArray &config);
+QByteArray ubxItfmWithEnabled(const QByteArray &config, bool enabled);
+std::optional<UbxInterferenceStatus> parseUbxMonHw(const QByteArray &payload);
 QString ubxGnssSystemName(quint8 gnssId);
 QString ubxGnssTalker(quint8 gnssId);
 QString ubxSatelliteKey(quint8 gnssId, int svId);

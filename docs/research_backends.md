@@ -22,6 +22,10 @@ See THIRD_PARTY_LICENSES.txt for licenses and corresponding-source obligations.
 
 ## GNSS from SDR
 
+PVT means position, velocity and time. A serial or UHD GPS module supplies
+an already computed fix over NMEA or UBX. The PocketSDR engine computes a
+separate solution directly from the chosen IQ source.
+
 GNSS / QTH -> SDR PVT (also in the DSP GNSS block) opens the PocketSDR tool.
 Choose stationary live IQ or a recording and explicitly press Start. For raw
 files specify CF32/CS16/CS8, little-endian I+jQ. Stereo PCM16 IQ WAV is supported;

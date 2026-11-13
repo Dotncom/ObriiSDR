@@ -4,6 +4,8 @@
 #include "dmrprivacyutils.h"
 #include "dmrtransmitencoder.h"
 #include "hackrfbackend.h"
+#include "../openradio/m17adapter.h"
+#include "../core/iqchannelizer.h"
 #include "sstvimageeditordialog.h"
 #include "signallabdialog.h"
 #include "signalunits.h"
@@ -240,11 +242,11 @@ bool TransmitDialog::eventFilter(QObject *watched, QEvent *event) {
     const QString source = sourceCombo->currentData().toString();
     const bool liveSource = source == QStringLiteral("manual-cw") ||
                             source == QStringLiteral("microphone-ptt");
-    if (!insideDialog || !isVisible() || !liveSource) {
-        return QDialog::eventFilter(watched, event);
+    if (watched == this && event->type() == QEvent::WindowDeactivate) {
+        liveKeyArmingClick = false;
+        if (liveKeyPressed) setLiveKey(false);
     }
-    if (event->type() == QEvent::WindowDeactivate && liveKeyPressed) {
-        setLiveKey(false);
+    if (!insideDialog || !isVisible() || !liveSource) {
         return QDialog::eventFilter(watched, event);
     }
     auto isLiveHotkey = [](const QKeyEvent *key) {
@@ -392,7 +394,7 @@ void TransmitDialog::buildUi() {
         TxModulation::Usb, TxModulation::Lsb, TxModulation::Cw, TxModulation::Ft8,
         TxModulation::Ook, TxModulation::Ask, TxModulation::Fsk, TxModulation::Gfsk,
         TxModulation::Gmsk, TxModulation::Bpsk, TxModulation::Qpsk, TxModulation::Rtty,
-        TxModulation::Dmr
+        TxModulation::Dmr, TxModulation::M17Voice
     };
     for (TxModulation mode : modes) {
         modulationCombo->addItem(TransmitWaveformGenerator::modulationName(mode), static_cast<int>(mode));
@@ -580,6 +582,24 @@ void TransmitDialog::buildUi() {
     dmr->setColumnStretch(4, 1);
     dmrBox->setVisible(false);
 
+    m17Box = new QGroupBox(QStringLiteral("M17 · Codec2 3200"), this);
+    auto *m17 = new QGridLayout(m17Box);
+    m17SourceLabel = new QLabel(m17Box);
+    m17DestinationLabel = new QLabel(m17Box);
+    m17SourceEdit = new QLineEdit(m17Box);
+    m17SourceEdit->setMaxLength(9);
+    m17DestinationEdit = new QLineEdit(QStringLiteral("@ALL"), m17Box);
+    m17DestinationEdit->setMaxLength(9);
+    m17CanSpin = new QSpinBox(m17Box);
+    m17CanSpin->setRange(0, 15);
+    m17->addWidget(m17SourceLabel, 0, 0);
+    m17->addWidget(m17SourceEdit, 0, 1);
+    m17->addWidget(m17DestinationLabel, 0, 2);
+    m17->addWidget(m17DestinationEdit, 0, 3);
+    m17->addWidget(new QLabel(QStringLiteral("CAN"), m17Box), 0, 4);
+    m17->addWidget(m17CanSpin, 0, 5);
+    m17Box->hide();
+
     QGroupBox *messageBox = new QGroupBox(this);
     messageBox->setObjectName(QStringLiteral("txMessageBox"));
     QVBoxLayout *messageLayout = new QVBoxLayout(messageBox);
@@ -641,6 +661,7 @@ void TransmitDialog::buildUi() {
     root->addWidget(hardwareBox);
     root->addWidget(signalBox);
     root->addWidget(dmrBox);
+    root->addWidget(m17Box);
     root->addWidget(messageBox);
     root->addWidget(mediaBox);
     root->addWidget(preview, 1);
@@ -736,13 +757,15 @@ void TransmitDialog::buildUi() {
     connect(invertDataCheck, &QCheckBox::toggled,
             this, [this]() { applyLiveSignalShape(); });
     connect(liveKeyButton, &QPushButton::pressed, this, [this]() {
-        if (activeBackend && activeBackend->isRunning()) setLiveKey(true);
+        liveKeyArmingClick = !activeBackend || !activeBackend->isRunning();
+        if (!liveKeyArmingClick) setLiveKey(true);
     });
     connect(liveKeyButton, &QPushButton::released, this, [this]() {
-        if (activeBackend && activeBackend->isRunning()) {
-            setLiveKey(false);
-        } else {
+        if (liveKeyArmingClick) {
+            liveKeyArmingClick = false;
             startTransmission();
+        } else {
+            setLiveKey(false);
         }
         if (activeBackend && activeBackend->isRunning()) {
             liveKeyButton->setFocus(Qt::MouseFocusReason);
@@ -780,6 +803,7 @@ void TransmitDialog::buildUi() {
     });
     connect(mediaPlayButton, &QPushButton::clicked, this, [this]() {
         if (activeBackend && activeBackend->isRunning()) {
+            if (activeConfiguration.modulation == TxModulation::M17Voice) return;
             mediaPaused = false;
             sourceTimer->start();
         } else {
@@ -1107,6 +1131,8 @@ void TransmitDialog::updateTexts() {
     dmrPrivacyCombo->setItemText(0, text(QStringLiteral("None"), QString::fromUtf8(u8"Вимкнено")));
     dmrPrivacyKeyIdLabel->setText(QStringLiteral("KID:"));
     dmrPrivacyKeyLabel->setText(text(QStringLiteral("Key (hex):"), QString::fromUtf8(u8"Ключ (hex):")));
+    modulationCombo->setItemText(modulationCombo->findData(static_cast<int>(TxModulation::M17Voice)),
+        text(QStringLiteral("M17 voice (Codec2 3200)"), QString::fromUtf8(u8"Голос M17 (Codec2 3200)")));
     invertDataCheck->setText(text(QStringLiteral("Invert data polarity"),
                                   QString::fromUtf8(u8"Інвертувати полярність даних")));
     symbolRateSpin->setToolTip(text(
@@ -1141,6 +1167,8 @@ void TransmitDialog::updateTexts() {
     setSourceText(QStringLiteral("manual-cw"), QStringLiteral("Manual CW key"),
                   QString::fromUtf8(u8"Ручний ключ CW"));
     setSourceText(QStringLiteral("audio-file"), QStringLiteral("Audio file"), QString::fromUtf8(u8"Аудіофайл"));
+    m17SourceLabel->setText(text(QStringLiteral("Source callsign"), QString::fromUtf8(u8"Позивний джерела")));
+    m17DestinationLabel->setText(text(QStringLiteral("Destination"), QString::fromUtf8(u8"Адресат")));
     setSourceText(QStringLiteral("image-sstv"), QStringLiteral("SSTV image"), QString::fromUtf8(u8"Зображення SSTV"));
     setSourceText(QStringLiteral("image-atv"), QStringLiteral("Analog video test frame"),
                   QString::fromUtf8(u8"Тестовий кадр аналогового відео"));
@@ -1420,6 +1448,7 @@ QString TransmitDialog::signalShapeSummary(const TxConfiguration &configuration)
 }
 void TransmitDialog::applyLiveSignalShape() {
     if (!activeBackend || !activeBackend->isRunning()) return;
+    if (activeConfiguration.modulation == TxModulation::M17Voice) return;
     TxConfiguration next = activeConfiguration;
     next.signalBandwidthHz = signalBandwidthFromUi();
     next.deviationHz = deviationSpin->value();
@@ -1459,6 +1488,7 @@ bool TransmitDialog::writeActiveIq(const std::complex<float> *samples, int count
     // DmrTransmitEncoder. Re-filtering the complex IQ here changes its phase
     // trajectory and destroys the intended constant-envelope waveform.
     if (activeConfiguration.modulation != TxModulation::Dmr &&
+        activeConfiguration.modulation != TxModulation::M17Voice &&
         TransmitWaveformGenerator::limitSignalBandwidth(activeConfiguration, samples, count,
                                                          &bandwidthLimitedIq,
                                                          &bandwidthLimiterState)) {
@@ -1473,7 +1503,8 @@ TxConfiguration TransmitDialog::configurationFromUi() const {
     configuration.sampleRate = signalunits::sampleRateValue(sampleRateCombo);
     configuration.level = static_cast<float>(levelSpin->value()) / 100.0f;
     configuration.deviationHz = deviationSpin->value();
-    configuration.signalBandwidthHz = signalBandwidthFromUi();
+    configuration.signalBandwidthHz = configuration.modulation == TxModulation::M17Voice
+        ? 12500.0 : signalBandwidthFromUi();
     configuration.toneHz = toneSpin->value();
     configuration.cwWpm = cwWpmSpin->value();
     configuration.symbolRate = symbolRateSpin->value();
@@ -1564,7 +1595,8 @@ void TransmitDialog::applyModulationPreset(TxModulation modulation) {
         toneSpin->setValue(2210.0);
         setBandwidth(500.0);
         break;
-    case TxModulation::Dmr: {
+    case TxModulation::Dmr:
+    case TxModulation::M17Voice: {
         const int rateIndex = sampleRateCombo->findData(48000);
         if (rateIndex >= 0) sampleRateCombo->setCurrentIndex(rateIndex);
         symbolRateSpin->setValue(4800.0);
@@ -1578,7 +1610,12 @@ void TransmitDialog::updateModeUi() {
     const TxModulation modulation = selectedModulation();
     QString source = sourceCombo->currentData().toString();
     const bool dmrMode = modulation == TxModulation::Dmr;
-    if (dmrMode && source != QStringLiteral("microphone") &&
+    const bool m17Mode = modulation == TxModulation::M17Voice;
+    if (m17Mode && source != QStringLiteral("audio-file") &&
+        source != QStringLiteral("microphone") && source != QStringLiteral("microphone-ptt")) {
+        source = QStringLiteral("microphone-ptt");
+        sourceCombo->setCurrentIndex(sourceCombo->findData(source));
+    } else if (dmrMode && source != QStringLiteral("microphone") &&
         source != QStringLiteral("microphone-ptt") &&
         source != QStringLiteral("audio-file")) {
         sourceCombo->setCurrentIndex(sourceCombo->findData(QStringLiteral("microphone")));
@@ -1593,10 +1630,13 @@ void TransmitDialog::updateModeUi() {
         sourceCombo->setCurrentIndex(sourceCombo->findData(QStringLiteral("text")));
         source = QStringLiteral("text");
     }
-    sourceCombo->setEnabled(true);
+    sourceCombo->setEnabled(!(activeBackend && activeBackend->isRunning()));
     const bool textSource = source == QStringLiteral("text");
     const bool microphoneSource = source == QStringLiteral("microphone") ||
                                   source == QStringLiteral("microphone-ptt");
+    sampleRateCombo->setEnabled(!(m17Mode && microphoneSource));
+    if (m17Mode && microphoneSource)
+        sampleRateCombo->setCurrentIndex(sampleRateCombo->findData(M17VoiceStream::IqRate));
     const bool mediaSource = source == QStringLiteral("audio-file") ||
                              source == QStringLiteral("image-sstv") ||
                              source == QStringLiteral("image-atv");
@@ -1614,6 +1654,9 @@ void TransmitDialog::updateModeUi() {
     if (auto *box = findChild<QGroupBox *>(QStringLiteral("txMessageBox"))) box->setVisible(textSource);
     if (auto *box = findChild<QGroupBox *>(QStringLiteral("txMediaBox"))) box->setVisible(mediaSource);
     if (dmrBox) dmrBox->setVisible(dmrMode);
+    m17Box->setVisible(m17Mode);
+    m17Box->setEnabled(!(activeBackend && activeBackend->isRunning()) ||
+                       (pttMode && !liveKeyPressed));
     const bool privacyEnabled = dmrMode &&
                                 dmrPrivacyCombo->currentData().toInt() != DMR_PRIVACY_NONE;
     dmrPrivacyKeyIdSpin->setEnabled(privacyEnabled);
@@ -1624,7 +1667,7 @@ void TransmitDialog::updateModeUi() {
             : QStringLiteral("10 hex digits"));
     mediaModeCombo->setEnabled(imageSource);
     mediaEditButton->setEnabled(imageSource && !mediaPath.isEmpty());
-    mediaPauseButton->setEnabled(source == QStringLiteral("audio-file") ||
+    mediaPauseButton->setEnabled((source == QStringLiteral("audio-file") && !m17Mode) ||
                                  source == QStringLiteral("image-atv"));
     const bool microphoneAvailable = audioInputCombo->count() > 0 &&
                                      !audioInputCombo->currentData().toString().isEmpty();
@@ -1639,7 +1682,7 @@ void TransmitDialog::updateModeUi() {
     deviationSpin->setEnabled(modulation == TxModulation::Nfm ||
                               modulation == TxModulation::Wfm ||
                               (fskMode && modulation != TxModulation::Gmsk));
-    signalBandwidthCombo->setEnabled(!dmrMode);
+    signalBandwidthCombo->setEnabled(!dmrMode && !m17Mode);
     toneSpin->setEnabled(TransmitWaveformGenerator::isTextMode(modulation) ||
                          source == QStringLiteral("manual-cw"));
     cwWpmSpin->setEnabled(modulation == TxModulation::Cw);
@@ -1724,7 +1767,9 @@ void TransmitDialog::startTransmission() {
     if (!validateSignalBandwidth(configuration)) return;
     const QString source = sourceCombo->currentData().toString();
     pttMode = source == QStringLiteral("microphone-ptt");
-    if (source == QStringLiteral("text")) {
+    if (configuration.modulation == TxModulation::M17Voice && source == QStringLiteral("audio-file")) {
+        startM17VoiceFile(configuration);
+    } else if (source == QStringLiteral("text")) {
         startTextSimulation(configuration);
     } else if (source == QStringLiteral("microphone") || pttMode) {
         startMicrophoneSimulation(configuration);
@@ -1843,6 +1888,11 @@ void TransmitDialog::startLaboratoryTransmission(
 void TransmitDialog::startTextSimulation(const TxConfiguration &configuration) {
     const TxGenerationResult generated =
         TransmitWaveformGenerator::generateText(configuration, messageEdit->toPlainText());
+    startGeneratedWaveform(configuration, generated);
+}
+
+void TransmitDialog::startGeneratedWaveform(const TxConfiguration &configuration,
+                                            const TxGenerationResult &generated) {
     if (!generated.ok()) {
         armCheck->setChecked(false);
         setStatus(generated.error, true);
@@ -1864,6 +1914,7 @@ void TransmitDialog::startTextSimulation(const TxConfiguration &configuration) {
     stopButton->setEnabled(true);
     exportButton->setEnabled(false);
     sourceCombo->setEnabled(false);
+    m17Box->setEnabled(false);
     statsLabel->setText(generated.summary);
 
     if (configuration.modulation == TxModulation::Ft8 && configuration.alignFt8ToUtcSlot) {
@@ -1906,6 +1957,11 @@ void TransmitDialog::beginTextWaveform() {
     pendingTextIq.clear();
     pendingTextIq.squeeze();
     progressTimer->start();
+    if (activeConfiguration.modulation == TxModulation::M17Voice) {
+        setStatus(text(QStringLiteral("M17 voice waveform is running."),
+                       QString::fromUtf8(u8"Передається голосовий сигнал M17.")));
+        return;
+    }
     setStatus(activeBackend->isRfCapable()
                   ? text(QStringLiteral("Text waveform is being transmitted by HackRF."),
                          QString::fromUtf8(u8"Текстовий сигнал передається через HackRF."))
@@ -2006,7 +2062,8 @@ void TransmitDialog::startMicrophoneSimulation(TxConfiguration configuration) {
                       .arg(format.sampleSize()), true);
         return;
     }
-    configuration.sampleRate = format.sampleRate();
+    const bool m17Mode = configuration.modulation == TxModulation::M17Voice;
+    configuration.sampleRate = m17Mode ? M17VoiceStream::IqRate : format.sampleRate();
     const bool deviationAdjusted = constrainVoiceDeviation(configuration);
     if (!validateSignalBandwidth(configuration)) return;
     configuration.liveSource = true;
@@ -2035,6 +2092,11 @@ void TransmitDialog::startMicrophoneSimulation(TxConfiguration configuration) {
         setStatus(error, true);
         return;
     }
+    if (m17Mode && !pttMode && !beginM17Call(&error)) {
+        stopTransmission(error);
+        return;
+    }
+    audioCaptureRate = format.sampleRate();
     audioCaptureChannels = format.channelCount();
     audioCaptureSampleSize = format.sampleSize();
     audioCaptureSampleType = static_cast<int>(format.sampleType());
@@ -2066,6 +2128,7 @@ void TransmitDialog::startMicrophoneSimulation(TxConfiguration configuration) {
                                                      microphoneSystemLevel,
                                                      &nativeCaptureError);
     if (nativeCapture) {
+        audioCaptureRate = 48000;
         audioCaptureChannels = 1;
         audioCaptureSampleSize = 16;
         audioCaptureSampleType = static_cast<int>(QAudioFormat::SignedInt);
@@ -2104,12 +2167,8 @@ void TransmitDialog::startMicrophoneSimulation(TxConfiguration configuration) {
         audioDevice = audioInput->start();
         if (!audioDevice) {
             const QString detail = audioInputErrorText(audioInput->error());
-            activeBackend->stop();
-            audioInput->disconnect(this);
-            audioInput->stop();
-            delete audioInput;
-            audioInput = nullptr;
-            audioDevice = nullptr;
+            if (m17VoiceStream) m17VoiceStream->reset();
+            stopTransmission();
             setStatus(text(QStringLiteral("Could not start microphone capture from '%1': %2. Refresh the list and check Windows microphone privacy/exclusive-mode settings."),
                            QString::fromUtf8(u8"Не вдалося запустити захоплення мікрофона '%1': %2. Оновіть список і перевірте дозволи Windows та монопольний режим пристрою."))
                           .arg(selected.deviceName(), detail), true);
@@ -2126,6 +2185,10 @@ void TransmitDialog::startMicrophoneSimulation(TxConfiguration configuration) {
     stopButton->setEnabled(true);
     exportButton->setEnabled(false);
     sourceCombo->setEnabled(false);
+    if (m17Mode) {
+        modulationCombo->setEnabled(false);
+        m17Box->setEnabled(pttMode);
+    }
     if (pttMode) {
         liveKeyButton->setEnabled(true);
         liveKeyButton->setFocus(Qt::OtherFocusReason);
@@ -2145,6 +2208,11 @@ void TransmitDialog::startMicrophoneSimulation(TxConfiguration configuration) {
                       << "audioLowPassHz"
                       << TransmitWaveformGenerator::audioLowPassCutoffHz(configuration)
                       << "deviationAdjusted" << deviationAdjusted;
+    if (m17Mode && pttMode) {
+        setStatus(text(QStringLiteral("M17 PTT ready. Hold the button, Space with focus, or F12."),
+                       QString::fromUtf8(u8"Тангента M17 готова. Утримуйте кнопку, Пробіл із фокусом або F12.")));
+        return;
+    }
     setStatus(activeBackend->isRfCapable()
                   ? (pttMode
                          ? text(QStringLiteral("Microphone PTT is armed. Focus the PTT button and hold Space, "
@@ -2191,6 +2259,34 @@ void TransmitDialog::startManualCw(TxConfiguration configuration) {
                                   "hold it with the mouse, or use F12."),
                    QString::fromUtf8(u8"Ручний CW озброєно. Передайте фокус кнопці ключа й утримуйте "
                                      u8"Пробіл, утримуйте її мишею або використовуйте F12.")));
+}
+
+void TransmitDialog::startM17VoiceFile(TxConfiguration configuration) {
+    if (mediaPath.isEmpty()) chooseMediaFile();
+    if (mediaPath.isEmpty()) return;
+    const QFileInfo input(mediaPath);
+    if (!input.isFile() || input.size() > 32 * 1024 * 1024) {
+        setStatus(text(QStringLiteral("Select a WAVE file of at most 32 MiB."),
+                       QString::fromUtf8(u8"Виберіть WAV-файл розміром до 32 МіБ.")), true);
+        return;
+    }
+    const auto media = TransmitMediaGenerator::loadWav(mediaPath, M17Adapter::VoiceSampleRate,
+                                                     M17Adapter::MaximumVoiceSamples);
+    if (!media.ok()) {
+        setStatus(media.error, true);
+        return;
+    }
+    if (configuration.sampleRate < 48000 || configuration.sampleRate > 2000000) {
+        setStatus(text(QStringLiteral("Set the M17 IQ rate to 48 kS/s..2 MS/s."),
+                       QString::fromUtf8(u8"Задайте частоту IQ для M17 від 48 ксемпл/с до 2 Мсемпл/с.")), true);
+        return;
+    }
+    TxGenerationResult generated;
+    generated.iq = M17Adapter::modulateVoice(m17SourceEdit->text(), m17DestinationEdit->text(),
+        m17CanSpin->value(), media.samples, configuration.level, configuration.sampleRate, &generated.error);
+    generated.durationSeconds = double(generated.iq.size()) / configuration.sampleRate;
+    generated.summary = QStringLiteral("M17 · Codec2 3200 · %1 s").arg(generated.durationSeconds, 0, 'f', 2);
+    startGeneratedWaveform(configuration, generated);
 }
 
 void TransmitDialog::startAudioFile(TxConfiguration configuration) {
@@ -2488,12 +2584,71 @@ bool TransmitDialog::finishDmrCall(QString *error) {
     return ok;
 }
 
+bool TransmitDialog::beginM17Call(QString *error) {
+    if (activeBackend == &virtualSignal && !virtualSignal.pollConnection()) {
+        if (error) *error = text(QStringLiteral("Waiting for virtual IQ receiver."),
+                                 QString::fromUtf8(u8"Очікування віртуального IQ-приймача."));
+        return false;
+    }
+    m17VoiceStream = std::make_unique<M17VoiceStream>();
+    m17AudioResampler = std::make_unique<IqChannelizer>();
+    const auto iq = m17VoiceStream->begin(m17SourceEdit->text(), m17DestinationEdit->text(),
+        m17CanSpin->value(), activeConfiguration.level, error);
+    if (iq.isEmpty()) return false;
+#ifdef FOBOSAPP_HAS_QT_MULTIMEDIA
+    audioCapturePendingBytes.clear();
+    microphoneDcPreviousInput = 0.0f;
+    microphoneDcPreviousOutput = 0.0f;
+#endif
+    if (!writeActiveIq(iq.constData(), iq.size(), error)) {
+        m17VoiceStream->reset();
+        return false;
+    }
+    return true;
+}
+
+bool TransmitDialog::finishM17Call(QString *error) {
+    if (!m17VoiceStream || !m17VoiceStream->isActive()) return true;
+    const auto tail = m17VoiceStream->finish(error);
+    if (tail.isEmpty()) return false;
+    if (activeBackend == &hackRf)
+        return hackRf.finishLiveBurst(tail.constData(), tail.size(), error);
+    return writeActiveIq(tail.constData(), tail.size(), error) && activeBackend->drain(500, error);
+}
+
 QVector<std::complex<float>> TransmitDialog::modulateActiveAudio(const QVector<float> &audio,
                                                                  QString *error) {
     if (activeConfiguration.modulation == TxModulation::Dmr) {
         if (!dmrCallActive || !dmrEncoder) return {};
         return dmrEncoder->pushAudio(audio, error);
     }
+#ifdef FOBOSAPP_HAS_QT_MULTIMEDIA
+    if (activeConfiguration.modulation == TxModulation::M17Voice) {
+        if (!m17VoiceStream || !m17VoiceStream->isActive()) return {};
+        if (audioCaptureRate == M17Adapter::VoiceSampleRate)
+            return m17VoiceStream->pushAudio(audio, error);
+        // Run the existing streaming FIR resampler at zero tuning offset.
+        std::vector<float> input(audio.size() * 2u, 0.0f);
+        for (int i = 0; i < audio.size(); ++i) input[2u * i] = audio[i];
+        std::vector<float> output;
+        RadioSettings settings{};
+        settings.sampleRate = audioCaptureRate;
+        settings.centerFrequency = settings.listeningFrequency = 0.0;
+        IqChannelizer::Options options;
+        options.outputRateHz = M17Adapter::VoiceSampleRate;
+        options.cutoffHz = 3000;
+        options.decimationFactor = 1;
+        options.firQuality = IqChannelizer::FirQuality::High;
+        if (!m17AudioResampler->processFloatIq(input.data(), input.size(), settings, output,
+                                               false, &options).valid) {
+            if (error) *error = QStringLiteral("Could not convert the microphone audio to 8 kHz.");
+            return {};
+        }
+        QVector<float> mono(int(output.size() / 2));
+        for (int i = 0; i < mono.size(); ++i) mono[i] = output[2u * i];
+        return m17VoiceStream->pushAudio(mono, error);
+    }
+#endif
     return TransmitWaveformGenerator::modulateAudio(activeConfiguration, audio, &modulatorState);
 }
 
@@ -2575,6 +2730,7 @@ void TransmitDialog::setLiveKey(bool pressed) {
     if (pressed == liveKeyPressed || !activeBackend || !activeBackend->isRunning()) return;
     QString error;
     const bool dmrMode = activeConfiguration.modulation == TxModulation::Dmr;
+    const bool m17Mode = activeConfiguration.modulation == TxModulation::M17Voice;
     if (pressed) {
         if (!activeBackend->setOutputEnabled(true, &error)) {
             stopTransmission(error);
@@ -2585,8 +2741,16 @@ void TransmitDialog::setLiveKey(bool pressed) {
             stopTransmission(error);
             return;
         }
+        if (m17Mode && !beginM17Call(&error)) {
+            stopTransmission(error);
+            return;
+        }
     } else {
         if (dmrMode && !finishDmrCall(&error)) {
+            stopTransmission(error);
+            return;
+        }
+        if (m17Mode && !finishM17Call(&error)) {
             stopTransmission(error);
             return;
         }
@@ -2596,6 +2760,7 @@ void TransmitDialog::setLiveKey(bool pressed) {
         }
     }
     liveKeyPressed = pressed;
+    if (m17Mode) m17Box->setEnabled(!pressed);
     liveKeyButton->setText(pressed
                                ? text(QStringLiteral("TRANSMITTING - release to stop"),
                                       QString::fromUtf8(u8"ПЕРЕДАЧА - відпустіть для зупинки"))
@@ -2689,7 +2854,7 @@ void TransmitDialog::processMicrophoneBytes(const QByteArray &newBytes) {
     qint64 nonZeroFrames = 0;
     const float dcAlpha = static_cast<float>(
         std::exp(-2.0 * 3.14159265358979323846 * 35.0 /
-                 (std::max)(8000, activeConfiguration.sampleRate)));
+                 (std::max)(8000, audioCaptureRate)));
     bool decodeEightBitAsUnsigned =
         audioCaptureSampleType == static_cast<int>(QAudioFormat::UnSignedInt);
 #ifdef Q_OS_WIN
@@ -2786,14 +2951,16 @@ void TransmitDialog::processMicrophoneBytes(const QByteArray &newBytes) {
     QString error;
     const QVector<std::complex<float>> iq = modulateActiveAudio(audio, &error);
     if (!error.isEmpty()) {
+        if (m17VoiceStream) m17VoiceStream->reset();
         stopTransmission(error);
         return;
     }
     if (!iq.isEmpty() && !writeActiveIq(iq.constData(), iq.size(), &error)) {
+        if (m17VoiceStream) m17VoiceStream->reset();
         stopTransmission(error);
         return;
     }
-    preview->setIq(iq);
+    if (!iq.isEmpty()) preview->setIq(iq);
     if (activeBackend == &simulator) {
         statsLabel->setText(text(QStringLiteral("Captured %1 IQ samples (%2 s)"),
                                  QString::fromUtf8(u8"Захоплено %1 IQ-семплів (%2 с)"))
@@ -2958,17 +3125,22 @@ void TransmitDialog::stopTransmission(const QString &reason) {
                        QString::fromUtf8(u8"Закриття віртуального IQ-каналу...")));
         statusLabel->repaint();
     }
-    const bool hadSamples = activeBackend == &simulator && !simulator.capturedIq().isEmpty();
-    QString dmrError;
+    QString finishError;
     if (activeBackend && activeBackend->isRunning() && dmrCallActive) {
-        finishDmrCall(&dmrError);
+        finishDmrCall(&finishError);
     }
+    if (activeBackend && activeBackend->isRunning() && m17VoiceStream && m17VoiceStream->isActive())
+        finishM17Call(&finishError);
+    const bool hadSamples = activeBackend == &simulator && !simulator.capturedIq().isEmpty();
     if (activeBackend) activeBackend->stop();
     activeBackend = nullptr;
     if (dmrEncoder) dmrEncoder->reset();
     dmrCallActive = false;
     dmrFinishing = false;
+    m17VoiceStream.reset();
+    m17AudioResampler.reset();
     liveKeyPressed = false;
+    liveKeyArmingClick = false;
     pttMode = false;
     microphoneRmsDb = -120.0f;
     microphonePeakDb = -120.0f;
@@ -2982,6 +3154,8 @@ void TransmitDialog::stopTransmission(const QString &reason) {
     startButton->setEnabled(true);
     stopButton->setEnabled(false);
     sourceCombo->setEnabled(true);
+    modulationCombo->setEnabled(true);
+    m17Box->setEnabled(true);
     liveKeyButton->setEnabled(false);
     liveKeyButton->setText(text(QStringLiteral("Start transmission"),
                                 QString::fromUtf8(u8"Почати передачу")));
@@ -2989,7 +3163,7 @@ void TransmitDialog::stopTransmission(const QString &reason) {
         QStringLiteral("background:#6b7078;color:white;font-weight:600;"));
     exportButton->setEnabled(hadSamples);
     if (!reason.isEmpty()) setStatus(reason);
-    else if (!dmrError.isEmpty()) setStatus(dmrError, true);
+    else if (!finishError.isEmpty()) setStatus(finishError, true);
 }
 
 void TransmitDialog::exportIq() {
@@ -3106,6 +3280,9 @@ void TransmitDialog::loadSettings() {
     const int ft8SlotIndex = ft8SlotCombo->findData(settings.value(QStringLiteral("transmit/ft8SlotParity"), -1).toInt());
     if (ft8SlotIndex >= 0) ft8SlotCombo->setCurrentIndex(ft8SlotIndex);
     dmrColorCodeSpin->setValue(settings.value(QStringLiteral("transmit/dmrColorCode"), 1).toInt());
+    m17SourceEdit->setText(settings.value(QStringLiteral("transmit/m17Source")).toString());
+    m17DestinationEdit->setText(settings.value(QStringLiteral("transmit/m17Destination"), QStringLiteral("@ALL")).toString());
+    m17CanSpin->setValue(settings.value(QStringLiteral("transmit/m17Can"), 0).toInt());
     const int dmrTimeslot = settings.value(QStringLiteral("transmit/dmrTimeslot"), 1).toInt();
     const int dmrTimeslotIndex = dmrTimeslotCombo->findData(dmrTimeslot);
     if (dmrTimeslotIndex >= 0) dmrTimeslotCombo->setCurrentIndex(dmrTimeslotIndex);
@@ -3182,6 +3359,9 @@ void TransmitDialog::saveSettings() const {
     settings.setValue(QStringLiteral("transmit/alignFt8Utc"), ft8UtcCheck->isChecked());
     settings.setValue(QStringLiteral("transmit/ft8SlotParity"), ft8SlotCombo->currentData().toInt());
     settings.setValue(QStringLiteral("transmit/dmrColorCode"), dmrColorCodeSpin->value());
+    settings.setValue(QStringLiteral("transmit/m17Source"), m17SourceEdit->text().trimmed());
+    settings.setValue(QStringLiteral("transmit/m17Destination"), m17DestinationEdit->text().trimmed());
+    settings.setValue(QStringLiteral("transmit/m17Can"), m17CanSpin->value());
     settings.setValue(QStringLiteral("transmit/dmrTimeslot"), dmrTimeslotCombo->currentData().toInt());
     settings.setValue(QStringLiteral("transmit/dmrSourceId"), dmrSourceIdSpin->value());
     settings.setValue(QStringLiteral("transmit/dmrDestinationId"), dmrDestinationIdSpin->value());

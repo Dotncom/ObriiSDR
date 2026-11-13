@@ -33,6 +33,9 @@ int fixture(const QStringList &args) {
         (request.value("rate").toInt() != 7680000 || request.value("offset").toInt() != -1000 ||
          request.value("format").toString() != QStringLiteral("cs16") || request.value("start").toInt() != 10))
         return 1;
+    if (action == QStringLiteral("umts-demo") &&
+            (request.value("scenario") != QJsonValue("ipv4") || request.size() != 3))
+        return 1;
     QString status = QStringLiteral("PASS");
     if (action == QStringLiteral("gsm-demo")) {
         QElapsedTimer deadline;
@@ -91,6 +94,11 @@ int main(int argc, char **argv) {
     check(!job.command({{"action", "umts-decode"}, {"input", input.fileName()}, {"rate", 7680000},
         {"start", 10.5}}).value("ok").toBool(), "UMTS rejects a fractional start sample");
     check(execute(job, umts).value("ok").toBool(), "UMTS request reaches the worker");
+    check(UsrpLabJob::arguments({"umts-demo", "unknown"}).isEmpty(), "unknown UMTS demo rejected by CLI");
+    check(!job.command({{"action", "umts-demo"}, {"input", input.fileName()}}).value("ok").toBool(),
+          "UMTS demo accepts only a preset");
+    check(execute(job, UsrpLabJob::arguments({"umts-demo"})).value("ok").toBool(),
+          "default UMTS demo reaches the worker");
     check(execute(job, {{"action", "contracts"}}).value("ok").toBool(), "verified worker exit succeeds");
     const auto failure = execute(job, {{"action", "wifi-loopback"}});
     check(!failure.value("ok").toBool() && failure.value("status") == QJsonValue("FAIL"),

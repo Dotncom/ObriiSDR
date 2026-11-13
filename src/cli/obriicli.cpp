@@ -21,6 +21,7 @@
 #include "cliresearchtools.h"
 #include "clidoctor.h"
 #include "clijsonrequest.h"
+#include "climcp.h"
 #include "cliruntimerecorder.h"
 #include "iqbuffer.h"
 #include "clitextdecoder.h"
@@ -66,12 +67,15 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSet>
+#include <QStandardPaths>
 #include <QSysInfo>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTemporaryDir>
 #include <QTextStream>
 #include <QThread>
 #include <QTimer>
+#include <QtEndian>
 
 #include <algorithm>
 #include <array>
@@ -107,13 +111,102 @@ int fail(const QString &message) {
     return 1;
 }
 
+int decodeWeakSignalFile(const QStringList &arguments) {
+    const bool wspr = arguments.value(0) == QLatin1String("wspr");
+    const auto usage = wspr ? QStringLiteral("ObriiCli module wspr YYYYMMDD_HHMM.wav DIAL_MHZ")
+                            : QStringLiteral("ObriiCli module js8 YYYYMMDD_HHMMSS.wav");
+    if (arguments.size() == 2 && arguments[1] == QLatin1String("--help")) {
+        QTextStream(stdout) << usage << '\n';
+        return 0;
+    }
+    if (arguments.size() != (wspr ? 3 : 2)) return fail(usage);
+    bool dialOk = false;
+    const double dial = arguments.value(2).toDouble(&dialOk);
+    if (wspr && (!dialOk || !std::isfinite(dial) || dial <= 0.0 || dial > 1000.0))
+        return fail(QStringLiteral("DIAL_MHZ must be a positive frequency in MHz"));
+    const QFileInfo input(arguments[1]);
+    static const QRegularExpression utcName(
+        QStringLiteral("\\A(?:[0-9]{6}|[0-9]{8})_[0-9]{4}(?:[0-9]{2})?\\.wav\\z"),
+        QRegularExpression::CaseInsensitiveOption);
+    if (!input.isFile() || input.isSymLink() || !utcName.match(input.fileName()).hasMatch())
+        return fail(QStringLiteral("Select a WAV file with a UTC date and time in its name."));
+    const QString engine = wspr ? QStringLiteral("wsprd") : QStringLiteral("js8");
+    const auto configured = qEnvironmentVariable(wspr ? "OBRII_WSPRD" : "OBRII_JS8_DECODER");
+    const auto executable = configured.isEmpty() ? QStandardPaths::findExecutable(engine) : configured;
+    const QFileInfo decoder(executable);
+    if (executable.isEmpty() || !decoder.isAbsolute() || !decoder.isFile() || !decoder.isExecutable())
+        return fail(wspr ? QStringLiteral("Install wsprd or set OBRII_WSPRD to its executable.")
+                         : QStringLiteral("Install the JS8Call decoder or set OBRII_JS8_DECODER to its executable."));
+    QFile wav(input.absoluteFilePath());
+    const qint64 minSamples = (wspr ? 114 : 12) * 12000;
+    const qint64 maxSamples = (wspr ? 125 : 20) * 12000;
+    if (!wav.open(QIODevice::ReadOnly) || wav.size() < minSamples * 2 + 44 || wav.size() > maxSamples * 2 + 44)
+        return fail(QStringLiteral("Expected one WSPR-2 or JS8 Normal slot in the WAV file."));
+    const auto bytes = wav.read(maxSamples * 2 + 45);
+    const auto u16 = [&bytes](int offset) { return qFromLittleEndian<quint16>(bytes.constData() + offset); };
+    const auto u32 = [&bytes](int offset) { return qFromLittleEndian<quint32>(bytes.constData() + offset); };
+    if (bytes.size() < minSamples * 2 + 44 || bytes.size() > maxSamples * 2 + 44 ||
+        !bytes.startsWith("RIFF") || bytes.mid(8, 8) != "WAVEfmt " || u32(16) != 16 ||
+        u16(20) != 1 || u16(22) != 1 || u32(24) != 12000 || u32(28) != 24000 ||
+        u16(32) != 2 || u16(34) != 16 || bytes.mid(36, 4) != "data" ||
+        u32(4) != quint32(bytes.size() - 8) || u32(40) != quint32(bytes.size() - 44) || bytes.size() % 2)
+        return fail(QStringLiteral("Expected canonical mono PCM16 WAV at 12 kHz with a 44-byte header."));
+    QTemporaryDir work;
+    if (!work.isValid() || work.path().toLocal8Bit().size() > 160)
+        return fail(QStringLiteral("Cannot create a short decoder work directory."));
+    const auto fileName = input.fileName().toLower();
+    QFile staged(work.filePath(fileName));
+    if (!staged.open(QIODevice::WriteOnly | QIODevice::NewOnly) || staged.write(bytes) != bytes.size() || !staged.flush())
+        return fail(QStringLiteral("Cannot stage the input WAV."));
+    staged.close();
+
+    QProcess process;
+    process.setWorkingDirectory(work.path());
+    auto environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(QStringLiteral("LC_ALL"), QStringLiteral("C"));
+    environment.insert(QStringLiteral("OMP_NUM_THREADS"), QStringLiteral("1"));
+    process.setProcessEnvironment(environment);
+    process.setStandardInputFile(QProcess::nullDevice());
+    process.start(decoder.absoluteFilePath(),
+        wspr ? QStringList{QStringLiteral("-H"), QStringLiteral("-f"), QString::number(dial, 'g', 12), fileName}
+             : QStringList{QStringLiteral("-8"), QStringLiteral("-m"), QStringLiteral("1"), fileName});
+    if (!process.waitForStarted(3000)) return fail(process.errorString());
+    QByteArray output, diagnostics;
+    QElapsedTimer elapsed;
+    elapsed.start();
+    interrupted = 0;
+    std::signal(SIGINT, interruptHandler);
+    std::signal(SIGTERM, interruptHandler);
+    while (process.state() != QProcess::NotRunning) {
+        process.waitForFinished(100);
+        output += process.readAllStandardOutput();
+        diagnostics += process.readAllStandardError();
+        if (interrupted || elapsed.hasExpired(45000) || output.size() + diagnostics.size() > 128 * 1024) {
+            process.kill();
+            process.waitForFinished(1000);
+            if (interrupted) return 130;
+            return fail(QStringLiteral("Weak-signal decoder exceeded its time or output limit."));
+        }
+    }
+    output += process.readAllStandardOutput();
+    diagnostics += process.readAllStandardError();
+    if (output.size() + diagnostics.size() > 128 * 1024)
+        return fail(QStringLiteral("Weak-signal decoder exceeded its output limit."));
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0 ||
+        !output.contains("<DecodeFinished>"))
+        return fail(QStringLiteral("Decoder failed: %1").arg(QString::fromUtf8(diagnostics.right(2048)).trimmed()));
+    printJson({{"ok", true}, {"decoder", engine}, {"output", QString::fromUtf8(output).trimmed()}});
+    return 0;
+}
+
 int runUsrpLab(const QStringList &words) {
     if (words == QStringList{QStringLiteral("--help")}) {
         QTextStream(stdout) << "usrp status | contracts | wifi-loopback | lte-zmq | gsm-demo\n"
                                "usrp zmq-loopback (requires Python with PyZMQ)\n"
                                "usrp gsm-decode FILE ARFCN [PDCH_TS]\n"
                                "usrp gsm-replay MAC.jsonl ARFCN CONTEXT_DIR\n"
-                               "usrp umts-decode FILE RATE [OFFSET_HZ [cf32|cs16|ci8 [START_SAMPLE]]]\n";
+                               "usrp umts-decode FILE RATE [OFFSET_HZ [cf32|cs16|ci8 [START_SAMPLE]]]\n"
+                               "usrp umts-demo [prach|rrc|attach|ipv4|rlc-recovery] (default: ipv4)\n";
         return 0;
     }
     const auto request = UsrpLabJob::arguments(words);
@@ -2901,7 +2994,8 @@ int runReceiver(QCoreApplication &app, RunOptions options) {
         if (announceUhdTxCompletion) return {{"state", "busy"}};
         device.uhd.requestGnssStatus();
         const auto status = device.uhd.gnssStatus();
-        return {{"state", status.state}, {"gga", status.gga}, {"rmc", status.rmc}, {"gsv", status.gsv}};
+        return {{"state", status.state}, {"gga", status.gga}, {"rmc", status.rmc}, {"gsv", status.gsv},
+                {"ubxHex", status.ubxHex}};
     };
     QElapsedTimer rateWindow; rateWindow.start();
     quint64 previousRateSamples = 0;
@@ -4692,6 +4786,11 @@ int runComputeService(QCoreApplication &app, const QString &path, double duratio
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("ObriiCli"));
+    if (app.arguments().value(1) == QLatin1String("mcp")) return runCliMcp(app.arguments().mid(2));
+    if (app.arguments().value(1) == QLatin1String("ask-local")) return runCliLocalModel(app.arguments().mid(2));
+    if (app.arguments().value(1) == QLatin1String("module") &&
+        (app.arguments().value(2) == QLatin1String("wspr") || app.arguments().value(2) == QLatin1String("js8")))
+        return decodeWeakSignalFile(app.arguments().mid(2));
     if (app.arguments().value(1) == QLatin1String("usrp")) return runUsrpLab(app.arguments().mid(2));
     if(app.arguments().value(1)==QLatin1String("fft-tune")) {
         auto args=app.arguments();args.removeAt(1);return runFftTuningCommand(args);
@@ -4707,7 +4806,8 @@ int main(int argc, char **argv) {
         return runLocalModule(app, QStringLiteral("ObriiCliTxModule"), 2);
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Headless SDR receiver. Commands: devices, rates, doctor [REQUEST.json], run [--serve|--preset FILE], client, research FILE.json, calibration FILE.json, preset list DIR|inspect|summary FILE, experiment inspect|summary|results|trace|measure|zero FILE, module list|start|status|stop|snapshot|tx|gnss, control commands|audit|request FILE.json|agent start [PORT]|agent status|agent control on/off|agent stop|status|metrics|record|spectrum|trace|traces|measure|tone|digital|filters|vfo|scan|trigger|quality|zero|multisdr|graph|gnss|research|preset|experiment|mode|demod|bandwidth|audio|start|stop|quit|tune|listen|gain, view open|set|status|snapshot|close."));
-    parser.setApplicationDescription(parser.applicationDescription() + QStringLiteral(" Local USRP jobs: usrp --help."));
+    parser.setApplicationDescription(parser.applicationDescription() + QStringLiteral(
+        " Local USRP jobs: usrp --help. MCP: mcp --help. Local model: ask-local --help. WAV decoding: module wspr|js8 --help."));
     parser.addHelpOption();
     const auto option = [&parser](const QString &name, const QString &description, const QString &value, const QString &fallback) {
         parser.addOption(QCommandLineOption(name, description, value, fallback));

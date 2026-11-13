@@ -229,6 +229,7 @@ QJsonObject YourClassName::settingsToJson() const {
     settings["spectrumPersistenceSmoothingMs"] = spectrumPersistenceSmoothingMs;
     settings["spectrumPersistenceStyle"] = spectrumPersistenceStyle;
     settings["waterfallDisplayMode"] = waterfallDisplayMode;
+    settings["waterfallColorPalette"] = waterfallColorPalette;
     settings["multiSdrViewMode"] = multiSdrViewMode;
     settings["waterfall3DResolutionDivisor"] = waterfall3DResolutionDivisor;
     settings["waterfall3DSurfaceStyle"] = waterfall3DSurfaceStyle;
@@ -571,7 +572,7 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
         qthSource = QStringLiteral("manual");
     }
     qthPositionBeforeUhd.reset();
-    if (qthSource == QLatin1String("uhd")) {
+    if (isUhdGnssSource(qthSource)) {
         qthPositionBeforeUhd = QPointF(qthLongitude, qthLatitude);
         qthPositionVisibleBeforeUhd = qthPositionVisible;
         qthPositionVisible = false;
@@ -755,6 +756,7 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
     }
     if (graphWidget) graphWidget->setPersistenceEnabled(spectrumDisplayMode == 1);
     waterfallDisplayMode = (std::clamp)(readInt("waterfallDisplayMode", waterfallDisplayMode), 0, 2);
+    applyWaterfallColorPalette(readInt("waterfallColorPalette", waterfallColorPalette));
     multiSdrViewMode = (std::clamp)(readInt("multiSdrViewMode", multiSdrViewMode), 0, 1);
     if (multiSdrViewModeCombo) {
         const QSignalBlocker blocker(multiSdrViewModeCombo);

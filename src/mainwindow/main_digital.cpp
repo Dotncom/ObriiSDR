@@ -51,11 +51,7 @@ void YourClassName::openOpenRadioLab() {
 }
 
 void YourClassName::processSstvAudioFrame(const QByteArray &pcmData) {
-    const bool suppressServerLocalOutput =
-        networkMode == NetworkMode::Server &&
-        serverDisableLocalVisualAudio &&
-        networkController &&
-        networkController->isControlReady();
+    const bool suppressServerLocalOutput = serverLocalOutputSuppressed();
     if (!videoProcessor ||
         !videoProcessorThread ||
         !videoDecodeEnabled ||
@@ -77,11 +73,7 @@ void YourClassName::processSstvAudioFrame(const QByteArray &pcmData) {
 }
 
 void YourClassName::processAptAudioFrame(const QByteArray &pcmData) {
-    const bool suppressServerLocalOutput =
-        networkMode == NetworkMode::Server &&
-        serverDisableLocalVisualAudio &&
-        networkController &&
-        networkController->isControlReady();
+    const bool suppressServerLocalOutput = serverLocalOutputSuppressed();
     if (!videoProcessor ||
         !videoProcessorThread ||
         !videoDecodeEnabled ||
@@ -103,11 +95,7 @@ void YourClassName::processAptAudioFrame(const QByteArray &pcmData) {
 }
 
 void YourClassName::processWefaxAudioFrame(const QByteArray &pcmData) {
-    const bool suppressServerLocalOutput =
-        networkMode == NetworkMode::Server &&
-        serverDisableLocalVisualAudio &&
-        networkController &&
-        networkController->isControlReady();
+    const bool suppressServerLocalOutput = serverLocalOutputSuppressed();
     if (!videoProcessor ||
         !videoProcessorThread ||
         !videoDecodeEnabled ||
@@ -129,11 +117,7 @@ void YourClassName::processWefaxAudioFrame(const QByteArray &pcmData) {
 }
 
 bool YourClassName::isVideoDecodeActive() const {
-    const bool suppressServerLocalOutput =
-        networkMode == NetworkMode::Server &&
-        serverDisableLocalVisualAudio &&
-        networkController &&
-        networkController->isControlReady();
+    const bool suppressServerLocalOutput = serverLocalOutputSuppressed();
     return videoDecodeEnabled &&
            isAnyVideoOutputVisible() &&
            videoDecodeCheckbox &&
@@ -306,11 +290,7 @@ void YourClassName::updateVideoProcessorMode() {
     const bool aptTest = testPatternEnabled && pendingSettings.modulationType == MOD_APT;
     const bool wefaxTest = testPatternEnabled && pendingSettings.modulationType == MOD_WEFAX;
     const bool lrptTest = testPatternEnabled && pendingSettings.modulationType == MOD_LRPT;
-    const bool suppressServerLocalOutput =
-        networkMode == NetworkMode::Server &&
-        serverDisableLocalVisualAudio &&
-        networkController &&
-        networkController->isControlReady();
+    const bool suppressServerLocalOutput = serverLocalOutputSuppressed();
     const bool sstvEnabled =
         isAnyVideoOutputVisible() &&
         pendingSettings.modulationType == MOD_SSTV &&

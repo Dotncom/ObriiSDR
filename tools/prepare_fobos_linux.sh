@@ -80,7 +80,17 @@ build_and_install() {
         -DCMAKE_INSTALL_PREFIX="${INSTALL_PREFIX}" \
         -DFOBOS_INSTALL_UDEV_RULES=OFF
     cmake --build "${build_dir}" -j "${JOBS}"
-    cmake --install "${build_dir}"
+    if [ "${name}" = libfobos-sdr-agile ]; then
+        # The upstream Agile install includes an absolute udev destination.
+        # Stage it under DESTDIR and install just the SDK into the requested prefix.
+        local staging
+        staging="$(mktemp -d "${build_dir}/install.XXXXXX")"
+        DESTDIR="${staging}" cmake --install "${build_dir}"
+        mkdir -p "${INSTALL_PREFIX}"
+        cp -a "${staging}${INSTALL_PREFIX}/." "${INSTALL_PREFIX}/"
+    else
+        cmake --install "${build_dir}"
+    fi
 }
 
 LIBFOBOS_SOURCE_DIR="$(resolve_source_dir libfobos "${LIBFOBOS_REPO}")"

@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QList>
 #include <QTimer>
 #ifdef _WIN32
@@ -24,11 +25,13 @@ public:
 
     void playPcmFrame(const QByteArray &pcmData);
     void playNetworkPcmFrame(const QByteArray &pcmData);
+    void playRelayPcmFrame(const QByteArray &pcmData);
     void stop();
     void setVolume(float volume);
     void setOutputDevice(int index);
     void setMaximumQueuedMs(int milliseconds);
     void setWideFmNetworkBuffer(bool enabled);
+    void setRelayBufferMs(int milliseconds);
 
 private slots:
     void cleanupCompletedBuffers();
@@ -47,13 +50,20 @@ private:
     qint64 networkPendingBytes = 0;
     bool networkPrimed = false;
     bool networkWideFm = false;
+    int relayBufferMs = 0;
+    QByteArray relayPartialBlock;
+    QElapsedTimer relayArrivalTimer;
 #ifdef _WIN32
     void releaseBlock(AudioBlock *block);
     void logWaveOutQueue(const char *event, qint64 incomingBytes = 0, int prebufferMs = 0,
                          const char *reason = "-") const;
     void resetWaveOut(const char *reason);
+#elif defined(FOBOSAPP_HAS_QT_AUDIO)
+    void drainRelayQtAudio();
+    qint64 writeQtPcmFrame(const QByteArray &pcmData);
 #endif
     void stopPlayback(const char *reason);
+    void playBufferedPcmFrame(const QByteArray &pcmData, int prebufferMs);
     bool openDevice();
 
 #ifdef _WIN32

@@ -37,9 +37,14 @@ struct HackRfFiniteBurstTestAccess {
         transfer.txContext = &tx;
         HackRfTransmitterBackend::blockCompleteCallback(&transfer, success);
     }
-    static void live(HackRfTransmitterBackend &tx) {
+    static void live(HackRfTransmitterBackend &tx, TxModulation mode = TxModulation::Nfm) {
+        tx.currentConfiguration.modulation = mode;
         tx.currentConfiguration.liveSource = true;
         tx.currentConfiguration.prebufferMilliseconds = 2000;
+    }
+    static bool stageEnd(HackRfTransmitterBackend &tx, const std::complex<float> *iq,
+                         int count, QString *error) {
+        return tx.stageLiveBurstEnd(iq, count, error);
     }
 };
 
@@ -180,6 +185,29 @@ void continuousZeroFill() {
           tx.setOutputEnabled(true, &error) && tx.writeIq(iq.data(), int(iq.size()), &error),
           "ordinary PTT can still clear and refill continuous IQ");
 }
+
+void liveM17End() {
+    HackRfTransmitterBackend tx;
+    HackRfFiniteBurstTestAccess::armMemory(tx);
+    HackRfFiniteBurstTestAccess::live(tx, TxModulation::M17Voice);
+    const std::complex<float> speech(0.5f, 0.0f), tail(0.25f, 0.0f);
+    QString error;
+    for (int call = 0; call < 2; ++call) {
+        check(tx.writeIq(&speech, 1, &error) &&
+              HackRfFiniteBurstTestAccess::stageEnd(tx, &tail, 1, &error),
+              "M17 PTT release appends EOT to queued live IQ");
+        std::array<unsigned char, 8> buffer{};
+        int valid = -1;
+        check(HackRfFiniteBurstTestAccess::transfer(tx, buffer.data(), int(buffer.size()), &valid) == 0 &&
+              valid == int(buffer.size()) && signedByte(buffer[0]) == 64 && signedByte(buffer[2]) == 32 &&
+              HackRfFiniteBurstTestAccess::transfer(tx, buffer.data(), int(buffer.size()), &valid) != 0 &&
+              valid == 0, "M17 live TX supplies the last buffer before returning EOS");
+        HackRfFiniteBurstTestAccess::flush(tx, 1);
+        check(tx.drain(0, &error) && tx.setOutputEnabled(false, &error) &&
+              tx.setOutputEnabled(true, &error) && !tx.finiteBurstComplete(),
+              "M17 PTT can send another call after a successful USB flush");
+    }
+}
 }
 
 int main(int argc, char **argv) {
@@ -190,5 +218,6 @@ int main(int argc, char **argv) {
     queueCompaction();
     cancellationAndBounds();
     continuousZeroFill();
+    liveM17End();
     return errors ? 1 : 0;
 }

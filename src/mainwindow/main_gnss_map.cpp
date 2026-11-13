@@ -319,6 +319,9 @@ void YourClassName::openQthMapWindow() {
         qthMapWidget->setGridPrecision(qthGridPrecision);
         qthMapWidget->setOverlayMode(static_cast<QthMapWidget::OverlayMode>(qthMapOverlayMode));
         qthMapWidget->setUserMarkers(qthUserMarkers);
+        if (isUhdGnssSource(qthSource) && uhdGnssShowRejections) {
+            qthMapWidget->setRejectedFixMarkers(uhdGnssRejectedMarkers);
+        }
         updateQthMapSatelliteOverlay();
         rootLayout->addWidget(qthMapWidget, 1);
 
@@ -581,7 +584,7 @@ void YourClassName::applyQthMapSearch() {
 
 void YourClassName::copyQthLocator() {
     if (!qthPositionVisible) {
-        if (qthSource == QLatin1String("uhd") ||
+        if (isUhdGnssSource(qthSource) ||
             (qthSource == QLatin1String("nmea") && gnssSerialFixCount <= 0 && gnssLastUbxFixMs <= 0)) {
             if (qthStatusLabel) {
                 qthStatusLabel->setText(uiText(QStringLiteral("qth_position_waiting_for_fix"),

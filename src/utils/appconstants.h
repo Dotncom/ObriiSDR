@@ -63,6 +63,9 @@ inline constexpr int DMR_BACKEND_GOPHERTRUNK = 3;
 inline constexpr double DMR_CENTER_MIN_OFFSET_HZ = 25000.0;
 
 inline constexpr int AUDIO_RELAY_HEADER_BYTES = 12;
+inline constexpr int AUDIO_RELAY_BUFFER_MIN_MS = 40;
+inline constexpr int AUDIO_RELAY_BUFFER_DEFAULT_MS = 160;
+inline constexpr int AUDIO_RELAY_BUFFER_MAX_MS = 400;
 inline constexpr qint64 AUDIO_HTTP_MAX_PENDING_BYTES = 512 * 1024;
 inline constexpr int AUDIO_LOW_PASS_SLIDER_STEP_HZ = 100;
 inline constexpr int AUDIO_LOW_PASS_SLIDER_MAX = 200;

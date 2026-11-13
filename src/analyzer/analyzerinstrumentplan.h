@@ -115,6 +115,7 @@ struct AnalyzerMeasurementPoint {
     double s11Magnitude = 0.0;
     double s21Magnitude = 0.0;
     bool valid = false;
+    bool forwardOnly = false;
 
     QJsonObject toJson() const;
     static AnalyzerMeasurementPoint fromJson(const QJsonObject &object);

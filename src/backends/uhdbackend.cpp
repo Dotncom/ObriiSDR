@@ -222,6 +222,7 @@ struct Api {
 Api &api() { static Api instance; return instance; }
 
 constexpr int MaxGsvPayloadBytes = 16384;
+constexpr int MaxUbxHexBytes = 16416;
 
 QByteArray readNmeaSensor(void *device, const char *name, int capacity) {
     if (!name) return {};
@@ -290,11 +291,35 @@ QString rxStreamError(void *streamer, const QString &fallback) {
 
 } // namespace
 
+QString validatedUhdGnssUbx(const QByteArray &payload) {
+    if (payload.size() > MaxUbxHexBytes) return {};
+    QStringList frames;
+    for (const QByteArray &line : payload.split('\n')) {
+        if (line.size() < 16 || line.size() > 8208 || line.size() % 2 ||
+            !std::all_of(line.cbegin(), line.cend(), [](unsigned char c) { return std::isxdigit(c); }))
+            continue;
+        const auto frame = QByteArray::fromHex(line);
+        const auto octet = [&frame](int i) { return static_cast<unsigned char>(frame.at(i)); };
+        if (octet(0) != 0xb5 || octet(1) != 0x62 || (octet(4) | octet(5) << 8) != frame.size() - 8)
+            continue;
+        unsigned char a = 0, b = 0;
+        for (int i = 2; i < frame.size() - 2; ++i) {
+            a = static_cast<unsigned char>(a + octet(i));
+            b = static_cast<unsigned char>(b + a);
+        }
+        if (a == octet(frame.size() - 2) && b == octet(frame.size() - 1))
+            frames.append(QString::fromLatin1(line.toLower()));
+    }
+    return frames.join(QLatin1Char('\n'));
+}
+
 UhdGnssSkySummary summarizeUhdGnssGsv(const QString &gsv) {
     if (gsv.isEmpty() || gsv.size() > MaxGsvPayloadBytes) return {};
 
     struct Satellite {
         int id;
+        int elevation;
+        int azimuth;
         int cn0;
     };
     struct GsvCycle {
@@ -343,13 +368,16 @@ UhdGnssSkySummary summarizeUhdGnssGsv(const QString &gsv) {
         QVector<Satellite> satellites;
         for (int i = 4; i + 3 < fields.size(); i += 4) {
             const int id = integer(fields.at(i));
-            if (id > 0) satellites.push_back({id, integer(fields.at(i + 3))});
+            if (id > 0) {
+                satellites.push_back({id, integer(fields.at(i + 1)),
+                                      integer(fields.at(i + 2)), integer(fields.at(i + 3))});
+            }
         }
         cycle.parts.insert(part, satellites);
     }
 
-    QHash<QByteArray, int> specificSatellites;
-    QHash<QByteArray, int> mixedSatellites;
+    QHash<QByteArray, UhdGnssSatellite> specificSatellites;
+    QHash<QByteArray, UhdGnssSatellite> mixedSatellites;
     bool haveSpecificCycle = false;
     bool haveMixedCycle = false;
     for (const auto &cycle : cycles) {
@@ -363,11 +391,18 @@ UhdGnssSkySummary summarizeUhdGnssGsv(const QString &gsv) {
         if (mixed) haveMixedCycle = true;
         else haveSpecificCycle = true;
         auto &satellites = mixed ? mixedSatellites : specificSatellites;
+        const QString talker = QString::fromLatin1(cycle.talker);
         for (const auto &part : cycle.parts) {
             for (const auto &satellite : part) {
                 const auto key = cycle.talker + ':' + QByteArray::number(satellite.id);
-                const int cn0 = satellite.cn0 > 0 && satellite.cn0 <= 99 ? satellite.cn0 : -1;
-                satellites.insert(key, (std::max)(satellites.value(key, -1), cn0));
+                auto &entry = satellites[key];
+                entry.talker = talker;
+                entry.id = satellite.id;
+                if (satellite.elevation >= 0 && satellite.elevation <= 90) entry.elevationDeg = satellite.elevation;
+                if (satellite.azimuth >= 0 && satellite.azimuth < 360) entry.azimuthDeg = satellite.azimuth;
+                if (satellite.cn0 > 0 && satellite.cn0 <= 99) {
+                    entry.cn0DbHz = (std::max)(entry.cn0DbHz, satellite.cn0);
+                }
             }
         }
     }
@@ -375,9 +410,11 @@ UhdGnssSkySummary summarizeUhdGnssGsv(const QString &gsv) {
     if (!haveSpecificCycle && !haveMixedCycle) return summary;
     const auto &satellites = haveSpecificCycle ? specificSatellites : mixedSatellites;
     summary.satellitesInView = satellites.size();
-    for (const int cn0 : satellites) {
-        if (cn0 > 0) ++summary.satellitesWithSignal;
-        summary.strongestCn0DbHz = (std::max)(summary.strongestCn0DbHz, cn0);
+    summary.satellites.reserve(satellites.size());
+    for (const auto &satellite : satellites) {
+        summary.satellites.push_back(satellite);
+        if (satellite.cn0DbHz > 0) ++summary.satellitesWithSignal;
+        summary.strongestCn0DbHz = (std::max)(summary.strongestCn0DbHz, satellite.cn0DbHz);
     }
     return summary;
 }
@@ -749,13 +786,15 @@ UhdGnssStatus UhdRxSession::readGnssSensors() {
         gnssGgaSensor_ = pick("gnss_gga", "gps_gpgga");
         gnssRmcSensor_ = pick("gnss_rmc", "gps_gprmc");
         if (available.contains("gnss_gsv")) gnssGsvSensor_ = "gnss_gsv";
+        if (available.contains("gnss_ubx")) gnssUbxSensor_ = "gnss_ubx";
     }
-    if (!gnssGgaSensor_ && !gnssRmcSensor_ && !gnssGsvSensor_)
+    if (!gnssGgaSensor_ && !gnssRmcSensor_ && !gnssGsvSensor_ && !gnssUbxSensor_)
         return {QStringLiteral("unsupported"), {}, {}};
     UhdGnssStatus status{QStringLiteral("waiting"), nmeaSensorValue(device_, gnssGgaSensor_, "GGA"),
                          nmeaSensorValue(device_, gnssRmcSensor_, "RMC"),
-                         gsvSensorValue(device_, gnssGsvSensor_)};
-    if (!status.gga.isEmpty() || !status.rmc.isEmpty() || !status.gsv.isEmpty())
+                         gsvSensorValue(device_, gnssGsvSensor_),
+                         validatedUhdGnssUbx(readNmeaSensor(device_, gnssUbxSensor_, MaxUbxHexBytes + 1))};
+    if (!status.gga.isEmpty() || !status.rmc.isEmpty() || !status.gsv.isEmpty() || !status.ubxHex.isEmpty())
         status.state = QStringLiteral("available");
     return status;
 }
@@ -913,6 +952,7 @@ void UhdRxSession::close() {
     gnssStatus_ = {};
     gnssSensorsDiscovered_ = false;
     gnssGgaSensor_ = gnssRmcSensor_ = gnssGsvSensor_ = nullptr;
+    gnssUbxSensor_ = nullptr;
     lastClockStatus_ = {};
     tuneCutoffPending_ = false;
     Api &a = api();

@@ -7,6 +7,8 @@
 #include <QQueue>
 #include <QTimer>
 
+bool validateKissTxFrame(const KissFrame &frame, QString *error);
+
 class KissVirtualTx final : public QObject {
     Q_OBJECT
 public:

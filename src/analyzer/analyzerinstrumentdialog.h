@@ -2,6 +2,7 @@
 #define ANALYZERINSTRUMENTDIALOG_H
 
 #include "analyzerinstrumentplan.h"
+#include "analyzerinstrumentscpi.h"
 #include "analyzerinstrumentsimulation.h"
 
 #include <QDateTime>
@@ -16,6 +17,7 @@ class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
 class QSpinBox;
+class QTabWidget;
 class AnalyzerSimulationTable;
 
 class AnalyzerInstrumentDialog final : public QDialog {
@@ -32,6 +34,8 @@ private:
     void savePlan();
     void saveSessionTemplate();
     void startSimulation();
+    void startScpi();
+    void beginSweep(const AnalyzerInstrumentPlan &, const QString &backend, bool useScpi);
     void finishSimulation(const QString &error);
     void saveSimulation();
     void saveSession(const AnalyzerMeasurementSession &session, const QString &title,
@@ -96,10 +100,15 @@ private:
     QDateTime calibrationCapturedUtc;
     AnalyzerMeasurementSession simulatedSession;
     AnalyzerInstrumentSimulation simulation;
+    AnalyzerInstrumentScpi scpi;
+    bool measuringScpi = false;
+    QTabWidget *tabs = nullptr;
+    QWidget *resultsPage = nullptr;
     AnalyzerSimulationTable *simulationTable = nullptr;
     QLabel *simulationStatus = nullptr;
     QProgressBar *simulationProgress = nullptr;
     QPushButton *startSimulationButton = nullptr;
+    QPushButton *executeButton = nullptr;
     QPushButton *stopSimulationButton = nullptr;
     QPushButton *saveSimulationButton = nullptr;
 };

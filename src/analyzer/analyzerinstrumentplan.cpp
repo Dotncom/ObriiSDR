@@ -159,15 +159,20 @@ QString AnalyzerPlanValidation::summary() const {
 }
 
 QJsonObject AnalyzerMeasurementPoint::toJson() const {
-    return {{QStringLiteral("frequencyHz"), frequencyHz},
+    QJsonObject json{{QStringLiteral("frequencyHz"), frequencyHz},
             {QStringLiteral("stimulusDbm"), stimulusDbm},
-            {QStringLiteral("referenceDb"), referenceDb},
             {QStringLiteral("forwardDb"), forwardDb},
-            {QStringLiteral("reflectedDb"), reflectedDb},
-            {QStringLiteral("phaseDegrees"), phaseDegrees},
-            {QStringLiteral("s11Magnitude"), s11Magnitude},
-            {QStringLiteral("s21Magnitude"), s21Magnitude},
             {QStringLiteral("valid"), valid}};
+    if (forwardOnly) {
+        json.insert(QStringLiteral("forwardOnly"), true);
+    } else {
+        json.insert(QStringLiteral("referenceDb"), referenceDb);
+        json.insert(QStringLiteral("reflectedDb"), reflectedDb);
+        json.insert(QStringLiteral("phaseDegrees"), phaseDegrees);
+        json.insert(QStringLiteral("s11Magnitude"), s11Magnitude);
+        json.insert(QStringLiteral("s21Magnitude"), s21Magnitude);
+    }
+    return json;
 }
 
 AnalyzerMeasurementPoint AnalyzerMeasurementPoint::fromJson(const QJsonObject &object) {
@@ -181,6 +186,7 @@ AnalyzerMeasurementPoint AnalyzerMeasurementPoint::fromJson(const QJsonObject &o
     value.s11Magnitude = finiteOr(object, "s11Magnitude", 0.0);
     value.s21Magnitude = finiteOr(object, "s21Magnitude", 0.0);
     value.valid = object.value(QStringLiteral("valid")).toBool();
+    value.forwardOnly = object.value(QStringLiteral("forwardOnly")).toBool();
     return value;
 }
 
