@@ -22,6 +22,7 @@
 #include <QHash>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocale>
@@ -104,6 +105,7 @@ AnalyzerMainWindow::AnalyzerMainWindow(bool connectOnStart, QWidget *parent)
             sweepUsesNativeAgileScan = false;
             sweepSegmentFrameCounts.clear();
             sweepButton->setText(uiText(QStringLiteral("Start wide sweep")));
+            setCenterFrequencyHz(sweepOriginalCenterHz);
         }
         receiverStartButton->setText(running ? uiText(QStringLiteral("Stop receiver"))
                                              : uiText(QStringLiteral("Start receiver")));
@@ -187,6 +189,11 @@ QString AnalyzerMainWindow::uiText(const QString &english) const {
         {QStringLiteral("Discard edges:"), QStringLiteral("Відкинути краї:")},
         {QStringLiteral("Frames / segment:"), QStringLiteral("Кадрів / сегмент:")},
         {QStringLiteral("Fobos sweep mode:"), QStringLiteral("Режим сканування Fobos:")},
+        {QStringLiteral("UHD gain:"), QStringLiteral("Підсилення UHD:")},
+        {QStringLiteral("Antenna:"), QStringLiteral("Антена:")},
+        {QStringLiteral("FPGA image:"), QStringLiteral("Образ FPGA:")},
+        {QStringLiteral("Choose FPGA image"), QStringLiteral("Вибрати образ FPGA")},
+        {QStringLiteral("Receiver rejected the next sweep frequency"), QStringLiteral("Приймач відхилив наступну частоту сканування")},
         {QStringLiteral("Auto"), QStringLiteral("Авто")},
         {QStringLiteral("Agile native scan"), QStringLiteral("Нативне сканування Agile")},
         {QStringLiteral("Normal retune scan"), QStringLiteral("Звичайне сканування переналаштуванням")},
@@ -433,8 +440,10 @@ void AnalyzerMainWindow::buildUi() {
     auto *receiverBox = new QGroupBox(controls);
     auto *receiverLayout = new QGridLayout(receiverBox);
     receiverCombo = new QComboBox(receiverBox);
+    receiverCombo->setObjectName(QStringLiteral("analyzerReceiver"));
     receiverRefreshButton = new QPushButton(QStringLiteral("Refresh"), receiverBox);
     receiverStartButton = new QPushButton(QStringLiteral("Start receiver"), receiverBox);
+    receiverStartButton->setObjectName(QStringLiteral("analyzerStartReceiver"));
     automaticAttachCheck = new QCheckBox(QStringLiteral("Prefer running Obrii SDR"), receiverBox);
     automaticAttachCheck->setChecked(saved.value(QStringLiteral("source/autoAttach"), true).toBool());
     centerUnitCombo = new QComboBox(receiverBox);
@@ -446,12 +455,14 @@ void AnalyzerMainWindow::buildUi() {
     centerUnitCombo->setCurrentIndex(savedCenterUnitIndex >= 0 ? savedCenterUnitIndex : 1);
     centerUnitFactor = centerUnitCombo->currentData().toDouble();
     centerSpin = new QDoubleSpinBox(receiverBox);
+    centerSpin->setObjectName(QStringLiteral("analyzerCenter"));
     const double savedCenterHz = saved.value(
         QStringLiteral("receiver/centerHz"),
         saved.value(QStringLiteral("receiver/centerMHz"), 100.0).toDouble() * 1.0e6).toDouble();
     updateCenterFrequencyUnit();
     setCenterFrequencyHz(savedCenterHz);
     sampleRateCombo = new QComboBox(receiverBox);
+    sampleRateCombo->setObjectName(QStringLiteral("analyzerSampleRate"));
     sampleRateCombo->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     receiverFftCombo = new QComboBox(receiverBox);
     for (int length : {512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
@@ -522,12 +533,47 @@ void AnalyzerMainWindow::buildUi() {
     receiverLayout->addWidget(displayReductionInfoLabel, 8, 0, 1, 3);
     receiverLayout->addWidget(new QLabel(QStringLiteral("Input:"), receiverBox), 9, 0);
     receiverLayout->addWidget(receiverInputCombo, 9, 1, 1, 2);
-    receiverLayout->addWidget(new QLabel(QStringLiteral("LNA / VGA:"), receiverBox), 10, 0);
+    receiverLegacyGainLabel = new QLabel(QStringLiteral("LNA / VGA:"), receiverBox);
+    receiverLayout->addWidget(receiverLegacyGainLabel, 10, 0);
     receiverLayout->addWidget(receiverLnaSpin, 10, 1);
     receiverLayout->addWidget(receiverVgaSpin, 10, 2);
-    receiverLayout->addWidget(receiverCapabilityLabel, 11, 0, 1, 3);
-    receiverLayout->addWidget(receiverStartButton, 12, 0, 1, 3);
-    receiverLayout->addWidget(automaticAttachCheck, 13, 0, 1, 3);
+    uhdSettingsPanel = new QWidget(receiverBox);
+    auto *uhdForm = new QFormLayout(uhdSettingsPanel);
+    uhdForm->setContentsMargins(0, 0, 0, 0);
+    uhdGainSpin = new QDoubleSpinBox(uhdSettingsPanel);
+    uhdGainSpin->setObjectName(QStringLiteral("analyzerUhdGain"));
+    uhdGainSpin->setRange(0.0, 100.0);
+    uhdGainSpin->setSuffix(QStringLiteral(" dB"));
+    uhdGainSpin->setValue(saved.value(QStringLiteral("receiver/uhdGainDb"), 30.0).toDouble());
+    uhdAntennaCombo = new QComboBox(uhdSettingsPanel);
+    uhdAntennaCombo->setObjectName(QStringLiteral("analyzerUhdAntenna"));
+    uhdAntennaCombo->setEditable(true);
+    uhdAntennaCombo->addItems({QString(), QStringLiteral("RX2"), QStringLiteral("TX/RX")});
+    uhdAntennaCombo->setCurrentText(saved.value(QStringLiteral("receiver/uhdAntenna")).toString());
+    auto *imageRow = new QWidget(uhdSettingsPanel);
+    auto *imageLayout = new QHBoxLayout(imageRow);
+    imageLayout->setContentsMargins(0, 0, 0, 0);
+    QSettings mainSettings(QDir(QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation))
+                               .filePath(QStringLiteral("ObriiSDR/ObriiSDR.ini")), QSettings::IniFormat);
+    uhdImageEdit = new QLineEdit(saved.value(QStringLiteral("receiver/uhdFpgaImage"),
+        mainSettings.value(QStringLiteral("receiver/uhdFpgaImagePath"))).toString(), imageRow);
+    uhdImageEdit->setObjectName(QStringLiteral("analyzerUhdImage"));
+    auto *browseImage = new QPushButton(QStringLiteral("…"), imageRow);
+    browseImage->setToolTip(QStringLiteral("Choose FPGA image"));
+    imageLayout->addWidget(uhdImageEdit, 1);
+    imageLayout->addWidget(browseImage);
+    connect(browseImage, &QPushButton::clicked, this, [this]() {
+        const QString path = QFileDialog::getOpenFileName(this, uiText(QStringLiteral("Choose FPGA image")),
+            uhdImageEdit->text(), QStringLiteral("FPGA (*.bin *.bit);;All files (*)"));
+        if (!path.isEmpty()) uhdImageEdit->setText(path);
+    });
+    uhdForm->addRow(QStringLiteral("UHD gain:"), uhdGainSpin);
+    uhdForm->addRow(QStringLiteral("Antenna:"), uhdAntennaCombo);
+    uhdForm->addRow(QStringLiteral("FPGA image:"), imageRow);
+    receiverLayout->addWidget(uhdSettingsPanel, 11, 0, 1, 3);
+    receiverLayout->addWidget(receiverCapabilityLabel, 12, 0, 1, 3);
+    receiverLayout->addWidget(receiverStartButton, 13, 0, 1, 3);
+    receiverLayout->addWidget(automaticAttachCheck, 14, 0, 1, 3);
     controlsLayout->addWidget(receiverToggle);
     controlsLayout->addWidget(receiverBox);
     receiverBox->setVisible(receiverToggle->isChecked());
@@ -601,6 +647,8 @@ void AnalyzerMainWindow::buildUi() {
     cycleSpin->setSuffix(QStringLiteral(" x"));
     sweepStartSpin = new QDoubleSpinBox(bandwidthBox);
     sweepStopSpin = new QDoubleSpinBox(bandwidthBox);
+    sweepStartSpin->setObjectName(QStringLiteral("analyzerSweepStart"));
+    sweepStopSpin->setObjectName(QStringLiteral("analyzerSweepStop"));
     for (QDoubleSpinBox *spin : {sweepStartSpin, sweepStopSpin}) {
         spin->setDecimals(6);
         spin->setRange(0.0, 100000.0);
@@ -636,6 +684,7 @@ void AnalyzerMainWindow::buildUi() {
     sweepContinuousCheck = new QCheckBox(QStringLiteral("Continuous / live sweep"), bandwidthBox);
     sweepContinuousCheck->setChecked(saved.value(QStringLiteral("sweep/continuous"), false).toBool());
     sweepButton = new QPushButton(QStringLiteral("Start wide sweep"), bandwidthBox);
+    sweepButton->setObjectName(QStringLiteral("analyzerWideSweep"));
     bandwidthForm->addRow(QStringLiteral("RBW/bin:"), rbwLabel);
     bandwidthForm->addRow(QStringLiteral("VBW:"), vbwSpin);
     bandwidthForm->addRow(QStringLiteral("Replay speed:"), cycleSpin);
@@ -835,7 +884,7 @@ void AnalyzerMainWindow::buildUi() {
             this, [this](int) {
         populateReceiverInputs();
         populateSampleRates();
-        updateReceiverControlRanges();
+        updateSourceControls();
     });
     connect(sampleRateCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int) { updateResolutionControls(); scheduleStandaloneReceiverRestart(); });
@@ -992,13 +1041,17 @@ void AnalyzerMainWindow::buildUi() {
             this, [this]() {
         const QString wantedBackend = receiverCombo->currentData(Qt::UserRole).toString();
         const int wantedIndex = receiverCombo->currentData(Qt::UserRole + 1).toInt();
+        const QString wantedAddress = receiverCombo->currentData(Qt::UserRole + 2).toString();
         receiverDevices = receiverScanWatcher->result();
+        const QSignalBlocker blocker(receiverCombo);
         receiverCombo->clear();
         int selected = -1;
         for (const AnalyzerReceiverDevice &item : receiverDevices) {
             receiverCombo->addItem(item.label, item.backendId);
             receiverCombo->setItemData(receiverCombo->count() - 1, item.nativeIndex, Qt::UserRole + 1);
-            if (item.backendId == wantedBackend && item.nativeIndex == wantedIndex)
+            receiverCombo->setItemData(receiverCombo->count() - 1, item.uhdDeviceAddress, Qt::UserRole + 2);
+            if (item.backendId == wantedBackend &&
+                (wantedAddress.isEmpty() ? item.nativeIndex == wantedIndex : item.uhdDeviceAddress == wantedAddress))
                 selected = receiverCombo->count() - 1;
         }
         if (receiverCombo->count() == 0)
@@ -1161,7 +1214,15 @@ bool AnalyzerMainWindow::consumeWideSweepFrame(const AnalyzerSpectrumFrame &fram
         if (!passComplete) {
             sweepSettleFrames = 2;
             const double nextCenter = plan.segments[sweepSegmentIndex].centerHz;
-            standaloneReceiver.retune(nextCenter);
+            if (!standaloneReceiver.retune(nextCenter)) {
+                sweepActive = false;
+                standaloneReceiver.stop();
+                setCenterFrequencyHz(sweepOriginalCenterHz);
+                sweepButton->setText(uiText(QStringLiteral("Start wide sweep")));
+                setStatus(uiText(QStringLiteral("Receiver rejected the next sweep frequency")), QColor(235, 104, 91));
+                updateSourceControls();
+                return true;
+            }
             setCenterFrequencyHz(nextCenter);
             setStatus(uiText(QStringLiteral("%1: segment %2 / %3"))
                           .arg(sweepContinuousCheck->isChecked() ? uiText(QStringLiteral("Live sweep"))
@@ -1230,6 +1291,7 @@ bool AnalyzerMainWindow::consumeWideSweepFrame(const AnalyzerSpectrumFrame &fram
     sweepUsesNativeAgileScan = false;
     sweepButton->setText(uiText(QStringLiteral("Start wide sweep")));
     standaloneReceiver.stop();
+    setCenterFrequencyHz(sweepOriginalCenterHz);
     sourceFrequencies = result.frequenciesHz;
     sourceLevels = result.levelsDb;
     currentFftLength = static_cast<int>(result.levelsDb.size());
@@ -1454,13 +1516,20 @@ void AnalyzerMainWindow::refreshReceivers() {
     const int wantedIndex = receiverCombo->currentData(Qt::UserRole + 1).isValid()
                                 ? receiverCombo->currentData(Qt::UserRole + 1).toInt()
                                 : saved.value(QStringLiteral("receiver/nativeIndex"), 0).toInt();
+    const QString wantedAddress = receiverCombo->currentIndex() >= 0
+        ? receiverCombo->currentData(Qt::UserRole + 2).toString()
+        : saved.value(QStringLiteral("receiver/uhdAddress")).toString();
+    const QSignalBlocker blocker(receiverCombo);
     receiverCombo->clear();
     receiverCombo->addItem(uiText(QStringLiteral("Scanning receivers...")), wantedBackend);
     receiverCombo->setItemData(0, wantedIndex, Qt::UserRole + 1);
+    receiverCombo->setItemData(0, wantedAddress, Qt::UserRole + 2);
+    receiverStartButton->setEnabled(false);
+    sweepButton->setEnabled(false);
     receiverRefreshButton->setText(uiText(QStringLiteral("Scanning...")));
     receiverRefreshButton->setEnabled(false);
     receiverScanWatcher->setFuture(QtConcurrent::run([] {
-        return AnalyzerReceiver::enumerateDevices();
+        return AnalyzerReceiver::enumerateDevices(true);
     }));
 }
 
@@ -1504,7 +1573,13 @@ AnalyzerReceiverSettings AnalyzerMainWindow::currentReceiverSettings(double cent
     settings.fftLength = selectedFftLength();
     settings.displayReductionRatio = selectedDisplayReductionRatio();
     settings.displayReductionMode = displayReductionMethodCombo->currentData().toInt();
-    if (settings.backendId == QStringLiteral("soapy-sdr")) {
+    if (settings.backendId == QStringLiteral("uhd-native")) {
+        settings.rxChannel = receiverInputCombo->currentData().toInt();
+        settings.uhdDeviceAddress = receiverCombo->currentData(Qt::UserRole + 2).toString();
+        settings.uhdRxGainDb = uhdGainSpin->value();
+        settings.uhdRxAntenna = uhdAntennaCombo->currentText().trimmed();
+        settings.uhdFpgaImagePath = uhdImageEdit->text().trimmed();
+    } else if (settings.backendId == QStringLiteral("soapy-sdr")) {
         settings.rxChannel = std::max(0, receiverInputCombo->currentData().toInt());
         settings.directChannel = 0;
         settings.directSampling = false;
@@ -1697,8 +1772,15 @@ void AnalyzerMainWindow::updateReceiverControlRanges() {
     const bool fobos = backend.startsWith(QStringLiteral("fobos-"));
     const bool hackRf = backend == QStringLiteral("hackrf");
     const bool soapy = backend == QStringLiteral("soapy-sdr");
+    const bool uhd = backend == QStringLiteral("uhd-native");
     const bool gainsAvailable = fobos || hackRf || soapy;
-    receiverInputCombo->setEnabled((fobos || soapy) && !sweepActive && !liveClient.isConnected());
+    receiverInputCombo->setEnabled((fobos || soapy || uhd) && !sweepActive && !liveClient.isConnected() &&
+                                  (!uhd || !standaloneReceiver.isRunning()));
+    uhdSettingsPanel->setVisible(uhd);
+    uhdSettingsPanel->setEnabled(!sweepActive && !standaloneReceiver.isRunning() && !liveClient.isConnected());
+    receiverLegacyGainLabel->setVisible(!uhd);
+    receiverLnaSpin->setVisible(!uhd);
+    receiverVgaSpin->setVisible(!uhd);
     receiverLnaSpin->setEnabled(gainsAvailable && !liveClient.isConnected());
     receiverVgaSpin->setEnabled((fobos || hackRf) && !liveClient.isConnected());
     if (fobos) {
@@ -1764,6 +1846,10 @@ void AnalyzerMainWindow::populateReceiverInputs() {
         receiverInputCombo->addItem(uiText(QStringLiteral("RF / tuner")), 0);
         receiverInputCombo->addItem(QStringLiteral("HF1 direct"), 1);
         receiverInputCombo->addItem(QStringLiteral("HF2 direct"), 2);
+    } else if (backend == QStringLiteral("uhd-native")) {
+        if (wanted < 0) wanted = saved.value(QStringLiteral("receiver/uhdRxChannel"), 0).toInt();
+        receiverInputCombo->addItem(uiText(QStringLiteral("RX channel %1")).arg(0), 0);
+        receiverInputCombo->addItem(uiText(QStringLiteral("RX channel %1")).arg(1), 1);
     } else if (backend == QStringLiteral("soapy-sdr")) {
         if (wanted < 0)
             wanted = saved.value(QStringLiteral("receiver/soapyRxChannel"), 0).toInt();
@@ -1806,6 +1892,9 @@ void AnalyzerMainWindow::populateSampleRates() {
         rates = {2.0e6, 4.0e6, 8.0e6, 10.0e6, 12.5e6, 16.0e6, 20.0e6};
     } else if (backend == QStringLiteral("rtl-sdr")) {
         rates = {1.024e6, 1.536e6, 2.048e6, 2.4e6, 2.56e6, 3.2e6};
+    } else if (backend == QStringLiteral("uhd-native")) {
+        rates = {1.0e6, 2.0e6, 4.0e6, 8.0e6, 10.0e6, 12.5e6, 15.36e6, 16.0e6,
+                 20.0e6, 25.0e6, 30.72e6, 32.0e6, 40.0e6, 50.0e6, 56.0e6, 61.44e6};
     } else {
         rates = {8.0e6, 10.0e6, 12.5e6, 16.0e6, 20.0e6,
                  25.0e6, 32.0e6, 40.0e6, 50.0e6, 80.0e6};
@@ -2044,7 +2133,14 @@ void AnalyzerMainWindow::saveSettings() {
     saved.setValue(QStringLiteral("receiver/hzPerBin"), hzPerBinSpin->value());
     saved.setValue(QStringLiteral("receiver/displayReductionRatio"), selectedDisplayReductionRatio());
     saved.setValue(QStringLiteral("receiver/displayReductionMethod"), displayReductionMethodCombo->currentData());
-    if (receiverCombo->currentData(Qt::UserRole).toString() == QStringLiteral("soapy-sdr"))
+    const QString backend = receiverCombo->currentData(Qt::UserRole).toString();
+    if (backend == QStringLiteral("uhd-native")) {
+        saved.setValue(QStringLiteral("receiver/uhdAddress"), receiverCombo->currentData(Qt::UserRole + 2));
+        saved.setValue(QStringLiteral("receiver/uhdRxChannel"), receiverInputCombo->currentData());
+        saved.setValue(QStringLiteral("receiver/uhdGainDb"), uhdGainSpin->value());
+        saved.setValue(QStringLiteral("receiver/uhdAntenna"), uhdAntennaCombo->currentText().trimmed());
+        saved.setValue(QStringLiteral("receiver/uhdFpgaImage"), uhdImageEdit->text().trimmed());
+    } else if (backend == QStringLiteral("soapy-sdr"))
         saved.setValue(QStringLiteral("receiver/soapyRxChannel"), receiverInputCombo->currentData());
     else
         saved.setValue(QStringLiteral("receiver/directChannel"), receiverInputCombo->currentData());

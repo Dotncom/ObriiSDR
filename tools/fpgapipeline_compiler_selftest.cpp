@@ -13,6 +13,11 @@ int main(int argc, char **argv) {
     QString error;
     const auto emptyRtl = FpgaPipelineCompiler::generateVerilog(stages, 1000000.0, 2000000.0, &error);
     if (!emptyRtl.contains("assign out_i = in_i;") || emptyRtl.contains("obrii_iq_avg_decimator #")) return 2;
+    FpgaPipelineStage identity;
+    identity.type = QStringLiteral("passthrough");
+    const auto identityCheck = FpgaPipelineCompiler::analyze({identity}, 30720000.0, 30720000.0);
+    if (!identityCheck.canGenerateRtl() || identityCheck.outputRateHz != 30720000.0 ||
+        FpgaPipelineCompiler::generateVerilog({identity}, 30720000.0, 30720000.0, &error) != emptyRtl) return 25;
 
     FpgaPipelineStage decimator;
     decimator.type = QStringLiteral("decimator");

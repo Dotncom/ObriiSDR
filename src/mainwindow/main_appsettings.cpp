@@ -2,6 +2,8 @@
 #include "core/fobosifselection.h"
 #include "core/fobosruntimeif.h"
 #include <QStandardItemModel>
+#include <QStyle>
+#include <QStyleFactory>
 #include <QTableWidget>
 #include <QHeaderView>
 #include "multivfowidget.h"
@@ -304,6 +306,34 @@ void YourClassName::openApplicationSettings() {
     if (languageCombo->currentIndex() < 0) {
         languageCombo->setCurrentIndex(0);
     }
+    const QString defaultStyle = qApp->property("obriiDefaultStyle").toString();
+    auto *styleCombo = new QComboBox(&dialog);
+    styleCombo->setObjectName(QStringLiteral("applicationStyleCombo"));
+    styleCombo->addItem(uiText("ui_style_default", "Default (%1)").arg(defaultStyle), QString());
+    QStringList styles = QStyleFactory::keys();
+    styles.sort(Qt::CaseInsensitive);
+    const QString savedStyle = QSettings(persistentSettingsFilePath(), QSettings::IniFormat)
+                                   .value(QStringLiteral("ui/style")).toString();
+    for (const QString &style : styles) {
+        styleCombo->addItem(style, style);
+        if (savedStyle.compare(style, Qt::CaseInsensitive) == 0)
+            styleCombo->setCurrentIndex(styleCombo->count() - 1);
+    }
+    connect(styleCombo, QOverload<int>::of(&QComboBox::activated), &dialog,
+            [this, styleCombo, defaultStyle](int) {
+        const QString chosen = styleCombo->currentData().toString();
+        const QString key = chosen.isEmpty() ? defaultStyle : chosen;
+        if (QApplication::style()->objectName().compare(key, Qt::CaseInsensitive) != 0 &&
+            !QApplication::setStyle(key)) {
+            QMessageBox::warning(styleCombo, uiText("ui_style", "Interface style"),
+                uiText("ui_style_unavailable", "Qt could not load the selected style."));
+            const QString current = QApplication::style()->objectName();
+            const int index = styleCombo->findText(current, Qt::MatchFixedString);
+            styleCombo->setCurrentIndex(current.compare(defaultStyle, Qt::CaseInsensitive) == 0 ? 0 : index);
+            return;
+        }
+        QSettings(persistentSettingsFilePath(), QSettings::IniFormat).setValue(QStringLiteral("ui/style"), chosen);
+    });
 
     QComboBox *fineTuneModeCombo = new QComboBox(&dialog);
     fineTuneModeCombo->addItem(uiText(QStringLiteral("fine_tune_scale"), QStringLiteral("Horizontal scale (mouse wheel)")),
@@ -406,6 +436,7 @@ void YourClassName::openApplicationSettings() {
         QStringLiteral("Show Standard and Agile Fobos API versions and the currently detected receiver list.")));
 
     generalLayout->addRow(uiText(QStringLiteral("language"), QStringLiteral("Lang:")), languageCombo);
+    generalLayout->addRow(uiText("ui_style", "Interface style"), styleCombo);
     generalLayout->addRow(uiText(QStringLiteral("fine_tune"), QStringLiteral("Fine tune")), fineTuneModeCombo);
     generalLayout->addRow(uiText(QStringLiteral("scan_measurement_update_interval"), QStringLiteral("Measurement accumulation")), scanMeasurementUpdateSpin);
     generalLayout->addRow(retuneHeader);

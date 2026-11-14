@@ -226,14 +226,16 @@ int main(int argc, char **argv) {
         const QJsonValue delay = link.value(QStringLiteral("delayMs"));
         const QJsonValue gain = link.value(QStringLiteral("gainDb"));
         const QJsonValue frequencyOffset = link.value(QStringLiteral("frequencyOffsetHz"));
+        const QJsonValue clockPpm = link.value(QStringLiteral("clockPpm"));
         if ((!legacySourceId(source) && !virtualSignalValidNodeId(source)) ||
             !hub.subscriberIds().contains(target) || seenLinks.contains(pair) ||
             (!enabled.isUndefined() && !enabled.isBool()) ||
             (!delay.isUndefined() && (!delay.isDouble() || delay.toDouble() != delay.toInt(-1))) ||
             (!gain.isUndefined() && !gain.isDouble()) ||
             (!frequencyOffset.isUndefined() && !frequencyOffset.isDouble()) ||
-            (!mixing && frequencyOffset.toDouble() != 0.0)) {
-            std::fprintf(stderr, "Invalid or duplicate IQ hub link (frequencyOffsetHz requires mix mode)\n");
+            (!clockPpm.isUndefined() && !clockPpm.isDouble()) ||
+            (!mixing && (frequencyOffset.toDouble() != 0.0 || clockPpm.toDouble() != 0.0))) {
+            std::fprintf(stderr, "Invalid or duplicate IQ hub link (frequencyOffsetHz and clockPpm require mix mode)\n");
             return 2;
         }
         VirtualIqLinkSettings linkSettings;
@@ -242,9 +244,10 @@ int main(int argc, char **argv) {
         linkSettings.gainDb = static_cast<float>(gain.toDouble(0.0));
         auto mixedLink = linkSettings;
         mixedLink.frequencyOffsetHz = frequencyOffset.toDouble();
+        mixedLink.clockPpm = clockPpm.toDouble();
         if (!hub.canSetLink(source, target, linkSettings) ||
             (mixing && !medium.canSetLink(source, target, mixedLink))) {
-            std::fprintf(stderr, "IQ hub link exceeds delay, gain or mix frequency limits\n");
+            std::fprintf(stderr, "IQ hub link exceeds delay, gain, mix frequency or clock limits\n");
             return 2;
         }
         hub.setLink(source, target, linkSettings);

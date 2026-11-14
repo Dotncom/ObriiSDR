@@ -1,5 +1,13 @@
 # Changelog
 
+## 9.0.4 - 2026-11-14
+
+- Create, edit and build B210 openXC7 source projects in FPGA Lab. Compare the resulting image with the stock image on a local or remote B210.
+- Add native UHD reception and wide sweeps to Obrii Analyzer.
+- Add streaming clock offsets in ppm for virtual IQ links in Mesh Designer.
+- Group receiver utilities under Tools and make the command console accessible there.
+- Add seven interface styles and include FPGA Lab in both Windows packages.
+
 ## 9.0.3 Preview - 2026-11-13
 
 - Transmit clear Codec2 3200 M17 voice from WAV, a live microphone or a push-to-talk microphone. The CLI sends M17 voice from WAV and continues to support M17 SMS.

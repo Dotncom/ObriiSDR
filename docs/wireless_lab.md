@@ -2,7 +2,7 @@
 
 ## Available Now
 
-Open **Spectrum measurements > Wireless lab (beta)**, or add the **Wireless lab**
+Open **Tools → Wireless lab (beta)**, or add the **Wireless lab**
 block to the DSP board. This is a separate, resizable window, not a new decoder
 inside the receiver callback.
 

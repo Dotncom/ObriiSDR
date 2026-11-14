@@ -7,7 +7,7 @@ call to the receiver path.
 
 ## Starting it
 
-- Open **Spectrum measurement -> Obrii Analyzer** in Obrii SDR to launch the
+- Open **Tools → Obrii Analyzer** in Obrii SDR to launch the
   analyzer with `--connect`. The main application keeps ownership of the SDR;
   the analyzer receives a bounded local spectrum stream.
 - Run `ObriiAnalyzer` directly to inspect an Obrii spectrum-frame recording.
@@ -17,10 +17,14 @@ call to the receiver path.
 - The analyzer follows the English/Ukrainian interface language selected in
   Obrii SDR's general settings, including controls, sweep states, measurement
   summaries and file dialogs.
-- Without Obrii SDR, select a detected Fobos Standard/Agile, HackRF or native
-  RTL-SDR device, set center frequency, sample rate, FFT and gains, then press
+- Without Obrii SDR, select a detected Fobos Standard/Agile, HackRF, RTL-SDR
+  or **USRP UHD native** device. Set center frequency, sample rate, FFT and gain, then press
   **Start receiver**. This is a deliberately small spectrum-only acquisition
   path and does not start Obrii SDR's audio, decoder or workspace subsystems.
+- With **USRP UHD native**, choose the RX channel, gain in dB and antenna before
+  starting. Set **FPGA image** to the compatible image if required by your board.
+  The wide sweep uses successive UHD retunes on that same channel. For UHD and
+  image setup, see [USRP B210 setup](usrp_b210_setup.md).
 - Center frequency can be entered in GHz, MHz or kHz without changing its
   physical value. While the standalone receiver is active, center and gains
   apply live; sample rate, FFT/Hz-per-bin, input and display-reduction changes
@@ -40,7 +44,7 @@ call to the receiver path.
 ## Multi-SDR mosaic
 
 - The main Obrii SDR window exposes the same **Multi-SDR...** tool under
-  Spectrum measurement. RX 1 is then the already running main receiver, so its
+  **Receiver**. RX 1 is then the already running main receiver, so its
   proven audio, decoders and IQ path remain untouched; RX 2 and later slots are
   independent spectrum sessions. **Add receiver** creates slots up to RX 8 and
   **Remove last** releases them. The standalone Analyzer can instead own every
@@ -186,8 +190,5 @@ The saved JSON contains complex `s11`, `returnLossDb` and `swr` per point. A
 non-finite metric is `null`. The operation uses the supplied measurements and
 does not start RF or capture calibration data.
 
-The current Windows bundle contains UHD command-line/runtime components used by
-the wireless toolchain, but not a SoapyUHD device module. A future USRP can be
-used through this acquisition path once a matching SoapyUHD module is deployed;
-native UHD transport is tracked separately in `usrp_b210_setup.md` so the
-analyzer does not silently depend on Wi-Fi tooling.
+The native USRP entry uses a compatible UHD runtime. A SoapySDR installation
+with a matching SoapyUHD module can also list the device through SoapySDR.

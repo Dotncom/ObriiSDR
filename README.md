@@ -13,6 +13,9 @@ level encoding, and fixes for Raspberry Pi display and remote zoom.
 See `docs/release_notes_9.0.2.md` for the update and its test coverage.
 The 9.0.3 preview adds M17 microphone and push-to-talk transmission,
 Mesh collision simulation, and combined GNSS satellite display.
+Version 9.0.4 adds editable B210 projects in FPGA Lab, native UHD in
+Obrii Analyzer, streaming clock offsets in Mesh Designer, and seven Windows
+interface styles in both Full and Lite.
 Download the Windows x64 package or the Raspberry Pi ARM64 package and
 follow [the installation guide](docs/install.md).
 
@@ -66,8 +69,9 @@ an installed Vivado for a project build without stopping Obrii SDR. It can
 generate standalone RTL experiment blocks, but does not automatically integrate
 them into the vendor image or modify the running receiver. An openXC7 tab now
 checks project portability and can run the open-source toolchain through
-Linux/WSL for standalone RTL modules or compatible pure-Verilog designs; the
-clone's full image still has vendor IP and netlist blockers. See `docs/fpga_lab.md`.
+Linux/WSL for standalone RTL modules or compatible pure-Verilog designs.
+The B210 tab can edit and build the single- and dual-RX openXC7 projects and
+compare RX on a local or remote B210. See `docs/fpga_lab.md`.
 The main application also has an opt-in Multi-SDR spectrum workspace: its
 existing receiver remains RX 1 and up to seven additional native receiver
 sessions can be placed on one stitched frequency axis. Architecture, coherence

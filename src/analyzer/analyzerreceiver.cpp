@@ -247,7 +247,7 @@ struct AnalyzerReceiver::Impl {
         QString message;
         if (!session.open(settings.uhdDeviceAddress, settings.rxChannel,
                           settings.sampleRateHz, settings.centerHz, settings.uhdRxGainDb,
-                          settings.uhdRxAntenna, QString(), &message)) {
+                          settings.uhdRxAntenna, settings.uhdFpgaImagePath, &message)) {
             reportError(message);
             return;
         }
@@ -264,6 +264,7 @@ struct AnalyzerReceiver::Impl {
                     availableFloats = 0;
                 } else {
                     reportError(message);
+                    break;
                 }
             }
             message.clear();
@@ -400,6 +401,7 @@ struct AnalyzerReceiver::Impl {
     void runFft() {
         ComputeBudgetManager::instance().applyCurrentThreadRole(
             ComputeThreadRole::AuxiliaryFft, settings.computeSourceOrdinal);
+        const auto epoch = streamEpoch;
         const int length = settings.fftLength;
         auto *input = reinterpret_cast<fftwf_complex *>(fftwf_malloc(sizeof(fftwf_complex) * length));
         auto *output = reinterpret_cast<fftwf_complex *>(fftwf_malloc(sizeof(fftwf_complex) * length));
@@ -575,8 +577,9 @@ struct AnalyzerReceiver::Impl {
                                                         std::memory_order_acquire)) {
             }
             if (pending < pendingLimit) {
-                QMetaObject::invokeMethod(owner, [this, frame = std::move(frame)]() {
-                    emit owner->frameReady(frame);
+                QMetaObject::invokeMethod(owner, [this, epoch, frame = std::move(frame)]() {
+                    if (running.load(std::memory_order_acquire) && epoch == streamEpoch)
+                        emit owner->frameReady(frame);
                     pendingFrames.fetch_sub(1, std::memory_order_acq_rel);
                 }, Qt::QueuedConnection);
             }
@@ -791,7 +794,7 @@ QVector<AnalyzerReceiverDevice> AnalyzerReceiver::enumerateDevices(bool includeN
             device.backendId = QStringLiteral("uhd-native");
             device.nativeIndex = index;
             device.uhdDeviceAddress = address;
-            device.label = QStringLiteral("USRP UHD #%1").arg(index);
+            device.label = QStringLiteral("USRP UHD native #%1").arg(index);
             for (const QString &part : address.split(QLatin1Char(','))) {
                 const QString field = part.trimmed();
                 if (field.startsWith(QStringLiteral("serial="))) {

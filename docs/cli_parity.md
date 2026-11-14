@@ -1,22 +1,22 @@
 # CLI Function Coverage
 
-This is a capability reference, not a promise of complete GUI equivalence.
 `ObriiCli capabilities` discovers the current build without opening hardware.
 
 | Area | Console surface | Boundary |
 | --- | --- | --- |
-| RX/audio | Native Fobos, HackRF, RTL, Soapy, UHD, rtl_tcp, recorded and virtual IQ; analog demodulation, filters, WAV/PCM | Backend-specific GPIO/clock/Opera Cake controls are not all exposed |
+| RX/audio | Native Fobos, HackRF, RTL, Soapy, UHD, rtl_tcp, recorded and virtual IQ, analog demodulation, filters, WAV/PCM | The CLI selects simplified audio channelization. GUI SAM/DSB reception and some backend-specific GPIO, clock and Opera Cake controls have no CLI equivalent. |
 | Network | GUI-compatible server/client, three processing modes, optional browser VFOs, standalone compute service | Trusted-network service; browser VFOs do not own physical tuning |
-| Virtual RF | Local/TCP source and sink, standalone packet or sample-mixing hub | No mesh MAC, resampler or inter-host clock synchronization |
+| Virtual RF | Local/TCP source and sink, standalone packet or sample-mixing hub, per-link frequency and clock mismatch in `ObriiIqHub` | The clock model is local to the virtual mixer. Distributed clock sync and the interactive Mesh Designer are separate. |
 | DSP graph | Supported local/external DDC, PFB, FFT/audio branches, source IDs and auxiliary recordings | Not arbitrary MIMO scheduling; descriptive wires stay descriptive |
 | Spectrum | Asynchronous 512..50M FFT, Hz/bin, detectors, VBW, hold/average/percentiles, ten markers, power/OBW/ACPR/tone measurements | One in-flight FFT window, explicit temporal skips; advanced scientific postprocessing still shares the control thread |
 | Calibration | Explicit correction tables, live noise reference and Y-factor, batch calculations and exports | Relative references are not absolute dBm calibration; float frequency-grid limits remain |
 | Recording | Startup captures plus runtime start/stop of CF32, CI8/SigMF, channel IQ, spectrum frames and audio; triggers/branch recording | Runtime control on RX host, five slots and bounded queue; spectrum files support up to 2097152 exact bins |
 | Diagnostics | Passive doctor, explicit temporary write and loopback port probes, structured JSON | Does not open hardware or prove backend ABI/RF correctness |
-| Digital RX | CW/BPSK31, optional FT8/FT4/RTTY/DMR/M17, known-key DMR profiles, AX.25 KISS RX, SSTV/APT/WEFAX | FT4 uses USB PCM; M17 independently FM-demodulates channel IQ with optional Codec2 voice; no KISS TX or full FT8 QSO manager, and RF qualification remains separate |
-| TX | Independent file/virtual/HackRF/UHD worker, CW/FT8/FT4/RTTY/AX.25/DMR/media/signal lab; live microphone/PTT and manual CW | DMR CLI TX remains unencrypted; RF/microphone qualification is separate |
+| Digital RX | CW/BPSK31, optional FT8/FT4/RTTY/DMR/M17, known-key DMR profiles, AX.25 KISS RX, SSTV/APT/WEFAX | FT4 uses USB PCM. M17 independently FM-demodulates channel IQ with optional Codec2 voice. The FT8 QSO manager is a GUI tool. |
+| TX | Independent file/virtual/HackRF/UHD worker, CW/FT8/FT4/RTTY/AX.25/DMR/media/signal lab, live analog microphone/PTT, manual CW, KISS TX to virtual IQ or UHD | M17 voice TX accepts WAV in the CLI. Live Codec2 M17 microphone/PTT is available in the GUI. |
 | GNSS | Recorded and explicit live full-source IQ to PocketSDR, JSON NMEA, bounded queues, counted EOF and cancellation | Navigation accuracy, backend throughput and actual RF reception need hardware tests |
 | Research | On-demand IQ/spectrum, density, pulses, constellation/eye, phase/autocorrelation and comb metrics, paged JSON/CSV | Bounded snapshots, not continuous arbitrary research graphs or coherent two-channel RF |
+| Multi-SDR | Timed dual UHD RX, per-channel settings, spectrum mosaics and auxiliary recording | Live coherent alignment, combining and replay of aligned Multi-SDR IQ are GUI tools. |
 | Visuals | Explicit companion spectrum/waterfall/scope/constellation/eye/frequency windows | Not every GUI research view or editor has a companion |
 | Experiments | Versioned receiver presets, graph/VFO/science restoration and offline results | JSON does not embed IQ or all calibration evidence; optional active work stays disarmed |
 
@@ -79,7 +79,6 @@ every CLI module. `commands` advertises the actual frontend surface; the optiona
 Agent API defaults to read-only and never grants file or RF TX access. See
 `command_dispatcher.md` and `command_console.md`.
 
-The CLI FT4/M17 addition has separate synthetic worker and manager/lifecycle
-checks described in `ft4_m17_receive.md`. Prior Raspberry shared-core results
-do not establish coverage of these new live modules: this CLI FT4/M17 change
-has not been tested on Raspberry Pi. No real RF qualification is claimed.
+The 9.0.3 release checks exercised the CLI FT4/M17 workers with generated IQ or
+PCM on Windows and Raspberry Pi ARM64. The fixture and manager/lifecycle checks
+are described in `ft4_m17_receive.md`.

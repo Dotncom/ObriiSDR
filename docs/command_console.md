@@ -1,6 +1,6 @@
 # Command Console
 
-Open **Console** (`>_`) in the Receiver section, next to Refresh, Network and Settings.
+Open **Console** in **Tools**, next to Settings.
 The DSP board also has a `>_` toolbar button, including in the alternative
 workspace. This window controls the already running GUI instance; it does not
 launch `ObriiCli` or reopen its USB receiver. The receiver keeps running when

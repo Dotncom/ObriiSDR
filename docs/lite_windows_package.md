@@ -5,6 +5,10 @@ runtime needed for ordinary receiver tuning, spectrum/waterfall display, and
 analog audio. The UI is unchanged. Native Fobos support is included; small
 HackRF and RTL-SDR runtime libraries are copied when present.
 
+The release includes FPGA Lab and all seven Windows interface styles. Choose
+a style in Obrii SDR under **Tools → Settings → Interface style**. For FPGA
+Lab, see [the build and installation instructions](fpga_lab.md).
+
 Run `ObriiSDR.exe` from this folder. Settings and presets remain in the usual
 per-user ObriiSDR settings directory, not in the package. No private INI files,
 keys, logs or captures are copied here.

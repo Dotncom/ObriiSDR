@@ -82,6 +82,7 @@ private:
     QSpinBox *loraSf=nullptr,*loraPreamble=nullptr,*loraSyncWord=nullptr;
     QLabel *protocolHint=nullptr;
     QDoubleSpinBox *frequency=nullptr,*bandwidth=nullptr,*level=nullptr,*gain=nullptr;
+    QDoubleSpinBox *linkFrequencyOffset=nullptr,*linkClockPpm=nullptr;
     QDoubleSpinBox *nodeNumber=nullptr;
     QSpinBox *delay=nullptr;
     QCheckBox *enabled=nullptr;

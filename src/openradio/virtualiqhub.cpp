@@ -55,7 +55,8 @@ bool VirtualIqHub::canSetLink(const QString &sourceId, const QString &subscriber
     if (sourceId.trimmed().isEmpty() || sourceId.size() > 128 ||
         !subscribers_.contains(subscriberId) || settings.delayMs < 0 ||
         settings.delayMs > 60000 || !std::isfinite(settings.gainDb) ||
-        settings.gainDb < -120.0f || settings.gainDb > 60.0f || settings.frequencyOffsetHz != 0.0)
+        settings.gainDb < -120.0f || settings.gainDb > 60.0f ||
+        settings.frequencyOffsetHz != 0.0 || settings.clockPpm != 0.0)
         return false;
     return true;
 }

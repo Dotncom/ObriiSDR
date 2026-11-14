@@ -24,6 +24,7 @@ class QPushButton;
 class QCheckBox;
 class QLineEdit;
 class QTabWidget;
+class B210LabPanel;
 
 class FpgaLabWindow final : public QMainWindow {
 public:
@@ -78,12 +79,15 @@ private:
     QAction *savePipelineAction_ = nullptr;
     QAction *vivadoBuildAction_ = nullptr;
     QAction *stopBuildAction_ = nullptr;
+    QAction *newB210SourceAction_ = nullptr;
     QProcess *buildProcess_ = nullptr;
     QTreeWidget *fileTree_ = nullptr;
     QPlainTextEdit *sourceEditor_ = nullptr;
     QPlainTextEdit *buildLog_ = nullptr;
     QPlainTextEdit *openXc7ReportView_ = nullptr;
     QTabWidget *tabs_ = nullptr;
+    B210LabPanel *b210Panel_ = nullptr;
+    bool b210SourceProject_ = false;
     QLineEdit *moduleTopEdit_ = nullptr;
     QCheckBox *nixCheck_ = nullptr;
     QPushButton *bitstreamButton_ = nullptr;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 9.0.3)
+project(ObriiSDR VERSION 9.0.4)
 enable_testing()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -1262,6 +1262,9 @@ if(WIN32)
     target_sources(ObriiAnalyzer PRIVATE packaging/windows/fobosapp.rc)
 endif()
 add_executable(ObriiFpgaLab
+    src/fpgalab/b210labpanel.cpp
+    src/fpgalab/b210labpanel.h
+    src/fpgalab/b210labresources.qrc
     src/ui/apphelp.cpp
     src/ui/apphelp.h
     src/fpgalab/fpgalabmain.cpp
@@ -1279,6 +1282,9 @@ add_executable(ObriiFpgaLab
 target_link_libraries(ObriiFpgaLab PRIVATE Qt5::Core Qt5::Widgets)
 target_include_directories(ObriiFpgaLab PRIVATE src/ui)
 add_executable(ObriiFpgaLabSelfTest EXCLUDE_FROM_ALL
+    src/fpgalab/b210labpanel.cpp
+    src/fpgalab/b210labpanel.h
+    src/fpgalab/b210labresources.qrc
     tools/fpgalab_selftest.cpp
     src/ui/apphelp.cpp
     src/ui/apphelp.h

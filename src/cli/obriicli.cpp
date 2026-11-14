@@ -4247,10 +4247,22 @@ int runReceiver(QCoreApplication &app, RunOptions options) {
     std::signal(SIGINT, interruptHandler);
     std::signal(SIGTERM, interruptHandler);
     std::vector<float> block(static_cast<std::size_t>(options.blockSamples) * 2);
+    QElapsedTimer receiveElapsed;
+    receiveElapsed.start();
     QElapsedTimer report; report.start();
     qint64 previousUhdReadEndNs = -1;
     qint64 maximumUhdReadPauseNs = 0;
     int exitCode = 0;
+    qint64 longestUhdReadPauseNs = 0;
+    const auto uhdRxDiagnostics = [&](qint64 pauseNs) {
+        return QJsonObject{
+            {QStringLiteral("overflows"), static_cast<double>(device.uhd.receiveOverflows())},
+            {QStringLiteral("timeouts"), static_cast<double>(device.uhd.receiveTimeouts())},
+            {QStringLiteral("timestampGaps"), static_cast<double>(device.uhd.receiveTimestampGaps())},
+            {QStringLiteral("missingSamplesPerChannel"), static_cast<double>(device.uhd.receiveMissingSamples())},
+            {QStringLiteral("blocksWithoutTimestamp"), static_cast<double>(device.uhd.receiveTimestampMissingBlocks())},
+            {QStringLiteral("maxReadPauseUs"), pauseNs / 1000.0}};
+    };
     const auto pollSpectrum = [&] {
         if (!spectrum) return;
         CliSpectrumResult result;
@@ -4659,13 +4671,8 @@ int runReceiver(QCoreApplication &app, RunOptions options) {
             if (options.spectrum && !latestSecondarySpectrum.isEmpty())
                 progress.insert(QStringLiteral("secondarySpectrum"), latestSecondarySpectrum);
             if (device.uhdSecondary) {
-                progress.insert(QStringLiteral("uhdRxDiagnostics"), QJsonObject{
-                    {QStringLiteral("overflows"), static_cast<double>(device.uhd.receiveOverflows())},
-                    {QStringLiteral("timeouts"), static_cast<double>(device.uhd.receiveTimeouts())},
-                    {QStringLiteral("timestampGaps"), static_cast<double>(device.uhd.receiveTimestampGaps())},
-                    {QStringLiteral("missingSamplesPerChannel"), static_cast<double>(device.uhd.receiveMissingSamples())},
-                    {QStringLiteral("blocksWithoutTimestamp"), static_cast<double>(device.uhd.receiveTimestampMissingBlocks())},
-                    {QStringLiteral("maxReadPauseUs"), maximumUhdReadPauseNs / 1000.0}});
+                progress.insert(QStringLiteral("uhdRxDiagnostics"), uhdRxDiagnostics(maximumUhdReadPauseNs));
+                longestUhdReadPauseNs = std::max(longestUhdReadPauseNs, maximumUhdReadPauseNs);
                 maximumUhdReadPauseNs = 0;
             }
             if (asyncWfm) progress.insert(QStringLiteral("wfmAudioWorker"), asyncWfm->status());
@@ -4675,6 +4682,9 @@ int runReceiver(QCoreApplication &app, RunOptions options) {
         }
         if (options.seconds > 0 && samples >= static_cast<quint64>(actualRate * options.seconds)) break;
     }
+    const QJsonObject finalUhdRxDiagnostics = device.uhdSecondary
+        ? uhdRxDiagnostics(std::max(longestUhdReadPauseNs, maximumUhdReadPauseNs)) : QJsonObject{};
+    const double receiveElapsedSeconds = receiveElapsed.nsecsElapsed() / 1.0e9;
     if (receiverRunning) device.stop();
     control.close();
     while (spectrum && spectrum->busy()) {
@@ -4710,8 +4720,11 @@ int runReceiver(QCoreApplication &app, RunOptions options) {
                {QStringLiteral("spectrum"), latestSpectrum},
                {QStringLiteral("iqSeconds"), samples / actualRate},
                {QStringLiteral("elapsedSeconds"), elapsed.elapsed() / 1000.0}};
-    if (device.uhdSecondary)
+    if (device.uhdSecondary) {
         stopped.insert(QStringLiteral("rxChannels"), QJsonArray{device.channel, device.uhdSecondary->channel});
+        stopped.insert(QStringLiteral("uhdRxDiagnostics"), finalUhdRxDiagnostics);
+        stopped.insert(QStringLiteral("receiveElapsedSeconds"), receiveElapsedSeconds);
+    }
     if (!latestSecondarySpectrum.isEmpty())
         stopped.insert(QStringLiteral("secondarySpectrum"), latestSecondarySpectrum);
     printJson(stopped);

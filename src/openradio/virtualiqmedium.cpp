@@ -13,6 +13,8 @@
 
 namespace {
 constexpr double Tau = 6.2831853071795864769;
+constexpr qint64 SampleUnits = 10000000000LL;
+constexpr int FractionalPhases = 1024;
 void setError(QString *error, const QString &message) {
     if (error) *error = message;
 }
@@ -21,6 +23,64 @@ qint64 roundedSamples(qint64 nanoseconds, quint32 sampleRate) {
     return static_cast<qint64>(std::llround(static_cast<long double>(nanoseconds) *
                                            sampleRate / 1000000000.0L));
 }
+}
+
+QVector<float> VirtualIqMedium::ClockResampler::process(const QVector<float> &iq, double ppm) {
+    // Causal fractional-delay FIR: at each output position only the current
+    // input and the 15 preceding samples are needed, even across a frame split.
+    static const auto coefficients = [] {
+        std::array<std::array<float, Taps>, FractionalPhases + 1> table{};
+        constexpr double cutoff = 0.45;
+        for (int phase = 0; phase <= FractionalPhases; ++phase) {
+            const double fraction = double(phase) / FractionalPhases;
+            double sum = 0;
+            for (int tap = 0; tap < Taps; ++tap) {
+                const double distance = tap - (Taps / 2 - 1) - fraction;
+                const double angle = Tau * cutoff * distance;
+                const double sinc = angle == 0 ? 1 : std::sin(angle) / angle;
+                const double window = Tau * tap / (Taps - 1);
+                const double coefficient = sinc * (0.42 - 0.5 * std::cos(window) + 0.08 * std::cos(2 * window));
+                table[phase][tap] = float(coefficient);
+                sum += coefficient;
+            }
+            for (float &coefficient : table[phase]) coefficient = float(coefficient / sum);
+        }
+        return table;
+    }();
+
+    const qint64 step = SampleUnits + std::llround(ppm * (SampleUnits / 1000000));
+    const qint64 end = qint64(iq.size() / 2) * SampleUnits;
+    const qint64 count = (end - position + step - 1) / step;
+    QVector<float> output(int(count) * 2);
+    const float *input = iq.constData();
+    for (int dest = 0; dest < output.size(); dest += 2, position += step) {
+        const int last = int(position / SampleUnits);
+        const int first = last - (Taps - 1);
+        const int phase = int(((position % SampleUnits) * FractionalPhases + SampleUnits / 2) / SampleUnits);
+        const auto &weights = coefficients[phase];
+        float re = 0, im = 0;
+        if (first >= 0) {
+            const auto *window = input + first * 2;
+            for (int tap = 0; tap < Taps; ++tap) {
+                re += window[tap * 2] * weights[tap];
+                im += window[tap * 2 + 1] * weights[tap];
+            }
+        } else {
+            for (int tap = 0; tap < Taps; ++tap) {
+                const int index = first + tap;
+                const float *sample = index < 0 ? history.data() + (Taps - 1 + index) * 2 : input + index * 2;
+                re += sample[0] * weights[tap];
+                im += sample[1] * weights[tap];
+            }
+        }
+        output[dest] = re;
+        output[dest + 1] = im;
+    }
+    position -= end;
+    const int retained = (std::min)(int(history.size()), iq.size());
+    std::copy(history.begin() + retained, history.end(), history.begin());
+    std::copy_n(input + iq.size() - retained, retained, history.end() - retained);
+    return output;
 }
 
 VirtualIqMedium::VirtualIqMedium(const VirtualIqMediumSettings &settings)
@@ -37,7 +97,9 @@ bool VirtualIqMedium::addSubscriber(const QString &id) {
 bool VirtualIqMedium::setLink(const QString &sourceId, const QString &subscriberId,
                               const VirtualIqLinkSettings &settings) {
     if (!canSetLink(sourceId, subscriberId, settings)) return false;
-    links_[sourceId].insert(subscriberId, settings);
+    auto &route = links_[sourceId][subscriberId];
+    route.settings = settings;
+    if (!settings.enabled) route.clock.reset();
     return true;
 }
 
@@ -55,6 +117,7 @@ bool VirtualIqMedium::canSetLink(const QString &sourceId, const QString &subscri
         !std::isfinite(settings.gainDb) || settings.gainDb < -120.0f ||
         settings.gainDb > 60.0f ||
         !std::isfinite(settings.frequencyOffsetHz) || std::abs(settings.frequencyOffsetHz) >= 0.5 * settings_.sampleRate ||
+        !std::isfinite(settings.clockPpm) || std::abs(settings.clockPpm) > VirtualIqLinkSettings::MaximumClockPpm ||
         (settings.enabled && requiredSamples > bufferedSamples)) return false;
     return true;
 }
@@ -89,38 +152,63 @@ bool VirtualIqMedium::publish(const QString &sourceId, const VirtualSignalFrame 
         epochNs_ = frame.timestampNs;
         wallEpochNs_ = nowNs;
     }
-    if (std::fabs(static_cast<long double>(frame.timestampNs) - epochNs_) > 60000000000.0L) {
-        setError(error, QStringLiteral("IQ timestamp differs from medium epoch by over 60 seconds; synchronize TX clocks"));
+    const auto elapsed = static_cast<long double>(nowNs) - wallEpochNs_;
+    if (std::fabs(static_cast<long double>(frame.timestampNs - epochNs_) - elapsed) > 60000000000.0L) {
+        setError(error, QStringLiteral("IQ timestamp differs from the running medium clock by over 60 seconds; synchronize TX clocks"));
         return false;
     }
     const QString sessionId = frame.metadata.value(QStringLiteral("hubSessionId")).toString();
-    const qint64 baseIndex = sampleIndex(frame.timestampNs) +
-        roundedSamples(static_cast<qint64>(settings_.fixedDelayMs) * 1000000LL,
-                       settings_.sampleRate);
+    const qint64 inputIndex = sampleIndex(frame.timestampNs);
+    auto routes = links_.find(sourceId);
     for (auto it = subscribers_.begin(); it != subscribers_.end(); ++it) {
         Subscriber &subscriber = it.value();
         ++subscriber.counters.receivedFrames;
-        const auto sourceLinks = links_.constFind(sourceId);
-        const bool explicitLink = sourceLinks != links_.cend() && sourceLinks->contains(it.key());
-        const VirtualIqLinkSettings link = explicitLink ? sourceLinks->value(it.key())
-                                                         : VirtualIqLinkSettings{};
-        if ((!explicitLink && !settings_.defaultRoute) ||
-            (explicitLink && !link.enabled)) {
+        Route *route = nullptr;
+        if (routes != links_.end()) {
+            auto found = routes->find(it.key());
+            if (found != routes->end()) route = &found.value();
+        }
+        if (route ? !route->settings.enabled : !settings_.defaultRoute) {
             ++subscriber.counters.filteredFrames;
             continue;
         }
-        const int delayMs = explicitLink ? link.delayMs : 0;
-        const float gain = explicitLink ? std::pow(10.0f, link.gainDb / 20.0f) : 1.0f;
-        const qint64 start = baseIndex + roundedSamples(static_cast<qint64>(delayMs) * 1000000LL,
-                                                         settings_.sampleRate);
-        addToSubscriber(&subscriber, sourceId, sessionId, frame, iq, start, gain, link.frequencyOffsetHz);
+        const VirtualIqLinkSettings link = route ? route->settings : VirtualIqLinkSettings{};
+        const float gain = route ? std::pow(10.0f, link.gainDb / 20.0f) : 1.0f;
+        const qint64 delay = roundedSamples(qint64(settings_.fixedDelayMs) * 1000000LL, settings_.sampleRate) +
+            roundedSamples(qint64(link.delayMs) * 1000000LL, settings_.sampleRate);
+        const qint64 start = inputIndex + delay;
+        bool discontinuity = frame.discontinuity;
+        if (route && route->clock && (frame.discontinuity || route->clock->session != sessionId ||
+                                      route->clock->nextInput != inputIndex)) {
+            route->clock.reset();
+            discontinuity = true;
+        }
+        if (route && (route->clock || link.clockPpm != 0.0)) {
+            if (!route->clock) {
+                auto &clock = route->clock.emplace();
+                clock.nextOutput = start;
+                clock.delay = delay;
+                clock.session = sessionId;
+                discontinuity = true;
+            }
+            auto &clock = *route->clock;
+            const qint64 outputStart = clock.nextOutput + delay - clock.delay;
+            const auto samples = clock.process(iq, link.clockPpm);
+            clock.nextInput = inputIndex + iq.size() / 2;
+            clock.nextOutput = outputStart + samples.size() / 2;
+            clock.delay = delay;
+            if (!samples.isEmpty())
+                addToSubscriber(&subscriber, sourceId, sessionId, discontinuity, samples, outputStart, gain, link.frequencyOffsetHz);
+        } else {
+            addToSubscriber(&subscriber, sourceId, sessionId, discontinuity, iq, start, gain, link.frequencyOffsetHz);
+        }
     }
     if (error) error->clear();
     return true;
 }
 
 void VirtualIqMedium::addToSubscriber(Subscriber *subscriber, const QString &sourceId,
-                                      const QString &sessionId, const VirtualSignalFrame &frame,
+                                      const QString &sessionId, bool discontinuity,
                                       const QVector<float> &iq, qint64 startIndex, float gain,
                                       double frequencyOffsetHz) {
     const qint64 count = iq.size() / 2;
@@ -167,7 +255,8 @@ void VirtualIqMedium::addToSubscriber(Subscriber *subscriber, const QString &sou
         }
         block.sources.insert(sourceId);
         if (!sessionId.isEmpty()) block.sessions.insert(sourceId, sessionId);
-        block.discontinuity |= frame.discontinuity;
+        block.discontinuity |= discontinuity;
+        discontinuity = false;
         const qint64 blockStart = blockIndex * settings_.blockSamples;
         const qint64 until = (std::min)(endIndex, blockStart + settings_.blockSamples);
         // Derive phase from the shared sample timeline so frame boundaries do not reset it.

@@ -153,6 +153,22 @@ if (-not (Test-Path -LiteralPath $QWindows)) {
 }
 Copy-Item -LiteralPath $QWindows -Destination (Join-Path $DeployPath "platforms\qwindows.dll") -Force
 
+$WindowsStyle = Join-Path $QtRoot "plugins\styles\qwindowsvistastyle.dll"
+if (Test-Path -LiteralPath $WindowsStyle -PathType Leaf) {
+    $StylesPath = Join-Path $DeployPath "styles"
+    New-Item -ItemType Directory -Path $StylesPath -Force | Out-Null
+    Copy-Item -LiteralPath $WindowsStyle -Destination $StylesPath -Force
+}
+if ([IO.Path]::GetFullPath($BuildPath) -ne [IO.Path]::GetFullPath($DeployPath)) {
+    foreach ($Name in @('qcleanlooksstyle.dll', 'qmotifstyle.dll', 'qplastiquestyle.dll')) {
+        $SourceStyle = Join-Path $BuildPath "styles/$Name"
+        if (Test-Path -LiteralPath $SourceStyle -PathType Leaf) {
+            New-Item -ItemType Directory -Path (Join-Path $DeployPath 'styles') -Force | Out-Null
+            Copy-Item -LiteralPath $SourceStyle -Destination (Join-Path $DeployPath "styles/$Name") -Force
+        }
+    }
+}
+
 $ImageFormatPlugins = @(
     "qgif.dll",
     "qico.dll",
@@ -308,11 +324,17 @@ if (Test-Path -LiteralPath (Join-Path $WiresharkPath 'wireshark.exe')) {
 $LicensePath = Join-Path $Workspace "licenses"
 if (Test-Path -LiteralPath $LicensePath) {
     $DeployLicensePath = Join-Path $DeployPath "licenses"
-    if (Test-Path -LiteralPath $DeployLicensePath) {
-        Remove-Item -LiteralPath $DeployLicensePath -Recurse -Force
-    }
     New-Item -ItemType Directory -Path $DeployLicensePath -Force | Out-Null
     Copy-Item -Path (Join-Path $LicensePath "*") -Destination $DeployLicensePath -Recurse -Force
+}
+
+if ([IO.Path]::GetFullPath($BuildPath) -ne [IO.Path]::GetFullPath($DeployPath)) {
+    foreach ($Name in @('LICENSE.LGPL-2.1.txt', 'LGPL_EXCEPTION.txt', 'qtstyleplugins-335dbece-source.tar.gz')) {
+        $StyleNotice = Join-Path $BuildPath "licenses/qt-styleplugins/$Name"
+        if (Test-Path -LiteralPath $StyleNotice -PathType Leaf) {
+            Copy-Item -LiteralPath $StyleNotice -Destination (Join-Path $DeployPath "licenses/qt-styleplugins/$Name") -Force
+        }
+    }
 }
 
 $DsdNeoExtractPath = Join-Path $Workspace "downloads\dsd-neo\extracted"

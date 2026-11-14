@@ -27,6 +27,79 @@ bool check(bool value, const char *message) {
     if (!value) qCritical() << message;
     return value;
 }
+
+VirtualSignalFrame tone(int first, int count) {
+    auto result = frame(0, count, Timestamp + qint64(first) * 125000);
+    QVector<std::complex<float>> samples(count);
+    for (int i = 0; i < count; ++i)
+        samples[i] = std::polar(0.25f, float((first + i) % 20) * 0.31415926536f);
+    result.payload = virtualSignalComplexFloat32Payload(samples.constData(), count);
+    return result;
+}
+
+bool checkClockResampling(VirtualIqMediumSettings settings) {
+    settings.blockSamples = 1;
+    settings.maximumBufferedBlocks = 8192;
+    VirtualIqMedium medium(settings), whole(settings);
+    for (auto *m : {&medium, &whole}) {
+        for (const auto id : {"fast", "slow", "nominal"}) if (!m->addSubscriber(id)) return false;
+        if (m->setLink("a", "fast", {true, 0, 0, 0, 1000.01}) ||
+            !m->setLink("a", "fast", {true, 0, 0, 0, 1000}) ||
+            !m->setLink("a", "slow", {true, 0, 0, 0, -1000}) ||
+            !m->setLink("a", "nominal", {})) return false;
+    }
+    constexpr int count = 4096;
+    if (!whole.publish("a", tone(0, count), Arrival)) return false;
+    for (int index = 0; index < count;) {
+        const int length = (std::min)(count - index, index % 11 + 1);
+        if (!medium.publish("a", tone(index, length), Arrival + qint64(index) * 125000)) return false;
+        index += length;
+    }
+    for (const auto id : {"fast", "slow", "nominal"}) {
+        const double step = id == QLatin1String("fast") ? 1.001 : id == QLatin1String("slow") ? 0.999 : 1.0;
+        const auto output = medium.takeReady(id, Arrival + 600000000, 8192);
+        const auto reference = whole.takeReady(id, Arrival + 600000000, 8192);
+        if (!check(output.size() == int(std::ceil(count / step)) && output.size() == reference.size(),
+                   "clock output count is independent of frame splits")) {
+            qCritical() << id << output.size() << reference.size() << std::ceil(count / step);
+            return false;
+        }
+        std::complex<double> phaseSum{};
+        std::complex<double> previous{};
+        for (int i = 0; i < output.size(); ++i) {
+            QVector<float> iq;
+            if (output[i].payload != reference[i].payload || (i && output[i].discontinuity) ||
+                output[i].timestampNs != Timestamp + qint64(i) * 125000 ||
+                !virtualSignalDecodeComplexFloat32(output[i].payload, &iq)) {
+                qCritical() << "split-frame mismatch" << id << i << output[i].discontinuity;
+                return false;
+            }
+            const std::complex<double> value{iq[0], iq[1]};
+            if (i > 32) phaseSum += value * std::conj(previous);
+            previous = value;
+        }
+        if (std::abs(std::arg(phaseSum) - 0.31415926536 * step) > 2e-6 ||
+            medium.counters(id).gapSamples || medium.counters(id).overlapSamples) {
+            qCritical() << "tone phase or IQ occupancy" << id << std::arg(phaseSum) - 0.31415926536 * step
+                        << medium.counters(id).gapSamples << medium.counters(id).overlapSamples;
+            return false;
+        }
+    }
+    // Changing the rate preserves the output cursor and fractional position.
+    if (!medium.setLink("a", "fast", {}) ||
+        !medium.publish("a", tone(count, 32), Arrival + count * 125000LL)) return false;
+    const auto continued = medium.takeReady("fast", Arrival + 800000000, 64);
+    if (!check(continued.size() == 32 && !continued.first().discontinuity &&
+        continued.first().timestampNs == Timestamp + qint64(std::ceil(count / 1.001)) * 125000,
+        "setting clock error back to zero preserves the sample cursor")) return false;
+
+    auto restarted = tone(count + 32, 32);
+    restarted.discontinuity = true;
+    if (!medium.publish("a", restarted, Arrival + 800000000)) return false;
+    const auto reset = medium.takeReady("fast", Arrival + 800000000, 64);
+    return !reset.isEmpty() && reset.last().timestampNs == restarted.timestampNs + 31 * 125000 &&
+           reset[reset.size() - 32].discontinuity;
+}
 }
 
 int main(int argc, char **argv) {
@@ -148,6 +221,14 @@ int main(int argc, char **argv) {
             if (!check(std::abs(observed - expected) < 1e-6, "offset phase across frame and mix block boundaries")) return 14;
         }
     }
+    if (!check(checkClockResampling(settings), "independent clock rates, spectrum shift, continuous split frames and restart")) return 15;
+    VirtualIqMedium longSession(delayedSettings);
+    longSession.addSubscriber("rx");
+    constexpr qint64 LongPause = 120000000000LL;
+    if (!check(longSession.publish("a", frame(0.1f, 128), Arrival) &&
+               longSession.publish("a", frame(0.1f, 128, Timestamp + LongPause), Arrival + LongPause) &&
+               !longSession.publish("a", frame(0.1f, 128, Timestamp + LongPause * 2), Arrival + LongPause),
+               "timestamp guard follows running clock and rejects clock jumps")) return 16;
     qInfo() << "Virtual IQ medium selftest passed";
     return 0;
 }

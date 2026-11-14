@@ -132,7 +132,24 @@ failure; stopping RX does not stop that node's test TX. Session stop still
 cleans up every process owned by the designer.
 
 The source center and sample rate are common to the session and editable while
-stopped. Link gain/delay/enabled edits are staged until **Apply link** is pressed.
+stopped. Link gain, delay, enabled state and frequency-offset edits are staged
+until **Apply link** is pressed. In a local **Sum IQ** session, select a link and
+set **IQ frequency offset** (`Частотний зсув IQ`) to shift its received carrier.
+Use positive Hz for a higher frequency, negative Hz for a lower frequency,
+and zero to clear the shift. The magnitude must be below half the sample rate.
+The saved project retains the value for its next local Sum IQ session.
+The packet lab and remote node sessions use their own channel settings.
+
+Set **IQ clock mismatch** (`Розбіжність тактів IQ`) on each link to model
+the source sample clock relative to the receiver. The range is −1000 to
++1000 ppm. For example, +100 ppm at 48 kS/s models a 48,004.8 S/s source
+on the shared 48 kS/s output grid. The signal becomes slightly shorter
+and a baseband tone rises in frequency. A negative value lengthens the
+signal. The fractional-delay FIR uses history across IQ frames and applies
+a small filter delay. A live edit changes the rate for new IQ, keeping the
+sample position already reached. Set zero for no further drift. A stream
+restart or discontinuity anchors the link to its new timestamp.
+With sustained drift the mixer still uses its configured playout buffer.
 The hub validates both the fan-out and sample-mix paths before mutation, including
 the active mixer buffer capacity. Rejected changes leave the previous link and
 revision unchanged. Nodes and links can now be appended while running; new nodes
@@ -186,7 +203,10 @@ An authenticated reply has `ok`, `id`, `instanceId` and a decimal-string
 counters and the current medium mode. Pin `targetInstanceId` on subsequent
 requests. A `setLink` request also requires the exact `expectedRevision` string
 and an `args` object with all five fields: `tx`, `rx`, `enabled`, `gainDb`,
-`delayMs`. Successful updates increment the revision and return the applied
+`delayMs`. In sample-mix mode, optional `frequencyOffsetHz` sets the carrier
+shift and `clockPpm` sets the sample clock error for that link. Omit a field
+to keep its value or send zero to clear it.
+Successful updates increment the revision and return the applied
 `link`; conflicts require a fresh status before retry. The API supports gain
 -120..60 dB and delay 0..60000 ms, subject to actual buffer capacity; the designer
 deliberately limits its delay editor to 500 ms. `addReceiver` accepts exactly

@@ -26,7 +26,8 @@ VirtualIqHubControl::VirtualIqHubControl(VirtualIqHub &h,VirtualIqMedium *m,
         QJsonObject snapshot{
             {"tx",l.value("tx")},{"rx",l.value("rx")},{"enabled",l.value("enabled").toBool(true)},
             {"gainDb",l.value("gainDb").toDouble(0)},{"delayMs",l.value("delayMs").toInt(0)}};
-        if (l.contains("frequencyOffsetHz")) snapshot.insert("frequencyOffsetHz", l.value("frequencyOffsetHz"));
+        for (const auto key : {"frequencyOffsetHz", "clockPpm"})
+            if (l.contains(key)) snapshot.insert(key, l.value(key));
         links.insert(l.value("tx").toString()+"/"+l.value("rx").toString(),snapshot);
     }
     rateWindow.start();
@@ -144,23 +145,28 @@ QJsonObject VirtualIqHubControl::execute(const QJsonObject &request) {
     const auto tx=args.value("tx").toString(),rx=args.value("rx").toString();
     const auto gain=args.value("gainDb"),delay=args.value("delayMs"),enabled=args.value("enabled");
     const auto offset=args.value("frequencyOffsetHz");
+    const auto clock=args.value("clockPpm");
     const auto pair=tx+"/"+rx;
     const double d=delay.toDouble(-1),g=gain.toDouble();
-    const double hz = offset.isUndefined() ? links.value(pair).value("frequencyOffsetHz").toDouble() : offset.toDouble();
-    if(args.size()!=(offset.isUndefined()?5:6)||!sourceId(tx)||!hub.subscriberIds().contains(rx)||tx==rx||!enabled.isBool()||
+    const auto previous=links.value(pair);
+    const double hz = offset.isUndefined() ? previous.value("frequencyOffsetHz").toDouble() : offset.toDouble();
+    const double ppm = clock.isUndefined() ? previous.value("clockPpm").toDouble() : clock.toDouble();
+    if(args.size()!=5+!offset.isUndefined()+!clock.isUndefined()||!sourceId(tx)||!hub.subscriberIds().contains(rx)||tx==rx||!enabled.isBool()||
        !delay.isDouble()||!std::isfinite(d)||std::floor(d)!=d||d<0||d>60000||
        !gain.isDouble()||!std::isfinite(g)||g< -120||g>60||
-       (!offset.isUndefined()&&!offset.isDouble())||!std::isfinite(hz)||(!medium&&hz!=0))
+       (!offset.isUndefined()&&!offset.isDouble())||!std::isfinite(hz)||
+       (!clock.isUndefined()&&!clock.isDouble())||!std::isfinite(ppm)||(!medium&&(hz!=0||ppm!=0)))
         return finish(failure("invalid_link","Invalid link parameters"));
     if(!links.contains(pair)&&links.size()>=1024)return finish(failure("link_limit","At most 1024 links are supported"));
     const VirtualIqLinkSettings route{enabled.toBool(),int(d),float(g)};
-    const VirtualIqLinkSettings value{enabled.toBool(),int(d),float(g),hz};
+    const VirtualIqLinkSettings value{enabled.toBool(),int(d),float(g),hz,ppm};
     // Validate both paths before mutating either; never copy buffered IQ for control.
     if(!hub.canSetLink(tx,rx,route)||(medium&&!medium->canSetLink(tx,rx,value)))
-        return finish(failure("link_capacity","Link exceeds the active medium's delay, buffer or frequency limits"));
+        return finish(failure("link_capacity","Link exceeds the active medium's delay, buffer, frequency or clock limits"));
     hub.setLink(tx,rx,route);if(medium)medium->setLink(tx,rx,value);
     auto applied = args;
     if (hz != 0.0) applied.insert("frequencyOffsetHz", hz);
+    if (ppm != 0.0) applied.insert("clockPpm", ppm);
     links.insert(pair,applied);++revision;
     return finish({{"ok",true},{"link",applied},{"appliesTo","future-published-frames"}});
 }

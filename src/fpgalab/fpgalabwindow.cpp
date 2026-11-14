@@ -1,4 +1,5 @@
 #include "fpgalabwindow.h"
+#include "b210labpanel.h"
 #include "fpgalogicblock.h"
 #include "fpgalogiceditor.h"
 #include "apphelp.h"
@@ -35,6 +36,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QPainter>
 #include <QPushButton>
 #include <QSaveFile>
@@ -59,7 +61,8 @@ namespace {
 const QStringList kSourceSuffixes = {
     QStringLiteral("v"), QStringLiteral("sv"), QStringLiteral("vh"),
     QStringLiteral("svh"), QStringLiteral("vhd"), QStringLiteral("vhdl"),
-    QStringLiteral("xdc"), QStringLiteral("tcl"), QStringLiteral("txt")};
+    QStringLiteral("xdc"), QStringLiteral("sdc"), QStringLiteral("tcl"), QStringLiteral("txt"),
+    QStringLiteral("py"), QStringLiteral("patch"), QStringLiteral("sh")};
 const QStringList kSkipDirectories = {
     QStringLiteral(".git"), QStringLiteral(".Xil"), QStringLiteral(".cache"),
     QStringLiteral(".runs"), QStringLiteral(".sim"), QStringLiteral("ip_user_files"),
@@ -79,6 +82,7 @@ bool withinRoot(const QString &root, const QString &path) {
 }
 
 QString stageLabel(const QString &type) {
+    if (type == QStringLiteral("passthrough")) return QStringLiteral("Наскрізний IQ");
     if (type == QStringLiteral("ddc")) return QStringLiteral("DDC / зсув частоти");
     if (type == QStringLiteral("fir")) return QStringLiteral("FIR / фільтр");
     if (type == QStringLiteral("decimator")) return QStringLiteral("Децимація");
@@ -142,11 +146,13 @@ FpgaLabWindow::FpgaLabWindow(QWidget *parent) : QMainWindow(parent) {
     toolbar->setMovable(false);
     toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     auto *openFolderAction = toolbar->addAction(QStringLiteral("Відкрити теку"));
-    auto *openFileAction = toolbar->addAction(QStringLiteral("Відкрити .xpr / .bin"));
+    auto *openFileAction = toolbar->addAction(QStringLiteral("Відкрити файл"));
     toolbar->addSeparator();
     auto *saveSourceAction = toolbar->addAction(QStringLiteral("Зберегти код"));
     auto *savePipelineAction = toolbar->addAction(QStringLiteral("Зберегти схему"));
     savePipelineAction_ = savePipelineAction;
+    newB210SourceAction_ = toolbar->addAction(QStringLiteral("Новий HDL-файл…"));
+    newB210SourceAction_->setEnabled(false);
     toolbar->addSeparator();
     auto *vivadoMenu = menuBar()->addMenu(QStringLiteral("Vivado (необов'язково)"));
     auto *helpMenu = menuBar()->addMenu(QStringLiteral("Довідка"));
@@ -231,7 +237,7 @@ FpgaLabWindow::FpgaLabWindow(QWidget *parent) : QMainWindow(parent) {
     stageType_->setObjectName(QStringLiteral("fpgaPipelineStageType"));
     for (const QString &type : {QStringLiteral("ddc"), QStringLiteral("fir"),
                                 QStringLiteral("decimator"), QStringLiteral("trigger"),
-                                QStringLiteral("custom")})
+                                QStringLiteral("custom"), QStringLiteral("passthrough")})
         stageType_->addItem(stageLabel(type), type);
     auto *addStage = new QPushButton(QStringLiteral("Додати"), pipelineTab);
     addStage->setObjectName(QStringLiteral("fpgaAddStage"));
@@ -368,6 +374,47 @@ FpgaLabWindow::FpgaLabWindow(QWidget *parent) : QMainWindow(parent) {
     buildLog_->setFont(editorFont);
     buildLog_->setPlaceholderText(QStringLiteral("Журнал перевірки та збірки FPGA."));
     tabs->addTab(buildLog_, QStringLiteral("Збірка"));
+    b210Panel_ = new B210LabPanel([this](QString *error) {
+        if (stages_.isEmpty() || std::any_of(stages_.cbegin(), stages_.cend(), [](const auto &stage) {
+                return stage.type != QStringLiteral("passthrough");
+            })) {
+            *error = QStringLiteral("Додайте принаймні один наскрізний IQ-блок. Для цього профілю потрібен тракт без затримки та зміни семплрейту.");
+            return QByteArray{};
+        }
+        return FpgaPipelineCompiler::generateVerilog(stages_, inputRate_->value(), clockRate_->value(), error);
+    }, [this](const QString &path) { openPath(path); }, [this] {
+        return buildProcess_->state() == QProcess::NotRunning &&
+               (!sourceEditor_->document()->isModified() || saveSource());
+    }, tabs);
+    tabs->addTab(b210Panel_, QStringLiteral("B210 Kintex-7"));
+    connect(newB210SourceAction_, &QAction::triggered, this, [this]() {
+        if (!b210SourceProject_ || b210Panel_->busy() || !confirmDiscard()) return;
+        bool accepted = false;
+        const QString name = QInputDialog::getText(this, QStringLiteral("Новий HDL-файл"),
+            QStringLiteral("Назва модуля"), QLineEdit::Normal, {}, &accepted).trimmed();
+        if (!accepted) return;
+        const QRegularExpression identifier(QStringLiteral("^[A-Za-z_][A-Za-z0-9_]*$"));
+        const auto folder = QDir(projectRoot_).filePath(QStringLiteral("src/user"));
+        if (!identifier.match(name).hasMatch() || !withinRoot(projectRoot_, folder) ||
+            QFileInfo(folder).isSymLink()) {
+            statusBar()->showMessage(QStringLiteral("Вкажіть допустиму назву Verilog і перевірте теку src/user."), 5000);
+            return;
+        }
+        QFile file(QDir(folder).filePath(name + QStringLiteral(".v")));
+        if (!file.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+            statusBar()->showMessage(file.errorString(), 5000);
+            return;
+        }
+        const QByteArray stub = QStringLiteral("module %1 ();\nendmodule\n").arg(name).toUtf8();
+        if (file.write(stub) != stub.size() || !file.flush()) {
+            statusBar()->showMessage(file.errorString(), 5000);
+            return;
+        }
+        file.close();
+        scanProject();
+        loadSource(file.fileName());
+        tabs_->setCurrentWidget(sourceEditor_);
+    });
     rightLayout->addWidget(tabs, 1);
     splitter->addWidget(fileTree_);
     splitter->addWidget(right);
@@ -381,7 +428,7 @@ FpgaLabWindow::FpgaLabWindow(QWidget *parent) : QMainWindow(parent) {
     });
     connect(openFileAction, &QAction::triggered, this, [this]() {
         const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("Відкрити FPGA-проєкт або образ"),
-            {}, QStringLiteral("FPGA (*.xpr *.bin);;Усі файли (*)"));
+            {}, QStringLiteral("FPGA (*.xpr *.bin .obrii-b210.json);;Усі файли (*)"));
         if (!path.isEmpty()) openPath(path);
     });
     connect(saveSourceAction, &QAction::triggered, this, [this]() { saveSource(); });
@@ -646,6 +693,11 @@ bool FpgaLabWindow::confirmDiscard() {
 }
 
 void FpgaLabWindow::closeEvent(QCloseEvent *event) {
+    if (b210Panel_->busy()) {
+        statusBar()->showMessage(QStringLiteral("Дочекайтеся завершення завдання B210."), 5000);
+        event->ignore();
+        return;
+    }
     if (buildProcess_->state() != QProcess::NotRunning) {
         QMessageBox::warning(this, QStringLiteral("Збірка триває"),
                              QStringLiteral("Зупиніть збірку перед закриттям програми."));
@@ -657,7 +709,7 @@ void FpgaLabWindow::closeEvent(QCloseEvent *event) {
 }
 
 bool FpgaLabWindow::openPath(const QString &path) {
-    if (buildProcess_->state() != QProcess::NotRunning) {
+    if (buildProcess_->state() != QProcess::NotRunning || b210Panel_->busy()) {
         QMessageBox::warning(this, QStringLiteral("Збірка триває"),
                              QStringLiteral("Зупиніть поточний процес перед відкриттям іншого проєкту."));
         return false;
@@ -666,14 +718,19 @@ bool FpgaLabWindow::openPath(const QString &path) {
     if (!info.exists() || info.isSymLink()) return false;
     if (!confirmDiscard()) return false;
     const QString suffix = info.suffix().toLower();
-    if (info.isFile() && suffix != QStringLiteral("xpr") && suffix != QStringLiteral("bin")) {
-        QMessageBox::warning(this, QStringLiteral("Формат"), QStringLiteral("Відкрийте теку, .xpr або .bin."));
+    if (info.isFile() && suffix != QStringLiteral("xpr") && suffix != QStringLiteral("bin") &&
+        info.fileName() != QStringLiteral(".obrii-b210.json")) {
+        QMessageBox::warning(this, QStringLiteral("Формат"), QStringLiteral("Відкрийте теку, .xpr, .obrii-b210.json або .bin."));
         return false;
     }
     projectRoot_ = info.isDir() ? info.canonicalFilePath() : info.canonicalPath();
     projectFile_ = suffix == QStringLiteral("xpr") ? info.canonicalFilePath() : QString();
     buildTclFile_.clear();
     binaryFile_ = suffix == QStringLiteral("bin") ? info.canonicalFilePath() : QString();
+    b210SourceProject_ = binaryFile_.isEmpty() &&
+        QFileInfo::exists(QDir(projectRoot_).filePath(QStringLiteral(".obrii-b210.json")));
+    newB210SourceAction_->setEnabled(b210SourceProject_);
+    b210Panel_->setOpenPath(projectRoot_, binaryFile_);
     sourceFile_.clear();
     moduleTopEdit_->clear();
     sourceHash_.clear();
@@ -732,7 +789,7 @@ void FpgaLabWindow::scanProject() {
             if (entry.isDir()) {
                 const QString name = entry.fileName();
                 if (kSkipDirectories.contains(name, Qt::CaseInsensitive) ||
-                    name.endsWith(QStringLiteral(".srcs"), Qt::CaseInsensitive) ||
+                    (!b210SourceProject_ && name.endsWith(QStringLiteral(".srcs"), Qt::CaseInsensitive)) ||
                     name.endsWith(QStringLiteral(".runs"), Qt::CaseInsensitive) ||
                     name.endsWith(QStringLiteral(".cache"), Qt::CaseInsensitive) ||
                     name.endsWith(QStringLiteral(".gen"), Qt::CaseInsensitive) ||
@@ -865,7 +922,8 @@ bool FpgaLabWindow::applyPipelineJson(const QJsonObject &root) {
         const QJsonObject object = value.toObject();
         const QString type = object.value(QStringLiteral("type")).toString();
         if (!QStringList{QStringLiteral("ddc"), QStringLiteral("fir"), QStringLiteral("decimator"),
-                         QStringLiteral("trigger"), QStringLiteral("custom")}.contains(type)) return false;
+                         QStringLiteral("trigger"), QStringLiteral("custom"),
+                         QStringLiteral("passthrough")}.contains(type)) return false;
         Stage stage;
         stage.type = type;
         stage.frequencyHz = object.value(QStringLiteral("frequencyHz")).toDouble();
@@ -1011,6 +1069,7 @@ void FpgaLabWindow::updateProjectSummary() {
 }
 
 void FpgaLabWindow::startBuild() {
+    if (b210Panel_->busy()) return;
     if ((projectFile_.isEmpty() && buildTclFile_.isEmpty()) || !binaryFile_.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("Збірка"),
             QStringLiteral("Для збірки потрібен повний Vivado-проєкт .xpr або вибраний Tcl-сценарій."));
@@ -1161,7 +1220,7 @@ void FpgaLabWindow::synthesizePipelineRtl() {
 }
 
 void FpgaLabWindow::launchOpenXc7Script(const QString &scriptPath, const QString &kind) {
-    if (buildProcess_->state() != QProcess::NotRunning) return;
+    if (buildProcess_->state() != QProcess::NotRunning || b210Panel_->busy()) return;
     QString program;
     QStringList args;
 #ifdef Q_OS_WIN

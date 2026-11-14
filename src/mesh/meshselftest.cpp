@@ -75,6 +75,23 @@ int main(int argc,char **argv) {
     invalid=project;invalid.nodes[0].listeningHz+=1e6;check(!invalid.validate(library).isEmpty(),"out-of-band radio setting rejected");
     Mesh::Project parsed;check(Mesh::Project::parse(project.json(),&parsed,&error)&&parsed.json()==project.json(),"project JSON roundtrip");
     auto bad=project.json();bad["version"]=9;check(!Mesh::Project::parse(bad,&parsed,&error),"future schema rejected");
+    auto shiftedProject=project;
+    shiftedProject.links[0].frequencyOffsetHz=-250.25;
+    shiftedProject.links[0].clockPpm=125.25;
+    check(shiftedProject.validate(library).isEmpty()&&Mesh::Project::parse(shiftedProject.json(),&parsed,&error)&&
+          parsed.links[0].frequencyOffsetHz==-250.25&&parsed.links[0].clockPpm==125.25,
+          "IQ link offset and clock error survive project save/load");
+    shiftedProject.mixIq=false;
+    check(!shiftedProject.validate(library).isEmpty()&&!Mesh::Project::parse(shiftedProject.json(),&parsed,&error),
+          "frame forwarding rejects a nonzero IQ link offset");
+    shiftedProject.mixIq=true;
+    shiftedProject.links[0].frequencyOffsetHz=project.sampleRate/2.0;
+    check(!shiftedProject.validate(library).isEmpty()&&!Mesh::Project::parse(shiftedProject.json(),&parsed,&error),
+          "project rejects an offset at the Nyquist limit");
+    shiftedProject.links[0].frequencyOffsetHz=0;
+    shiftedProject.links[0].clockPpm=-1000.01;
+    check(!shiftedProject.validate(library).isEmpty()&&!Mesh::Project::parse(shiftedProject.json(),&parsed,&error),
+          "project rejects out-of-range clock error");
     {
         Mesh::SpectrumView graph;
         QJsonObject trace{{"startHz",145476000.0},{"binHz",12000.0},{"offset",0},{"totalBins",4},
@@ -243,8 +260,8 @@ int main(int argc,char **argv) {
             check(runtime.testSignal("node1",&error)&&waitFor([&]{return filteredFrames(runtime,"node2")>filtered;}),"new TX is filtered by disabled live link");
             check(command(runtime,"node2","status",{}).value("samples").toDouble()==isolated,"disabled edge delivers no new IQ after queued tail drains");
             check(runtime.stopSignal("node1",&error)&&waitFor([&]{return !runtime.snapshot("node1").value("txRunning").toBool();}),"disabled-link stimulus stops cleanly");
-            link.enabled=true;link.gainDb=-18;link.delayMs=20;
-            check(runtime.applyLink(link,&error)&&waitFor([&]{const auto a=appliedLink(runtime,"node1","node2");return !runtime.hubSnapshot().value("pending").toBool()&&runtime.hubSnapshot().value("revision")=="2"&&a.value("enabled").toBool()&&a.value("gainDb").toDouble()==-18&&a.value("delayMs").toInt()==20;}),"gain, delay and restore applied without session restart");
+            link.enabled=true;link.gainDb=-18;link.delayMs=20;link.frequencyOffsetHz=-250.25;
+            check(runtime.applyLink(link,&error)&&waitFor([&]{const auto a=appliedLink(runtime,"node1","node2");return !runtime.hubSnapshot().value("pending").toBool()&&runtime.hubSnapshot().value("revision")=="2"&&a.value("enabled").toBool()&&a.value("gainDb").toDouble()==-18&&a.value("delayMs").toInt()==20&&a.value("frequencyOffsetHz").toDouble()==-250.25;}),"gain, delay and frequency offset applied without session restart");
             auto invalidLink=link;invalidLink.delayMs=501;
             check(!runtime.applyLink(invalidLink,&error)&&runtime.hubSnapshot().value("revision")=="2","invalid designer link cannot mutate running topology");
             check(runtime.testSignal("node1",&error)&&waitFor([&]{return runtime.snapshot("node2").value("applied").toObject().value("samples").toDouble()>isolated;}),"restored edge carries new IQ");
@@ -274,7 +291,13 @@ int main(int argc,char **argv) {
             check(runtime.hubSnapshot().value("instanceId")==hubInstance&&runtime.snapshot("node1").value("pid")==firstPid&&runtime.snapshot("node3").value("pid")==thirdPid,"live local append preserves unaffected process identities");
             runtime.stop();check(waitFor([&]{return runtime.state()==Mesh::Runtime::Idle;},8000)&&runtime.ownedProcessCount()==0,"stop cleans up all owned processes including TX");
             auto remote=project;remote.nodes[0].presetId="pi5";check(!runtime.start(remote,library,&error)&&runtime.ownedProcessCount()==0,"remote launch explicitly unavailable before creating processes");
-            check(runtime.start(project,library,&error)&&waitFor([&]{return runtime.state()==Mesh::Runtime::Running;}),"session can restart with fresh endpoints");
+            auto restartProject=project;
+            restartProject.links[0].frequencyOffsetHz=125.5;
+            restartProject.links[0].clockPpm=-220.25;
+            check(runtime.start(restartProject,library,&error)&&waitFor([&]{return runtime.state()==Mesh::Runtime::Running&&
+                appliedLink(runtime,"node1","node2").value("frequencyOffsetHz").toDouble()==125.5&&
+                appliedLink(runtime,"node1","node2").value("clockPpm").toDouble()==-220.25;}),
+                "a fresh session loads the saved offset and clock error into the real hub");
             auto pendingLink=project.links.first();pendingLink.enabled=false;
             check(runtime.applyLink(pendingLink,&error),"link request queued before immediate stop");
             runtime.stop();check(waitFor([&]{return runtime.state()==Mesh::Runtime::Idle;},8000)&&!runtime.hubSnapshot().value("pending").toBool(),"stop cancels pending link control without stale callbacks");
@@ -310,12 +333,30 @@ int main(int argc,char **argv) {
                 view->scene()->clearSelection();
                 for(auto item:view->scene()->items())if(item->data(0)=="link"&&item->data(1)=="node1/node2")item->setSelected(true);
                 auto enabled=window.findChild<QCheckBox *>("linkEnabled");auto apply=window.findChild<QPushButton *>("applyLink");
+                auto offset=window.findChild<QDoubleSpinBox *>("linkFrequencyOffsetHz");
+                auto clock=window.findChild<QDoubleSpinBox *>("linkClockPpm");
+                check(offset&&offset->isEnabled()&&offset->value()==0,"legacy project shows a zero offset in the link editor");
+                check(clock&&clock->isEnabled()&&clock->value()==0,"legacy project shows zero clock error");
+                if(offset)offset->setValue(350.5);
+                if(clock)clock->setValue(-175.5);
                 if(enabled)enabled->setChecked(false);
                 check(enabled&&apply&&apply->isEnabled()&&live->hubSnapshot().value("revision")=="0","production link editor stages desired values until Apply");
                 if(apply)apply->click();
                 check(waitFor([&]{return live->hubSnapshot().value("revision")=="1"&&!live->hubSnapshot().value("pending").toBool()&&!appliedLink(*live,"node1","node2").value("enabled").toBool(true);}),"production Apply button changes actual hub link");
                 auto label=window.findChild<QLabel *>("appliedLinkState");
                 check(label&&apply&&label->text().contains(QString::fromUtf8("Вимкнений"))&&!apply->isEnabled(),"production link inspector shows confirmed state");
+                check(appliedLink(*live,"node1","node2").value("frequencyOffsetHz").toDouble()==350.5,
+                      "production Apply sends the edited offset");
+                check(appliedLink(*live,"node1","node2").value("clockPpm").toDouble()==-175.5,
+                      "production Apply sends the edited clock error");
+                if(offset)offset->setValue(0);
+                if(clock)clock->setValue(0);
+                if(apply)apply->click();
+                check(waitFor([&]{return live->hubSnapshot().value("revision")=="2"&&
+                    !live->hubSnapshot().value("pending").toBool()&&
+                    appliedLink(*live,"node1","node2").value("frequencyOffsetHz").toDouble(-1)==0&&
+                    appliedLink(*live,"node1","node2").value("clockPpm").toDouble(-1)==0;}),
+                    "clearing offset and clock error sends explicit zeros to the running hub");
                 if(argc>2)check(window.grab().save(QString::fromLocal8Bit(argv[2])+"-link.png"),"live link editor screenshot");
             }
             if(live){live->stop();check(waitFor([&]{return live->state()==Mesh::Runtime::Idle;},8000),"production inspector session cleans up");}

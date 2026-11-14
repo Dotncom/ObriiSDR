@@ -11,6 +11,10 @@ The package includes the Qt runtime, Codec2 for M17, and the Fobos USB
 libraries. For supported Fobos firmware and recovery instructions, see
 `firmware/fobos/README.txt` inside the package.
 
+Both Windows packages include FPGA Lab and seven interface styles. Select a
+style under **Tools → Settings → Interface style**. For the B210 build tools,
+see [FPGA Lab](fpga_lab.md).
+
 ## Raspberry Pi OS Bookworm, 64-bit
 
 Extract the ARM64 archive and run these commands from its directory.

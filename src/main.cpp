@@ -47,6 +47,7 @@
 #include "remotewebserver.h"
 
 #include <QApplication>
+#include <QStyle>
 #include <QClipboard>
 #include <QDateTime>
 #include <chrono>
@@ -194,7 +195,7 @@ YourClassName::YourClassName(QWidget *parent)
     controlsDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
     controlsDock->setFeatures(QDockWidget::DockWidgetMovable |
                               QDockWidget::DockWidgetFloatable);
-    controlsDock->setMinimumWidth(340);
+    controlsDock->setMinimumWidth(220);
     controlsDock->setWidget(controlsScrollArea);
     addDockWidget(Qt::LeftDockWidgetArea, controlsDock);
 
@@ -1573,10 +1574,10 @@ YourClassName::YourClassName(QWidget *parent)
         QStringLiteral("Configure local IPC or TCP input for generated IQ signals")));
     virtualSignalSettingsButton->hide();
     appSettingsButton = new QPushButton("Settings...", this);
-    commandConsoleButton = new QPushButton(QStringLiteral(">_"), this);
+    commandConsoleButton = new QPushButton(this);
+    markTranslatable(commandConsoleButton, QStringLiteral("command_console"), QStringLiteral("Console"));
     commandConsoleButton->setToolTip(uiText(QStringLiteral("command_console"), QStringLiteral("Console")));
     commandConsoleButton->setAccessibleName(commandConsoleButton->toolTip());
-    commandConsoleButton->setFixedWidth(32);
     commandConsoleButton->setObjectName(QStringLiteral("commandConsoleButton"));
     connect(commandConsoleButton, &QPushButton::clicked, this, &YourClassName::showCommandConsole);
     markTranslatable(appSettingsButton, QStringLiteral("settings"), QStringLiteral("Settings..."));
@@ -1840,12 +1841,10 @@ YourClassName::YourClassName(QWidget *parent)
     markTranslatable(zoomSpectrumButton,
                      QStringLiteral("zoom_spectrum"),
                      QStringLiteral("Zoom spectrum"));
-    zoomSpectrumButton->setToolTip(QString::fromUtf8(u8"Р’С–РґРєСЂРёС‚Рё С€РІРёРґРєРёР№ РІСѓР·СЊРєРѕСЃРјСѓРіРѕРІРёР№ Р°РЅР°Р»С–Р· РґР»СЏ РґС–Р°РїР°Р·РѕРЅСѓ, РІРёРґС–Р»РµРЅРѕРіРѕ РјРёС€РµСЋ РЅР° СЃРїРµРєС‚СЂС–"));
     zoomDensityButton = new QPushButton(QStringLiteral("Density"), this);
     markTranslatable(zoomDensityButton,
                      QStringLiteral("zoom_density"),
                      QStringLiteral("Density"));
-    zoomDensityButton->setToolTip(QString::fromUtf8(u8"Р’С–РґРєСЂРёС‚Рё РѕРєСЂРµРјРёР№ РіСЂР°С„С–Рє С‰С–Р»СЊРЅРѕСЃС‚С– РґР»СЏ СЃРјСѓРіРё, РІРёРґС–Р»РµРЅРѕС— РјРёС€РµСЋ РЅР° СЃРїРµРєС‚СЂС–"));
     
     QLabel *clockSourceLabel = new QLabel("Clock:", this);
     markTranslatable(clockSourceLabel, QStringLiteral("clock"), QStringLiteral("Clock:"));
@@ -1864,6 +1863,11 @@ YourClassName::YourClassName(QWidget *parent)
     markTranslatable(agileScanBox, QStringLiteral("agile_scan"), QStringLiteral("Agile scan"));
     QGroupBox *spectrumMeasurementBox = new QGroupBox("Spectrum measurement", this);
     markTranslatable(spectrumMeasurementBox, QStringLiteral("spectrum_measurement"), QStringLiteral("Spectrum measurement"));
+    QWidget *toolsPanel = new QWidget(this);
+    toolsPanel->setObjectName(QStringLiteral("receiverToolsPanel"));
+    auto *toolsLayout = new QVBoxLayout(toolsPanel);
+    toolsLayout->setContentsMargins(0, 0, 0, 0);
+    toolsLayout->setSpacing(4);
     agileScanCheckbox = new QCheckBox("Enable scan", agileScanBox);
     markTranslatable(agileScanCheckbox, QStringLiteral("enable_scan"), QStringLiteral("Enable scan"));
     agileScanPresetCombo = new QComboBox(agileScanBox);
@@ -2021,7 +2025,7 @@ YourClassName::YourClassName(QWidget *parent)
     markTranslatable(zeroSpanButton, QStringLiteral("zero_span_open"), QStringLiteral("Zero Span..."));
     zeroSpanButton->setToolTip(uiText(QStringLiteral("zero_span_open_tooltip"),
                                       QStringLiteral("Open time-domain level analysis at one selected frequency")));
-    researchToolsButton = new QPushButton("Research...", spectrumMeasurementBox);
+    researchToolsButton = new QPushButton("Research...", toolsPanel);
     markTranslatable(researchToolsButton,
                      QStringLiteral("research_tools_open"),
                      QStringLiteral("Research..."));
@@ -2052,7 +2056,7 @@ YourClassName::YourClassName(QWidget *parent)
     spurClearButton->setToolTip(uiText(QStringLiteral("clear_spur_tooltip"),
                                        QStringLiteral("Clear calibrated spur mask")));
 
-    QGroupBox *receiverCalibrationBox = new QGroupBox("Receiver calibration", spectrumMeasurementBox);
+    QGroupBox *receiverCalibrationBox = new QGroupBox("Receiver calibration", toolsPanel);
     markTranslatable(receiverCalibrationBox,
                      QStringLiteral("receiver_calibration"),
                      QStringLiteral("Receiver calibration"));
@@ -2278,18 +2282,15 @@ YourClassName::YourClassName(QWidget *parent)
     spectrumScienceActionLayout->setSpacing(4);
     spectrumScienceActionLayout->addWidget(spectrumScienceResetButton, 0, 0);
     spectrumScienceActionLayout->addWidget(spectrumScienceExportButton, 0, 1);
-    spectrumScienceActionLayout->addWidget(zeroSpanButton, 1, 0);
-    spectrumScienceActionLayout->addWidget(researchToolsButton, 1, 1);
+    spectrumScienceActionLayout->addWidget(zeroSpanButton, 1, 0, 1, 2);
     spectrumScienceActionLayout->addWidget(waterfallAreaMeasurementCheckbox, 2, 0, 1, 2);
-    auto *wirelessLabButton = new QPushButton("Wireless lab (beta)...", spectrumMeasurementBox);
+    auto *wirelessLabButton = new QPushButton("Wireless lab (beta)...", toolsPanel);
     markTranslatable(wirelessLabButton, QStringLiteral("wireless_lab"), QStringLiteral("Wireless lab (beta)..."));
-    spectrumScienceActionLayout->addWidget(wirelessLabButton, 3, 0, 1, 2);
     connect(wirelessLabButton, &QPushButton::clicked, this, &YourClassName::openWirelessLab);
-    auto *analyzerButton = new QPushButton(QStringLiteral("Obrii Analyzer..."), spectrumMeasurementBox);
+    auto *analyzerButton = new QPushButton(QStringLiteral("Obrii Analyzer..."), toolsPanel);
     analyzerButton->setToolTip(uiText(
         QStringLiteral("obrii_analyzer_tooltip"),
         QStringLiteral("Open the standalone laboratory analyzer and attach it to this live spectrum.")));
-    spectrumScienceActionLayout->addWidget(analyzerButton, 5, 0, 1, 2);
     connect(analyzerButton, &QPushButton::clicked, this, [this]() {
         const QString executableName = QStringLiteral("ObriiAnalyzer")
 #ifdef _WIN32
@@ -2306,11 +2307,10 @@ YourClassName::YourClassName(QWidget *parent)
                                         QStringLiteral("ObriiAnalyzer executable was not found or could not be started.")));
         }
     });
-    auto *fpgaLabButton = new QPushButton(QStringLiteral("Obrii FPGA Lab..."), spectrumMeasurementBox);
+    auto *fpgaLabButton = new QPushButton(QStringLiteral("Obrii FPGA Lab..."), toolsPanel);
     fpgaLabButton->setToolTip(uiText(
         QStringLiteral("fpga_lab_tooltip"),
         QStringLiteral("Open the standalone FPGA project editor while Obrii SDR keeps running.")));
-    spectrumScienceActionLayout->addWidget(fpgaLabButton, 6, 0, 1, 2);
     connect(fpgaLabButton, &QPushButton::clicked, this, [this]() {
         const QString executableName = QStringLiteral("ObriiFpgaLab")
 #ifdef _WIN32
@@ -2392,10 +2392,15 @@ YourClassName::YourClassName(QWidget *parent)
         multiSdrDialog->raise();
         multiSdrDialog->activateWindow();
     });
-    auto *propagationButton = new QPushButton("Radio propagation...", spectrumMeasurementBox);
+    auto *propagationButton = new QPushButton("Radio propagation...", toolsPanel);
     markTranslatable(propagationButton, QStringLiteral("radio_propagation"), QStringLiteral("Radio propagation..."));
-    spectrumScienceActionLayout->addWidget(propagationButton, 4, 0, 1, 2);
     connect(propagationButton, &QPushButton::clicked, this, &YourClassName::openPropagationLab);
+    toolsLayout->addWidget(researchToolsButton);
+    toolsLayout->addWidget(wirelessLabButton);
+    toolsLayout->addWidget(propagationButton);
+    toolsLayout->addWidget(analyzerButton);
+    toolsLayout->addWidget(fpgaLabButton);
+    toolsLayout->addWidget(receiverCalibrationBox);
     spectrumScienceActionLayout->setColumnStretch(0, 1);
     spectrumScienceActionLayout->setColumnStretch(1, 1);
     spectrumSciencePanelLayout->setContentsMargins(0, 0, 0, 0);
@@ -2422,7 +2427,6 @@ YourClassName::YourClassName(QWidget *parent)
     auto *hiddenSpurControls = new QWidget(this);
     hiddenSpurControls->setLayout(spurSuppressionPanelLayout);
     hiddenSpurControls->hide();
-    spectrumMeasurementLayout->addWidget(receiverCalibrationBox);
 
     agileScanLayout->addLayout(agileScanPresetLayout);
     agileScanLayout->addLayout(agileScanPresetButtonLayout);
@@ -3421,14 +3425,28 @@ YourClassName::YourClassName(QWidget *parent)
     prepareCompactPanelButton(networkButton);
     prepareCompactPanelButton(appSettingsButton);
     prepareCompactPanelButton(commandConsoleButton);
+    prepareCompactPanelButton(multiSdrButton);
 
     QHBoxLayout *deviceButtonLayout = new QHBoxLayout();
     deviceButtonLayout->setContentsMargins(0, 0, 0, 0);
     deviceButtonLayout->setSpacing(4);
-    deviceButtonLayout->addWidget(refreshButton, 4);
-    deviceButtonLayout->addWidget(networkButton, 3);
-    deviceButtonLayout->addWidget(appSettingsButton, 5);
-    deviceButtonLayout->addWidget(commandConsoleButton);
+    deviceButtonLayout->addWidget(refreshButton, 1);
+    deviceButtonLayout->addWidget(multiSdrButton, 1);
+
+    auto *toolShortcuts = new QGridLayout;
+    toolShortcuts->setContentsMargins(0, 0, 0, 0);
+    toolShortcuts->setSpacing(4);
+    toolShortcuts->setColumnStretch(0, 1);
+    toolShortcuts->setColumnStretch(1, 1);
+    toolShortcuts->addWidget(presetManagerButton, 0, 0);
+    toolShortcuts->addWidget(networkButton, 0, 1);
+    toolShortcuts->addWidget(zoomDensityButton, 1, 0);
+    toolShortcuts->addWidget(zoomSpectrumButton, 1, 1);
+    toolShortcuts->addWidget(appSettingsButton, 2, 0);
+    toolShortcuts->addWidget(commandConsoleButton, 2, 1);
+    for (auto *button : {presetManagerButton, zoomDensityButton, zoomSpectrumButton})
+        prepareCompactPanelButton(button);
+    toolsLayout->insertLayout(0, toolShortcuts);
 
     QHBoxLayout *gainLabelLayout = new QHBoxLayout();
     lnaGainLabel->setAlignment(Qt::AlignCenter);
@@ -3569,16 +3587,6 @@ YourClassName::YourClassName(QWidget *parent)
     fineTuneHeaderLayout->addWidget(fineTuneScaleModeButton, 0, Qt::AlignRight | Qt::AlignVCenter);
     fineTuneLayout->addLayout(fineTuneHeaderLayout);
     fineTuneLayout->addWidget(fineTuneStack);
-    QGridLayout *frequencyActionLayout = new QGridLayout();
-    frequencyActionLayout->setContentsMargins(0, 0, 0, 0);
-    frequencyActionLayout->setHorizontalSpacing(4);
-    frequencyActionLayout->setVerticalSpacing(4);
-    frequencyActionLayout->addWidget(presetManagerButton, 0, 0);
-    frequencyActionLayout->addWidget(zoomSpectrumButton, 0, 1);
-    frequencyActionLayout->addWidget(zoomDensityButton, 1, 0);
-    frequencyActionLayout->addWidget(multiSdrButton, 1, 1);
-    frequencyActionLayout->setColumnStretch(0, 1);
-    frequencyActionLayout->setColumnStretch(1, 1);
 
     QVBoxLayout *receiverControlLayout = new QVBoxLayout();
     receiverControlLayout->setContentsMargins(0, 0, 0, 0);
@@ -3793,7 +3801,6 @@ YourClassName::YourClassName(QWidget *parent)
     };
 
     CollapsibleSection receiverSection = createCollapsibleSection(QStringLiteral("receiver"), QStringLiteral("Receiver"), true);
-    receiverSection.contentLayout->addLayout(frequencyActionLayout);
     receiverSection.contentLayout->addLayout(deviceButtonLayout);
     receiverSection.contentLayout->addWidget(comboBox);
     receiverSection.contentLayout->addLayout(receiverControlLayout);
@@ -3981,6 +3988,8 @@ YourClassName::YourClassName(QWidget *parent)
 
     CollapsibleSection spectrumMeasurementSection = createCollapsibleSection(QStringLiteral("spectrum_measurement"), QStringLiteral("Spectrum measurement"), false);
     spectrumMeasurementSection.contentLayout->addWidget(spectrumMeasurementBox);
+    CollapsibleSection toolsSection = createCollapsibleSection(QStringLiteral("tools_section"), QStringLiteral("Tools"), false);
+    toolsSection.contentLayout->addWidget(toolsPanel);
 
     CollapsibleSection listeningScanSection = createCollapsibleSection(QStringLiteral("listening_scan"), QStringLiteral("Listening scan"), false);
     listeningScanSection.contentLayout->addWidget(listeningScanBox);
@@ -4208,6 +4217,7 @@ YourClassName::YourClassName(QWidget *parent)
     layout->addWidget(recordingSection.widget);
     layout->addWidget(gpioSection.widget);
     layout->addWidget(spectrumMeasurementSection.widget);
+    layout->addWidget(toolsSection.widget);
     layout->addStretch(1);
 
     controlsWidget->setLayout(layout);
@@ -10456,6 +10466,10 @@ int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("ObriiSDR"));
     QGuiApplication::setApplicationDisplayName(QStringLiteral("Obrii SDR"));
+    app.setProperty("obriiDefaultStyle", app.style()->objectName());
+    const QString savedStyle = QSettings(persistentSettingsFilePath(), QSettings::IniFormat)
+                                   .value(QStringLiteral("ui/style")).toString();
+    if (!savedStyle.isEmpty()) QApplication::setStyle(savedStyle);
     app.setWindowIcon(QIcon(QStringLiteral(":/icons/obriisdr.png")));
 
     installDiagnosticLogger();

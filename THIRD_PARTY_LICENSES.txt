@@ -31,6 +31,10 @@ using AMBE-capable binaries.
    Qt LGPL/GPL license files distributed with your Qt installation.
    Packaged texts and original source-module links: licenses/qt/.
 
+   Optional classic Qt styles for Windows (Cleanlooks, CDE/Motif, Plastique):
+   LGPL 2.1. The Windows packages include the matching source, the qmake
+   build file and notices under licenses/qt-styleplugins/.
+
 2. FFTW 3.3.5 single-precision runtime
    File used in the Windows package:
    - libfftw3f-3.dll

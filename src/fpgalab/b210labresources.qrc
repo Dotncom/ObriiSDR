@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/fpga">
+        <file alias="b210_fpga_check.py">../../tools/b210_fpga_check.py</file>
+    </qresource>
+</RCC>

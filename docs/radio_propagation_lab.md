@@ -1,6 +1,6 @@
 # Radio Propagation Lab / HF Conditions
 
-Open **Spectrum measurements -> Radio propagation / HF**, or the DSP board's
+Open **Tools → Radio propagation / HF**, or the DSP board's
 **Radio propagation / HF** block. This is an independent planning tool: it
 does not tune a receiver, transmit RF, or continuously analyze IQ.
 

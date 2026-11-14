@@ -44,7 +44,7 @@ if (Test-Path -LiteralPath $output) {
 New-Item -ItemType Directory -Path $output -Force | Out-Null
 
 $files = @(
-    'ObriiSDR.exe', 'ObriiCli.exe', 'ObriiCliView.exe', 'translations.json', 'LICENSE', 'THIRD_PARTY_LICENSES.txt',
+    'ObriiSDR.exe', 'ObriiCli.exe', 'ObriiCliView.exe', 'ObriiFpgaLab.exe', 'translations.json', 'LICENSE', 'THIRD_PARTY_LICENSES.txt',
     'fobos.dll', 'fobos_sdr.dll', 'libfftw3f-3.dll', 'libusb-1.0.dll',
     'Qt5Core.dll', 'Qt5Concurrent.dll', 'Qt5Gui.dll', 'Qt5Widgets.dll',
     'Qt5Network.dll', 'Qt5SerialPort.dll', 'Qt5Multimedia.dll',
@@ -53,6 +53,8 @@ $files = @(
     'imageformats/qjpeg.dll', 'imageformats/qtiff.dll', 'imageformats/qwebp.dll',
     'audio/qtaudio_windows.dll', 'audio/qtaudio_wasapi.dll'
 )
+. (Join-Path $PSScriptRoot 'qt_style_package_manifest.ps1')
+$files += @(Get-ObriiQtStylePackageFiles $runtime)
 $optional = @(
     'rtlsdr.dll', 'rtlsdr/rtlsdr.dll', 'rtlsdr/libusb-1.0.dll',
     'hackrf/hackrf.dll', 'hackrf/libusb-1.0.dll', 'hackrf/pthreadVC3.dll',
@@ -74,7 +76,7 @@ foreach ($relative in $files + $optional) {
     }
 }
 Copy-Item -LiteralPath (Join-Path $Workspace 'docs/lite_windows_package.md') -Destination (Join-Path $output 'README-LITE.md')
-$publicDocs = @('mesh_vpn_discovery.md', 'fft_tuning.md', 'phosphor_contours.md', 'obrii_cli.md', 'cli_parity.md', 'shared_runtime_core.md',
+$publicDocs = @('mesh_vpn_discovery.md', 'fft_tuning.md', 'phosphor_contours.md', 'fpga_lab.md', 'obrii_cli.md', 'cli_parity.md', 'shared_runtime_core.md',
     'shared_fft_core.md', 'shared_recording_core.md', 'command_dispatcher.md',
     'command_console.md', 'command_control_api.md', 'cli_doctor.md',
     'cli_runtime_recording.md', 'cli_calibration.md', 'cli_digital_profiles.md',

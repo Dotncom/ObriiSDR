@@ -51,6 +51,7 @@ struct AnalyzerReceiverSettings {
     QString uhdDeviceAddress;
     double uhdRxGainDb = 30.0;
     QString uhdRxAntenna;
+    QString uhdFpgaImagePath;
 };
 
 class AnalyzerReceiver final : public QObject {

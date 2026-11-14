@@ -9,6 +9,8 @@
 #include <QSet>
 #include <QVector>
 
+#include <array>
+#include <optional>
 #include <random>
 
 struct VirtualIqMediumSettings {
@@ -52,6 +54,21 @@ public:
     VirtualIqMediumCounters totalCounters() const;
 
 private:
+    struct ClockResampler {
+        static constexpr int Taps = 16;
+        std::array<float, (Taps - 1) * 2> history{};
+        qint64 position = 0;
+        qint64 nextInput = 0;
+        qint64 nextOutput = 0;
+        qint64 delay = 0;
+        QString session;
+
+        QVector<float> process(const QVector<float> &iq, double ppm);
+    };
+    struct Route {
+        VirtualIqLinkSettings settings;
+        std::optional<ClockResampler> clock;
+    };
     struct Block {
         QVector<float> iq;
         QVector<quint8> occupied;
@@ -74,13 +91,13 @@ private:
     qint64 sampleIndex(qint64 timestampNs) const;
     static qint64 floorBlock(qint64 sampleIndex, int blockSamples);
     void addToSubscriber(Subscriber *subscriber, const QString &sourceId,
-                         const QString &sessionId, const VirtualSignalFrame &frame,
+                         const QString &sessionId, bool discontinuity,
                          const QVector<float> &iq, qint64 startIndex, float gain,
                          double frequencyOffsetHz);
 
     VirtualIqMediumSettings settings_;
     QHash<QString, Subscriber> subscribers_;
-    QHash<QString, QHash<QString, VirtualIqLinkSettings>> links_;
+    QHash<QString, QHash<QString, Route>> links_;
     qint64 epochNs_ = 0;
     qint64 wallEpochNs_ = 0;
 };

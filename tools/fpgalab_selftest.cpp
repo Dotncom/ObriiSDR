@@ -4,6 +4,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QComboBox>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -112,6 +113,19 @@ int main(int argc, char **argv) {
         if (!preview.save(QString::fromLocal8Bit(argv[1]))) return 10;
     }
     if (!window.openPath(image) || !editor->isReadOnly() || logicButton->isEnabled()) return 9;
+    const QString nested = temp.filePath(QStringLiteral("b210/src/B210_Project_Firmwire.srcs"));
+    const QString marker = temp.filePath(QStringLiteral("b210/.obrii-b210.json"));
+    if (!QDir().mkpath(nested) ||
+        !writeFile(nested + QStringLiteral("/radio_legacy.v"), "module radio_legacy; endmodule\n") ||
+        !writeFile(marker, "{\"schema\":1,\"variant\":\"b210-dual-fabric\"}") ||
+        !window.openPath(marker) || !window.findChild<QWidget *>(QStringLiteral("b210LabPanel")) ||
+        !QFile::exists(QStringLiteral(":/fpga/b210_fpga_check.py"))) return 20;
+    const auto radio = tree->findItems(QStringLiteral("radio_legacy.v"), Qt::MatchExactly | Qt::MatchRecursive);
+    if (radio.size() != 1) return 21;
+    tree->setCurrentItem(radio.first());
+    if (editor->isReadOnly() || !editor->toPlainText().contains(QStringLiteral("module radio_legacy"))) return 22;
+    const int identity = stageType->findData(QStringLiteral("passthrough"));
+    if (identity < 0) return 23;
     if (argc > 2) {
         if (!window.openPath(QString::fromLocal8Bit(argv[2]))) return 12;
         auto *report = window.findChild<QPlainTextEdit *>(QStringLiteral("openXc7Report"));

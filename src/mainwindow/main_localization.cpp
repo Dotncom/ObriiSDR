@@ -172,6 +172,10 @@ void YourClassName::applyUiLanguage() {
         commandConsoleButton->setToolTip(uiText(QStringLiteral("command_console"), QStringLiteral("Console")));
         commandConsoleButton->setAccessibleName(commandConsoleButton->toolTip());
     }
+    if (zoomSpectrumButton) zoomSpectrumButton->setToolTip(uiText(
+        "zoom_spectrum_tooltip", "Open a narrowband spectrum for the range selected with the mouse."));
+    if (zoomDensityButton) zoomDensityButton->setToolTip(uiText(
+        "zoom_density_tooltip", "Open a density plot for the range selected with the mouse."));
     const auto widgets = findChildren<QWidget*>();
     for (QWidget *widget : widgets) {
         const QString key = widget->property("i18nKey").toString();

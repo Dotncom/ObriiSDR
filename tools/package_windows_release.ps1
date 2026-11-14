@@ -95,6 +95,8 @@ $PublicDocs = @(
     'cli_dsp_graph_example.json', 'cli_multisdr_graph_example.json',
     'cli_iq_trigger_example.json', 'virtual_iq_link_scenario.json'
 )
+. (Join-Path $PSScriptRoot 'qt_style_package_manifest.ps1')
+$QtStyleFiles = @(Get-ObriiQtStylePackageFiles $RuntimePath)
 $Backends = if ($WirelessAddOn) { @('wireshark', 'wifi-phy', 'wifi-ht') } else { @('pocketsdr', 'satdump', 'hdf5', 'itu_hf') }
 $ResearchFiles = @{}
 foreach ($Backend in $Backends) {
@@ -129,8 +131,9 @@ Get-ChildItem -LiteralPath $RuntimePath -Recurse -File -Force | ForEach-Object {
         '^[^/]+$' { $Allowed = $RootFiles -contains $File.Name }
         '^docs/[^/]+$' { $Allowed = $PublicDocs -contains $File.Name }
         '^dsp/[^/]+$' { $Allowed = $Relative -in @('dsp/obrii_gr_bridge.py', 'dsp/obrii_gr_resampler.py', 'dsp/obrii_gr_hier_resampler.py') }
-        '^licenses/' { $Allowed = $File.Extension -in @('', '.txt', '.md', '.json') -or $Relative -in @('licenses/lora/LICENSE.LoRaPHY', 'licenses/libgcc/COPYING.RUNTIME', 'licenses/codec2/sources/mingw-w64-codec2-1.2.0-2.src.tar.zst') }
+        '^licenses/' { $Allowed = $File.Extension -in @('', '.txt', '.md', '.json') -or $Relative -in $QtStyleFiles -or $Relative -in @('licenses/lora/LICENSE.LoRaPHY', 'licenses/libgcc/COPYING.RUNTIME', 'licenses/codec2/sources/mingw-w64-codec2-1.2.0-2.src.tar.zst') }
         '^config/' { $Allowed = $Relative -in @('config/dmr_backends.example.json', 'config/fobosapp_defaults_4.2.json') }
+        '^styles/' { $Allowed = $Relative -in $QtStyleFiles }
         '^platforms/' { $Allowed = $Relative -eq 'platforms/qwindows.dll' }
         '^imageformats/' { $Allowed = $File.Name -in @('qgif.dll', 'qico.dll', 'qjpeg.dll', 'qtiff.dll', 'qwebp.dll') }
         '^audio/' { $Allowed = $File.Name -in @('qtaudio_windows.dll', 'qtaudio_wasapi.dll') }

@@ -16,7 +16,9 @@ find_package(Qt5 REQUIRED COMPONENTS Core Network Gui Concurrent)
 find_package(Qt5 COMPONENTS Multimedia QUIET)
 find_package(Qt5 COMPONENTS Widgets QUIET)
 add_library(ObriiUsrpLabCore STATIC
-    "${OBRII_ROOT}/src/core/usrplabjob.cpp" "${OBRII_ROOT}/src/core/usrplabjob.h")
+    "${OBRII_ROOT}/src/core/usrplabjob.cpp" "${OBRII_ROOT}/src/core/usrplabjob.h"
+    "${OBRII_ROOT}/src/core/usrplabresources.qrc")
+set_target_properties(ObriiUsrpLabCore PROPERTIES AUTORCC ON)
 target_include_directories(ObriiUsrpLabCore PUBLIC "${OBRII_ROOT}/src/core")
 target_link_libraries(ObriiUsrpLabCore PUBLIC Qt5::Core)
 add_library(ObriiCommandCore STATIC "${OBRII_ROOT}/src/core/commanddispatcher.cpp")
@@ -57,6 +59,7 @@ endforeach()
 
 add_executable(ObriiCli
     obriicli.cpp climodulemanager.cpp climodulemanager.h climoduleprotocol.h
+    climcp.cpp climcp.h
     cliasyncspectrum.cpp cliasyncspectrum.h
     clidoctor.cpp clidoctor.h cliruntimerecorder.cpp cliruntimerecorder.h
     "${OBRII_ROOT}/src/utils/dmrprivacyutils.cpp"
@@ -297,6 +300,7 @@ add_executable(ObriiCliTxModule
     "${OBRII_ROOT}/src/transmit/windowsmicrophonecapture.cpp"
     "${OBRII_ROOT}/src/transmit/windowsmicrophonecapture.h"
     obriiclitxmodule.cpp
+    "${OBRII_ROOT}/src/openradio/m17adapter.cpp"
     "${OBRII_ROOT}/src/transmit/transmitmediagenerator.cpp"
     "${OBRII_ROOT}/src/transmit/transmitmediagenerator.h"
     "${OBRII_ROOT}/src/openradio/ax25afsk1200.cpp"
@@ -327,7 +331,7 @@ target_include_directories(ObriiCliTxModule PRIVATE
     "${OBRII_ROOT}/third_party/tiny_aes"
     "${FFTW_INCLUDE_DIR}"
     "${OBRII_ROOT}/FobosDMRVoiceBackend-gpl/include")
-target_link_libraries(ObriiCliTxModule PRIVATE Qt5::Core Qt5::Gui Qt5::Network Qt5::Concurrent "${FFTW_FLOAT_LIBRARY}")
+target_link_libraries(ObriiCliTxModule PRIVATE Qt5::Core Qt5::Gui Qt5::Network Qt5::Concurrent ObriiCliM17Core "${FFTW_FLOAT_LIBRARY}")
 target_compile_definitions(ObriiCliTxModule PRIVATE AES256=1 CBC=0 CTR=0 ECB=1)
 if(WIN32)
     target_link_libraries(ObriiCliTxModule PRIVATE winmm ole32)

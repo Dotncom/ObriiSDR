@@ -23,10 +23,12 @@ struct VirtualIqHubSettings {
 };
 
 struct VirtualIqLinkSettings {
+    static constexpr double MaximumClockPpm = 1000.0;
     bool enabled = true;
     int delayMs = 0;
     float gainDb = 0.0f;
     double frequencyOffsetHz = 0.0;
+    double clockPpm = 0.0;
 };
 
 struct VirtualIqHubCounters {
