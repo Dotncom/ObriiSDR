@@ -310,6 +310,14 @@ void YourClassName::populateSampleRates() {
     }
     if (isSoapySdrSelected() || isUhdNativeSelected()) {
         sampleBox->clear();
+        if (isUhdNativeSelected() && pendingSettings.uhdDuplexEnabled) {
+            for (const double rate : {15360000.0, 30720000.0})
+                sampleBox->addItem(formatSampleRate(rate), rate);
+            const int index = (std::max)(0, sampleBox->findData(pendingSettings.sampleRate));
+            sampleBox->setCurrentIndex(index);
+            pendingSettings.sampleRate = sampleBox->itemData(index).toDouble();
+            return;
+        }
         QVector<double> receiverRates = {
             1000000.0,
             1024000.0,

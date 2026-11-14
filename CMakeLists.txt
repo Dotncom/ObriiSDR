@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ObriiSDR VERSION 9.0.4)
+project(ObriiSDR VERSION 9.0.5)
 enable_testing()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -752,6 +752,7 @@ endif()
 obrii_register_selftest(ObriiCliLaunchScriptSelfTest)
 
 add_executable(ObriiCliNetworkBridgeSelfTest tools/cli_network_bridge_selftest.cpp
+    src/transmit/uhdtransmitterbackend.cpp src/backends/uhdbackend.cpp
     src/cli/clinetworkbridge.cpp src/cli/clinetworkbridge.h
     src/network/networkcontroller.cpp src/network/networkcontroller.h
     src/network/displayspectrumcodec.cpp src/network/displayspectrumcodec.h
@@ -1100,6 +1101,7 @@ set(SOURCES
     src/transmit/sstvimageeditordialog.cpp
     src/transmit/sstvimageeditordialog.h
     src/transmit/transmitdialog.cpp
+    src/transmit/uhdtransmitterbackend.cpp
     src/transmit/transmitdialog.h
     src/transmit/windowsmicrophonecapture.cpp
     src/transmit/windowsmicrophonecapture.h

@@ -8,8 +8,9 @@ Extract the entire ZIP into a new folder. Run `ObriiSDR.exe` for the GUI
 or `ObriiCli.exe --help` for console use. Mesh Designer, MeshSim, Analyzer
 and the optional decoder and transmitter workers live in the same folder.
 The package includes the Qt runtime, Codec2 for M17, and the Fobos USB
-libraries. For supported Fobos firmware and recovery instructions, see
-`firmware/fobos/README.txt` inside the package.
+libraries. Windows Full includes the compiled `ObriiFobosFirmware.exe`,
+verified firmware images, the catalog, and recovery instructions under
+`firmware/fobos/README.txt`.
 
 Both Windows packages include FPGA Lab and seven interface styles. Select a
 style under **Tools → Settings → Interface style**. For the B210 build tools,
@@ -27,7 +28,11 @@ sudo apt install libqt5widgets5 libqt5concurrent5 libqt5network5 libqt5serialpor
 ./bin/ObriiCli --help
 ```
 
-The launcher uses Qt Fusion at 110% by default. If a Fobos is accessible
+The launcher uses Qt Fusion at 110% by default. The ARM64 package also
+includes `bin/ObriiFobosFirmware`, its verified firmware catalog, images,
+and `bin/firmware/fobos/README.txt`. Close other SDR applications before
+running the updater from the desktop session. The same udev rule applies to
+receiver access from the updater. If a Fobos is accessible
 only as root, install the included udev rule and reconnect it.
 
 ```sh

@@ -1,6 +1,8 @@
 #ifndef UHD_BACKEND_H
 #define UHD_BACKEND_H
 
+#include "uhdiqtxstream.h"
+
 #include <QByteArray>
 #include <QString>
 #include <QStringList>
@@ -53,6 +55,7 @@ private:
     std::array<std::size_t, 2> channels_{};
     std::size_t channelCount_ = 0;
     bool ownsDevice_ = false;
+    QString deviceAddress_;
 };
 
 struct UhdDuplexTxStatus {
@@ -101,7 +104,7 @@ bool uhdClockControlAvailable();
 class UhdRxSession {
 public:
     static constexpr double DuplexClockHz = 30.72e6;
-    static constexpr double DuplexTxRateHz = 1.92e6;
+    static constexpr double DuplexTxRateHz = UhdIqTx::DeviceRate;
     UhdRxSession() = default;
     UhdRxSession(const UhdRxSession &) = delete;
     UhdRxSession &operator=(const UhdRxSession &) = delete;
@@ -127,10 +130,15 @@ public:
     // A target of -1 uses the default channel. In 2+2 mode, 2 selects both TX channels.
     bool startTransmitTone(double frequencyHz, double gainDb, int durationMs, QString *errorMessage,
                            int toneChannel = -1);
+    bool startTransmitIq(int target, int sourceRate, double frequencyHz, double gainDb,
+                         const QString &antenna, QString *errorMessage, std::size_t queueLimit = 0);
+    bool queueTransmitIq(UhdIqTx::Block block) { return transmitIq_.push(std::move(block)); }
+    std::size_t queuedTransmitSamples() const { return transmitIq_.queuedSamples(); }
+    void finishTransmitIq() { transmitIq_.finish(); }
     void requestTransmitStop() { cancelTransmit_.store(true, std::memory_order_relaxed); }
     UhdDuplexTxStatus transmitStatus() const;
     // Both channels use the same center when sharing one device and RX streamer.
-    bool retune(double centerHz, QString *errorMessage);
+    bool retune(double centerHz, QString *errorMessage, bool allowDuringTx = false);
     void beginTimestampedTuneSettling();
     std::optional<std::size_t> samplesBeforeTuneCutoff(std::size_t received, double sampleRateHz);
     int receive(float *interleavedIq, std::size_t capacity, QString *errorMessage);
@@ -176,9 +184,11 @@ private:
     std::int64_t tuneCutoffSeconds_ = 0;
     double tuneCutoffFraction_ = 0.0;
     UhdTxSession sharedTx_;
+    UhdIqTx::Queue transmitIq_;
     int duplexTxChannel_ = -1;
     std::thread transmitThread_;
     std::atomic<bool> cancelTransmit_{false};
+    std::mutex transmitLifecycleMutex_;
     mutable std::mutex transmitStatusMutex_;
     UhdDuplexTxStatus transmitStatus_;
     mutable std::mutex deviceControlMutex_;

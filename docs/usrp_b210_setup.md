@@ -93,7 +93,52 @@ emits them on UART. The GPS panel shows the number of packets and includes
 the hex frames in the local fix log when that log is enabled. The FPGA GNSS
 path currently receives UART data and cannot configure the module's output.
 
-## Remote UHD RX and TX test
+## UHD output in the TX window
+
+Open **TX…** and select **USRP UHD (local)**. Choose the device, TX channel,
+gain and antenna. On B210, each TX channel uses its corresponding **TX/RX**
+port. For simultaneous local RX and TX on that B210, stop RX, enable
+**Simultaneous RX + TX (B210)** in **USRP UHD RX**, select 15.36 or 30.72 MS/s,
+and start RX again. The RX path uses **RX2**. Select the same channel number
+in the TX window and use **TX/RX** for TX. Local GUI duplex is one RX plus
+one TX. When receiving through a separate Fobos, the standalone B210 TX
+output is available without changing the Fobos RX settings.
+The window sends generated IQ at 1.92 MS/s and accepts baseband rates from
+8 kS/s to 1.92 MS/s. A custom FPGA image can be set in **USRP UHD RX**.
+
+For a B210 on Raspberry Pi, run the updated **ObriiCli** server with
+`--duplex-tx-channel 0` or `--duplex-tx-channel 1`. Choose an RX rate of
+15.36 or 30.72 MS/s per channel and **RX2** on every receiving channel.
+Use matching RX and TX channel numbers in 1+1 mode. With `--rx-dual` the
+client can select either TX channel for the waveform.
+
+For example, from the main installation's `build/linux-release` directory:
+
+```sh
+./start-obrii.sh --cli run --backend uhd --device 0 \
+  --rx-channel 0 --antenna RX2 --duplex-tx-channel 0 \
+  --rate 30.72M --freq 102.287174M --mode wfm --bandwidth 200k \
+  --block-samples 65536 --spectrum --serve --bind 192.168.89.248 \
+  --network-port 21090 --control-port 17675
+```
+
+For a B210 clone, append `--fpga-image` with the path to its compatible image.
+
+In the controlling client, choose **USRP UHD (network)** in **TX…**. Set
+the TX channel, gain and antenna, enter the single-use code described
+below, and click **Start RF**. Start with a baseband
+rate of 48 kS/s for narrowband signals. Network IQ uses four bytes per
+complex sample. Upload needs about 1.54 Mbit/s at 48 kS/s or 61.44 Mbit/s
+at 1.92 MS/s, before protocol overhead.
+RX continues through the same UHD session. Use a trusted network.
+
+To keep local Fobos reception on the same Obrii window, leave it in local
+receive mode. In **TX… → USRP UHD (network)**, enter the B210 server address
+and port and click **Connect**. This connection carries TX IQ and control
+without subscribing to RX spectrum or audio. The server still grants
+control to one client at a time.
+
+### Remote test tone
 
 On the Raspberry Pi, enable duplex test bursts with
 `--duplex-tx-channel 0` or `--duplex-tx-channel 1`. Set the RX rate
@@ -116,7 +161,7 @@ control port:
 ./ObriiCli control uhd-tx-arm --control-port 17675
 ```
 
-Open **TX…** from the controlling Obrii network client. Select TX 0, TX 1,
+In **TX… → USRP UHD (network)**, click **Test tone…**. Select TX 0, TX 1,
 or both outputs when available. Enter the common TX center, gain (0–10 dB),
 duration (50–500 ms), and single-use code. The code expires in 60 seconds.
 The test sends a ramped tone 1 kHz above center on a single selected port.

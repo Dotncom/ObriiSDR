@@ -48,6 +48,7 @@ public:
     bool peerSupportsBinaryAudio(const QString &peerId) const;
     bool peerSupportsUhdRxSpectrum(const QString &peerId) const;
     void enableUhdRxSpectrum(bool enabled) { uhdRxSpectrumEnabled = enabled; }
+    void enableUhdTxOnly(bool enabled) { uhdTxOnlyEnabled = enabled; }
 
     void stop();
     void startServer(const QString &bindAddress, quint16 port);
@@ -129,6 +130,7 @@ private:
     QString currentStatus = "Network disabled";
     bool controlReady = false;
     bool localClientHasControl = true;
+    bool uhdTxOnlyEnabled = false;
     bool uhdRxSpectrumEnabled = false;
     quint64 nextPeerId = 1;
 };

@@ -790,10 +790,11 @@ ReceiverStreamDescriptor YourClassName::makeUhdNativeStreamDescriptor(bool queue
     stream.frequencyCalibrationOffsetHz = effectiveFrequencyCalibrationOffsetHz(pendingSettings.centerFrequency);
     stream.uhdNativeDeviceIndex = uhdNativeIndexFromComboValue(pendingSettings.deviceIndex);
     stream.uhdRxChannel = pendingSettings.uhdRxChannel;
+    stream.uhdDuplexEnabled = pendingSettings.uhdDuplexEnabled;
     stream.uhdClockSource = pendingSettings.uhdClockSource;
     stream.uhdGnssBaud = pendingSettings.uhdGnssBaud;
     stream.uhdRxGainDb = pendingSettings.uhdRxGainDb;
-    stream.uhdRxAntenna = pendingSettings.uhdRxAntenna;
+    stream.uhdRxAntenna = stream.uhdDuplexEnabled ? QStringLiteral("RX2") : pendingSettings.uhdRxAntenna;
     stream.uhdFpgaImagePath = pendingSettings.uhdFpgaImagePath;
     stream.queueAudioBlocks = queueAudioBlocks;
     stream.publishIqSnapshot = publishIqSnapshot;
@@ -836,6 +837,8 @@ void YourClassName::showUhdRxSettings() {
     const QString rxAntenna = remote ? remoteRx.value(QStringLiteral("antenna")).toString() : pendingSettings.uhdRxAntenna;
     auto *antenna = makeAntenna(rxAntenna);
     antenna->setEnabled(canEditRx);
+    auto *duplex = new QCheckBox(uk ? QStringLiteral("Одночасний RX + TX (B210)")
+                                    : QStringLiteral("Simultaneous RX + TX (B210)"), &dialog);
     auto *fpgaRow = new QWidget(&dialog);
     auto *fpgaLayout = new QHBoxLayout(fpgaRow);
     fpgaLayout->setContentsMargins(0, 0, 0, 0);
@@ -873,7 +876,20 @@ void YourClassName::showUhdRxSettings() {
     if (remote) {
         fpgaRow->hide();
         gnssBaud->hide();
+        duplex->hide();
     } else {
+        duplex->setChecked(pendingSettings.uhdDuplexEnabled);
+        duplex->setEnabled(canEditRx);
+        duplex->setToolTip(uk
+            ? QStringLiteral("Дуплекс B210 використовує RX2 і 15,36 або 30,72 Мсемпл/с. У вікні TX виберіть той самий номер каналу, що й для RX.")
+            : QStringLiteral("B210 duplex uses RX2 and 15.36 or 30.72 MS/s. Select the same TX and RX channel number."));
+        const auto updateAntenna = [antenna, canEditRx, rxAntenna](bool enabled) {
+            antenna->setCurrentIndex(antenna->findData(enabled ? QStringLiteral("RX2") : rxAntenna));
+            antenna->setEnabled(canEditRx && !enabled);
+        };
+        connect(duplex, &QCheckBox::toggled, &dialog, updateAntenna);
+        if (duplex->isChecked()) updateAntenna(true);
+        layout->addRow(duplex);
         layout->addRow(uiText(QStringLiteral("uhd_fpga_image"), QStringLiteral("FPGA image (optional)")), fpgaRow);
         gnssBaud->addItem(uk ? QStringLiteral("Авто (датчики UHD)") : QStringLiteral("Auto (UHD sensors)"), 0);
         gnssBaud->addItem(QStringLiteral("38400"), 38400);
@@ -995,9 +1011,17 @@ void YourClassName::showUhdRxSettings() {
     if (clockControl) pendingSettings.uhdClockSource = clock->currentData().toString();
     if (canEditRx) pendingSettings.uhdGnssBaud = gnssBaud->currentData().toInt();
     pendingSettings.uhdRxChannel = channel->currentData().toInt();
+    const bool duplexChanged = pendingSettings.uhdDuplexEnabled != duplex->isChecked();
+    pendingSettings.uhdDuplexEnabled = duplex->isChecked();
     pendingSettings.uhdRxGainDb = gain->value();
-    pendingSettings.uhdRxAntenna = antenna->currentData().toString();
+    if (!duplex->isChecked()) pendingSettings.uhdRxAntenna = antenna->currentData().toString();
     pendingSettings.uhdFpgaImagePath = fpgaPath->text().trimmed();
+    if (duplexChanged && isUhdNativeSelected()) {
+        const double previousRate = pendingSettings.sampleRate;
+        populateSampleRates();
+        pendingSettings.sampleRate = previousRate;
+        onSampleRateChanged(sampleBox->currentIndex());
+    }
     savePersistentSettings();
 }
 

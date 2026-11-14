@@ -799,8 +799,8 @@ UhdGnssStatus UhdRxSession::readGnssSensors() {
     return status;
 }
 
-bool UhdRxSession::retune(double centerHz, QString *errorMessage) {
-    if (sharedTx_.streamer_ && transmitStatus().active) {
+bool UhdRxSession::retune(double centerHz, QString *errorMessage, bool allowDuringTx) {
+    if (!allowDuringTx && sharedTx_.streamer_ && transmitStatus().active) {
         if (errorMessage) *errorMessage = QStringLiteral("UHD TX burst is active");
         return false;
     }
@@ -945,6 +945,7 @@ void UhdRxSession::accountReceiveTimestamp(std::size_t received) {
 }
 
 void UhdRxSession::close() {
+    const std::lock_guard<std::mutex> lifecycleLock(transmitLifecycleMutex_);
     stopTransmit();
     if (gnssJob_.valid()) gnssJob_.wait();
     gnssJob_ = {};
@@ -1007,6 +1008,16 @@ bool UhdTxSession::open(int deviceIndex, int channel, double sampleRateHz, doubl
         deviceArgs += QStringLiteral("fpga=") + QDir::fromNativeSeparators(image.absoluteFilePath());
     }
     const QByteArray args = deviceArgs.toUtf8();
+    {
+        QMutexLocker lock(&rxDevicesMutex);
+        const auto address = devices.at(deviceIndex);
+        if (openRxDevices.contains(address)) {
+            if (errorMessage) *errorMessage = QStringLiteral("This USRP is already in use. Enable shared RX/TX or stop RX on this USRP.");
+            return false;
+        }
+        openRxDevices.insert(address);
+        deviceAddress_ = address;
+    }
     ownsDevice_ = true;
     if (a.make(&device_, args.constData()) != 0 || !device_) {
         if (errorMessage) *errorMessage = deviceError(device_, QStringLiteral("UHD TX device open failed"));
@@ -1149,6 +1160,11 @@ void UhdTxSession::close() {
     device_ = nullptr;
     channelCount_ = 0;
     ownsDevice_ = false;
+    if (!deviceAddress_.isEmpty()) {
+        QMutexLocker lock(&rxDevicesMutex);
+        openRxDevices.remove(deviceAddress_);
+        deviceAddress_.clear();
+    }
 }
 
 UhdDuplexTxStatus UhdRxSession::transmitStatus() const {
@@ -1159,10 +1175,76 @@ UhdDuplexTxStatus UhdRxSession::transmitStatus() const {
 void UhdRxSession::stopTransmit() {
     requestTransmitStop();
     if (transmitThread_.joinable()) transmitThread_.join();
+    transmitIq_.reset(0);
+}
+
+bool UhdRxSession::startTransmitIq(int target, int sourceRate, double frequencyHz, double gainDb,
+                                  const QString &antenna, QString *errorMessage, std::size_t queueLimit) {
+    const std::lock_guard<std::mutex> lifecycleLock(transmitLifecycleMutex_);
+    if (!streamStarted_ || !sharedTx_.streamer_) {
+        if (errorMessage) *errorMessage = QStringLiteral("Shared UHD RX/TX is not active");
+        return false;
+    }
+    if (sharedTx_.channelCount_ == 1 && target != duplexTxChannel_) {
+        if (errorMessage) *errorMessage = QStringLiteral("Select TX %1 to match the active RX channel").arg(duplexTxChannel_);
+        return false;
+    }
+    if (transmitStatus().active || target < 0 || target > 1 ||
+        sourceRate < 8000 || sourceRate > UhdIqTx::DeviceRate ||
+        !std::isfinite(frequencyHz) || frequencyHz < 70e6 || frequencyHz > 6e9 ||
+        !std::isfinite(gainDb) || gainDb < 0.0 || gainDb > 89.75 || antenna != QLatin1String("TX/RX")) {
+        if (errorMessage) *errorMessage = QStringLiteral("Invalid or unavailable shared UHD TX settings");
+        return false;
+    }
+    stopTransmit();
+    transmitIq_.reset(queueLimit == 0 ? std::size_t(sourceRate / 2) : queueLimit);
+    cancelTransmit_.store(false, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(transmitStatusMutex_);
+        transmitStatus_ = {true, 0, QStringLiteral("streaming"), {}, target};
+    }
+    try {
+        transmitThread_ = std::thread([this, target, sourceRate, frequencyHz, gainDb, antenna] {
+            QString error;
+            std::array<UhdIqTx::Sample, 4096> silence{};
+            std::size_t selected = 0;
+            {
+                const std::lock_guard<std::mutex> lock(deviceControlMutex_);
+                for (std::size_t i = 0; i < sharedTx_.channelCount_; ++i) {
+                    const auto channel = sharedTx_.channels_[i];
+                    const bool enabled = target == static_cast<int>(channel);
+                    if (enabled) selected = i;
+                    if (!sharedTx_.tune(channel, frequencyHz, enabled ? gainDb : 0.0, 0.0, antenna, &error)) break;
+                }
+            }
+            std::uint64_t sent = 0;
+            if (error.isEmpty() && !cancelTransmit_.load(std::memory_order_relaxed)) {
+                sent = UhdIqTx::run(transmitIq_, sourceRate, 120, cancelTransmit_,
+                    [&](const auto *iq, std::size_t count, bool first, QString *why) {
+                        std::array<const UhdIqTx::Sample *, 2> channels{silence.data(), silence.data()};
+                        channels[selected] = iq;
+                        return sharedTx_.sendBuffers(channels, count, first, why, 0.1);
+                    }, [this](QString *why) { return sharedTx_.finish(why); }, &error);
+            }
+            std::lock_guard<std::mutex> lock(transmitStatusMutex_);
+            const bool canceled = cancelTransmit_.load(std::memory_order_relaxed);
+            transmitStatus_ = {false, sent, error.isEmpty()
+                ? (canceled ? QStringLiteral("stopped") : QStringLiteral("completed"))
+                : QStringLiteral("error"), error, target};
+        });
+    } catch (const std::system_error &) {
+        const QString error = QStringLiteral("Could not start UHD TX worker");
+        std::lock_guard<std::mutex> lock(transmitStatusMutex_);
+        transmitStatus_ = {false, 0, QStringLiteral("error"), error, target};
+        if (errorMessage) *errorMessage = error;
+        return false;
+    }
+    return true;
 }
 
 bool UhdRxSession::startTransmitTone(double frequencyHz, double gainDb, int durationMs,
                                     QString *errorMessage, int toneChannel) {
+    const std::lock_guard<std::mutex> lifecycleLock(transmitLifecycleMutex_);
     const int target = toneChannel == -1 ? duplexTxChannel_ : toneChannel;
     if (!streamStarted_ || !sharedTx_.streamer_ || transmitStatus().active ||
         target < 0 || target > 2 ||

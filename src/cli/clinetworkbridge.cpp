@@ -41,6 +41,10 @@ CliNetworkBridge::CliNetworkBridge(QObject *parent) : network(parent) {
     });
     QObject::connect(&network, &NetworkController::binaryCommandReceived, &network,
                      [this](const QJsonObject &command, const QByteArray &payload) {
+        if (network.mode() == NetworkMode::Server && command.value("type") == QLatin1String("uhdTxIq")) {
+            handleUhdTxStream(command, payload);
+            return;
+        }
         if (network.mode() != NetworkMode::Client) return;
         const QString type = command.value(QStringLiteral("type")).toString();
         if (type == QStringLiteral("audiobin") && onClientAudio) {
@@ -182,6 +186,10 @@ void CliNetworkBridge::handleServerCommand(const QJsonObject &command) {
     if (command.value(QStringLiteral("type")).toString() != QStringLiteral("control")) return;
     const QString action = command.value(QStringLiteral("action")).toString();
     const QString peerId = command.value(QStringLiteral("_networkPeerId")).toString();
+    if (action == QLatin1String("uhdTxStream")) {
+        handleUhdTxStream(command);
+        return;
+    }
     if (action == QStringLiteral("requestServerState") || action == QStringLiteral("refreshDevices")) {
         broadcastState();
         return;
@@ -244,6 +252,23 @@ void CliNetworkBridge::handleServerCommand(const QJsonObject &command) {
         if (serverCallbacks.setRunning) serverCallbacks.setRunning(false, &reason);
         publishState();
     }
+}
+
+void CliNetworkBridge::handleUhdTxStream(const QJsonObject &command, const QByteArray &payload) {
+    const QString peer = command.value("_networkPeerId").toString();
+    if (peer.isEmpty() || peer != network.controllerPeerId()) return;
+    QJsonObject reply = serverCallbacks.uhdTxStream
+        ? serverCallbacks.uhdTxStream(peer, command, payload)
+        : QJsonObject{{"ok", false}, {"reason", "UHD IQ TX is unavailable"}};
+    if (reply.isEmpty()) return;
+    reply.insert("session", command.value("session"));
+    replyUhdTxStream(peer, std::move(reply));
+}
+
+void CliNetworkBridge::replyUhdTxStream(const QString &peerId, QJsonObject reply) {
+    reply.insert("type", "control");
+    reply.insert("action", "uhdTxStreamReply");
+    network.sendControlCommandToPeer(peerId, reply);
 }
 
 void CliNetworkBridge::flushCenterChange() {
@@ -324,6 +349,7 @@ void CliNetworkBridge::sendSpectrum(const std::vector<float> &orderedDbfs,
                       {QStringLiteral("frequencies"), frequencies},
                       {QStringLiteral("magnitudes"), nativeMagnitudes}};
     for (const QString &peerId : network.readyPeerIds()) {
+        if (network.peerStreamProfile(peerId) == QLatin1String("uhd-tx")) continue;
         if (network.pendingBytesForPeer(peerId) > 256 * 1024) {
             ++droppedSpectrum;
             continue;
@@ -367,7 +393,7 @@ void CliNetworkBridge::sendUhdRxSpectrum(int channel, const std::vector<float> &
     const QByteArray payload = DisplaySpectrumCodec::encodeDb10(levels);
     for (const QString &peerId : network.readyPeerIds()) {
         if (!network.peerSupportsUhdRxSpectrum(peerId) ||
-            network.peerStreamProfile(peerId) == QStringLiteral("remote-vfo")) continue;
+            network.peerStreamProfile(peerId) != QStringLiteral("legacy")) continue;
         if (network.pendingBytesForPeer(peerId) > 256 * 1024) {
             ++droppedSpectrum;
             continue;
@@ -405,6 +431,7 @@ void CliNetworkBridge::sendAudioPacket(const QByteArray &pcm, const QStringList 
                       {QStringLiteral("sequence"), QString::number(++audioSequence)},
                       {QStringLiteral("sourceTimeMs"), QString::number(QDateTime::currentMSecsSinceEpoch())}};
     for (const QString &peerId : peers) {
+        if (network.peerStreamProfile(peerId) == QLatin1String("uhd-tx")) continue;
         if (network.pendingBytesForPeer(peerId) > 256 * 1024) {
             ++droppedAudio;
             continue;
@@ -473,6 +500,7 @@ void CliNetworkBridge::sendIq(const float *samples, int sampleCount, const Radio
                             {QStringLiteral("payloadEncoding"), QStringLiteral("raw")}};
     const qint64 limit = channelized ? 2 * 1024 * 1024 : 8 * 1024 * 1024;
     for (const QString &peerId : network.readyPeerIds()) {
+        if (network.peerStreamProfile(peerId) == QLatin1String("uhd-tx")) continue;
         if (network.pendingBytesForPeer(peerId) > limit) {
             ++droppedIq;
             continue;

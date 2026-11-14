@@ -72,6 +72,7 @@ public:
     bool queryHackRfDiagnostics(HackRfDeviceDiagnostics *diagnostics,
                                 QString *errorMessage = nullptr);
     bool uhdStreamReady() const { return uhdStreamReady_.load(std::memory_order_acquire); }
+    std::shared_ptr<UhdRxSession> sharedUhdTxSession(int deviceIndex) const;
     UhdClockStatus uhdClockStatus() const;
     void setUhdGnssPollingEnabled(bool enabled);
     UhdGnssStatus uhdGnssStatus() const;
@@ -149,6 +150,8 @@ private:
     ReceiverStreamDescriptor activeStreamDescriptor;
     std::atomic<bool> uhdStreamReady_{false};
     mutable QMutex uhdStatusMutex;
+    std::shared_ptr<UhdRxSession> activeUhdDuplexSession;
+    int activeUhdDuplexDevice = -1;
     UhdClockStatus activeUhdClock;
     UhdGnssStatus activeUhdGnss;
     std::atomic<bool> uhdGnssPollingEnabled{false};

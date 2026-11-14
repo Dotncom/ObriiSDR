@@ -4,11 +4,59 @@
 #include <QTextStream>
 #include <algorithm>
 
+namespace {
+bool verifyTxIqPipeline() {
+    using namespace UhdIqTx;
+    constexpr int Rate = 48000;
+    std::vector<Sample> tone(1000);
+    for (std::size_t i = 0; i < tone.size(); ++i)
+        tone[i] = std::polar(0.5f, float(i * 6.283185307179586 / 48.0));
+    const auto render = [&](std::size_t split, int &bursts, int &ends) {
+        Queue queue;
+        queue.reset(tone.size());
+        queue.push({std::vector<Sample>(tone.begin(), tone.begin() + split), false});
+        queue.push({std::vector<Sample>(tone.begin() + split, tone.end()), false});
+        queue.push({{}, true});
+        queue.finish();
+        const std::atomic<bool> cancel{false};
+        std::vector<Sample> result;
+        QString error;
+        run(queue, Rate, 120, cancel,
+            [&](const auto *iq, std::size_t count, bool first, QString *) {
+                if (first) ++bursts;
+                result.insert(result.end(), iq, iq + count);
+                return true;
+            }, [&](QString *) { ++ends; return true; }, &error);
+        if (!error.isEmpty()) result.clear();
+        return result;
+    };
+    int bursts = 0, ends = 0;
+    const auto output = render(19, bursts, ends);
+    const auto reference = render(781, bursts, ends);
+    if (bursts != 2 || ends != 2 || output != reference || output.size() < 40000 || output.size() > 41000)
+        return false;
+    constexpr int Window = 19200;
+    auto magnitude = [&](double frequency) {
+        std::complex<double> sum{};
+        for (int i = 0; i < Window; ++i)
+            sum += std::complex<double>(output[10000 + i]) *
+                   std::polar(1.0, -6.283185307179586 * frequency * i / DeviceRate);
+        return std::abs(sum) / Window;
+    };
+    return magnitude(1000.0) > 0.49 && magnitude(47000.0) < 0.005;
+}
+}
+
 int main(int argc, char **argv) {
     QCoreApplication application(argc, argv);
     QString error;
     const QStringList devices = enumerateUhdDeviceArgs(&error);
     QTextStream output(stdout);
+    if (!verifyTxIqPipeline()) {
+        output << "UHD TX IQ pipeline failed\n";
+        return 1;
+    }
+    output << "UHD TX IQ pipeline: OK\n";
     const auto ubx = validatedUhdGnssUbx("B5620A0400000E34\nb5620a0400000e35\n"
                                         "b5620a0401000f36\n b5620a0400000e34\n");
     if (ubx != QLatin1String("b5620a0400000e34")) {

@@ -246,6 +246,7 @@ struct RadioSettings {
     int hackRfLnaGainDb = 16;
     int hackRfVgaGainDb = 20;
     int uhdRxChannel = 0;
+    bool uhdDuplexEnabled = false;
     QString uhdClockSource = QStringLiteral("auto");
     int uhdGnssBaud = 0;
     double uhdRxGainDb = 30.0;

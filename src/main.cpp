@@ -6897,6 +6897,7 @@ void YourClassName::closeEvent(QCloseEvent *event) {
     pendingAudioStartAfterStreamReady = false;
     pendingNetworkAudioStartAfterIqPrebuffer = false;
     pendingPlaybackAudioStartAfterIqPrebuffer = false;
+    if (transmitDialog) transmitDialog->close();
     stopGnssSdrAcquisition(QStringLiteral("close"), false);
 
     const bool processorRunning = processor && processor->isRunning();
@@ -9893,7 +9894,7 @@ void YourClassName::openZoomDensity() {
     zoomDensityDialog->activateWindow();
 }
 
-void YourClassName::openTransmitDialog() {
+void YourClassName::openRemoteUhdToneTest() {
     const auto remoteTx = [this] {
         return networkClientConfirmedSettingsJson.value(QStringLiteral("uhdTx")).toObject();
     };
@@ -10043,8 +10044,10 @@ void YourClassName::openTransmitDialog() {
         dialog.exec();
         if (sentTone && (!requestId.isEmpty() || remoteTx().value("active").toBool()))
             submit({{"operation", "stop"}});
-        return;
     }
+}
+
+void YourClassName::openTransmitDialog() {
     if (!transmitDialog) {
         transmitDialog = new TransmitDialog(uiLanguage, this);
     }
@@ -10053,6 +10056,15 @@ void YourClassName::openTransmitDialog() {
                isHackRfNativeSelected() &&
                selectedHackRfNativeIndex() == deviceIndex;
     });
+    transmitDialog->setSharedUhdTxSessionProvider([this](int deviceIndex) {
+        return processor ? processor->sharedUhdTxSession(deviceIndex) : nullptr;
+    });
+    transmitDialog->setUhdContext(networkController, [this] {
+        return networkMode == NetworkMode::Client && networkController->isControlReady()
+            ? networkClientConfirmedSettingsJson.value(QStringLiteral("uhdTx")).toObject()
+            : QJsonObject{};
+    }, pendingSettings.uhdFpgaImagePath, networkServerAddress, networkControlPort,
+        [this] { openRemoteUhdToneTest(); });
     transmitDialog->setLanguage(uiLanguage);
     transmitDialog->show();
     transmitDialog->raise();

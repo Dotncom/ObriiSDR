@@ -24,8 +24,10 @@
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFormLayout>
 #include <QGridLayout>
+#include <QJsonArray>
+#include "../backends/uhdbackend.h"
+#include "../network/networkcontroller.h"
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QJsonDocument>
@@ -33,12 +35,13 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
-#include <QMessageBox>
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSaveFile>
+#include <QScreen>
+#include <QScrollArea>
 #include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
@@ -124,7 +127,7 @@ float softLimitMicrophone(float sample) {
 class TxWaveformPreviewWidget final : public QWidget {
 public:
     explicit TxWaveformPreviewWidget(QWidget *parent = nullptr) : QWidget(parent) {
-        setMinimumHeight(170);
+        setMinimumHeight(120);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     }
 
@@ -214,7 +217,10 @@ private:
 TransmitDialog::TransmitDialog(const QString &language, QWidget *parent)
     : QDialog(parent), language(language) {
     setAttribute(Qt::WA_DeleteOnClose, false);
-    resize(760, 650);
+    const auto *screen = parent ? parent->screen() : QGuiApplication::primaryScreen();
+    const QSize available = screen ? screen->availableGeometry().size() : QSize(1280, 720);
+    resize(qMin(600, qRound(available.width() * 0.5)),
+           qMin(680, qRound(available.height() * 0.8)));
     buildUi();
     populateAudioInputs();
     populateHackRfDevices();
@@ -285,6 +291,15 @@ void TransmitDialog::buildUi() {
     QVBoxLayout *root = new QVBoxLayout(this);
     root->setContentsMargins(10, 10, 10, 10);
     root->setSpacing(8);
+    auto *scroll = new QScrollArea(this);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidgetResizable(true);
+    scroll->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    auto *content = new QWidget;
+    auto *sections = new QVBoxLayout(content);
+    sections->setContentsMargins(0, 0, 0, 0);
+    scroll->setWidget(content);
+    root->addWidget(scroll, 1);
 
     QGroupBox *hardwareBox = new QGroupBox(this);
     hardwareBox->setObjectName(QStringLiteral("txHardwareBox"));
@@ -293,12 +308,56 @@ void TransmitDialog::buildUi() {
     backendCombo->addItem(QStringLiteral("Simulator / IQ file"), QStringLiteral("simulator-iq-file"));
     backendCombo->addItem(QStringLiteral("HackRF native"), QStringLiteral("hackrf-native"));
     backendCombo->addItem(QStringLiteral("Virtual IQ receiver"), QStringLiteral("virtual-signal"));
+    backendCombo->addItem(localUhd.displayName(), localUhd.id());
+    backendCombo->addItem(remoteUhd.displayName(), remoteUhd.id());
     deviceCombo = new QComboBox(hardwareBox);
+    uhdDeviceCombo = new QComboBox(hardwareBox);
+    uhdChannelCombo = new QComboBox(hardwareBox);
+    uhdAntennaCombo = new QComboBox(hardwareBox);
+    uhdGainSpin = new QDoubleSpinBox(hardwareBox);
+    uhdGainSpin->setRange(0.0, 89.75);
+    uhdGainSpin->setSingleStep(0.25);
+    uhdGainSpin->setSuffix(QStringLiteral(" dB"));
+    uhdChannelLabel = new QLabel(hardwareBox);
+    uhdAntennaLabel = new QLabel(hardwareBox);
+    uhdGainLabel = new QLabel(hardwareBox);
+    uhdArmCodeLabel = new QLabel(hardwareBox);
+    uhdArmCodeEdit = new QLineEdit(hardwareBox);
+    uhdArmCodeEdit->setEchoMode(QLineEdit::Password);
+    uhdArmCodeEdit->setMaxLength(36);
+    uhdArmCodeEdit->setPlaceholderText(QStringLiteral("ObriiCli control uhd-tx-arm"));
+    uhdToneTestButton = new QPushButton(hardwareBox);
+    uhdServerLabel = new QLabel(hardwareBox);
+    uhdServerEdit = new QLineEdit(hardwareBox);
+    uhdServerPortLabel = new QLabel(hardwareBox);
+    uhdServerPort = new QSpinBox(hardwareBox);
+    uhdServerPort->setRange(1, 65535);
+    uhdServerPort->setValue(21090);
+    uhdConnectButton = new QPushButton(hardwareBox);
+    txNetwork = new NetworkController(this);
+    txNetwork->enableUhdTxOnly(true);
+    connect(txNetwork, &NetworkController::controlCommandReceived, this, [this](const QJsonObject &command) {
+        if (command.value("action") != QLatin1String("serverState")) return;
+        txServerCapabilities = command.value("settings").toObject().value("uhdTx").toObject();
+        refreshUhdOutput();
+        if (!remoteUhdSelected() || (activeBackend && activeBackend->isRunning())) return;
+        updateModeUi();
+        if (!txNetwork->clientHasControl())
+            setStatus(text(QStringLiteral("Connected as observer. Release control on the other network client."),
+                           QStringLiteral("Підключено як спостерігач. Звільніть керування в іншому мережевому клієнті.")), true);
+    });
+    connect(txNetwork, &NetworkController::channelError, this, [this](const QString &why) {
+        txServerCapabilities = {};
+        if (remoteUhdSelected() && !remoteUhd.isRunning()) {
+            refreshUhdOutput();
+            setStatus(why, true);
+        }
+    });
+    connect(uhdConnectButton, &QPushButton::clicked, this, &TransmitDialog::connectUhdTxEndpoint);
     frequencySpin = new QDoubleSpinBox(hardwareBox);
     frequencySpin->setRange(1.0, 7250.0);
     frequencySpin->setDecimals(6);
     frequencySpin->setSingleStep(0.0125);
-    frequencySpin->setSuffix(QStringLiteral(" MHz"));
     sampleRateCombo = new QComboBox(hardwareBox);
     sampleRateCombo->setEditable(true);
     sampleRateCombo->setInsertPolicy(QComboBox::NoInsert);
@@ -327,10 +386,9 @@ void TransmitDialog::buildUi() {
     watchdogSpin->setValue(30);
     watchdogSpin->setSuffix(QStringLiteral(" s"));
     rfAmpCheck = new QCheckBox(hardwareBox);
-    armCheck = new QCheckBox(hardwareBox);
-    armCheck->setChecked(false);
     rfLockLabel = new QLabel(hardwareBox);
     rfLockLabel->setWordWrap(true);
+    rfLockLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     rfLockLabel->setStyleSheet(QStringLiteral("color: #d0a43b; font-weight: 600;"));
     backendLabel = new QLabel(hardwareBox);
     deviceLabel = new QLabel(hardwareBox);
@@ -355,35 +413,43 @@ void TransmitDialog::buildUi() {
     levelLabel = new QLabel(hardwareBox);
     txGainLabel = new QLabel(hardwareBox);
     watchdogLabel = new QLabel(hardwareBox);
-    hardware->addWidget(backendLabel, 0, 0);
-    hardware->addWidget(backendCombo, 0, 1);
-    hardware->addWidget(deviceLabel, 0, 2);
-    hardware->addWidget(deviceCombo, 0, 3);
-    hardware->addWidget(rfLabel, 1, 0);
-    hardware->addWidget(frequencySpin, 1, 1);
-    hardware->addWidget(deviceRateLabel, 1, 2);
-    hardware->addWidget(deviceSampleRateCombo, 1, 3);
-    hardware->addWidget(bandwidthLabel, 2, 0);
-    hardware->addWidget(bandwidthCombo, 2, 1);
-    hardware->addWidget(txGainLabel, 2, 2);
-    hardware->addWidget(txGainSpin, 2, 3);
-    hardware->addWidget(watchdogLabel, 3, 0);
-    hardware->addWidget(watchdogSpin, 3, 1);
-    hardware->addWidget(rfAmpCheck, 3, 2);
-    hardware->addWidget(armCheck, 3, 3);
-    hardware->addWidget(virtualTransportLabel, 4, 0);
-    hardware->addWidget(virtualTransportCombo, 4, 1);
-    hardware->addWidget(virtualEndpointLabel, 4, 2);
-    hardware->addWidget(virtualLocalNameEdit, 4, 3);
-    hardware->addWidget(virtualHostLabel, 5, 0);
-    hardware->addWidget(virtualHostEdit, 5, 1);
-    hardware->addWidget(virtualPortLabel, 5, 2);
-    hardware->addWidget(virtualPortSpin, 5, 3);
-    hardware->addWidget(virtualNodeIdLabel, 6, 0);
-    hardware->addWidget(virtualNodeIdEdit, 6, 1, 1, 3);
+    const auto addField = [](QGridLayout *grid, int row, int column, QLabel *label, QWidget *field) {
+        label->setBuddy(field);
+        label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        label->setWordWrap(true);
+        label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        grid->addWidget(label, row, 2 * column);
+        if (field) {
+            field->setSizePolicy(QSizePolicy::Expanding, field->sizePolicy().verticalPolicy());
+            grid->addWidget(field, row, 2 * column + 1);
+        }
+    };
+    addField(hardware, 0, 0, backendLabel, backendCombo);
+    addField(hardware, 0, 1, deviceLabel, deviceCombo);
+    uhdDeviceCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    hardware->addWidget(uhdDeviceCombo, 0, 3);
+    addField(hardware, 1, 0, rfLabel, frequencySpin);
+    addField(hardware, 1, 1, txGainLabel, txGainSpin);
+    addField(hardware, 1, 1, uhdGainLabel, uhdGainSpin);
+    addField(hardware, 2, 0, deviceRateLabel, deviceSampleRateCombo);
+    addField(hardware, 2, 1, bandwidthLabel, bandwidthCombo);
+    addField(hardware, 2, 0, uhdChannelLabel, uhdChannelCombo);
+    addField(hardware, 2, 1, uhdAntennaLabel, uhdAntennaCombo);
+    addField(hardware, 3, 0, watchdogLabel, watchdogSpin);
+    hardware->addWidget(rfAmpCheck, 3, 2, 1, 2, Qt::AlignLeft);
+
+    addField(hardware, 4, 0, uhdServerLabel, uhdServerEdit);
+    addField(hardware, 4, 1, uhdServerPortLabel, uhdServerPort);
+    addField(hardware, 5, 0, uhdArmCodeLabel, uhdArmCodeEdit);
+    hardware->addWidget(uhdConnectButton, 5, 2, 1, 2, Qt::AlignLeft);
+    hardware->addWidget(uhdToneTestButton, 6, 2, 1, 2, Qt::AlignLeft);
+
+    addField(hardware, 4, 0, virtualTransportLabel, virtualTransportCombo);
+    addField(hardware, 4, 1, virtualEndpointLabel, virtualLocalNameEdit);
+    addField(hardware, 4, 1, virtualHostLabel, virtualHostEdit);
+    addField(hardware, 5, 0, virtualNodeIdLabel, virtualNodeIdEdit);
+    addField(hardware, 5, 1, virtualPortLabel, virtualPortSpin);
     hardware->addWidget(rfLockLabel, 7, 0, 1, 4);
-    hardware->setColumnStretch(1, 1);
-    hardware->setColumnStretch(3, 1);
 
     QGroupBox *signalBox = new QGroupBox(this);
     signalBox->setObjectName(QStringLiteral("txSignalBox"));
@@ -474,13 +540,12 @@ void TransmitDialog::buildUi() {
     ft8SlotCombo->addItem(QString(), 0);
     ft8SlotCombo->addItem(QString(), 1);
     ft8UtcCheck->setChecked(true);
-    liveKeyButton = new QPushButton(signalBox);
+    liveKeyButton = new QPushButton(this);
     liveKeyButton->setEnabled(false);
     liveKeyButton->setAutoRepeat(false);
     liveKeyButton->setAutoDefault(false);
     liveKeyButton->setDefault(false);
     liveKeyButton->setFocusPolicy(Qt::StrongFocus);
-    liveKeyButton->setMinimumHeight(42);
     modeLabel = new QLabel(signalBox);
     sourceLabel = new QLabel(signalBox);
     audioInputLabel = new QLabel(signalBox);
@@ -492,40 +557,34 @@ void TransmitDialog::buildUi() {
     symbolRateLabel = new QLabel(signalBox);
     gaussianBtLabel = new QLabel(signalBox);
     modulationDepthLabel = new QLabel(signalBox);
-    signal->addWidget(basebandLabel, 0, 0);
-    signal->addWidget(sampleRateCombo, 0, 1);
-    signal->addWidget(levelLabel, 0, 2);
-    signal->addWidget(levelSpin, 0, 3);
-    signal->addWidget(modeLabel, 1, 0);
-    signal->addWidget(modulationCombo, 1, 1);
-    signal->addWidget(sourceLabel, 1, 2);
-    signal->addWidget(sourceCombo, 1, 3);
-    signal->addWidget(audioInputLabel, 2, 0);
-    signal->addWidget(audioInputCombo, 2, 1, 1, 2);
-    signal->addWidget(audioRefreshButton, 2, 3);
-    signal->addWidget(microphoneLevelLabel, 3, 0);
-    signal->addWidget(microphoneLevelSlider, 3, 1, 1, 2);
-    signal->addWidget(microphoneLevelValueLabel, 3, 3);
-    signal->addWidget(deviationLabel, 4, 0);
-    signal->addWidget(deviationSpin, 4, 1);
-    signal->addWidget(toneLabel, 4, 2);
-    signal->addWidget(toneSpin, 4, 3);
-    signal->addWidget(signalBandwidthLabel, 5, 0);
-    signal->addWidget(signalBandwidthCombo, 5, 1, 1, 3);
-    signal->addWidget(cwSpeedLabel, 6, 0);
-    signal->addWidget(cwWpmSpin, 6, 1);
-    signal->addWidget(ft8UtcCheck, 6, 2);
-    signal->addWidget(ft8SlotCombo, 6, 3);
-    signal->addWidget(symbolRateLabel, 7, 0);
-    signal->addWidget(symbolRateSpin, 7, 1);
-    signal->addWidget(gaussianBtLabel, 7, 2);
-    signal->addWidget(gaussianBtSpin, 7, 3);
-    signal->addWidget(modulationDepthLabel, 8, 0);
-    signal->addWidget(modulationDepthSpin, 8, 1);
-    signal->addWidget(invertDataCheck, 8, 2, 1, 2);
-    signal->addWidget(liveKeyButton, 9, 0, 1, 4);
-    signal->setColumnStretch(1, 1);
-    signal->setColumnStretch(3, 1);
+    addField(signal, 0, 0, basebandLabel, sampleRateCombo);
+    addField(signal, 0, 1, levelLabel, levelSpin);
+    addField(signal, 1, 0, modeLabel, modulationCombo);
+    addField(signal, 1, 1, sourceLabel, sourceCombo);
+    addField(signal, 2, 0, audioInputLabel, nullptr);
+    audioInputLabel->setBuddy(audioInputCombo);
+    auto *inputRow = new QHBoxLayout;
+    inputRow->addWidget(audioInputCombo, 1);
+    inputRow->addWidget(audioRefreshButton);
+    signal->addLayout(inputRow, 2, 1);
+    addField(signal, 2, 1, signalBandwidthLabel, signalBandwidthCombo);
+    auto *micGainRow = new QHBoxLayout;
+    microphoneLevelLabel->setBuddy(microphoneLevelSlider);
+    micGainRow->addWidget(microphoneLevelLabel);
+    micGainRow->addWidget(microphoneLevelSlider, 1);
+    micGainRow->addWidget(microphoneLevelValueLabel);
+    signal->addLayout(micGainRow, 3, 0, 1, 4);
+    addField(signal, 4, 0, deviationLabel, deviationSpin);
+    addField(signal, 4, 1, toneLabel, toneSpin);
+    addField(signal, 5, 0, cwSpeedLabel, cwWpmSpin);
+    addField(signal, 5, 1, symbolRateLabel, symbolRateSpin);
+    addField(signal, 6, 0, gaussianBtLabel, gaussianBtSpin);
+    addField(signal, 6, 1, modulationDepthLabel, modulationDepthSpin);
+    auto *ft8Row = new QHBoxLayout;
+    ft8Row->addWidget(ft8UtcCheck);
+    ft8Row->addWidget(ft8SlotCombo, 1);
+    signal->addLayout(ft8Row, 7, 0, 1, 2);
+    signal->addWidget(invertDataCheck, 7, 2, 1, 2);
 
     dmrBox = new QGroupBox(this);
     dmrBox->setObjectName(QStringLiteral("txDmrBox"));
@@ -564,22 +623,21 @@ void TransmitDialog::buildUi() {
     dmrPrivacyKeyEdit->setEchoMode(QLineEdit::PasswordEchoOnEdit);
     dmr->addWidget(dmrColorCodeLabel, 0, 0);
     dmr->addWidget(dmrColorCodeSpin, 0, 1);
-    dmr->addWidget(dmrTimeslotLabel, 0, 2);
-    dmr->addWidget(dmrTimeslotCombo, 0, 3);
-    dmr->addWidget(dmrCallTypeLabel, 0, 4);
-    dmr->addWidget(dmrCallTypeCombo, 0, 5);
-    dmr->addWidget(dmrSourceIdLabel, 1, 0);
-    dmr->addWidget(dmrSourceIdSpin, 1, 1, 1, 2);
-    dmr->addWidget(dmrDestinationIdLabel, 1, 3);
-    dmr->addWidget(dmrDestinationIdSpin, 1, 4, 1, 2);
-    dmr->addWidget(dmrPrivacyLabel, 2, 0);
-    dmr->addWidget(dmrPrivacyCombo, 2, 1, 1, 2);
-    dmr->addWidget(dmrPrivacyKeyIdLabel, 2, 3);
-    dmr->addWidget(dmrPrivacyKeyIdSpin, 2, 4, 1, 2);
-    dmr->addWidget(dmrPrivacyKeyLabel, 3, 0);
-    dmr->addWidget(dmrPrivacyKeyEdit, 3, 1, 1, 5);
+    dmr->addWidget(dmrTimeslotLabel, 1, 0);
+    dmr->addWidget(dmrTimeslotCombo, 1, 1);
+    dmr->addWidget(dmrCallTypeLabel, 2, 0);
+    dmr->addWidget(dmrCallTypeCombo, 2, 1);
+    dmr->addWidget(dmrSourceIdLabel, 3, 0);
+    dmr->addWidget(dmrSourceIdSpin, 3, 1);
+    dmr->addWidget(dmrDestinationIdLabel, 4, 0);
+    dmr->addWidget(dmrDestinationIdSpin, 4, 1);
+    dmr->addWidget(dmrPrivacyLabel, 5, 0);
+    dmr->addWidget(dmrPrivacyCombo, 5, 1);
+    dmr->addWidget(dmrPrivacyKeyIdLabel, 6, 0);
+    dmr->addWidget(dmrPrivacyKeyIdSpin, 6, 1);
+    dmr->addWidget(dmrPrivacyKeyLabel, 7, 0);
+    dmr->addWidget(dmrPrivacyKeyEdit, 7, 1);
     dmr->setColumnStretch(1, 1);
-    dmr->setColumnStretch(4, 1);
     dmrBox->setVisible(false);
 
     m17Box = new QGroupBox(QStringLiteral("M17 · Codec2 3200"), this);
@@ -594,10 +652,11 @@ void TransmitDialog::buildUi() {
     m17CanSpin->setRange(0, 15);
     m17->addWidget(m17SourceLabel, 0, 0);
     m17->addWidget(m17SourceEdit, 0, 1);
-    m17->addWidget(m17DestinationLabel, 0, 2);
-    m17->addWidget(m17DestinationEdit, 0, 3);
-    m17->addWidget(new QLabel(QStringLiteral("CAN"), m17Box), 0, 4);
-    m17->addWidget(m17CanSpin, 0, 5);
+    m17->addWidget(m17DestinationLabel, 1, 0);
+    m17->addWidget(m17DestinationEdit, 1, 1);
+    m17->addWidget(new QLabel(QStringLiteral("CAN"), m17Box), 2, 0);
+    m17->addWidget(m17CanSpin, 2, 1);
+    m17->setColumnStretch(1, 1);
     m17Box->hide();
 
     QGroupBox *messageBox = new QGroupBox(this);
@@ -606,6 +665,7 @@ void TransmitDialog::buildUi() {
     messageEdit = new QPlainTextEdit(messageBox);
     messageEdit->setPlaceholderText(QStringLiteral("CQ TEST KN34 / HELLO WORLD"));
     messageEdit->setMaximumBlockCount(20);
+    messageEdit->setMinimumHeight(64);
     messageLayout->addWidget(messageEdit);
 
     QGroupBox *mediaBox = new QGroupBox(this);
@@ -614,6 +674,7 @@ void TransmitDialog::buildUi() {
     mediaPathLabel = new QLabel(mediaBox);
     mediaPathLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     mediaPathLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    mediaPathLabel->setWordWrap(true);
     mediaBrowseButton = new QPushButton(mediaBox);
     mediaEditButton = new QPushButton(mediaBox);
     mediaModeLabel = new QLabel(mediaBox);
@@ -626,14 +687,14 @@ void TransmitDialog::buildUi() {
     mediaPlayButton = new QPushButton(mediaBox);
     mediaPauseButton = new QPushButton(mediaBox);
     mediaStopButton = new QPushButton(mediaBox);
-    mediaLayout->addWidget(mediaPathLabel, 0, 0, 1, 3);
-    mediaLayout->addWidget(mediaBrowseButton, 0, 3);
-    mediaLayout->addWidget(mediaEditButton, 0, 4);
-    mediaLayout->addWidget(mediaModeLabel, 1, 0);
-    mediaLayout->addWidget(mediaModeCombo, 1, 1);
-    mediaLayout->addWidget(mediaPlayButton, 1, 2);
-    mediaLayout->addWidget(mediaPauseButton, 1, 3);
-    mediaLayout->addWidget(mediaStopButton, 1, 4);
+    mediaLayout->addWidget(mediaPathLabel, 0, 0, 1, 2);
+    mediaLayout->addWidget(mediaBrowseButton, 1, 0);
+    mediaLayout->addWidget(mediaEditButton, 1, 1);
+    mediaLayout->addWidget(mediaModeLabel, 2, 0);
+    mediaLayout->addWidget(mediaModeCombo, 2, 1);
+    mediaLayout->addWidget(mediaPlayButton, 3, 0, 1, 2);
+    mediaLayout->addWidget(mediaPauseButton, 4, 0);
+    mediaLayout->addWidget(mediaStopButton, 4, 1);
     mediaLayout->setColumnStretch(1, 1);
 
     preview = new TxWaveformPreviewWidget(this);
@@ -643,31 +704,60 @@ void TransmitDialog::buildUi() {
     statusLabel = new QLabel(this);
     statusLabel->setWordWrap(true);
     statsLabel = new QLabel(this);
+    statsLabel->setWordWrap(true);
     statsLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
-    QHBoxLayout *actions = new QHBoxLayout();
+    auto *actions = new QHBoxLayout();
     startButton = new QPushButton(this);
     stopButton = new QPushButton(this);
     exportButton = new QPushButton(this);
     signalLabButton = new QPushButton(this);
     stopButton->setEnabled(false);
     exportButton->setEnabled(false);
-    actions->addWidget(startButton);
-    actions->addWidget(stopButton);
-    actions->addWidget(signalLabButton);
+    for (auto *button : {startButton, stopButton, signalLabButton, exportButton}) {
+        button->setAutoDefault(false);
+        button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        actions->addWidget(button);
+    }
+    mediaPlayButton->setAutoDefault(false);
     actions->addStretch(1);
-    actions->addWidget(exportButton);
 
-    root->addWidget(hardwareBox);
-    root->addWidget(signalBox);
-    root->addWidget(dmrBox);
-    root->addWidget(m17Box);
-    root->addWidget(messageBox);
-    root->addWidget(mediaBox);
-    root->addWidget(preview, 1);
+    sections->addWidget(hardwareBox);
+    sections->addWidget(signalBox);
+    sections->addWidget(dmrBox);
+    sections->addWidget(m17Box);
+    sections->addWidget(messageBox);
+    sections->addWidget(mediaBox);
+    sections->addWidget(preview, 1);
+    for (auto *combo : content->findChildren<QComboBox *>()) {
+        combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        combo->setMinimumContentsLength(8);
+    }
+    for (auto *combo : {backendCombo, deviceCombo, uhdDeviceCombo, deviceSampleRateCombo,
+                        bandwidthCombo, uhdChannelCombo, uhdAntennaCombo, virtualTransportCombo,
+                        sampleRateCombo, modulationCombo, sourceCombo, audioInputCombo,
+                        signalBandwidthCombo, ft8SlotCombo}) {
+        combo->setMinimumContentsLength(4);
+    }
+    for (auto *combo : {backendCombo, deviceCombo, sourceCombo}) {
+        connect(combo, &QComboBox::currentTextChanged, combo, &QComboBox::setToolTip);
+    }
+    const int labelWidth = qMax(fontMetrics().horizontalAdvance(QStringLiteral("TX channel")),
+                               fontMetrics().horizontalAdvance(QStringLiteral("Несуча RF:")));
+    const int fieldWidth = std::max({frequencySpin->sizeHint().width(), inputRow->sizeHint().width(),
+                                     symbolRateSpin->sizeHint().width(), toneSpin->sizeHint().width()});
+    for (auto *grid : {hardware, signal}) {
+        grid->setColumnMinimumWidth(0, labelWidth);
+        grid->setColumnMinimumWidth(2, labelWidth);
+        grid->setColumnMinimumWidth(1, fieldWidth);
+        grid->setColumnMinimumWidth(3, fieldWidth);
+        grid->setColumnStretch(1, 1);
+        grid->setColumnStretch(3, 1);
+    }
     root->addWidget(progressBar);
     root->addWidget(statusLabel);
     root->addWidget(statsLabel);
+    root->addWidget(liveKeyButton, 0, Qt::AlignLeft);
     root->addLayout(actions);
 
     progressTimer = new QTimer(this);
@@ -697,14 +787,16 @@ void TransmitDialog::buildUi() {
             });
     connect(backendCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, [this]() {
-                armCheck->setChecked(false);
+                uhdArmCodeEdit->clear();
+                if (!remoteUhdSelected()) txNetwork->stop();
+                refreshUhdOutput();
                 updateModeUi();
             });
+    connect(uhdToneTestButton, &QPushButton::clicked, this, [this] {
+        if (openUhdToneTest) openUhdToneTest();
+    });
     connect(virtualTransportCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, [this]() { updateModeUi(); });
-    connect(armCheck, &QCheckBox::toggled, this, [this]() {
-        if (!(activeBackend && activeBackend->isRunning())) updateTexts();
-    });
     connect(sourceCombo, qOverload<int>(&QComboBox::currentIndexChanged),
             this, [this]() { updateModeUi(); });
     connect(dmrPrivacyCombo, qOverload<int>(&QComboBox::currentIndexChanged),
@@ -936,6 +1028,102 @@ void TransmitDialog::setHackRfReceiverUseChecker(HackRfReceiverUseChecker checke
     updateModeUi();
 }
 
+void TransmitDialog::setUhdContext(NetworkController *network,
+                                  std::function<QJsonObject()> remoteSettings, QString fpgaImage,
+                                  const QString &serverHost, int serverPort,
+                                  std::function<void()> openToneTest) {
+    sharedNetwork = network;
+    if (uhdServerEdit->text().isEmpty()) {
+        uhdServerEdit->setText(serverHost);
+        uhdServerPort->setValue(serverPort);
+    }
+    remoteUhdSettings = std::move(remoteSettings);
+    openUhdToneTest = std::move(openToneTest);
+    uhdFpgaImage = std::move(fpgaImage);
+    refreshUhdOutput();
+    updateModeUi();
+}
+
+void TransmitDialog::setSharedUhdTxSessionProvider(std::function<std::shared_ptr<UhdRxSession>(int)> provider) {
+    localUhd.setSharedSessionProvider(std::move(provider));
+}
+
+QJsonObject TransmitDialog::uhdRemoteCapabilities() const {
+    if (txNetwork && txNetwork->isControlReady()) return txServerCapabilities;
+    return remoteUhdSettings ? remoteUhdSettings() : QJsonObject{};
+}
+
+void TransmitDialog::connectUhdTxEndpoint() {
+    if (remoteUhd.isRunning() || uhdServerEdit->text().trimmed().isEmpty()) return;
+    txServerCapabilities = {};
+    txNetwork->testClientConnection(uhdServerEdit->text().trimmed(), quint16(uhdServerPort->value()));
+    setStatus(txNetwork->statusText());
+}
+
+void TransmitDialog::refreshUhdOutput() {
+    if (activeBackend && activeBackend->isRunning()) return;
+    const bool remote = remoteUhdSelected();
+    if (!remote && !localUhdSelected()) return;
+    const QSettings settings(persistentSettingsFilePath(), QSettings::IniFormat);
+    const QString prefix = remote ? QStringLiteral("transmit/remoteUhd/") : QStringLiteral("transmit/localUhd/");
+    const bool sameOutput = uhdDeviceCombo->property("remote").isValid() &&
+                            uhdDeviceCombo->property("remote").toBool() == remote;
+    const int device = sameOutput ? uhdDeviceCombo->currentData().toInt()
+                                  : settings.value(prefix + "device", 0).toInt();
+    const int channel = sameOutput && uhdChannelCombo->currentIndex() >= 0 ? uhdChannelCombo->currentData().toInt()
+                                   : settings.value(prefix + "channel", 0).toInt();
+    const QString antenna = sameOutput && uhdAntennaCombo->currentText() ==
+        uhdAntennaCombo->itemText(uhdAntennaCombo->currentIndex()) && !remote
+        ? uhdAntennaCombo->currentData().toString()
+        : sameOutput ? uhdAntennaCombo->currentText()
+                                        : settings.value(prefix + "antenna", QStringLiteral("TX/RX")).toString();
+    if (!sameOutput) uhdGainSpin->setValue(settings.value(prefix + "gainDb", 0).toDouble());
+    uhdDeviceCombo->setProperty("remote", remote);
+    const QJsonObject capabilities = remote ? uhdRemoteCapabilities() : QJsonObject{};
+    uhdDeviceCombo->clear();
+    uhdDeviceCombo->setToolTip({});
+    uhdChannelCombo->clear();
+    uhdAntennaCombo->clear();
+    uhdAntennaCombo->setEditable(!remote);
+    if (remote) {
+        uhdDeviceCombo->addItem(QStringLiteral("B210 · Obrii CLI"), 0);
+        for (const auto entry : capabilities.value("txChannels").toArray()) {
+            const int number = entry.toInt(-1);
+            if (number >= 0) uhdChannelCombo->addItem(QStringLiteral("TX %1").arg(number), number);
+        }
+        for (const auto entry : capabilities.value("antennas").toArray())
+            if (entry.isString()) uhdAntennaCombo->addItem(entry.toString());
+        if (uhdAntennaCombo->count() == 0 && !capabilities.isEmpty())
+            uhdAntennaCombo->addItem(QStringLiteral("TX/RX"));
+    } else {
+        QString discoveryError;
+        const auto devices = enumerateUhdDeviceArgs(&discoveryError);
+        for (int i = 0; i < devices.size(); ++i) uhdDeviceCombo->addItem(devices.at(i), i);
+        if (devices.isEmpty()) {
+            const QString noDevice = discoveryError.isEmpty()
+                ? text(QStringLiteral("No USRP detected"), QStringLiteral("USRP не знайдено"))
+                : text(QStringLiteral("UHD discovery error"), QStringLiteral("Помилка пошуку через UHD"));
+            uhdDeviceCombo->addItem(noDevice, -1);
+            uhdDeviceCombo->setToolTip(discoveryError);
+        }
+        for (int index = 0; index < 2; ++index)
+            uhdChannelCombo->addItem(QStringLiteral("TX %1").arg(index), index);
+        uhdAntennaCombo->addItem(QStringLiteral("TX/RX"), QStringLiteral("TX/RX"));
+        uhdAntennaCombo->addItem(text(QStringLiteral("Driver default"), QStringLiteral("За замовчуванням UHD")), QString());
+    }
+    const int deviceIndex = uhdDeviceCombo->findData(device);
+    if (deviceIndex >= 0) uhdDeviceCombo->setCurrentIndex(deviceIndex);
+    const int channelIndex = uhdChannelCombo->findData(channel);
+    if (channelIndex >= 0) uhdChannelCombo->setCurrentIndex(channelIndex);
+    if (!remote) {
+        const int antennaIndex = uhdAntennaCombo->findData(antenna);
+        if (antennaIndex >= 0) uhdAntennaCombo->setCurrentIndex(antennaIndex);
+        else uhdAntennaCombo->setEditText(antenna);
+    } else if (!antenna.isEmpty()) {
+        uhdAntennaCombo->setCurrentText(antenna);
+    }
+}
+
 void TransmitDialog::setLanguage(const QString &nextLanguage) {
     language = nextLanguage;
     if (signalLabDialog) signalLabDialog->setLanguage(language);
@@ -974,10 +1162,6 @@ bool TransmitDialog::startPreparedFt8Automatically(QString *error) {
     if (activeBackend && activeBackend->isRunning()) {
         return fail(text(QStringLiteral("The transmitter is busy with another transmission."),
                          QString::fromUtf8(u8"Передавач зайнятий іншою передачею.")));
-    }
-    if (!armCheck->isChecked()) {
-        return fail(text(QStringLiteral("RF output is not armed. Open TX setup, verify the antenna/load and arm RF output."),
-                         QString::fromUtf8(u8"RF-вихід не озброєно. Відкрийте налаштування TX, перевірте антену/навантаження та озбройте RF-вихід.")));
     }
     if (deviceCombo->currentData().toInt() < 0) {
         return fail(text(QStringLiteral("No HackRF device is available for automatic FT8."),
@@ -1029,22 +1213,37 @@ void TransmitDialog::updateTexts() {
         box->setTitle(text(QStringLiteral("Media source"), QString::fromUtf8(u8"Медіаджерело")));
     backendLabel->setText(text(QStringLiteral("Output:"), QString::fromUtf8(u8"Вихід:")));
     deviceLabel->setText(text(QStringLiteral("Device:"), QString::fromUtf8(u8"Пристрій:")));
-    rfLabel->setText(text(QStringLiteral("RF carrier:"), QString::fromUtf8(u8"Несуча RF:")));
+    rfLabel->setText(text(QStringLiteral("RF (MHz):"), QStringLiteral("RF (МГц):")));
     basebandLabel->setText(text(QStringLiteral("Generator sample rate:"),
-                                QString::fromUtf8(u8"Частота семплів генератора:")));
-    deviceRateLabel->setText(text(QStringLiteral("HackRF IQ rate:"),
-                                  QString::fromUtf8(u8"Частота передавання IQ:")));
-    bandwidthLabel->setText(text(QStringLiteral("HackRF RF filter:"),
-                                 QString::fromUtf8(u8"Апаратний RF-фільтр:")));
+                                QString::fromUtf8(u8"Семплрейт IQ:")));
+    deviceRateLabel->setText(text(QStringLiteral("IQ rate:"), QStringLiteral("Частота IQ:")));
+    bandwidthLabel->setText(text(QStringLiteral("RF filter:"), QStringLiteral("RF-фільтр:")));
     levelLabel->setText(text(QStringLiteral("IQ amplitude:"), QString::fromUtf8(u8"Амплітуда IQ:")));
-    txGainLabel->setText(text(QStringLiteral("HackRF TX VGA:"), QString::fromUtf8(u8"HackRF TX VGA:")));
+    const bool uhd = localUhdSelected() || remoteUhdSelected();
+    const bool rfOutput = hackRfSelected() || uhd;
+    txGainLabel->setText(QStringLiteral("TX VGA:"));
+    const auto txGainText = text(QStringLiteral("TX gain"), QStringLiteral("Підсилення TX"));
+    uhdGainLabel->setText(text(QStringLiteral("TX gain"), QStringLiteral("Підс. TX")));
+    uhdGainLabel->setToolTip(txGainText);
+    uhdGainSpin->setToolTip(txGainText);
+    uhdChannelLabel->setText(text(QStringLiteral("TX channel"), QStringLiteral("Канал TX")));
+    uhdAntennaLabel->setText(text(QStringLiteral("TX antenna"), QStringLiteral("Антена TX")));
+    uhdArmCodeLabel->setText(text(QStringLiteral("TX code"), QStringLiteral("Код TX")));
+    uhdArmCodeLabel->setToolTip(text(QStringLiteral("Single-use TX code"), QStringLiteral("Одноразовий код TX")));
+    uhdArmCodeEdit->setToolTip(uhdArmCodeLabel->toolTip());
+    uhdServerLabel->setText(text(QStringLiteral("TX server"), QStringLiteral("Сервер TX")));
+    uhdServerPortLabel->setText(text(QStringLiteral("Port"), QStringLiteral("Порт")));
+    uhdConnectButton->setText(text(QStringLiteral("Connect"), QStringLiteral("Підключити")));
+    uhdToneTestButton->setText(text(QStringLiteral("Test tone…"), QStringLiteral("Тестовий тон…")));
+    uhdAntennaCombo->setToolTip(text(QStringLiteral("On B210, TX/RX is the transmit port for the selected channel."),
+                                    QStringLiteral("На B210 передавання йде через TX/RX вибраного каналу.")));
     watchdogLabel->setText(text(QStringLiteral("RF watchdog:"), QString::fromUtf8(u8"Таймер RF:")));
     modeLabel->setText(text(QStringLiteral("Mode:"), QString::fromUtf8(u8"Режим:")));
     sourceLabel->setText(text(QStringLiteral("Source:"), QString::fromUtf8(u8"Джерело:")));
-    audioInputLabel->setText(text(QStringLiteral("Microphone input:"), QString::fromUtf8(u8"Мікрофонний вхід:")));
+    audioInputLabel->setText(text(QStringLiteral("Mic input:"), QStringLiteral("Мікр. вхід:")));
     microphoneLevelLabel->setText(
         text(QStringLiteral("Microphone level / boost:"),
-             QString::fromUtf8(u8"Рівень / підсилення мікрофона:")));
+             QString::fromUtf8(u8"Рівень мікрофона:")));
     const QString microphoneLevelHelp = text(
         QStringLiteral("0-100% controls the selected Windows microphone endpoint. Above 100%, the endpoint remains at 100% and Obrii adds up to +30 dB of software gain. Software gain cannot restore samples that the driver returns as digital silence."),
         QString::fromUtf8(u8"0-100% керує вибраним мікрофонним входом Windows. Вище 100% системний рівень лишається 100%, а Obrii додає до +30 dB програмного підсилення. Програмне підсилення не відновить семпли, якщо драйвер повертає цифрову тишу."));
@@ -1133,8 +1332,9 @@ void TransmitDialog::updateTexts() {
     dmrPrivacyKeyLabel->setText(text(QStringLiteral("Key (hex):"), QString::fromUtf8(u8"Ключ (hex):")));
     modulationCombo->setItemText(modulationCombo->findData(static_cast<int>(TxModulation::M17Voice)),
         text(QStringLiteral("M17 voice (Codec2 3200)"), QString::fromUtf8(u8"Голос M17 (Codec2 3200)")));
-    invertDataCheck->setText(text(QStringLiteral("Invert data polarity"),
-                                  QString::fromUtf8(u8"Інвертувати полярність даних")));
+    invertDataCheck->setText(text(QStringLiteral("Invert data"), QStringLiteral("Інверсія даних")));
+    invertDataCheck->setToolTip(text(QStringLiteral("Invert data polarity"),
+                                      QStringLiteral("Інвертувати полярність даних")));
     symbolRateSpin->setToolTip(text(
         QStringLiteral("Symbols per second. Raw packet modes use an Obrii laboratory frame with preamble, sync, UTF-8 length and CRC-16."),
         QString::fromUtf8(u8"Символів за секунду. Сирі пакетні режими використовують лабораторний кадр Obrii з преамбулою, sync, довжиною UTF-8 та CRC-16.")));
@@ -1144,14 +1344,17 @@ void TransmitDialog::updateTexts() {
     backendCombo->setItemText(0, text(QStringLiteral("Simulator / IQ file"),
                                       QString::fromUtf8(u8"Симулятор / файл IQ")));
     backendCombo->setItemText(1, QStringLiteral("HackRF native"));
+    backendCombo->setItemText(backendCombo->findData(localUhd.id()),
+        text(localUhd.displayName(), QStringLiteral("USRP UHD (локальний)")));
+    backendCombo->setItemText(backendCombo->findData(remoteUhd.id()),
+        text(remoteUhd.displayName(), QStringLiteral("USRP UHD (мережа)")));
     backendCombo->setItemText(2, text(QStringLiteral("Virtual IQ receiver"),
                                       QString::fromUtf8(u8"Віртуальний IQ-приймач")));
     virtualTransportLabel->setText(text(QStringLiteral("Transport:"),
                                         QString::fromUtf8(u8"Транспорт:")));
-    virtualEndpointLabel->setText(text(QStringLiteral("Local channel:"),
-                                       QString::fromUtf8(u8"Локальний канал:")));
-    virtualHostLabel->setText(text(QStringLiteral("Receiver IP:"),
-                                   QString::fromUtf8(u8"IP приймача:")));
+    virtualEndpointLabel->setText(text(QStringLiteral("Channel:"), QStringLiteral("Канал:")));
+    virtualHostLabel->setText(text(QStringLiteral("IP address:"), QStringLiteral("IP-адреса:")));
+    virtualHostLabel->setToolTip(text(QStringLiteral("Receiver IP address"), QStringLiteral("IP-адреса приймача")));
     virtualPortLabel->setText(text(QStringLiteral("Port:"),
                                    QString::fromUtf8(u8"Порт:")));
     virtualNodeIdLabel->setText(text(QStringLiteral("Node ID:"),
@@ -1202,36 +1405,39 @@ void TransmitDialog::updateTexts() {
                                 ? text(QStringLiteral("No media file selected"),
                                        QString::fromUtf8(u8"Медіафайл не обрано"))
                                 : QFileInfo(mediaPath).fileName());
-    startButton->setText(hackRfSelected()
+    startButton->setToolTip(rfOutput
                              ? text(QStringLiteral("Start RF transmission"), QString::fromUtf8(u8"Почати RF-передачу"))
                              : virtualSignalSelected()
                                    ? text(QStringLiteral("Start virtual transmission"), QString::fromUtf8(u8"Почати віртуальну передачу"))
                                    : text(QStringLiteral("Start simulation"), QString::fromUtf8(u8"Почати симуляцію")));
-    stopButton->setText(text(QStringLiteral("Stop"), QString::fromUtf8(u8"Зупинити")));
-    exportButton->setText(text(QStringLiteral("Export IQ..."), QString::fromUtf8(u8"Експорт IQ...")));
-    signalLabButton->setText(text(QStringLiteral("Signal lab..."),
-                                  QString::fromUtf8(u8"Лабораторія сигналів...")));
-    ft8UtcCheck->setText(text(QStringLiteral("Align FT8 to UTC 15 s slot"),
-                              QString::fromUtf8(u8"Прив'язати FT8 до 15-секундного UTC-слота")));
+    startButton->setText(rfOutput ? text(QStringLiteral("Start RF"), QStringLiteral("Почати RF"))
+                                 : text(QStringLiteral("Start"), QStringLiteral("Почати")));
+    stopButton->setText(text(QStringLiteral("Stop"), QStringLiteral("Стоп")));
+    stopButton->setToolTip(text(QStringLiteral("Stop transmission"), QStringLiteral("Зупинити передачу")));
+    exportButton->setText(text(QStringLiteral("Export IQ…"), QStringLiteral("Експорт IQ…")));
+    signalLabButton->setText(text(QStringLiteral("Signal lab…"), QStringLiteral("Лаб. сигналів…")));
+    signalLabButton->setToolTip(text(QStringLiteral("Open the signal laboratory"),
+                                     QStringLiteral("Відкрити лабораторію сигналів")));
+    ft8UtcCheck->setText(text(QStringLiteral("FT8 UTC"), QStringLiteral("FT8 UTC")));
+    ft8UtcCheck->setToolTip(text(QStringLiteral("Align FT8 to a 15-second UTC slot"),
+                                 QStringLiteral("Прив’язати FT8 до 15-секундного слота UTC")));
     ft8SlotCombo->setItemText(0, text(QStringLiteral("Next slot"), QString::fromUtf8(u8"Наступний слот")));
     ft8SlotCombo->setItemText(1, text(QStringLiteral("Even slot"), QString::fromUtf8(u8"Парний слот")));
     ft8SlotCombo->setItemText(2, text(QStringLiteral("Odd slot"), QString::fromUtf8(u8"Непарний слот")));
-    rfAmpCheck->setText(text(QStringLiteral("RF amp (+~11 dB)"),
-                             QString::fromUtf8(u8"RF-підсилювач (+~11 дБ)")));
-    armCheck->setText(text(QStringLiteral("ARM RF output"),
-                           QString::fromUtf8(u8"ОЗБРОЇТИ RF-вихід")));
+    rfAmpCheck->setText(text(QStringLiteral("RF amp"), QStringLiteral("RF-підсилювач")));
+    rfAmpCheck->setToolTip(text(QStringLiteral("Enable RF amplifier (about +11 dB)"),
+                               QStringLiteral("Увімкнути RF-підсилювач (приблизно +11 дБ)")));
     rfLockLabel->setText(hackRfSelected()
         ? text(QStringLiteral("Connect a suitable antenna or dummy load. Verify frequency, local rules and gain. Stop reception on this HackRF before transmitting."),
                QString::fromUtf8(u8"Підключіть відповідну антену або еквівалент навантаження. Перевірте частоту, місцеві правила та підсилення. Перед передачею зупиніть прийом на цьому HackRF."))
+        : uhd ? text(QStringLiteral("Verify the TX frequency, gain and antenna or load before transmitting."),
+                      QStringLiteral("Перед передаванням перевірте частоту, підсилення й антену або навантаження."))
         : text(QStringLiteral("Simulation and IQ export do not emit RF."),
                QString::fromUtf8(u8"Симуляція та експорт IQ не випромінюють RF.")));
     if (!(activeBackend && activeBackend->isRunning())) {
-        setStatus(hackRfSelected()
-                      ? (armCheck->isChecked()
-                             ? text(QStringLiteral("Ready; RF output is armed for this dialog session"),
-                                    QString::fromUtf8(u8"Готово; RF-вихід озброєно на цю сесію вікна"))
-                             : text(QStringLiteral("Ready; RF output is disarmed"),
-                                    QString::fromUtf8(u8"Готово; RF-вихід не озброєний")))
+        setStatus(rfOutput
+                      ? text(QStringLiteral("Ready to start RF transmission"),
+                             QStringLiteral("Готово до запуску RF-передачі"))
                       : text(QStringLiteral("Ready; no RF can be emitted"),
                              QString::fromUtf8(u8"Готово; випромінювання RF неможливе")));
     }
@@ -1239,6 +1445,15 @@ void TransmitDialog::updateTexts() {
 
 bool TransmitDialog::hackRfSelected() const {
     return backendCombo && backendCombo->currentData().toString() == QStringLiteral("hackrf-native");
+}
+
+bool TransmitDialog::localUhdSelected() const { return backendCombo->currentData() == localUhd.id(); }
+bool TransmitDialog::remoteUhdSelected() const { return backendCombo->currentData() == remoteUhd.id(); }
+
+UhdTransmitterBackend *TransmitDialog::activeUhdBackend() {
+    if (activeBackend == &localUhd) return &localUhd;
+    if (activeBackend == &remoteUhd) return &remoteUhd;
+    return nullptr;
 }
 
 bool TransmitDialog::virtualSignalSelected() const {
@@ -1265,6 +1480,8 @@ bool TransmitDialog::selectedHackRfBusyForReception() const {
 
 TransmitterBackend *TransmitDialog::selectedBackend() {
     if (hackRfSelected()) return &hackRf;
+    if (localUhdSelected()) return &localUhd;
+    if (remoteUhdSelected()) return &remoteUhd;
     if (virtualSignalSelected()) {
         applyVirtualSignalEndpoint();
         return &virtualSignal;
@@ -1529,6 +1746,17 @@ TxConfiguration TransmitDialog::configurationFromUi() const {
     configuration.deviceSampleRate = deviceSampleRateCombo->currentData().toInt();
     configuration.bandwidthHz = static_cast<std::uint32_t>(bandwidthCombo->currentData().toUInt());
     configuration.txVgaGainDb = txGainSpin->value();
+    if (localUhdSelected() || remoteUhdSelected()) {
+        configuration.deviceIndex = uhdDeviceCombo->currentData().toInt();
+        configuration.deviceSampleRate = UhdIqTx::DeviceRate;
+        configuration.uhdChannel = uhdChannelCombo->currentData().toInt();
+        configuration.uhdGainDb = uhdGainSpin->value();
+        configuration.uhdAntenna = uhdAntennaCombo->currentText().trimmed();
+        if (localUhdSelected() && uhdAntennaCombo->currentIndex() >= 0 &&
+            uhdAntennaCombo->currentText() == uhdAntennaCombo->itemText(uhdAntennaCombo->currentIndex()))
+            configuration.uhdAntenna = uhdAntennaCombo->currentData().toString();
+        if (localUhdSelected()) configuration.uhdFpgaImage = uhdFpgaImage;
+    }
     configuration.rfAmpEnabled = rfAmpCheck->isChecked();
     return configuration;
 }
@@ -1705,15 +1933,49 @@ void TransmitDialog::updateModeUi() {
     liveKeyButton->setVisible(liveKeySource);
     liveKeyButton->setEnabled(liveKeySource);
     const bool hardware = hackRfSelected();
+    const bool uhd = localUhdSelected() || remoteUhdSelected();
+    const bool networkUhd = remoteUhdSelected();
+    const bool transmitting = activeBackend && activeBackend->isRunning();
     const bool virtualOutput = virtualSignalSelected();
     const bool virtualTcp = virtualTransportCombo->currentData().toInt() == 1;
+    deviceCombo->setVisible(!uhd);
+    deviceLabel->setBuddy(uhd ? uhdDeviceCombo : deviceCombo);
     deviceCombo->setEnabled(hardware);
+    deviceRateLabel->setVisible(!uhd);
+    deviceSampleRateCombo->setVisible(!uhd);
     deviceSampleRateCombo->setEnabled(hardware);
+    bandwidthLabel->setVisible(!uhd);
+    bandwidthCombo->setVisible(!uhd);
     bandwidthCombo->setEnabled(hardware);
+    txGainSpin->setVisible(!uhd);
     txGainSpin->setEnabled(hardware);
-    watchdogSpin->setEnabled(hardware);
+    txGainLabel->setVisible(!uhd);
+    rfAmpCheck->setVisible(!uhd);
     rfAmpCheck->setEnabled(hardware);
-    armCheck->setEnabled(hardware);
+    uhdDeviceCombo->setVisible(uhd);
+    uhdDeviceCombo->setEnabled(!networkUhd);
+    uhdGainLabel->setVisible(uhd);
+    uhdGainSpin->setVisible(uhd);
+    uhdChannelLabel->setVisible(uhd);
+    uhdChannelCombo->setVisible(uhd);
+    uhdAntennaLabel->setVisible(uhd);
+    uhdAntennaCombo->setVisible(uhd);
+    backendCombo->setEnabled(!transmitting);
+    uhdChannelCombo->setEnabled(!transmitting);
+    uhdAntennaCombo->setEnabled(!transmitting);
+    uhdGainSpin->setEnabled(!transmitting);
+    uhdConnectButton->setEnabled(!transmitting);
+    uhdServerEdit->setEnabled(!transmitting);
+    uhdServerPort->setEnabled(!transmitting);
+    uhdArmCodeLabel->setVisible(networkUhd);
+    uhdArmCodeEdit->setVisible(networkUhd);
+    uhdServerLabel->setVisible(networkUhd);
+    uhdServerPortLabel->setVisible(networkUhd);
+    uhdServerEdit->setVisible(networkUhd);
+    uhdServerPort->setVisible(networkUhd);
+    uhdConnectButton->setVisible(networkUhd);
+    uhdToneTestButton->setVisible(networkUhd && remoteUhdSettings && !remoteUhdSettings().isEmpty());
+    watchdogSpin->setEnabled(hardware || uhd);
     virtualTransportLabel->setVisible(virtualOutput);
     virtualTransportCombo->setVisible(virtualOutput);
     virtualEndpointLabel->setVisible(virtualOutput && !virtualTcp);
@@ -1729,32 +1991,18 @@ void TransmitDialog::updateModeUi() {
     virtualHostEdit->setEnabled(virtualOutput && !(activeBackend && activeBackend->isRunning()));
     virtualPortSpin->setEnabled(virtualOutput && !(activeBackend && activeBackend->isRunning()));
     virtualNodeIdEdit->setEnabled(virtualOutput && !(activeBackend && activeBackend->isRunning()));
-    frequencySpin->setMaximum(hardware ? 6000.0 : 7250.0);
+    frequencySpin->setMaximum(hardware || uhd ? 6000.0 : 7250.0);
     updateTexts();
 }
 
 void TransmitDialog::startTransmission() {
     if (activeBackend && activeBackend->isRunning()) return;
     hackRfStoppedStreamPolls = 0;
+    if (remoteUhdSelected()) refreshUhdOutput();
     activeBackend = selectedBackend();
-    if (activeBackend->isRfCapable()) {
-        if (!armCheck->isChecked()) {
-            setStatus(text(QStringLiteral("Arm the RF output before starting"),
-                           QString::fromUtf8(u8"Перед запуском озбройте RF-вихід")), true);
-            return;
-        }
-        if (deviceCombo->currentData().toInt() < 0) {
-            setStatus(text(QStringLiteral("No HackRF device is available"),
-                           QString::fromUtf8(u8"Немає доступного пристрою HackRF")), true);
-            return;
-        }
-        if (selectedHackRfBusyForReception()) {
-            setStatus(text(
-                QStringLiteral("This HackRF is already receiving. Select another HackRF or stop RX before transmitting."),
-                QString::fromUtf8(u8"Цей HackRF уже працює на прийом. Оберіть інший HackRF або зупиніть RX перед передачею.")),
-                true);
-            return;
-        }
+    if (!authorizeRfOutput()) {
+        activeBackend = nullptr;
+        return;
     }
     saveSettings();
     preview->clear();
@@ -1764,6 +2012,8 @@ void TransmitDialog::startTransmission() {
     bandwidthLimiterState.reset();
     bandwidthLimitedIq.clear();
     TxConfiguration configuration = configurationFromUi();
+    if (remoteUhdSelected()) configuration.uhdArmCode = uhdArmCodeEdit->text().trimmed();
+    uhdArmCodeEdit->clear();
     if (!validateSignalBandwidth(configuration)) return;
     const QString source = sourceCombo->currentData().toString();
     pttMode = source == QStringLiteral("microphone-ptt");
@@ -1785,6 +2035,40 @@ void TransmitDialog::startTransmission() {
     }
 }
 
+bool TransmitDialog::authorizeRfOutput() {
+    if (!activeBackend->isRfCapable()) return true;
+    if (activeBackend == &localUhd && uhdDeviceCombo->currentData().toInt() < 0) {
+        const QString detail = uhdDeviceCombo->toolTip();
+        setStatus(detail.isEmpty()
+            ? text(QStringLiteral("No USRP UHD device is available"), QStringLiteral("Немає доступного USRP UHD"))
+            : detail, true);
+        return false;
+    }
+    if (activeBackend == &remoteUhd) {
+        const auto capabilities = uhdRemoteCapabilities();
+        if (capabilities.value("iqStream").toInt() != 1 || !capabilities.value("available").toBool() ||
+            uhdChannelCombo->count() == 0 || uhdArmCodeEdit->text().trimmed().isEmpty()) {
+            setStatus(text(QStringLiteral("Remote UHD TX requires an active duplex server and a new arm code"),
+                           QStringLiteral("Для мережевого UHD TX потрібні активний дуплексний сервер і новий одноразовий код")), true);
+            return false;
+        }
+        remoteUhd.setNetwork(txNetwork->isControlReady() ? txNetwork : sharedNetwork);
+    }
+    if (activeBackend == &hackRf && deviceCombo->currentData().toInt() < 0) {
+        setStatus(text(QStringLiteral("No HackRF device is available"),
+                       QString::fromUtf8(u8"Немає доступного пристрою HackRF")), true);
+        return false;
+    }
+    if (selectedHackRfBusyForReception()) {
+        setStatus(text(
+            QStringLiteral("This HackRF is already receiving. Select another HackRF or stop RX before transmitting."),
+            QString::fromUtf8(u8"Цей HackRF уже працює на прийом. Оберіть інший HackRF або зупиніть RX перед передачею.")),
+            true);
+        return false;
+    }
+    return true;
+}
+
 void TransmitDialog::startLaboratoryTransmission(
     const SignalLabGenerationResult &result, double centerHz) {
     if (!result.ok()) {
@@ -1800,30 +2084,11 @@ void TransmitDialog::startLaboratoryTransmission(
         return;
     }
 
+    if (remoteUhdSelected()) refreshUhdOutput();
     activeBackend = selectedBackend();
-    if (activeBackend->isRfCapable()) {
-        if (!armCheck->isChecked()) {
-            activeBackend = nullptr;
-            setStatus(text(QStringLiteral("Arm the RF output in the transmitter window before laboratory TX"),
-                           QString::fromUtf8(u8"Перед лабораторною TX-передачею озбройте RF-вихід у вікні передавача")),
-                      true);
-            return;
-        }
-        if (deviceCombo->currentData().toInt() < 0) {
-            activeBackend = nullptr;
-            setStatus(text(QStringLiteral("No HackRF device is available"),
-                           QString::fromUtf8(u8"Немає доступного пристрою HackRF")),
-                      true);
-            return;
-        }
-        if (selectedHackRfBusyForReception()) {
-            activeBackend = nullptr;
-            setStatus(text(
-                QStringLiteral("This HackRF is already receiving. Select another HackRF or stop RX before transmitting."),
-                QString::fromUtf8(u8"Цей HackRF уже працює на прийом. Оберіть інший HackRF або зупиніть RX перед передачею.")),
-                true);
-            return;
-        }
+    if (!authorizeRfOutput()) {
+        activeBackend = nullptr;
+        return;
     }
 
     saveSettings();
@@ -1834,6 +2099,8 @@ void TransmitDialog::startLaboratoryTransmission(
     bandwidthLimitedIq.clear();
 
     TxConfiguration configuration = configurationFromUi();
+    if (remoteUhdSelected()) configuration.uhdArmCode = uhdArmCodeEdit->text().trimmed();
+    uhdArmCodeEdit->clear();
     if (centerHz >= 0.0) configuration.frequencyHz = centerHz;
     configuration.sampleRate = result.sampleRate;
     configuration.level = 1.0f;
@@ -1844,7 +2111,6 @@ void TransmitDialog::startLaboratoryTransmission(
     if (!activeBackend->start(configuration, &error)) {
         activeBackend->stop();
         activeBackend = nullptr;
-        armCheck->setChecked(false);
         setStatus(error, true);
         return;
     }
@@ -1853,8 +2119,11 @@ void TransmitDialog::startLaboratoryTransmission(
     if (activeBackend != &virtualSignal &&
         !activeBackend->writeIq(result.iq.constData(), result.iq.size(), &error)) {
         activeBackend->stop();
+        if (const auto *uhd = activeUhdBackend()) {
+            const QString cause = uhd->error();
+            if (!cause.isEmpty()) error = cause;
+        }
         activeBackend = nullptr;
-        armCheck->setChecked(false);
         setStatus(error, true);
         return;
     }
@@ -1879,9 +2148,10 @@ void TransmitDialog::startLaboratoryTransmission(
         if (activeBackend != &virtualSignal || !virtualSignal.isRunning()) return;
     }
     progressTimer->start();
+    if (activeUhdBackend()) finishUhdWaveform();
     setStatus(activeBackend->isRfCapable()
-                  ? text(QStringLiteral("Laboratory IQ waveform is being transmitted by HackRF"),
-                         QString::fromUtf8(u8"Лабораторний IQ-сигнал передається через HackRF"))
+                  ? text(QStringLiteral("Laboratory IQ waveform queued for %1"),
+                         QStringLiteral("Лабораторний IQ-сигнал поставлено в чергу %1")).arg(activeBackend->displayName())
                   : text(QStringLiteral("Laboratory IQ simulation is running"),
                          QString::fromUtf8(u8"Симуляція лабораторного IQ запущена")));
 }
@@ -1894,7 +2164,6 @@ void TransmitDialog::startTextSimulation(const TxConfiguration &configuration) {
 void TransmitDialog::startGeneratedWaveform(const TxConfiguration &configuration,
                                             const TxGenerationResult &generated) {
     if (!generated.ok()) {
-        armCheck->setChecked(false);
         setStatus(generated.error, true);
         return;
     }
@@ -1902,7 +2171,6 @@ void TransmitDialog::startGeneratedWaveform(const TxConfiguration &configuration
     activeConfiguration = configuration;
     if (!activeBackend || !activeBackend->start(configuration, &error)) {
         if (activeBackend) activeBackend->stop();
-        armCheck->setChecked(false);
         setStatus(error, true);
         return;
     }
@@ -1940,8 +2208,13 @@ void TransmitDialog::beginTextWaveform() {
     QString error;
     if (activeBackend != &virtualSignal &&
         !writeActiveIq(pendingTextIq.constData(), pendingTextIq.size(), &error)) {
-        armCheck->setChecked(false);
-        stopTransmission(error);
+        const auto *uhd = activeUhdBackend();
+        stopTransmission();
+        if (uhd) {
+            const QString cause = uhd->error();
+            if (!cause.isEmpty()) error = cause;
+        }
+        setStatus(error, true);
         return;
     }
     elapsedTimer.restart();
@@ -1957,14 +2230,15 @@ void TransmitDialog::beginTextWaveform() {
     pendingTextIq.clear();
     pendingTextIq.squeeze();
     progressTimer->start();
+    if (activeUhdBackend()) finishUhdWaveform();
     if (activeConfiguration.modulation == TxModulation::M17Voice) {
         setStatus(text(QStringLiteral("M17 voice waveform is running."),
                        QString::fromUtf8(u8"Передається голосовий сигнал M17.")));
         return;
     }
     setStatus(activeBackend->isRfCapable()
-                  ? text(QStringLiteral("Text waveform is being transmitted by HackRF."),
-                         QString::fromUtf8(u8"Текстовий сигнал передається через HackRF."))
+                  ? text(QStringLiteral("Text waveform queued for %1."),
+                         QStringLiteral("Текстовий сигнал поставлено в чергу %1.")).arg(activeBackend->displayName())
                   : text(QStringLiteral("Text baseband simulation is running."),
                          QString::fromUtf8(u8"Симуляція текстового baseband запущена.")));
 }
@@ -2071,24 +2345,20 @@ void TransmitDialog::startMicrophoneSimulation(TxConfiguration configuration) {
     QString error;
     if (configuration.modulation == TxModulation::Dmr &&
         !configureDmrEncoder(configuration, &error)) {
-        armCheck->setChecked(false);
         setStatus(error, true);
         return;
     }
     if (!activeBackend || !activeBackend->start(configuration, &error)) {
-        armCheck->setChecked(false);
         setStatus(error, true);
         return;
     }
     if (pttMode && !activeBackend->setOutputEnabled(false, &error)) {
         activeBackend->stop();
-        armCheck->setChecked(false);
         setStatus(error, true);
         return;
     }
     if (configuration.modulation == TxModulation::Dmr && !pttMode && !beginDmrCall(&error)) {
         activeBackend->stop();
-        armCheck->setChecked(false);
         setStatus(error, true);
         return;
     }
@@ -2240,7 +2510,6 @@ void TransmitDialog::startManualCw(TxConfiguration configuration) {
     if (!activeBackend || !activeBackend->start(configuration, &error) ||
         !activeBackend->setOutputEnabled(false, &error)) {
         if (activeBackend) activeBackend->stop();
-        armCheck->setChecked(false);
         setStatus(error, true);
         return;
     }
@@ -2313,18 +2582,15 @@ void TransmitDialog::startAudioFile(TxConfiguration configuration) {
     QString error;
     if (configuration.modulation == TxModulation::Dmr &&
         !configureDmrEncoder(configuration, &error)) {
-        armCheck->setChecked(false);
         setStatus(error, true);
         return;
     }
     if (!activeBackend || !activeBackend->start(configuration, &error)) {
-        armCheck->setChecked(false);
         setStatus(error, true);
         return;
     }
     if (configuration.modulation == TxModulation::Dmr && !beginDmrCall(&error)) {
         activeBackend->stop();
-        armCheck->setChecked(false);
         setStatus(error, true);
         return;
     }
@@ -2381,7 +2647,6 @@ void TransmitDialog::startImageTransmission(TxConfiguration configuration) {
             (activeBackend != &virtualSignal &&
              !writeActiveIq(iq.constData(), iq.size(), &error))) {
             if (activeBackend) activeBackend->stop();
-            armCheck->setChecked(false);
             setStatus(error, true);
             return;
         }
@@ -2390,6 +2655,7 @@ void TransmitDialog::startImageTransmission(TxConfiguration configuration) {
         textSimulation = true;
         elapsedTimer.restart();
         progressTimer->start();
+        if (activeUhdBackend()) finishUhdWaveform();
         startButton->setEnabled(false);
         stopButton->setEnabled(true);
         sourceCombo->setEnabled(false);
@@ -2467,7 +2733,6 @@ void TransmitDialog::startImageTransmission(TxConfiguration configuration) {
                       << (1000.0 * atvFrame.size() / configuration.sampleRate);
     QString error;
     if (!activeBackend || !activeBackend->start(configuration, &error)) {
-        armCheck->setChecked(false);
         setStatus(error, true);
         return;
     }
@@ -2655,14 +2920,21 @@ QVector<std::complex<float>> TransmitDialog::modulateActiveAudio(const QVector<f
 void TransmitDialog::processLiveSource() {
     if (mediaPaused || !activeBackend || !activeBackend->isRunning()) return;
     const QString source = sourceCombo->currentData().toString();
+    const auto *uhd = activeUhdBackend();
+    const auto buffered = [this, uhd] {
+        if (uhd) return int(uhd->bufferedSourceSamples());
+        if (activeBackend == &hackRf) return int(hackRf.bufferedSourceSamples());
+        return 0;
+    };
     QString error;
     if (source == QStringLiteral("manual-cw")) {
         if (!liveKeyPressed) return;
         const int count = (std::max)(1, activeConfiguration.sampleRate / 50);
-        const int target = activeBackend == &hackRf ? activeConfiguration.sampleRate / 4 : count;
+        const int target = uhd ? activeConfiguration.sampleRate * 160 / 1000
+            : (activeBackend == &hackRf ? activeConfiguration.sampleRate / 4 : count);
         int guard = 0;
         while (activeBackend && activeBackend->isRunning() &&
-               (activeBackend != &hackRf || hackRf.bufferedSourceSamples() < target) &&
+               buffered() < target &&
                guard++ < 16) {
             QVector<std::complex<float>> iq(count);
             const double step = 2.0 * 3.14159265358979323846 * activeConfiguration.toneHz /
@@ -2682,15 +2954,19 @@ void TransmitDialog::processLiveSource() {
     if (source == QStringLiteral("audio-file")) {
         if (mediaPosition >= mediaAudio.size()) {
             if (activeBackend == &hackRf && hackRf.bufferedSourceSamples() > 1) return;
+            if (uhd) {
+                finishUhdWaveform();
+                return;
+            }
             stopTransmission(text(QStringLiteral("Audio file transmission complete"),
                                   QString::fromUtf8(u8"Передачу аудіофайлу завершено")));
             return;
         }
-        const int target = activeBackend == &hackRf ? activeConfiguration.sampleRate / 2
-                                                     : activeConfiguration.sampleRate / 50;
+        const int target = uhd ? activeConfiguration.sampleRate * 180 / 1000
+            : (activeBackend == &hackRf ? activeConfiguration.sampleRate / 2 : activeConfiguration.sampleRate / 50);
         int guard = 0;
         while (mediaPosition < mediaAudio.size() && activeBackend && activeBackend->isRunning() &&
-               (activeBackend != &hackRf || hackRf.bufferedSourceSamples() < target) &&
+               buffered() < target &&
                guard++ < 16) {
             const int count = (std::min)(activeConfiguration.sampleRate / 50,
                                          mediaAudio.size() - mediaPosition);
@@ -2974,8 +3250,28 @@ void TransmitDialog::processMicrophoneBytes(const QByteArray &newBytes) {
 
 void TransmitDialog::updateProgress() {
     if (!activeBackend || !activeBackend->isRunning()) {
+        if (const auto *uhd = activeUhdBackend()) {
+            const QString error = uhd->error();
+            if (error.isEmpty() && finishingUhdWaveform) progressBar->setValue(1000);
+            stopTransmission(error.isEmpty() && finishingUhdWaveform
+                ? text(QStringLiteral("Transmission complete"), QStringLiteral("Передачу завершено")) : QString());
+            if (!error.isEmpty()) setStatus(error, true);
+            return;
+        }
         progressTimer->stop();
         return;
+    }
+    if (activeUhdBackend()) {
+        // A hardware or network error can complete the worker independently of the GUI.
+        backendCombo->setEnabled(false);
+        uhdDeviceCombo->setEnabled(false);
+        uhdChannelCombo->setEnabled(false);
+        uhdAntennaCombo->setEnabled(false);
+        uhdGainSpin->setEnabled(false);
+        uhdToneTestButton->setEnabled(false);
+        uhdConnectButton->setEnabled(false);
+        uhdServerEdit->setEnabled(false);
+        uhdServerPort->setEnabled(false);
     }
     if (activeBackend == &virtualSignal) {
         const bool connected = virtualSignal.pollConnection();
@@ -3028,7 +3324,6 @@ void TransmitDialog::updateProgress() {
                     << "[HackRFTX] USB stream stopped unexpectedly"
                     << "outputSamples" << hackRf.outputSamples()
                     << "bufferedSourceSamples" << hackRf.bufferedSourceSamples();
-                armCheck->setChecked(false);
                 stopTransmission(text(
                     QStringLiteral("HackRF USB stream stopped unexpectedly. Reduce the TX device sample rate or move the receiver to another USB controller."),
                     QString::fromUtf8(u8"USB-потік HackRF несподівано зупинився. Зменште семплрейт передавача або перенесіть приймач на інший USB-контролер.")));
@@ -3066,6 +3361,7 @@ void TransmitDialog::updateProgress() {
     }
     if ((textSimulation && elapsed >= plannedDurationSeconds) ||
         (activeBackend != &virtualSignal && elapsed >= safetyLimit)) {
+        if (activeUhdBackend() && finishingUhdWaveform && elapsed < safetyLimit) return;
         stopTransmission(textSimulation
                              ? text(activeBackend->isRfCapable() ? QStringLiteral("Transmission complete")
                                                                 : QStringLiteral("Simulation complete"),
@@ -3073,6 +3369,22 @@ void TransmitDialog::updateProgress() {
                                                                 : QString::fromUtf8(u8"Симуляцію завершено"))
                              : text(QStringLiteral("RF safety timer reached"),
                                     QString::fromUtf8(u8"Спрацював таймер безпеки RF")));
+    }
+}
+
+void TransmitDialog::finishUhdWaveform() {
+    if (finishingUhdWaveform) return;
+    if (auto *uhd = activeUhdBackend()) {
+        if (sourceCombo->currentData() == QLatin1String("audio-file") && !textSimulation) {
+            QString error;
+            if (!finishDmrCall(&error)) {
+                stopTransmission(error);
+                return;
+            }
+        }
+        finishingUhdWaveform = true;
+        sourceTimer->stop();
+        uhd->finish();
     }
 }
 
@@ -3126,14 +3438,16 @@ void TransmitDialog::stopTransmission(const QString &reason) {
         statusLabel->repaint();
     }
     QString finishError;
-    if (activeBackend && activeBackend->isRunning() && dmrCallActive) {
+    if (activeBackend && !activeUhdBackend() && activeBackend->isRunning() && dmrCallActive) {
         finishDmrCall(&finishError);
     }
-    if (activeBackend && activeBackend->isRunning() && m17VoiceStream && m17VoiceStream->isActive())
+    if (activeBackend && !activeUhdBackend() && activeBackend->isRunning() && m17VoiceStream && m17VoiceStream->isActive())
         finishM17Call(&finishError);
     const bool hadSamples = activeBackend == &simulator && !simulator.capturedIq().isEmpty();
     if (activeBackend) activeBackend->stop();
     activeBackend = nullptr;
+    finishingUhdWaveform = false;
+    activeConfiguration.uhdArmCode.clear();
     if (dmrEncoder) dmrEncoder->reset();
     dmrCallActive = false;
     dmrFinishing = false;
@@ -3162,6 +3476,15 @@ void TransmitDialog::stopTransmission(const QString &reason) {
     liveKeyButton->setStyleSheet(
         QStringLiteral("background:#6b7078;color:white;font-weight:600;"));
     exportButton->setEnabled(hadSamples);
+    backendCombo->setEnabled(true);
+    uhdDeviceCombo->setEnabled(localUhdSelected());
+    uhdChannelCombo->setEnabled(true);
+    uhdAntennaCombo->setEnabled(true);
+    uhdGainSpin->setEnabled(true);
+    uhdToneTestButton->setEnabled(true);
+    uhdConnectButton->setEnabled(true);
+    uhdServerEdit->setEnabled(true);
+    uhdServerPort->setEnabled(true);
     if (!reason.isEmpty()) setStatus(reason);
     else if (!finishError.isEmpty()) setStatus(finishError, true);
 }
@@ -3301,6 +3624,8 @@ void TransmitDialog::loadSettings() {
                                            QStringLiteral("simulator-iq-file")).toString();
     const int backendIndex = backendCombo->findData(backend);
     if (backendIndex >= 0) backendCombo->setCurrentIndex(backendIndex);
+    uhdServerEdit->setText(settings.value(QStringLiteral("transmit/remoteUhd/host")).toString());
+    uhdServerPort->setValue(settings.value(QStringLiteral("transmit/remoteUhd/port"), 21090).toInt());
     const int virtualTransport = settings.value(QStringLiteral("transmit/virtualTransport"), 0).toInt();
     const int virtualTransportIndex = virtualTransportCombo->findData(virtualTransport);
     if (virtualTransportIndex >= 0) virtualTransportCombo->setCurrentIndex(virtualTransportIndex);
@@ -3322,7 +3647,6 @@ void TransmitDialog::loadSettings() {
     txGainSpin->setValue(settings.value(QStringLiteral("transmit/txVgaGainDb"), 0).toInt());
     rfAmpCheck->setChecked(settings.value(QStringLiteral("transmit/rfAmp"), false).toBool());
     watchdogSpin->setValue(settings.value(QStringLiteral("transmit/watchdogSeconds"), 30).toInt());
-    armCheck->setChecked(false);
     messageEdit->setPlainText(settings.value(QStringLiteral("transmit/message"),
                                              QStringLiteral("CQ TEST KN34")).toString());
     const QString source = settings.value(QStringLiteral("transmit/source"),
@@ -3334,7 +3658,7 @@ void TransmitDialog::loadSettings() {
                                              QStringLiteral("robot36")).toString();
     const int mediaModeIndex = mediaModeCombo->findData(mediaMode);
     if (mediaModeIndex >= 0) mediaModeCombo->setCurrentIndex(mediaModeIndex);
-    restoreGeometry(settings.value(QStringLiteral("transmit/dialogGeometry")).toByteArray());
+    restoreGeometry(settings.value(QStringLiteral("transmit/resizableDialogGeometry")).toByteArray());
 }
 
 void TransmitDialog::saveSettings() const {
@@ -3379,18 +3703,40 @@ void TransmitDialog::saveSettings() const {
     settings.setValue(QStringLiteral("transmit/deviceSampleRate"), deviceSampleRateCombo->currentData().toInt());
     settings.setValue(QStringLiteral("transmit/bandwidthHz"), bandwidthCombo->currentData().toUInt());
     settings.setValue(QStringLiteral("transmit/txVgaGainDb"), txGainSpin->value());
+    if (!uhdServerEdit->text().trimmed().isEmpty()) {
+        settings.setValue(QStringLiteral("transmit/remoteUhd/host"), uhdServerEdit->text().trimmed());
+        settings.setValue(QStringLiteral("transmit/remoteUhd/port"), uhdServerPort->value());
+    }
+    if (localUhdSelected() || remoteUhdSelected()) {
+        const QString prefix = remoteUhdSelected() ? QStringLiteral("transmit/remoteUhd/")
+                                                  : QStringLiteral("transmit/localUhd/");
+        const TxConfiguration cfg = configurationFromUi();
+        if (uhdDeviceCombo->currentIndex() >= 0) settings.setValue(prefix + "device", cfg.deviceIndex);
+        if (uhdChannelCombo->currentIndex() >= 0) settings.setValue(prefix + "channel", cfg.uhdChannel);
+        if (uhdAntennaCombo->count()) settings.setValue(prefix + "antenna", cfg.uhdAntenna);
+        settings.setValue(prefix + "gainDb", cfg.uhdGainDb);
+    }
     settings.setValue(QStringLiteral("transmit/rfAmp"), rfAmpCheck->isChecked());
     settings.setValue(QStringLiteral("transmit/watchdogSeconds"), watchdogSpin->value());
     settings.setValue(QStringLiteral("transmit/message"), messageEdit->toPlainText());
     settings.setValue(QStringLiteral("transmit/source"), sourceCombo->currentData().toString());
     settings.setValue(QStringLiteral("transmit/mediaPath"), mediaPath);
     settings.setValue(QStringLiteral("transmit/mediaMode"), mediaModeCombo->currentData().toString());
-    settings.setValue(QStringLiteral("transmit/dialogGeometry"), saveGeometry());
+    settings.setValue(QStringLiteral("transmit/resizableDialogGeometry"), saveGeometry());
 }
 
 void TransmitDialog::closeEvent(QCloseEvent *event) {
-    armCheck->setChecked(false);
+    uhdArmCodeEdit->clear();
     stopTransmission();
+    txNetwork->stop();
     saveSettings();
     QDialog::closeEvent(event);
+}
+
+void TransmitDialog::reject() {
+    if (activeBackend) stopTransmission();
+    uhdArmCodeEdit->clear();
+    txNetwork->stop();
+    saveSettings();
+    QDialog::reject();
 }

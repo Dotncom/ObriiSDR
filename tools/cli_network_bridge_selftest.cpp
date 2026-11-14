@@ -1,5 +1,6 @@
 #include "clinetworkbridge.h"
 #include "displayspectrumcodec.h"
+#include "../src/transmit/uhdtransmitterbackend.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -159,5 +160,82 @@ int main(int argc, char **argv) {
     if (!waitFor([&] { return uhdSpectrumFrames == 1 && legacySpectrumFrames == 1; }) ||
         legacyUhdFrames != 0) return 20;
     std::puts("CLI network bridge self-test passed");
+    QTcpServer txProbe;
+    if (!txProbe.listen(QHostAddress::LocalHost, 0)) return 21;
+    const quint16 txPort = txProbe.serverPort();
+    txProbe.close();
+    CliNetworkBridge txServer;
+    CliNetworkBridge::ServerCallbacks txCallbacks;
+    txCallbacks.settings = [] { return QJsonObject{}; };
+    QByteArray txIq;
+    QString txPeer, txSession;
+    int txStarts = 0, txBursts = 0, txStops = 0;
+    bool txComplete = false;
+    txCallbacks.uhdTxStream = [&](const QString &peer, const QJsonObject &command,
+                                  const QByteArray &payload) -> QJsonObject {
+        const auto operation = command.value("operation").toString();
+        if (operation == QLatin1String("start")) {
+            ++txStarts;
+            if (command.value("code") != QLatin1String("selftest") || command.value("channel").toInt(-1) != 1 ||
+                command.value("antenna") != QLatin1String("TX/RX") || command.value("gainDb").toDouble() != 5.25)
+                return {{"ok", false}, {"reason", "Incorrect TX settings"}};
+            txPeer = peer;
+            txSession = command.value("session").toString();
+            return {{"ok", true}, {"state", "started"}};
+        }
+        if (peer != txPeer || command.value("session").toString() != txSession) return {};
+        txIq += payload;
+        if (operation == QLatin1String("endBurst")) ++txBursts;
+        if (operation == QLatin1String("stop")) ++txStops;
+        if (operation == QLatin1String("finish")) {
+            txComplete = true;
+            return {{"ok", true}, {"state", "completed"}};
+        }
+        return {};
+    };
+    if (!txServer.startServer(QStringLiteral("127.0.0.1"), txPort, std::move(txCallbacks))) return 22;
+    NetworkController txClient, observer;
+    txClient.enableUhdTxOnly(true);
+    int unwantedRxFrames = 0;
+    QObject::connect(&txClient, &NetworkController::controlCommandReceived, &app,
+                     [&](const QJsonObject &command) {
+        if (command.value("type") == QLatin1String("spectrum")) ++unwantedRxFrames;
+    });
+    QObject::connect(&txClient, &NetworkController::binaryCommandReceived, &app,
+                     [&](const QJsonObject &, const QByteArray &) { ++unwantedRxFrames; });
+    txClient.testClientConnection(QStringLiteral("127.0.0.1"), txPort);
+    if (!waitFor([&] { return txClient.isControlReady() && txClient.clientHasControl(); })) return 23;
+    observer.testClientConnection(QStringLiteral("127.0.0.1"), txPort);
+    if (!waitFor([&] { return observer.isControlReady() && txServer.peerCount() == 2 && !observer.clientHasControl(); }))
+        return 24;
+    TxConfiguration config;
+    config.uhdArmCode = QStringLiteral("selftest");
+    config.uhdChannel = 1;
+    config.uhdAntenna = QStringLiteral("TX/RX");
+    config.uhdGainDb = 5.25;
+    QString error;
+    UhdTransmitterBackend remote(true);
+    remote.setNetwork(&observer);
+    if (remote.start(config, &error) || error.isEmpty()) return 25;
+    if (!observer.sendControlCommand({{"type", "control"}, {"action", "uhdTxStream"},
+                                     {"operation", "start"}, {"code", "selftest"}})) return 26;
+    remote.setNetwork(&txClient);
+    if (!remote.start(config, &error)) return 27;
+    txServer.sendSpectrum(full, 100e6, 8e6, 100e6, 12500, MOD_NFM, INPUT_RF);
+    txServer.sendAudio(QByteArray(4000, '\0'));
+    const std::vector<UhdIqTx::Sample> samples(1600, {1.0f, -0.5f});
+    if (!remote.writeIq(samples.data(), int(samples.size()), &error) ||
+        !remote.setOutputEnabled(false, &error) ||
+        !remote.writeIq(samples.data(), int(samples.size()), &error)) return 28;
+    remote.finish();
+    if (!waitFor([&] { return txComplete && !remote.isRunning(); }) || !remote.error().isEmpty() ||
+        txStarts != 1 || txBursts != 1 || unwantedRxFrames ||
+        txIq != QByteArray::fromHex("ff7f00c0").repeated(int(samples.size()))) return 29;
+    if (!remote.start(config, &error)) return 30;
+    remote.stop();
+    if (!waitFor([&] { return txStops == 1; })) return 31;
+    if (!remote.start(config, &error)) return 32;
+    txClient.stop();
+    if (!waitFor([&] { return !remote.isRunning(); }) || remote.error().isEmpty()) return 33;
     return 0;
 }

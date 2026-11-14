@@ -34,6 +34,9 @@ void YourClassName::openFt8StationDialog() {
                 [this](const QString &message, double dialFrequencyHz,
                        double audioFrequencyHz, int slotParity) {
             if (!transmitDialog) transmitDialog = new TransmitDialog(uiLanguage, this);
+            transmitDialog->setSharedUhdTxSessionProvider([this](int deviceIndex) {
+                return processor ? processor->sharedUhdTxSession(deviceIndex) : nullptr;
+            });
             transmitDialog->setHackRfReceiverUseChecker([this](int deviceIndex) {
                 return runState != RadioRunState::Idle &&
                        isHackRfNativeSelected() &&

@@ -449,7 +449,7 @@ bool NetworkController::setPeerStreamProfile(const QString &peerIdValue,
     if (!isReadyPeer(socket)) return false;
     const QString normalized = profile.trimmed().toLower();
     peerStreamProfiles.insert(socket,
-                              normalized == QStringLiteral("remote-vfo")
+                              normalized == QStringLiteral("remote-vfo") || normalized == QStringLiteral("uhd-tx")
                                   ? normalized
                                   : QStringLiteral("legacy"));
     return true;
@@ -683,8 +683,7 @@ bool NetworkController::isReadyPeer(QTcpSocket *socket) const {
 }
 
 bool NetworkController::acceptsLegacyStream(QTcpSocket *socket) const {
-    return peerStreamProfiles.value(socket, QStringLiteral("legacy")) !=
-           QStringLiteral("remote-vfo");
+    return peerStreamProfiles.value(socket, QStringLiteral("legacy")) == QStringLiteral("legacy");
 }
 
 void NetworkController::promoteControllerIfNeeded() {
@@ -888,6 +887,8 @@ void NetworkController::processLine(QTcpSocket *socket, const QByteArray &line) 
             capabilities[QStringLiteral("binaryAudioPcmS16")] = true;
             if (uhdRxSpectrumEnabled)
                 capabilities[QStringLiteral("uhdRxSpectrum")] = true;
+            if (uhdTxOnlyEnabled)
+                capabilities[QStringLiteral("uhdTxOnly")] = true;
             sendJsonToSocket(socket, capabilities);
             const QString message = QString("Control channel ready: %1:%2")
                                         .arg(clientSocket->peerAddress().toString())
@@ -935,12 +936,21 @@ void NetworkController::processLine(QTcpSocket *socket, const QByteArray &line) 
             uhdRxSpectrumPeers.insert(socket);
         else
             uhdRxSpectrumPeers.remove(socket);
+        if (command.value(QStringLiteral("uhdTxOnly")).toBool(false))
+            setPeerStreamProfile(peerId(socket), QStringLiteral("uhd-tx"));
         return;
     }
     if (command.contains("payloadBytes")) {
         bool ok = false;
         const qint64 payloadBytes = command.value("payloadBytes").toVariant().toLongLong(&ok);
-        if (!ok || payloadBytes <= 0 || payloadBytes > (512LL * 1024LL * 1024LL)) {
+        const bool txIq = command.value("type") == QLatin1String("uhdTxIq");
+        if (!ok || payloadBytes <= 0 || payloadBytes > (512LL * 1024LL * 1024LL) ||
+            (txIq && (currentMode != NetworkMode::Server || socket != peerSocket ||
+                      payloadBytes > 16384 || payloadBytes % 4))) {
+            if (txIq && currentMode == NetworkMode::Server && peerSockets.contains(socket)) {
+                closePeerSocket(socket);
+                promoteControllerIfNeeded();
+            }
             setStatus(QString("Ignoring invalid binary payload header"));
             return;
         }

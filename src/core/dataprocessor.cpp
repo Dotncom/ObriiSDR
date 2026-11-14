@@ -1104,6 +1104,11 @@ UhdClockStatus DataProcessor::uhdClockStatus() const {
     return activeUhdClock;
 }
 
+std::shared_ptr<UhdRxSession> DataProcessor::sharedUhdTxSession(int deviceIndex) const {
+    QMutexLocker lock(&uhdStatusMutex);
+    return running.load() && deviceIndex == activeUhdDuplexDevice ? activeUhdDuplexSession : nullptr;
+}
+
 void DataProcessor::setUhdGnssPollingEnabled(bool enabled) {
     QMutexLocker lock(&uhdStatusMutex);
     uhdGnssPollingEnabled.store(enabled);
@@ -1121,13 +1126,16 @@ void DataProcessor::runUhdNativeReader(const ReceiverStreamDescriptor &stream, u
         activeUhdClock = status;
     };
     publishClock({});
-    UhdRxSession session;
+    auto sessionOwner = std::make_shared<UhdRxSession>();
+    auto &session = *sessionOwner;
     QString error;
     const double logicalCenter = requestedCenterFrequency.load() > 0.0
                                      ? requestedCenterFrequency.load() : stream.centerFrequencyHz;
-    if (!session.open(stream.uhdNativeDeviceIndex, stream.uhdRxChannel,
+    const int duplexChannel = stream.uhdDuplexEnabled ? stream.uhdRxChannel : -1;
+    const std::vector<UhdRxChannelSettings> channels{{stream.uhdRxChannel, stream.uhdRxGainDb, stream.uhdRxAntenna}};
+    if (!session.open(stream.uhdNativeDeviceIndex, channels,
                       stream.sampleRateHz, logicalCenter + frequencyCalibrationOffsetHz.load(),
-                      stream.uhdRxGainDb, stream.uhdRxAntenna, stream.uhdFpgaImagePath, &error,
+                      stream.uhdFpgaImagePath, &error, duplexChannel,
                       stream.uhdClockSource, stream.uhdGnssBaud)) {
         qWarning().noquote() << "[UHD]" << error;
         if (running.load()) emit readerFailed(UHD_NATIVE_ERR_OPEN, false);
@@ -1140,6 +1148,11 @@ void DataProcessor::runUhdNativeReader(const ReceiverStreamDescriptor &stream, u
         return;
     }
     activeDevice = &session;
+    if (stream.uhdDuplexEnabled) {
+        QMutexLocker lock(&uhdStatusMutex);
+        activeUhdDuplexDevice = stream.uhdNativeDeviceIndex;
+        activeUhdDuplexSession = sessionOwner;
+    }
     IqBuffer::setSampleRateEstimate(stream.sampleRateHz);
     asyncMeasuredSamples = 0;
     asyncCallbackCounter = 0;
@@ -1177,7 +1190,7 @@ void DataProcessor::runUhdNativeReader(const ReceiverStreamDescriptor &stream, u
         }
         const double nextCenter = requestedCenterFrequency.load();
         if (nextCenter > 0.0 && std::abs(nextCenter - appliedCenter) > 0.5) {
-            if (!session.retune(nextCenter + frequencyCalibrationOffsetHz.load(), &error)) {
+            if (!session.retune(nextCenter + frequencyCalibrationOffsetHz.load(), &error, stream.uhdDuplexEnabled)) {
                 qWarning().noquote() << "[UHD]" << error;
                 emit readerFailed(UHD_NATIVE_ERR_STREAM, false);
                 break;
@@ -1208,6 +1221,11 @@ void DataProcessor::runUhdNativeReader(const ReceiverStreamDescriptor &stream, u
                  << "maxReadPauseMs" << maximumReadPauseNs / 1000000.0;
     }
     uhdStreamReady_.store(false, std::memory_order_release);
+    if (stream.uhdDuplexEnabled) {
+        QMutexLocker lock(&uhdStatusMutex);
+        activeUhdDuplexSession.reset();
+        activeUhdDuplexDevice = -1;
+    }
     activeDevice = nullptr;
     setUhdGnssPollingEnabled(false);
     publishClock({});

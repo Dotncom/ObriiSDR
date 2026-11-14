@@ -1,5 +1,12 @@
 # Changelog
 
+## 9.0.5 - 2026-11-14
+
+- Add local and network UHD output to the transmitter window.
+- Add local B210 1+1 reception and transmission through a shared UHD session at 15.36 or 30.72 MS/s.
+- Preserve UHD transmit errors and log the samples submitted to the driver.
+- Make the TX window resizable and align settings in two equally sized columns.
+
 ## 9.0.4 - 2026-11-14
 
 - Create, edit and build B210 openXC7 source projects in FPGA Lab. Compare the resulting image with the stock image on a local or remote B210.

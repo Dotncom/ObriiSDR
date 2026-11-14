@@ -469,6 +469,7 @@ private:
     void openZoomSpectrum();
     void openZoomDensity();
     void openTransmitDialog();
+    void openRemoteUhdToneTest();
     void openFt8StationDialog();
     void openOpenRadioLab();
     void openApplicationSettings();

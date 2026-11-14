@@ -2707,6 +2707,9 @@ int runReceiver(QCoreApplication &app, RunOptions options) {
     QString uhdTxArmCode;
     qint64 uhdTxArmDeadlineMs = 0;
     bool announceUhdTxCompletion = false;
+    QString uhdTxOwner, uhdTxSessionId, uhdTxStreamError;
+    qint64 uhdTxStreamDeadlineMs = 0, uhdTxStreamExpiryMs = 0;
+    bool uhdTxFinishing = false;
     std::uint64_t txRxOverflowsBefore = 0;
     std::uint64_t txRxMissingSamplesBefore = 0;
     std::vector<float> orderedTrace;
@@ -3881,6 +3884,7 @@ int runReceiver(QCoreApplication &app, RunOptions options) {
                     ? QJsonArray{0, 1} : QJsonArray{options.uhdDuplexTxChannel};
                 state.insert(QStringLiteral("uhdTx"), QJsonObject{
                     {"available", receiverRunning}, {"channel", options.uhdDuplexTxChannel},
+                    {"iqStream", 1}, {"antennas", QJsonArray{QStringLiteral("TX/RX")}},
                     {"txChannels", channels}, {"targetChannel", tx.targetChannel},
                     {"active", tx.active}, {"state", tx.state},
                     {"samples", static_cast<qint64>(tx.samples)}, {"error", tx.error}});
@@ -3924,6 +3928,77 @@ int runReceiver(QCoreApplication &app, RunOptions options) {
             accumulatedTraces.clear(); accumulatedFrames = 0;
             return true;
         };
+        callbacks.uhdTxStream = [&](const QString &peer, const QJsonObject &command,
+                                    const QByteArray &payload) -> QJsonObject {
+            const auto session = command.value("session").toString();
+            const auto operation = command.value("operation").toString();
+            const bool iqPacket = command.value("type") == QLatin1String("uhdTxIq");
+            const auto reject = [](const QString &reason) -> QJsonObject {
+                return {{"ok", false}, {"reason", reason}};
+            };
+            const qint64 now = elapsed.elapsed();
+            if (!iqPacket && operation == QLatin1String("start")) {
+                if (options.uhdDuplexTxChannel < 0 || !receiverRunning || announceUhdTxCompletion ||
+                    device.uhd.transmitStatus().active || session.size() != 36)
+                    return reject(QStringLiteral("UHD duplex TX is unavailable or busy"));
+                if (uhdTxArmCode.isEmpty() || now >= uhdTxArmDeadlineMs ||
+                    command.value("code").toString() != uhdTxArmCode ||
+                    command.value("rfConfirm") != QJsonValue(true))
+                    return reject(QStringLiteral("A new local UHD TX arm code is required"));
+                if (device.antenna != QLatin1String("RX2") ||
+                    (device.uhdSecondary && device.uhdSecondary->antenna != QLatin1String("RX2")))
+                    return reject(QStringLiteral("Select RX2 on all receiving channels in duplex mode"));
+                QString error;
+                if (!device.uhd.startTransmitIq(command.value("channel").toInt(-1),
+                        command.value("sampleRate").toInt(-1), command.value("frequencyHz").toDouble(),
+                        command.value("gainDb").toDouble(-1.0), command.value("antenna").toString(), &error))
+                    return reject(error);
+                uhdTxArmCode.clear();
+                uhdTxOwner = peer;
+                uhdTxSessionId = session;
+                uhdTxStreamError.clear();
+                uhdTxFinishing = false;
+                uhdTxStreamDeadlineMs = now + 1200;
+                uhdTxStreamExpiryMs = now + 3600000;
+                txRxOverflowsBefore = device.uhd.receiveOverflows();
+                txRxMissingSamplesBefore = device.uhd.receiveMissingSamples();
+                announceUhdTxCompletion = true;
+                return {{"ok", true}, {"state", "started"}};
+            }
+            if (peer != uhdTxOwner || session != uhdTxSessionId || uhdTxOwner.isEmpty()) return {};
+            if (!iqPacket && operation == QLatin1String("stop")) {
+                device.uhd.requestTransmitStop();
+                return {};
+            }
+            if (!iqPacket && operation != QLatin1String("keepalive") &&
+                operation != QLatin1String("endBurst") && operation != QLatin1String("finish")) return {};
+            uhdTxStreamDeadlineMs = now + 1200;
+            if (operation == QLatin1String("keepalive") || uhdTxFinishing) return {};
+            if (!iqPacket && operation == QLatin1String("finish")) {
+                uhdTxFinishing = true;
+                device.uhd.finishTransmitIq();
+                return {};
+            }
+            if (!device.uhd.transmitStatus().active) return {};
+            UhdIqTx::Block block;
+            block.endBurst = !iqPacket && operation == QLatin1String("endBurst");
+            if (!block.endBurst) {
+                if (payload.isEmpty() || payload.size() % 4 ||
+                    payload.size() > UhdIqTx::MaximumPacketSamples * 4) return {};
+                block.iq.resize(static_cast<std::size_t>(payload.size() / 4));
+                const auto *bytes = reinterpret_cast<const uchar *>(payload.constData());
+                for (auto &sample : block.iq) {
+                    sample = {qFromLittleEndian<qint16>(bytes) / 32768.0f,
+                              qFromLittleEndian<qint16>(bytes + 2) / 32768.0f};
+                    bytes += 4;
+                }
+            }
+            if (!device.uhd.queueTransmitIq(std::move(block))) {
+                uhdTxStreamError = QStringLiteral("UHD TX input queue overflow");
+                device.uhd.requestTransmitStop();
+            }
+            return {};
+        };
         callbacks.applySettings = [&](const QJsonObject &patch, QString *reason) {
             if (patch.isEmpty()) return true;
             if (patch.contains(QStringLiteral("uhdTx"))) {
@@ -3934,6 +4009,10 @@ int runReceiver(QCoreApplication &app, RunOptions options) {
                 const auto tx = patch.value(QStringLiteral("uhdTx")).toObject();
                 const auto operation = tx.value("operation").toString();
                 if (operation == QLatin1String("stop")) {
+                    if (!uhdTxOwner.isEmpty()) {
+                        *reason = QStringLiteral("Stop the IQ stream from its TX window");
+                        return false;
+                    }
                     device.uhd.requestTransmitStop();
                     return true;
                 }
@@ -4341,14 +4420,30 @@ int runReceiver(QCoreApplication &app, RunOptions options) {
         pollSpectrum();
         pollSecondarySpectrum();
         if (announceUhdTxCompletion) {
-            if (bridge->peerCount() == 0) device.uhd.requestTransmitStop();
+            const auto now = elapsed.elapsed();
+            if (!uhdTxOwner.isEmpty() && (bridge->controllerPeerId() != uhdTxOwner ||
+                now >= uhdTxStreamExpiryMs || now >= uhdTxStreamDeadlineMs)) {
+                uhdTxStreamError = QStringLiteral("UHD TX stream lease expired or lost server control");
+                device.uhd.requestTransmitStop();
+            } else if (bridge->peerCount() == 0) {
+                device.uhd.requestTransmitStop();
+            }
             const auto tx = device.uhd.transmitStatus();
             if (!tx.active) {
                 announceUhdTxCompletion = false;
+                const QString error = uhdTxStreamError.isEmpty() ? tx.error : uhdTxStreamError;
+                if (!uhdTxOwner.isEmpty()) {
+                    bridge->replyUhdTxStream(uhdTxOwner, {{"session", uhdTxSessionId},
+                        {"ok", error.isEmpty()}, {"state", tx.state}, {"reason", error},
+                        {"samples", static_cast<qint64>(tx.samples)}});
+                    uhdTxOwner.clear();
+                    uhdTxSessionId.clear();
+                    uhdTxStreamError.clear();
+                }
                 bridge->publishReceiverStatus();
                 printJson({{"event", "uhdTx"}, {"state", tx.state},
                            {"targetChannel", tx.targetChannel},
-                           {"samples", static_cast<qint64>(tx.samples)}, {"error", tx.error},
+                           {"samples", static_cast<qint64>(tx.samples)}, {"error", error},
                            {"rxOverflows", static_cast<qint64>(device.uhd.receiveOverflows() - txRxOverflowsBefore)},
                            {"rxMissingSamples", static_cast<qint64>(device.uhd.receiveMissingSamples() - txRxMissingSamplesBefore)}});
             }

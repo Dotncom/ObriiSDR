@@ -1027,8 +1027,8 @@ void Ft8StationDialog::setAutomaticEnabled(bool enabled) {
 
     const QMessageBox::StandardButton answer = QMessageBox::warning(
         this, windowTitle(),
-        text(QStringLiteral("Automatic FT8 mode can emit RF without another click when an eligible CQ is decoded. Configure a separate TX device, connect a suitable antenna/load, arm RF output in TX setup, and observe local regulations. Continue?"),
-             QString::fromUtf8(u8"Автоматичний режим FT8 може випромінювати RF без додаткового натискання після декодування дозволеного CQ. Налаштуйте окремий TX-пристрій, під'єднайте відповідну антену/навантаження, озбройте RF-вихід у налаштуваннях TX і дотримуйтеся місцевих правил. Продовжити?")),
+        text(QStringLiteral("Automatic FT8 mode can emit RF without another click when an eligible CQ is decoded. Select the HackRF output in TX setup and verify the antenna or load. Enable automatic transmission?"),
+             QStringLiteral("Автоматичний режим FT8 може почати передачу одразу після декодування дозволеного CQ. Оберіть вихід HackRF у налаштуваннях TX і перевірте антену або навантаження. Увімкнути автоматичну передачу?")),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
     if (answer != QMessageBox::Yes) {
         const QSignalBlocker blocker(automaticReplyCheck);

@@ -57,6 +57,11 @@ struct TxConfiguration {
     int deviceSampleRate = 2000000;
     std::uint32_t bandwidthHz = 0;
     int txVgaGainDb = 0;
+    int uhdChannel = 0;
+    double uhdGainDb = 0.0;
+    QString uhdAntenna;
+    QString uhdFpgaImage;
+    QString uhdArmCode;
     bool rfAmpEnabled = false;
     // Zero disables the firmware shortfall stop. The host-side backend still
     // reports missing source samples and the transmit dialog has its own

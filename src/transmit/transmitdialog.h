@@ -4,6 +4,7 @@
 #include "transmitterbackend.h"
 #include "hackrftransmitterbackend.h"
 #include "virtualtransmitterbackend.h"
+#include "uhdtransmitterbackend.h"
 #include "transmitwaveformgenerator.h"
 #include "signallabgenerator.h"
 
@@ -11,6 +12,7 @@
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QJsonObject>
 #include <QVector>
 
 #include <complex>
@@ -53,6 +55,10 @@ public:
 
     void setLanguage(const QString &language);
     void setHackRfReceiverUseChecker(HackRfReceiverUseChecker checker);
+    void setSharedUhdTxSessionProvider(std::function<std::shared_ptr<UhdRxSession>(int)> provider);
+    void setUhdContext(NetworkController *network, std::function<QJsonObject()> remoteSettings,
+                       QString fpgaImage, const QString &serverHost, int serverPort,
+                       std::function<void()> openToneTest);
     void prepareFt8Message(const QString &message, double dialFrequencyHz,
                            double audioFrequencyHz, int slotParity);
     bool startPreparedFt8Automatically(QString *error = nullptr);
@@ -61,6 +67,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void reject() override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
@@ -110,6 +117,14 @@ private:
     void exportIq();
     void setStatus(const QString &message, bool error = false);
     bool hackRfSelected() const;
+    bool localUhdSelected() const;
+    bool remoteUhdSelected() const;
+    void refreshUhdOutput();
+    void finishUhdWaveform();
+    bool authorizeRfOutput();
+    UhdTransmitterBackend *activeUhdBackend();
+    QJsonObject uhdRemoteCapabilities() const;
+    void connectUhdTxEndpoint();
     bool virtualSignalSelected() const;
     void applyVirtualSignalEndpoint();
     bool selectedHackRfBusyForReception() const;
@@ -120,6 +135,15 @@ private:
     SimulatorTransmitterBackend simulator;
     HackRfTransmitterBackend hackRf;
     VirtualTransmitterBackend virtualSignal;
+    UhdTransmitterBackend localUhd;
+    UhdTransmitterBackend remoteUhd{true};
+    std::function<QJsonObject()> remoteUhdSettings;
+    std::function<void()> openUhdToneTest;
+    NetworkController *txNetwork = nullptr;
+    NetworkController *sharedNetwork = nullptr;
+    QJsonObject txServerCapabilities;
+    QString uhdFpgaImage;
+    bool finishingUhdWaveform = false;
     TransmitterBackend *activeBackend = nullptr;
     TxConfiguration activeConfiguration;
     TxModulatorState modulatorState;
@@ -133,6 +157,21 @@ private:
 
     QComboBox *backendCombo = nullptr;
     QComboBox *deviceCombo = nullptr;
+    QComboBox *uhdDeviceCombo = nullptr;
+    QComboBox *uhdChannelCombo = nullptr;
+    QComboBox *uhdAntennaCombo = nullptr;
+    QDoubleSpinBox *uhdGainSpin = nullptr;
+    QLineEdit *uhdArmCodeEdit = nullptr;
+    QLabel *uhdChannelLabel = nullptr;
+    QLabel *uhdAntennaLabel = nullptr;
+    QLabel *uhdGainLabel = nullptr;
+    QLabel *uhdArmCodeLabel = nullptr;
+    QLabel *uhdServerLabel = nullptr;
+    QLabel *uhdServerPortLabel = nullptr;
+    QLineEdit *uhdServerEdit = nullptr;
+    QSpinBox *uhdServerPort = nullptr;
+    QPushButton *uhdConnectButton = nullptr;
+    QPushButton *uhdToneTestButton = nullptr;
     QComboBox *virtualTransportCombo = nullptr;
     QLineEdit *virtualLocalNameEdit = nullptr;
     QLineEdit *virtualHostEdit = nullptr;
@@ -155,7 +194,6 @@ private:
     QSpinBox *txGainSpin = nullptr;
     QSpinBox *watchdogSpin = nullptr;
     QCheckBox *rfAmpCheck = nullptr;
-    QCheckBox *armCheck = nullptr;
     QDoubleSpinBox *deviationSpin = nullptr;
     QDoubleSpinBox *toneSpin = nullptr;
     QSpinBox *cwWpmSpin = nullptr;

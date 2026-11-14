@@ -180,6 +180,7 @@ void YourClassName::loadPersistentSettings() {
                      62) / 2 * 2;
     pendingSettings.uhdRxChannel =
         (std::clamp)(settings.value("receiver/uhdRxChannel", 0).toInt(), 0, 1);
+    pendingSettings.uhdDuplexEnabled = settings.value("receiver/uhdDuplexEnabled", false).toBool();
     const auto uhdClock = settings.value("receiver/uhdClockSource").toString();
     if (uhdClock == QLatin1String("internal") || uhdClock == QLatin1String("external"))
         pendingSettings.uhdClockSource = uhdClock;
@@ -1700,6 +1701,7 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("receiver/hackRfLnaGainDb", settingsToSave.hackRfLnaGainDb);
     settings.setValue("receiver/hackRfVgaGainDb", settingsToSave.hackRfVgaGainDb);
     settings.setValue("receiver/uhdRxChannel", settingsToSave.uhdRxChannel);
+    settings.setValue("receiver/uhdDuplexEnabled", settingsToSave.uhdDuplexEnabled);
     settings.setValue("receiver/uhdClockSource", settingsToSave.uhdClockSource);
     settings.setValue("receiver/uhdGnssBaud", settingsToSave.uhdGnssBaud);
     settings.setValue("receiver/uhdRxGainDb", settingsToSave.uhdRxGainDb);

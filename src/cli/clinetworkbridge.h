@@ -20,6 +20,7 @@ public:
         std::function<bool()> isRunning;
         bool coalesceCenterChanges = false;
         std::function<QJsonObject()> uhdGnssStatus;
+        std::function<QJsonObject(const QString &, const QJsonObject &, const QByteArray &)> uhdTxStream;
     };
 
     explicit CliNetworkBridge(QObject *parent = nullptr);
@@ -30,12 +31,14 @@ public:
     bool clientHasControl() const { return network.clientHasControl(); }
     int processingMode() const { return mode; }
     int peerCount() const { return network.readyPeerIds().size(); }
+    QString controllerPeerId() const { return network.controllerPeerId(); }
     QJsonObject metrics() const;
     QJsonObject clientState() const { return receivedState; }
     quint64 audioGeneration() const { return audioEpoch; }
     void publishState() { resetPendingAudio(); broadcastState(); }
     void publishReceiverStatus() { broadcastState(); }
     void publishUhdClockStatus(const QJsonObject &status);
+    void replyUhdTxStream(const QString &peerId, QJsonObject reply);
     bool setServerProcessingMode(int requested);
     bool sendClientControl(const QString &action, const QJsonObject &settings = {});
     bool requestClientProcessingMode(int requested);
@@ -60,6 +63,7 @@ private:
     void handleServerCommand(const QJsonObject &command);
     void flushCenterChange();
     void applyServerSettings(const QJsonObject &command, const QStringList &requestIds = {});
+    void handleUhdTxStream(const QJsonObject &command, const QByteArray &payload = {});
     void sendAudioPacket(const QByteArray &pcm, const QStringList &peers);
     void broadcastState();
     void sendAck(const QString &peerId, const QJsonObject &request,
