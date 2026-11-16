@@ -338,6 +338,15 @@ if ([IO.Path]::GetFullPath($BuildPath) -ne [IO.Path]::GetFullPath($DeployPath)) 
     }
 }
 
+if ([IO.Path]::GetFullPath($BuildPath) -ne [IO.Path]::GetFullPath($DeployPath)) {
+    foreach ($Name in @('LICENSE.LGPL-2.1.txt', 'LGPL_EXCEPTION.txt', 'qtstyleplugins-335dbece-source.tar.gz')) {
+        $StyleNotice = Join-Path $BuildPath "licenses/qt-styleplugins/$Name"
+        if (Test-Path -LiteralPath $StyleNotice -PathType Leaf) {
+            Copy-Item -LiteralPath $StyleNotice -Destination (Join-Path $DeployPath "licenses/qt-styleplugins/$Name") -Force
+        }
+    }
+}
+
 $DsdNeoExtractPath = Join-Path $Workspace "downloads\dsd-neo\extracted"
 $ResearchNotices = @{
     "ntia_itm" = @("LICENSE.md", "OBRII_CHANGES.md", "ERRORS_AND_WARNINGS.md")

@@ -1,5 +1,54 @@
 # Changelog
 
+## 9.0.5 - 2026-11-14
+
+- Add local and network UHD output to the transmitter window.
+- Add local B210 1+1 reception and transmission through a shared UHD session at 15.36 or 30.72 MS/s.
+- Preserve UHD transmit errors and log the samples submitted to the driver.
+- Make the TX window resizable and align settings in two equally sized columns.
+
+## 9.0.4 - 2026-11-14
+
+- Create, edit and build B210 openXC7 source projects in FPGA Lab. Compare the resulting image with the stock image on a local or remote B210.
+- Add native UHD reception and wide sweeps to Obrii Analyzer.
+- Add streaming clock offsets in ppm for virtual IQ links in Mesh Designer.
+- Group receiver utilities under Tools and make the command console accessible there.
+- Add seven interface styles and include FPGA Lab in both Windows packages.
+
+## 9.0.3 Preview - 2026-11-13
+
+- Transmit clear Codec2 3200 M17 voice from WAV, a live microphone or a push-to-talk microphone. The CLI sends M17 voice from WAV and continues to support M17 SMS.
+- Set channel bitrate in the Mesh packet simulation to include airtime, collisions and half-duplex losses. Saved scenarios reproduce those outcomes in ObriiMeshSim.
+- Add optional noise weighting and drift correction to live coherent IQ. Add node positions, motion and a configurable link radius to the packet lab.
+- Show satellite observations from UHD GPS and a serial GNSS module together. Add fix validation and map markers for rejected UHD fixes.
+- Add a configurable UDP audio receive buffer and six waterfall palettes. Correct CPU waterfall alignment at fractional display scales. Improve Raspberry Pi Fobos startup across sample-rate changes.
+- Add TCP SCPI scalar sweeps, offline OSL correction for recorded S11, and synthetic UMTS IQ demos.
+
+## 9.0.2 Preview - 2026-11-11
+
+- Pace network spectrum updates independently when the GUI server's local display is disabled. Compute one FFT per update and expose a configurable 1–60 frames/s limit.
+- Add separate display and network level steps. Compatible peers can receive one byte per bin at coarser steps while keeping the selected frequency resolution.
+- Give PCM room on the shared TCP stream and keep client zoom stable when delayed viewport frames arrive.
+- Improve Qt Fusion layouts, fractional-DPI waterfall rendering, and popup interaction over XWayland on Raspberry Pi.
+- Record and replay aligned coherent IQ in Multi-SDR.
+- Run and export simulated filter sweeps in Analyzer Instrument Lab.
+
+## 9.0.1 Preview - 2026-11-11
+
+- Add native UHD receiver controls for B210, dual RX on the CLI server, per-channel settings in Multi-SDR, and timed shared RX/TX test bursts.
+- Read GGA, RMC, and optional GSV through UHD GPS in GPS / QTH. Show satellites in view, measured signal, and fix status in the receiver controls.
+- Improve Raspberry Pi UHD buffering and allow extra time for a custom FPGA image to load. Install a Qt Fusion launcher at 110% scale.
+- Add USRP Lab jobs for file-based and software-loopback testing.
+
+## 9.0.0 - 2026-11-08
+
+- Added Obrii Dual receiver support and a Windows firmware updater for qualified Fobos HW 3.0.0 images.
+- Improved Fobos Start/Stop, USB-library switching, live tuning, and receiver diagnostics.
+- Added configurable spur calibration, separate wideband noise correction, and ADC overload protection.
+- Added live coherent IQ in Multi-SDR with a virtual pair and an experimental signal-alignment mode for two Fobos receivers.
+- Improved DMR receive synchronization, automatic PI key selection, and resynchronization with a selected key.
+- Improved simultaneous IQ capture and video decode, and expanded the Analyzer, DSP Flow, and virtual radio tools.
+
 ## 8.2.0 - 2026-11-03
 
 - Include the Debian/Raspberry Codec2 development dependency needed by M17 voice.
@@ -41,7 +90,7 @@
   submitting timing context, preventing early timer callbacks from dropping frames.
 - Distributed mesh ports: independent RX/TX bindings, per-link DATA/IQ bearers,
   bounded isolated queues, shared AFSK/LoRa PHY, native Meshtastic and Reticulum
-  adapters, local private protocol state and credential-free project exports.
+  adapters, protocol state stored locally and credential-free project exports.
 - Optional read-only radio ingress uses the running RX stream and shared DDC;
   a separately authorized, expiring RF egress reuses native UHD/HackRF backends.
   Physical RF interoperability and duplex timing still require hardware tests.
