@@ -138,7 +138,7 @@ void YourClassName::openFobosIfEditor() {
     // milliseconds after Stop.  Retry a bounded number of times instead of
     // reporting that a compatible image is incompatible.
     const int retryCount = property("fobosIfEditorBusyRetries").toInt();
-    if (probe == FOBOS_ERR_BUSY && retryCount < 3) {
+    if (probe == FobosErrorBusy && retryCount < 3) {
         setProperty("fobosIfEditorBusyRetries", retryCount + 1);
         QTimer::singleShot(125, this, [this] { openFobosIfEditor(); });
         return;

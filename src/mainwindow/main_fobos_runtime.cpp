@@ -109,7 +109,7 @@ void YourClassName::openFobosDetailsDialog() {
         unsigned int config[16] = {};
         const int configResult = idle
             ? getActiveFobosReceiverConfigSafely(config, sizeof(config))
-            : FOBOS_ERR_BUSY;
+            : FobosErrorBusy;
         const bool configAvailable = configResult == FOBOS_ERR_OK;
         deviceInfo->setText(info.present
             ? QStringLiteral("%1\n%2: %3\n%4: %5\n%6: %7%8")

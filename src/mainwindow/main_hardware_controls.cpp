@@ -99,7 +99,7 @@ void YourClassName::logStoppedFobosDeviceMetrics() {
     // A stopped-but-open legacy/Dual receiver can legitimately reject this
     // diagnostic endpoint while EP0 is owned by its control path.  It is not
     // an IQ loss or a firmware fault, and must not flood the user log.
-    } else if (result != FOBOS_ERR_UNSUPPORTED && result != FOBOS_ERR_BUSY) {
+    } else if (result != FOBOS_ERR_UNSUPPORTED && result != FobosErrorBusy) {
         qWarning() << "[Fobos DMA] stopped metrics read failed" << result;
     }
 }

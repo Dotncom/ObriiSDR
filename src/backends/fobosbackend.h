@@ -14,6 +14,11 @@ extern fobos_dev_t *device;
 extern fobos_sdr_dev_t *agileDevice;
 extern FobosApiKind activeFobosApiKind;
 
+// The stock SDK headers intentionally do not expose the optional extension's
+// transient-busy result.  Keep its meaning in the application layer so a
+// build against the unmodified Standard or Agile headers remains portable.
+constexpr int FobosErrorBusy = -11;
+
 const char *fobosApiKindName(FobosApiKind kind);
 QString fobosApiDisplayName(FobosApiKind kind);
 void *activeFobosDevice();
