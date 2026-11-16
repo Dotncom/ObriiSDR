@@ -52,6 +52,11 @@ QString sourceLabel(int id, const FpgaLogicBlock &block) {
 }
 }
 
+FpgaLogicEditor::~FpgaLogicEditor() {
+    // Scene cleanup emits selectionChanged after the editor's members are destroyed.
+    disconnect(scene_, &QGraphicsScene::selectionChanged, this, nullptr);
+}
+
 FpgaLogicEditor::FpgaLogicEditor(const QString &projectRoot, QWidget *parent)
     : QDialog(parent), projectRoot_(projectRoot),
       filePath_(QDir(projectRoot).filePath(QStringLiteral(".obrii-logic.json"))) {

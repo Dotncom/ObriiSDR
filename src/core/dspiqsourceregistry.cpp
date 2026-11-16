@@ -5,11 +5,12 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <limits>
 #include <mutex>
 
 namespace {
 constexpr std::size_t MaximumSourceFloats = 2U * 1024U * 1024U;
-constexpr int MaximumBufferedSources = 8;
+constexpr int MaximumBufferedSources = 11; // Eight receivers, two virtual test inputs and the coherent output.
 
 struct SourceBuffer {
     std::deque<float> history;
@@ -24,6 +25,8 @@ struct SourceBuffer {
     bool sampleClockValid = false;
     bool hardwareTimestamp = false;
     bool clockLocked = false;
+    bool sharedSampleTimeline = false;
+    std::uint64_t continuityId = 0;
     int nativeAdcBits = 0;
     QString nativeSampleFormat;
     double normalizedFullScale = 1.0;
@@ -36,6 +39,7 @@ struct DspIqSourceRegistry::Impl {
     QHash<QString, int> subscriberCounts;
     QHash<QString, SourceBuffer> sources;
     DspIqSourceRegistryStats statistics;
+    std::uint64_t nextContinuityId = 0;
 
     void rebuildSubscribers() {
         subscriberCounts.clear();
@@ -84,7 +88,8 @@ bool DspIqSourceRegistry::publish(const DspSourceIdentity &source,
     Impl &state = impl();
     if (!source.isValid() || !samples || floatCount < 2 ||
         floatCount % 2U || !std::isfinite(sampleRateHz) || sampleRateHz <= 0.0 ||
-        !std::isfinite(centerHz))
+        !std::isfinite(centerHz) || (timing && timing->sampleClockValid &&
+            timing->firstComplexSample > std::numeric_limits<std::uint64_t>::max() - floatCount / 2U))
         return false;
     std::lock_guard<std::mutex> lock(state.mutex);
     const QString key = source.key();
@@ -97,13 +102,20 @@ bool DspIqSourceRegistry::publish(const DspSourceIdentity &source,
         return false;
     }
     SourceBuffer &buffer = state.sources[key];
+    const bool shared = timing && timing->sharedSampleTimeline && timing->sampleClockValid &&
+                        timing->clockLocked && !timing->clockId.isEmpty();
+    const bool timelineChanged = !buffer.history.empty() &&
+        (shared != buffer.sharedSampleTimeline || (shared && timing->clockId != buffer.clockId));
     const bool timingEpochChanged = timing && timing->epoch && buffer.epoch != timing->epoch;
     const bool timingDiscontinuity = timing && timing->sampleClockValid && buffer.sampleClockValid &&
         timing->firstComplexSample != buffer.endComplexSample;
     const bool formatChanged = buffer.sampleRateHz > 0.0 &&
         (std::abs(buffer.sampleRateHz - sampleRateHz) > 0.5 ||
          std::abs(buffer.centerHz - centerHz) > 0.5);
-    if (formatChanged || discontinuity || timingEpochChanged || timingDiscontinuity) {
+    const bool reset = formatChanged || discontinuity || timingEpochChanged || timingDiscontinuity || timelineChanged;
+    if (!buffer.continuityId || reset)
+        buffer.continuityId = ++state.nextContinuityId;
+    if (reset) {
         buffer.history.clear();
         buffer.totalFloats = 0;
         buffer.epoch = timing && timing->epoch ? timing->epoch : buffer.epoch + 1;
@@ -113,6 +125,7 @@ bool DspIqSourceRegistry::publish(const DspSourceIdentity &source,
     }
     buffer.sampleRateHz = sampleRateHz;
     buffer.centerHz = centerHz;
+    buffer.sharedSampleTimeline = shared;
     const std::size_t keepStart = floatCount > MaximumSourceFloats
                                       ? floatCount - MaximumSourceFloats
                                       : 0;
@@ -154,7 +167,7 @@ bool DspIqSourceRegistry::snapshotSince(const DspSourceIdentity &source,
                                         std::uint64_t previousEpoch,
                                         std::uint64_t previousEndFloatCount,
                                         std::size_t maximumFloatCount,
-                                        DspIqSourceSnapshot &snapshot) const {
+                                        DspIqSourceSnapshot &snapshot, bool consumeGap) const {
     snapshot = {};
     maximumFloatCount &= ~std::size_t(1);
     if (!source.isValid() || maximumFloatCount < 2) return false;
@@ -185,10 +198,12 @@ bool DspIqSourceRegistry::snapshotSince(const DspSourceIdentity &source,
     snapshot.sampleClockValid = buffer.sampleClockValid;
     snapshot.hardwareTimestamp = buffer.hardwareTimestamp;
     snapshot.clockLocked = buffer.clockLocked;
+    snapshot.sharedSampleTimeline = buffer.sharedSampleTimeline;
+    snapshot.continuityId = buffer.continuityId;
     snapshot.nativeAdcBits = buffer.nativeAdcBits;
     snapshot.nativeSampleFormat = buffer.nativeSampleFormat;
     snapshot.normalizedFullScale = buffer.normalizedFullScale;
-    buffer.pendingGap = false;
+    if (consumeGap) buffer.pendingGap = false;
     snapshot.iq.resize(static_cast<std::size_t>(requested));
     const auto begin = buffer.history.end() - static_cast<std::ptrdiff_t>(requested);
     std::copy(begin, buffer.history.end(), snapshot.iq.begin());

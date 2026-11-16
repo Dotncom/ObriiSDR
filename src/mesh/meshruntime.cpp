@@ -10,6 +10,7 @@
 #include <QSet>
 #include <QDir>
 #include <QFile>
+#include <algorithm>
 #include <cmath>
 
 namespace Mesh {
@@ -485,7 +486,21 @@ void Runtime::sendQueuedHubChange() {
     if(hubSocket||state_!=Running||hubState.contains("controlError"))return;
     if(hasQueuedLink){
         hasQueuedLink=false;
-        hubRequest("setLink",{{"tx",queuedLink.tx},{"rx",queuedLink.rx},{"gainDb",queuedLink.gainDb},{"delayMs",queuedLink.delayMs},{"enabled",queuedLink.enabled}});return;
+        QJsonObject args{{"tx",queuedLink.tx},{"rx",queuedLink.rx},{"gainDb",queuedLink.gainDb},
+                         {"delayMs",queuedLink.delayMs},{"enabled",queuedLink.enabled}};
+        if(project.mixIq){
+            const auto links=hubState.value("links").toArray();
+            const auto previous=std::find_if(links.begin(),links.end(),[this](const QJsonValue &value){
+                const auto link=value.toObject();
+                return link.value("tx")==queuedLink.tx&&link.value("rx")==queuedLink.rx;
+            });
+            const auto applied=previous==links.end()?QJsonObject():(*previous).toObject();
+            if(queuedLink.frequencyOffsetHz!=0||applied.value("frequencyOffsetHz").toDouble()!=0)
+                args["frequencyOffsetHz"]=queuedLink.frequencyOffsetHz;
+            if(queuedLink.clockPpm!=0||applied.value("clockPpm").toDouble()!=0)
+                args["clockPpm"]=queuedLink.clockPpm;
+        }
+        hubRequest("setLink",args);return;
     }
     while(!receiverRegistrations.isEmpty()) {
         const auto id=receiverRegistrations.dequeue();auto e=entry(id);
@@ -502,6 +517,10 @@ bool Runtime::applyLink(const Link &link,QString *error) {
     if(!tx||!rx||!tx->registered||!rx->registered)return fail(error,"Link endpoints must be registered with the hub");
     if(link.tx==link.rx||!std::isfinite(link.gainDb)||link.gainDb< -120||link.gainDb>60||link.delayMs<0||link.delayMs>500)
         return fail(error,"Invalid link parameters");
+    if(!validLinkFrequencyOffset(link.frequencyOffsetHz,project.sampleRate,project.mixIq))
+        return fail(error,"Link frequency offset requires sample-mix mode and must be below half the sample rate");
+    if(!validLinkClockPpm(link.clockPpm,project.mixIq))
+        return fail(error,"Link clock error requires sample-mix mode and must be within ±1000 ppm");
     const auto validation=validateLinkOptions(link);if(!validation.isEmpty())return fail(error,validation);
     queuedLink=link;hasQueuedLink=linkChangePending=true;hubState.remove("lastLinkError");emit topologyChanged();sendQueuedHubChange();return true;
 }

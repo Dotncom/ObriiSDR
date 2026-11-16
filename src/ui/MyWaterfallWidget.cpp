@@ -1,4 +1,5 @@
 #include "MyWaterfallWidget.h"
+#include "../utils/displaylevelstep.h"
 #include "radiosettings.h"
 #include "waterfall3drenderer.h"
 
@@ -8,9 +9,11 @@
 #include <limits>
 #include <QLabel>
 #include <QDateTime>
+#include <QImage>
 #include <QLinearGradient>
 #include <QOpenGLContext>
 #include <QPainterPath>
+#include <QPixmap>
 #include <QStyle>
 #include <QToolButton>
 
@@ -26,58 +29,72 @@ struct SignalSample {
     float level = 0.0f;
 };
 
-const std::array<QColor, 17> &legacyWaterfallPalette() {
-    static const std::array<QColor, 17> palette = {{
-        QColor("#000020"),
-        QColor("#000050"),
-        QColor("#000090"),
-        QColor("#0000F0"),
-        QColor("#0000FF"),
-        QColor("#50F030"),
-        QColor("#1E90FF"),
-        QColor("#FFFFFF"),
-        QColor("#FFFF00"),
-        QColor("#FE6D16"),
-        QColor("#FE6D16"),
-        QColor("#FF0000"),
-        QColor("#FF0000"),
-        QColor("#C60000"),
-        QColor("#9F0000"),
-        QColor("#750000"),
-        QColor("#4A0000"),
-    }};
-    return palette;
-}
+using ColorPalette = MyWaterfallWidget::ColorPalette;
 
-QColor legacyWaterfallColor(float normalizedValue, float contrastFactor, float sensitivityFactor) {
-    if (!std::isfinite(normalizedValue)) {
-        normalizedValue = 0.0f;
+QVector<QRgb> interpolatePalette(const QVector<QRgb> &stops) {
+    QVector<QRgb> colors(256);
+    for (int i = 0; i < colors.size(); ++i) {
+        const float position = i * float(stops.size() - 1) / (colors.size() - 1);
+        const int segment = (std::min)(int(position), stops.size() - 2);
+        const float fraction = position - segment;
+        const QRgb low = stops[segment];
+        const QRgb high = stops[segment + 1];
+        colors[i] = qRgb(qRound(qRed(low) + fraction * (qRed(high) - qRed(low))),
+                         qRound(qGreen(low) + fraction * (qGreen(high) - qGreen(low))),
+                         qRound(qBlue(low) + fraction * (qBlue(high) - qBlue(low))));
     }
-    const float value = qBound(0.0f, normalizedValue * sensitivityFactor, 1.0f);
-    const auto &palette = legacyWaterfallPalette();
-    int index = static_cast<int>(value * static_cast<float>(palette.size() - 1));
-    index = std::clamp(index, 0, static_cast<int>(palette.size() - 1));
-
-    const QColor baseColor = palette[static_cast<std::size_t>(index)];
-    const int blue = (baseColor.green() + baseColor.blue()) / 3;
-    const int r = static_cast<int>(baseColor.red() * contrastFactor + blue * (1.0f - contrastFactor));
-    const int g = static_cast<int>(baseColor.green() * contrastFactor + blue * (1.0f - contrastFactor));
-    const int b = static_cast<int>(baseColor.blue() * contrastFactor + blue * (1.0f - contrastFactor));
-    return QColor(r, g, b);
+    return colors;
 }
 
-void writeWaterfallColor(float normalizedValue,
+const QVector<QRgb> &waterfallPaletteColors(ColorPalette palette) {
+    static const std::array<QVector<QRgb>, 6> palettes{{
+        {0xff000020, 0xff000050, 0xff000090, 0xff0000f0, 0xff0000ff, 0xff50f030,
+         0xff1e90ff, 0xffffffff, 0xffffff00, 0xfffe6d16, 0xfffe6d16, 0xffff0000,
+         0xffff0000, 0xffc60000, 0xff9f0000, 0xff750000, 0xff4a0000},
+        interpolatePalette({0xff080616, 0xff470d60, 0xff971a59, 0xffdd513a, 0xfffc9a36, 0xfffcf3a0}),
+        interpolatePalette({0xff040b1c, 0xff123160, 0xff195d97, 0xff259abf, 0xff72d7e6, 0xffedffff}),
+        interpolatePalette({0xff110726, 0xff43215f, 0xff7852a0, 0xffae80ab, 0xffdfb584, 0xffffed9c}),
+        interpolatePalette({0xff080500, 0xff3b1e00, 0xff7a4100, 0xffbc7609, 0xffecb535, 0xffffefb1}),
+        interpolatePalette({0xff000000, 0xffffffff})
+    }};
+    const auto index = static_cast<std::size_t>(palette);
+    return palettes[index < palettes.size() ? index : 0];
+}
+
+QRgb paletteColorAt(const QVector<QRgb> &colors, float level) {
+    const float normalized = std::isfinite(level) ? std::clamp(level, 0.0f, 1.0f) : 0.0f;
+    return colors[static_cast<int>(normalized * (colors.size() - 1))];
+}
+
+void writeWaterfallColor(const QVector<QRgb> &colors,
+                         bool classic,
+                         float normalizedValue,
                          float contrastFactor,
                          float sensitivityFactor,
                          unsigned char *dest) {
-    if (!dest) {
-        return;
-    }
-    const QColor color = legacyWaterfallColor(normalizedValue, contrastFactor, sensitivityFactor);
+    const QRgb base = paletteColorAt(colors, normalizedValue * sensitivityFactor);
+    const int gray = classic ? (qGreen(base) + qBlue(base)) / 3 : qGray(base);
+    const float grayContribution = gray * (1.0f - contrastFactor);
+    const int red = static_cast<int>(qRed(base) * contrastFactor + grayContribution);
+    const int green = static_cast<int>(qGreen(base) * contrastFactor + grayContribution);
+    const int blue = static_cast<int>(qBlue(base) * contrastFactor + grayContribution);
+    const QColor color = classic ? QColor(red, green, blue)
+                                 : QColor(std::clamp(red, 0, 255), std::clamp(green, 0, 255),
+                                          std::clamp(blue, 0, 255));
     dest[0] = static_cast<unsigned char>(color.red());
     dest[1] = static_cast<unsigned char>(color.green());
     dest[2] = static_cast<unsigned char>(color.blue());
 }
+}
+
+QIcon MyWaterfallWidget::colorPalettePreview(ColorPalette palette) {
+    const auto &colors = waterfallPaletteColors(palette);
+    QImage image(48, 12, QImage::Format_RGB32);
+    for (int x = 0; x < image.width(); ++x) {
+        const QRgb color = paletteColorAt(colors, float(x) / (image.width() - 1));
+        for (int y = 0; y < image.height(); ++y) image.setPixel(x, y, color);
+    }
+    return QIcon(QPixmap::fromImage(image));
 }
 
 MyWaterfallWidget::MyWaterfallWidget(QWidget *parent)
@@ -316,6 +333,7 @@ void MyWaterfallWidget::mousePressEvent(QMouseEvent *event) {
 }
 
 void MyWaterfallWidget::mouseMoveEvent(QMouseEvent *event) {
+    updateReceiverStatusOverlay();
     if (alternativeInterfaceMode) {
         alternativeSpectrumHoverVisible = alternativeSpectrumPlotRect().contains(event->pos());
         alternativeSpectrumHoverPos = event->pos();
@@ -464,6 +482,7 @@ void MyWaterfallWidget::mouseDoubleClickEvent(QMouseEvent *event) {
 
 void MyWaterfallWidget::leaveEvent(QEvent *event) {
     alternativeSpectrumHoverVisible = false;
+    if (!frequencySliceMouseActive && !spectrumFrameSliceMouseActive) hideSliceOverlay();
     update();
     QOpenGLWidget::leaveEvent(event);
 }
@@ -664,7 +683,6 @@ qDebug() << "MyWaterfallWidget::initializeGL done";
 }
 
 void MyWaterfallWidget::resizeGL(int w, int h) {
-        glViewport(0, 0, w, h);
         if (pauseControl) {
             pauseControl->move((std::max)(2, w - pauseControl->width() - 6), 6);
             pauseControl->raise();
@@ -889,13 +907,16 @@ void MyWaterfallWidget::setData(const std::vector<float> &sourceXData,
 
             const float contrastFactor = this->contrast / 10.0f;
             const float sensitivityFactor = this->sensitivity / 10.0f;
+            const auto &colors = waterfallPaletteColors(activeColorPalette);
+            const bool classic = activeColorPalette == ColorPalette::Classic;
             const double span = this->xMax - this->xMin;
             for (int x = 0; x < lineWidth; ++x) {
                 const std::size_t index = static_cast<std::size_t>(x);
                 pixelFrequencyData[index] = static_cast<float>(
                     this->xMin + (static_cast<double>(x) + 0.5) * span / static_cast<double>(lineWidth));
-                pixelLevelData[index] = pixelMaxData[index];
-                writeWaterfallColor(normalizedLevel(pixelMaxData[index]),
+                const float level = DisplayLevelStep::rounded(pixelMaxData[index], displayLevelStepTenths);
+                pixelLevelData[index] = level;
+                writeWaterfallColor(colors, classic, normalizedLevel(level),
                                     contrastFactor,
                                     sensitivityFactor,
                                     &lineData[index * 3]);
@@ -1057,11 +1078,35 @@ void MyWaterfallWidget::setAreaMeasurementEnabled(bool enabled) {
     update();
 }
 
+void MyWaterfallWidget::setReceiverStatusText(const QString &text) {
+    if (receiverStatusText == text) return;
+    receiverStatusText = text;
+    if (extendedInfoOverlayEnabled && sliceDetailsOverlayLabel) {
+        if (frequencySliceMouseActive || spectrumFrameSliceMouseActive)
+            updateSliceOverlay(sliceOverlayAnchor);
+        else updateReceiverStatusOverlay();
+    }
+}
+
+void MyWaterfallWidget::updateReceiverStatusOverlay() {
+    if (!sliceDetailsOverlayLabel || frequencySliceMouseActive || spectrumFrameSliceMouseActive) return;
+    if (!extendedInfoOverlayEnabled || receiverStatusText.isEmpty() || !underMouse()) {
+        sliceDetailsOverlayLabel->hide();
+        return;
+    }
+    sliceDetailsOverlayLabel->setText(receiverStatusText);
+    sliceDetailsOverlayLabel->adjustSize();
+    sliceDetailsOverlayLabel->show();
+    sliceDetailsOverlayLabel->raise();
+    positionInfoOverlays();
+}
+
 void MyWaterfallWidget::setExtendedInfoOverlayEnabled(bool enabled) {
     if (extendedInfoOverlayEnabled == enabled) {
         return;
     }
     extendedInfoOverlayEnabled = enabled;
+    updateReceiverStatusOverlay();
     if (!enabled && sliceDetailsOverlayLabel) {
         sliceDetailsOverlayLabel->hide();
     } else if (frequencySliceMouseActive || spectrumFrameSliceMouseActive) {
@@ -1139,6 +1184,11 @@ void MyWaterfallWidget::setDisplayMode(DisplayMode mode) {
 MyWaterfallWidget::DisplayMode MyWaterfallWidget::displayMode() const {
     QMutexLocker locker(&mutex);
     return activeDisplayMode;
+}
+
+void MyWaterfallWidget::setColorPalette(ColorPalette palette) {
+    QMutexLocker locker(&mutex);
+    activeColorPalette = palette;
 }
 
 void MyWaterfallWidget::set3DResolutionDivisor(int divisor) {
@@ -1595,7 +1645,6 @@ void MyWaterfallWidget::drawMiniWaterfallOverlay(float vStart) {
     const float bottom = top - overlayHeight;
     const float border = 3.0f;
 
-    glViewport(0, 0, width(), height());
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     glOrtho(0.0, width(), 0.0, height(), -1.0, 1.0);
@@ -1854,13 +1903,15 @@ void MyWaterfallWidget::computeLineData() {
 
 	float contrastFactor = contrast/10;
 	float sensitivityFactor = sensitivity/10;
+    const auto &colors = waterfallPaletteColors(activeColorPalette);
+    const bool classic = activeColorPalette == ColorPalette::Classic;
     const int lineWidth = std::max(1, width());
     const int dataCount = std::min(lineWidth, static_cast<int>(pixelLevelData.size()));
     if (dataCount < lineWidth) {
         std::fill(lineData.begin(), lineData.end(), 0);
     }
     for (int x = 0; x < dataCount; ++x) {
-        writeWaterfallColor(normalizedLevel(pixelLevelData[static_cast<std::size_t>(x)]),
+        writeWaterfallColor(colors, classic, normalizedLevel(pixelLevelData[static_cast<std::size_t>(x)]),
                             contrastFactor,
                             sensitivityFactor,
                             &lineData[static_cast<std::size_t>(x) * 3]);
@@ -1894,6 +1945,10 @@ void MyWaterfallWidget::paintGL() {
         return;
     }
 	painter.beginNativePainting();
+    // Keep projections and input in widget coordinates, with a viewport that
+    // covers the physical framebuffer at fractional display scales.
+    const QSize viewport = size() * devicePixelRatioF();
+    glViewport(0, 0, viewport.width(), viewport.height());
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     bool drawSegmentOverlay = true;
     std::vector<float> secondGraphLevels;
@@ -1936,30 +1991,31 @@ void MyWaterfallWidget::paintGL() {
             for (const float level : pixelLevelData) {
                 secondGraphLevels.push_back(normalizedLevel(level));
             }
-	    } else {
-        //waterfall
+        } else {
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, waterfallTexture);
+            glColor3f(1.0f, 1.0f, 1.0f);
 
-        glViewport(0, 0, width(), height());
-        glMatrixMode(GL_PROJECTION);
-        glLoadIdentity();
-        glOrtho(0, width(), 0, height(), -1, 1);
+            const float vStart = static_cast<float>(waterfallWriteRow) / static_cast<float>(textureHeight);
+            const bool useGpuPrepared = activeRenderBackend == RenderBackend::GpuPrepared;
+            if (!useGpuPrepared || !drawGpuPreparedWaterfall(vStart)) {
+                // The viewport already covers the physical framebuffer. Drop
+                // QPainter's device scaling and any previous 3D view matrix.
+                glMatrixMode(GL_PROJECTION);
+                glLoadIdentity();
+                glMatrixMode(GL_MODELVIEW);
+                glLoadIdentity();
 
-	    glEnable(GL_TEXTURE_2D);
-        glBindTexture(GL_TEXTURE_2D, waterfallTexture);
-        glColor3f(1.0f, 1.0f, 1.0f);
-
-        const float vStart = static_cast<float>(waterfallWriteRow) / static_cast<float>(textureHeight);
-        const bool useGpuPrepared = activeRenderBackend == RenderBackend::GpuPrepared;
-        if (!useGpuPrepared || !drawGpuPreparedWaterfall(vStart)) {
-            glBegin(GL_QUADS);
-            glTexCoord2f(0.0f, vStart + 1.0f); glVertex2f(0, 0);
-            glTexCoord2f(1.0f, vStart + 1.0f); glVertex2f(width(), 0);
-            glTexCoord2f(1.0f, vStart); glVertex2f(width(), height());
-            glTexCoord2f(0.0f, vStart); glVertex2f(0, height());
-            glEnd();
-        }
+                glBegin(GL_QUADS);
+                glTexCoord2f(0.0f, vStart + 1.0f); glVertex2f(-1.0f, -1.0f);
+                glTexCoord2f(1.0f, vStart + 1.0f); glVertex2f(1.0f, -1.0f);
+                glTexCoord2f(1.0f, vStart); glVertex2f(1.0f, 1.0f);
+                glTexCoord2f(0.0f, vStart); glVertex2f(-1.0f, 1.0f);
+                glEnd();
+            }
             glBindTexture(GL_TEXTURE_2D, 0);
-	    }
+            glDisable(GL_TEXTURE_2D);
+        }
     }
     painter.endNativePainting();
     updateAlternativeBandLabels();
@@ -2558,6 +2614,10 @@ void MyWaterfallWidget::updateSliceOverlay(const QPoint &anchor) {
         return;
     }
 
+    if (extendedInfoOverlayEnabled && !receiverStatusText.isEmpty()) {
+        if (!detailsText.isEmpty()) detailsText += QLatin1Char('\n');
+        detailsText += receiverStatusText;
+    }
     sliceOverlayAnchor = anchor;
     sliceOverlayLabel->setText(text);
     sliceOverlayLabel->adjustSize();
@@ -2623,41 +2683,6 @@ void MyWaterfallWidget::drawScanSegments(QPainter &painter) const {
         painter.drawLine(right, 0, right, height());
     }
     painter.restore();
-}
-
-QColor MyWaterfallWidget::valueToColor(float value, float contrastFactor, float sensitivityFactor) {
-    if (!std::isfinite(value)) {
-        value = 0.0f;
-    }
-    value = qBound(0.0f, value * sensitivityFactor, 1.0f);
-    QVector<QColor> colorMap = {
-        QColor("#000020"),
-        QColor("#000050"),
-        QColor("#000090"),
-        QColor("#0000F0"),
-        QColor("#0000FF"),
-        QColor("#50F030"),
-        QColor("#1E90FF"),
-        QColor("#FFFFFF"),
-        QColor("#FFFF00"),
-        QColor("#FE6D16"),
-        QColor("#FE6D16"),
-        QColor("#FF0000"),
-        QColor("#FF0000"),
-        QColor("#C60000"),
-        QColor("#9F0000"),
-        QColor("#750000"),
-        QColor("#4A0000"),
-        //QColor("#F000F0")
-    };
-    int index = static_cast<int>(value * (colorMap.size() - 1));
-    index = std::clamp(index, 0, colorMap.size() - 1);
-    QColor baseColor = colorMap[index];
-    int blue = (baseColor.green() + baseColor.blue())/3;
-    int r = static_cast<int>(baseColor.red() * contrastFactor + blue * (1.0f - contrastFactor));
-    int g = static_cast<int>(baseColor.green() * contrastFactor + blue * (1.0f - contrastFactor));
-    int b = static_cast<int>(baseColor.blue() * contrastFactor + blue * (1.0f - contrastFactor));
-    return QColor(r, g, b);
 }
 
 float MyWaterfallWidget::normalizedLevel(float value) const {

@@ -49,6 +49,7 @@ final class UsbSandbox {
     static final int USB_TARGET_AUTO = 0;
     static final int USB_TARGET_FOBOS = 1;
     static final int USB_TARGET_RTL_SDR = 2;
+    static final int USB_TARGET_HACKRF = 3;
 
     private static final String ACTION_USB_PERMISSION =
             "com.fobosapp.networkclient.USB_PERMISSION";
@@ -132,6 +133,12 @@ final class UsbSandbox {
     private static final int RTL_AUDIO_QUEUE_DEPTH = 8;
     private static final int RTL_SPECTRUM_QUEUE_DEPTH = 2;
     private static final long RTL_RETUNE_READ_GRACE_NANOS = 700_000_000L;
+    // HackRF uses signed 8-bit I/Q on bulk endpoint 0x81.  Keep the initial
+    // Android path deliberately conservative; 8 MS/s is practical on far more
+    // phones/tablets than the device maximum of 20 MS/s.
+    private static final int HACKRF_PREVIEW_TRANSFER_BYTES = 65_536;
+    private static final int HACKRF_PREVIEW_MAX_SAMPLE_RATE = 8_000_000;
+    private static final int HACKRF_PREVIEW_DEFAULT_SAMPLE_RATE = 8_000_000;
     private static final int AUDIO_SAMPLE_RATE = 48_000;
     private static final double AUDIO_RATE_BIAS = 1.0;
     private static final double AUDIO_RATE_MAX_STEP = 0.0035;
@@ -229,7 +236,8 @@ final class UsbSandbox {
     private enum ActiveUsbReceiverKind {
         NONE,
         FOBOS,
-        RTL_SDR
+        RTL_SDR,
+        HACKRF
     }
 
     private ActiveUsbReceiverKind activeReceiverKind = ActiveUsbReceiverKind.NONE;
@@ -306,6 +314,8 @@ final class UsbSandbox {
         final int requestedFftLength;
         final AtomicInteger references = new AtomicInteger(0);
 
+        final boolean signedSamples;
+
         RtlIqBlock(byte[] bytes,
                    int length,
                    long nanos,
@@ -316,7 +326,8 @@ final class UsbSandbox {
                    double bandwidth,
                    int modulationType,
                    int fftLength,
-                   int requestedFftLength) {
+                   int requestedFftLength,
+                   boolean signedSamples) {
             this.bytes = bytes;
             this.length = length;
             this.nanos = nanos;
@@ -328,6 +339,7 @@ final class UsbSandbox {
             this.modulationType = modulationType;
             this.fftLength = fftLength;
             this.requestedFftLength = requestedFftLength;
+            this.signedSamples = signedSamples;
         }
     }
 
@@ -400,7 +412,8 @@ final class UsbSandbox {
     }
 
     void setPreferredReceiverTarget(int target) {
-        if (target != USB_TARGET_FOBOS && target != USB_TARGET_RTL_SDR) {
+        if (target != USB_TARGET_FOBOS && target != USB_TARGET_RTL_SDR &&
+                target != USB_TARGET_HACKRF) {
             preferredReceiverTarget = USB_TARGET_AUTO;
             return;
         }
@@ -414,19 +427,42 @@ final class UsbSandbox {
         if (activeReceiverKind == ActiveUsbReceiverKind.RTL_SDR) {
             return USB_TARGET_RTL_SDR;
         }
+        if (activeReceiverKind == ActiveUsbReceiverKind.HACKRF) {
+            return USB_TARGET_HACKRF;
+        }
         return USB_TARGET_AUTO;
     }
 
     int detectedReceiverTarget() {
         HashMap<String, UsbDevice> deviceList = usbManager.getDeviceList();
+        boolean fobosVisible = false;
         boolean rtlVisible = false;
+        boolean hackRfVisible = false;
         for (UsbDevice device : deviceList.values()) {
             if (isFobosCandidate(device)) {
-                return USB_TARGET_FOBOS;
+                fobosVisible = true;
             }
             if (isRtlSdrCandidate(device)) {
                 rtlVisible = true;
             }
+            if (isHackRfCandidate(device)) {
+                hackRfVisible = true;
+            }
+        }
+        if (preferredReceiverTarget == USB_TARGET_HACKRF && hackRfVisible) {
+            return USB_TARGET_HACKRF;
+        }
+        if (preferredReceiverTarget == USB_TARGET_RTL_SDR && rtlVisible) {
+            return USB_TARGET_RTL_SDR;
+        }
+        if (preferredReceiverTarget == USB_TARGET_FOBOS && fobosVisible) {
+            return USB_TARGET_FOBOS;
+        }
+        if (fobosVisible) {
+            return USB_TARGET_FOBOS;
+        }
+        if (hackRfVisible) {
+            return USB_TARGET_HACKRF;
         }
         return rtlVisible ? USB_TARGET_RTL_SDR : USB_TARGET_AUTO;
     }
@@ -488,6 +524,10 @@ final class UsbSandbox {
         if (activeReceiverKind == ActiveUsbReceiverKind.RTL_SDR) {
             return runRtlSdrBulkProbe(report);
         }
+        if (activeReceiverKind == ActiveUsbReceiverKind.HACKRF) {
+            return report.append("[USB HackRF] RX data is read only after explicit preview/sample-test start")
+                    .toString();
+        }
         int maxPacket = Math.max(64, activeBulkInEndpoint.getMaxPacketSize());
         int length = Math.max(512, Math.min(16_384, maxPacket * 16));
         byte[] buffer = new byte[length];
@@ -523,6 +563,10 @@ final class UsbSandbox {
         }
         if (activeReceiverKind == ActiveUsbReceiverKind.RTL_SDR) {
             report.append("[USB RTL] device open; firmware strings are not available through Fobos control request");
+            return report.toString();
+        }
+        if (activeReceiverKind == ActiveUsbReceiverKind.HACKRF) {
+            appendHackRfInfoProbe(report);
             return report.toString();
         }
         appendFirmwareInfoProbe(report);
@@ -582,6 +626,27 @@ final class UsbSandbox {
         }
         double sampleRate = rtlPreviewSampleRate(request.sampleRate);
         return new PreviewRequest(center,
+                request.listeningFrequency,
+                sampleRate,
+                RadioSettings.INPUT_RF,
+                request.bandwidth,
+                request.modulationType,
+                request.audioEnabled,
+                request.lnaGain,
+                request.vgaGain,
+                request.fftLength,
+                request.requestedFftLength);
+    }
+
+    private PreviewRequest hackRfPreviewRequest(PreviewRequest request) {
+        double center = request.centerFrequency;
+        if (!Double.isFinite(center) || center < HackRfOtgProtocol.MIN_FREQUENCY_HZ) {
+            center = request.listeningFrequency;
+        }
+        long normalizedCenter = HackRfOtgProtocol.normalizeFrequencyHz(center);
+        int requestedRate = HackRfOtgProtocol.normalizeSampleRateHz(request.sampleRate);
+        int sampleRate = Math.min(HACKRF_PREVIEW_MAX_SAMPLE_RATE, requestedRate);
+        return new PreviewRequest(normalizedCenter,
                 request.listeningFrequency,
                 sampleRate,
                 RadioSettings.INPUT_RF,
@@ -689,6 +754,8 @@ final class UsbSandbox {
         }
         PreviewRequest startRequest = activeReceiverKind == ActiveUsbReceiverKind.RTL_SDR
                 ? rtlPreviewRequest(request)
+                : activeReceiverKind == ActiveUsbReceiverKind.HACKRF
+                ? hackRfPreviewRequest(request)
                 : request;
         synchronized (previewControlLock) {
             applyPreviewRequestState(startRequest);
@@ -700,13 +767,18 @@ final class UsbSandbox {
                 () -> {
                     if (activeReceiverKind == ActiveUsbReceiverKind.RTL_SDR) {
                         runRtlPreviewLoop(startRequest);
+                    } else if (activeReceiverKind == ActiveUsbReceiverKind.HACKRF) {
+                        runHackRfPreviewLoop(startRequest);
                     } else {
                         runPreviewLoop(startRequest);
                     }
                 },
-                activeReceiverKind == ActiveUsbReceiverKind.RTL_SDR ? "RtlOtgPreview" : "FobosOtgPreview");
+                activeReceiverKind == ActiveUsbReceiverKind.RTL_SDR ? "RtlOtgPreview" :
+                        activeReceiverKind == ActiveUsbReceiverKind.HACKRF ? "HackRfOtgPreview" :
+                                "FobosOtgPreview");
         previewThread.start();
-        report.append(activeReceiverKind == ActiveUsbReceiverKind.RTL_SDR ? "[USB RTL]" : "[USB OTG]")
+        report.append(activeReceiverKind == ActiveUsbReceiverKind.RTL_SDR ? "[USB RTL]" :
+                        activeReceiverKind == ActiveUsbReceiverKind.HACKRF ? "[USB HackRF]" : "[USB OTG]")
                 .append(" preview starting at ")
                 .append(formatMhz(startRequest.centerFrequency))
                 .append(" MHz, ")
@@ -720,7 +792,15 @@ final class UsbSandbox {
                     .append(" Msps is using safe RTL rate ")
                     .append(formatMhz(startRequest.sampleRate))
                     .append(" Msps");
-        } else if (startRequest.sampleRate >= PREVIEW_MAX_SAMPLE_RATE) {
+        } else if (activeReceiverKind == ActiveUsbReceiverKind.HACKRF &&
+                Math.abs(startRequest.sampleRate - request.sampleRate) > 1.0) {
+            report.append("\n[USB HackRF] requested sample rate ")
+                    .append(formatMhz(request.sampleRate))
+                    .append(" Msps is using Android-safe ")
+                    .append(formatMhz(startRequest.sampleRate))
+                    .append(" Msps");
+        } else if (startRequest.sampleRate >= PREVIEW_MAX_SAMPLE_RATE &&
+                activeReceiverKind == ActiveUsbReceiverKind.FOBOS) {
             report.append("\n[USB OTG] preview sample rate capped for first Android streaming tests");
         }
         return report.toString();
@@ -765,6 +845,9 @@ final class UsbSandbox {
                 requestedFftLength);
         if (activeReceiverKind == ActiveUsbReceiverKind.RTL_SDR) {
             return applyRtlReceiverPreviewSettings(request);
+        }
+        if (activeReceiverKind == ActiveUsbReceiverKind.HACKRF) {
+            return applyHackRfReceiverPreviewSettings(request);
         }
         StringBuilder report = new StringBuilder("[USB OTG] preview settings");
         try {
@@ -908,6 +991,49 @@ final class UsbSandbox {
         return report.toString();
     }
 
+    private String applyHackRfReceiverPreviewSettings(PreviewRequest incomingRequest) {
+        PreviewRequest request = hackRfPreviewRequest(incomingRequest);
+        StringBuilder report = new StringBuilder("[USB HackRF] preview settings");
+        try {
+            boolean audioResetNeeded;
+            boolean needsRestart;
+            boolean gainChanged;
+            synchronized (previewControlLock) {
+                audioResetNeeded = Math.abs(request.sampleRate - previewSampleRate) > 1.0 ||
+                        request.modulationType != previewModulationType ||
+                        Math.abs(request.listeningFrequency - previewListeningFrequency) > 10.0 ||
+                        Math.abs(request.centerFrequency - previewCenterFrequency) > 10.0;
+                needsRestart = Math.abs(request.sampleRate - previewSampleRate) > 1.0 ||
+                        request.fftLength != previewFftLength;
+                gainChanged = request.lnaGain != previewLnaGain || request.vgaGain != previewVgaGain;
+                if (needsRestart) {
+                    previewRestartCancelled = false;
+                    pendingPreviewRestart = request;
+                    if (!previewRestartWorkerRunning) {
+                        startPreviewRestartWorkerLocked();
+                    }
+                    return report.append(" queued restart for sample/FFT change").toString();
+                }
+                applyPreviewRequestState(request);
+            }
+
+            int frequencyResult = hackRfSetFrequency(request.centerFrequency);
+            report.append(" RF ").append(formatMhz(request.centerFrequency))
+                    .append(" MHz ").append(frequencyResult);
+            if (gainChanged) {
+                int lnaResult = hackRfSetLnaGain(request.lnaGain);
+                int vgaResult = hackRfSetVgaGain(request.vgaGain);
+                report.append(", LNA ").append(lnaResult).append(", VGA ").append(vgaResult);
+            }
+            if (audioResetNeeded) {
+                previewAudioResetRequested = true;
+            }
+        } catch (RuntimeException e) {
+            report.append(" failed: ").append(e.getMessage());
+        }
+        return report.toString();
+    }
+
     String runReceiverSampleTest() {
         StringBuilder report = new StringBuilder();
         if (activeConnection == null || activeBulkInEndpoint == null) {
@@ -920,6 +1046,9 @@ final class UsbSandbox {
         }
         if (activeReceiverKind == ActiveUsbReceiverKind.RTL_SDR) {
             return runRtlSdrBulkProbe(report);
+        }
+        if (activeReceiverKind == ActiveUsbReceiverKind.HACKRF) {
+            return runHackRfSampleTest(report);
         }
 
         boolean openedByCommand = false;
@@ -1002,6 +1131,44 @@ final class UsbSandbox {
             report.append("\n[USB RTL] first bytes ").append(hexPreview(buffer, result, 32));
         } else {
             report.append("\n[USB RTL] no IQ after init; full R82xx PLL init may be required");
+        }
+        return report.toString();
+    }
+
+    private String runHackRfSampleTest(StringBuilder report) {
+        if (activeConnection == null || activeBulkInEndpoint == null) {
+            return report.append("[USB HackRF] no open bulk IN endpoint").toString();
+        }
+        boolean started = false;
+        try {
+            int configureResult = configureHackRfReceiver(100_000_000L,
+                    HACKRF_PREVIEW_DEFAULT_SAMPLE_RATE, 1, 8, report);
+            if (configureResult < 0) {
+                return report.append("\n[USB HackRF] RX setup failed").toString();
+            }
+            int startResult = hackRfSetTransceiverMode(HackRfOtgProtocol.TRANSCEIVER_MODE_RECEIVE);
+            report.append("\n[USB HackRF] RX start result ").append(startResult);
+            started = startResult >= 0;
+            if (!started) {
+                return report.toString();
+            }
+            byte[] buffer = new byte[HACKRF_PREVIEW_TRANSFER_BYTES];
+            long startNanos = System.nanoTime();
+            int result = activeConnection.bulkTransfer(activeBulkInEndpoint, buffer, buffer.length, 1000);
+            long elapsedMicros = (System.nanoTime() - startNanos) / 1000L;
+            report.append("\n[USB HackRF] RX bulk read result ").append(result)
+                    .append(" elapsed ").append(elapsedMicros).append(" us");
+            if (result > 0) {
+                report.append("\n[USB HackRF] signed I/Q first bytes ")
+                        .append(hexPreview(buffer, result, 32));
+            }
+        } catch (RuntimeException e) {
+            report.append("\n[USB HackRF] sample test failed: ").append(e.getMessage());
+        } finally {
+            if (started) {
+                report.append("\n[USB HackRF] RX stop result ")
+                        .append(hackRfSetTransceiverMode(HackRfOtgProtocol.TRANSCEIVER_MODE_OFF));
+            }
         }
         return report.toString();
     }
@@ -1583,6 +1750,85 @@ final class UsbSandbox {
                 data, length, CTRL_TIMEOUT_MS);
     }
 
+    private int hackRfControlOut(int request, int value, int index, byte[] data, int length) {
+        if (activeConnection == null) {
+            return -1;
+        }
+        return activeConnection.controlTransfer(USB_VENDOR_OUT, request, value, index,
+                data, length, CTRL_TIMEOUT_MS);
+    }
+
+    private int hackRfControlIn(int request, int value, int index, byte[] data, int length) {
+        if (activeConnection == null) {
+            return -1;
+        }
+        return activeConnection.controlTransfer(USB_VENDOR_IN, request, value, index,
+                data, length, CTRL_TIMEOUT_MS);
+    }
+
+    private int hackRfSetTransceiverMode(int mode) {
+        return hackRfControlOut(HackRfOtgProtocol.REQUEST_SET_TRANSCEIVER_MODE,
+                mode, 0, null, 0);
+    }
+
+    private int hackRfSetFrequency(double frequencyHz) {
+        long frequency = HackRfOtgProtocol.normalizeFrequencyHz(frequencyHz);
+        byte[] payload = HackRfOtgProtocol.frequencyPayload(frequency);
+        return hackRfControlOut(HackRfOtgProtocol.REQUEST_SET_FREQ, 0, 0,
+                payload, payload.length);
+    }
+
+    private int hackRfSetSampleRate(double sampleRateHz) {
+        int sampleRate = HackRfOtgProtocol.normalizeSampleRateHz(sampleRateHz);
+        byte[] payload = HackRfOtgProtocol.sampleRatePayload(sampleRate);
+        return hackRfControlOut(HackRfOtgProtocol.REQUEST_SAMPLE_RATE_SET, 0, 0,
+                payload, payload.length);
+    }
+
+    private int hackRfSetAutomaticFilter(double sampleRateHz) {
+        int sampleRate = HackRfOtgProtocol.normalizeSampleRateHz(sampleRateHz);
+        int bandwidth = HackRfOtgProtocol.automaticFilterBandwidthHz(sampleRate);
+        return hackRfControlOut(HackRfOtgProtocol.REQUEST_BASEBAND_FILTER_BANDWIDTH_SET,
+                bandwidth & 0xffff, (bandwidth >>> 16) & 0xffff, null, 0);
+    }
+
+    private int hackRfSetLnaGain(int uiGain) {
+        byte[] accepted = new byte[1];
+        return hackRfControlIn(HackRfOtgProtocol.REQUEST_SET_LNA_GAIN, 0,
+                HackRfOtgProtocol.lnaGainDbForUi(uiGain), accepted, accepted.length) == 1 &&
+                accepted[0] != 0 ? 0 : -1;
+    }
+
+    private int hackRfSetVgaGain(int uiGain) {
+        byte[] accepted = new byte[1];
+        return hackRfControlIn(HackRfOtgProtocol.REQUEST_SET_VGA_GAIN, 0,
+                HackRfOtgProtocol.vgaGainDbForUi(uiGain), accepted, accepted.length) == 1 &&
+                accepted[0] != 0 ? 0 : -1;
+    }
+
+    private int configureHackRfReceiver(long centerFrequencyHz,
+                                        int sampleRateHz,
+                                        int lnaGain,
+                                        int vgaGain,
+                                        StringBuilder report) {
+        int stopResult = hackRfSetTransceiverMode(HackRfOtgProtocol.TRANSCEIVER_MODE_OFF);
+        int frequencyResult = hackRfSetFrequency(centerFrequencyHz);
+        int rateResult = hackRfSetSampleRate(sampleRateHz);
+        int filterResult = hackRfSetAutomaticFilter(sampleRateHz);
+        int lnaResult = hackRfSetLnaGain(lnaGain);
+        int vgaResult = hackRfSetVgaGain(vgaGain);
+        if (report != null) {
+            report.append("[USB HackRF] RX config off ").append(stopResult)
+                    .append(", freq ").append(frequencyResult)
+                    .append(", rate ").append(rateResult)
+                    .append(", filter ").append(filterResult)
+                    .append(", LNA ").append(lnaResult)
+                    .append(", VGA ").append(vgaResult);
+        }
+        return frequencyResult < 0 || rateResult < 0 || filterResult < 0 ||
+                lnaResult < 0 || vgaResult < 0 ? -1 : 0;
+    }
+
     String runNativeBulkBenchmark() {
         StringBuilder report = new StringBuilder();
         stopPreviewThread(1200L);
@@ -1596,6 +1842,9 @@ final class UsbSandbox {
         }
         if (activeReceiverKind == ActiveUsbReceiverKind.RTL_SDR) {
             return runRtlSdrBulkProbe(report);
+        }
+        if (activeReceiverKind == ActiveUsbReceiverKind.HACKRF) {
+            return runHackRfSampleTest(report);
         }
         if (!NativeUsbBridge.isAvailable()) {
             return report.append("[USB OTG] ")
@@ -2016,7 +2265,8 @@ final class UsbSandbox {
                         previewBandwidth,
                         previewModulationType,
                         previewFftLength,
-                        previewRequestedFftLength);
+                        previewRequestedFftLength,
+                        false);
                 boolean queued = false;
                 boolean attemptedQueue = false;
                 if (previewAudioEnabled && listener != null) {
@@ -2063,6 +2313,148 @@ final class UsbSandbox {
         }
     }
 
+    private void runHackRfPreviewLoop(PreviewRequest request) {
+        try {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO);
+        } catch (RuntimeException ignored) {
+        }
+
+        ArrayBlockingQueue<byte[]> bufferPool = new ArrayBlockingQueue<>(RTL_PREVIEW_BUFFER_POOL_DEPTH);
+        for (int i = 0; i < RTL_PREVIEW_BUFFER_POOL_DEPTH; ++i) {
+            bufferPool.offer(new byte[HACKRF_PREVIEW_TRANSFER_BYTES]);
+        }
+        ArrayBlockingQueue<RtlIqBlock> audioQueue = new ArrayBlockingQueue<>(RTL_AUDIO_QUEUE_DEPTH);
+        ArrayBlockingQueue<RtlIqBlock> spectrumQueue = new ArrayBlockingQueue<>(RTL_SPECTRUM_QUEUE_DEPTH);
+        AtomicLong telemetryBytes = new AtomicLong();
+        AtomicLong telemetryReads = new AtomicLong();
+        AtomicLong telemetryIqSamples = new AtomicLong();
+        AtomicLong telemetryPcmSamples = new AtomicLong();
+        AtomicLong telemetryAudioFrames = new AtomicLong();
+        AtomicLong telemetryFftFrames = new AtomicLong();
+        AtomicLong telemetryAudioDrops = new AtomicLong();
+        AtomicLong telemetrySpectrumDrops = new AtomicLong();
+        Thread audioThread = new Thread(
+                () -> runRtlAudioWorker(audioQueue, bufferPool, telemetryPcmSamples,
+                        telemetryAudioFrames),
+                "HackRfOtgAudio");
+        Thread spectrumThread = new Thread(
+                () -> runRtlSpectrumWorker(spectrumQueue, bufferPool, telemetryFftFrames),
+                "HackRfOtgSpectrum");
+        long lastSpectrumOfferNanos = 0L;
+        long telemetryStartNanos = System.nanoTime();
+        int readFailures = 0;
+        boolean started = false;
+
+        try {
+            StringBuilder initReport = new StringBuilder();
+            int configureResult = configureHackRfReceiver(
+                    HackRfOtgProtocol.normalizeFrequencyHz(request.centerFrequency),
+                    (int) Math.round(request.sampleRate), request.lnaGain, request.vgaGain, initReport);
+            if (configureResult < 0) {
+                log(initReport.append("\n[USB HackRF] preview RX configuration failed").toString());
+                return;
+            }
+            int startResult = hackRfSetTransceiverMode(HackRfOtgProtocol.TRANSCEIVER_MODE_RECEIVE);
+            initReport.append("\n[USB HackRF] RX start result ").append(startResult);
+            if (startResult < 0) {
+                log(initReport.toString());
+                return;
+            }
+            started = true;
+            audioThread.start();
+            spectrumThread.start();
+            log(initReport.append("\n[USB HackRF] pipeline threads: reader/audio/spectrum").toString());
+
+            while (previewRunning) {
+                byte[] buffer = acquireHackRfBuffer(bufferPool);
+                int result;
+                try {
+                    result = activeConnection.bulkTransfer(activeBulkInEndpoint, buffer, buffer.length, 250);
+                } catch (RuntimeException e) {
+                    recycleHackRfBuffer(bufferPool, buffer);
+                    log("[USB HackRF] preview bulk read failed: " + e.getMessage());
+                    break;
+                }
+                if (result <= 0) {
+                    recycleHackRfBuffer(bufferPool, buffer);
+                    if (++readFailures >= 8) {
+                        log("[USB HackRF] preview bulk read stalled result " + result);
+                        break;
+                    }
+                    continue;
+                }
+                readFailures = 0;
+                telemetryBytes.addAndGet(result);
+                telemetryReads.incrementAndGet();
+                int complexSamples = rawRtlComplexSampleCount(buffer, result);
+                if (complexSamples < 2) {
+                    recycleHackRfBuffer(bufferPool, buffer);
+                    continue;
+                }
+                telemetryIqSamples.addAndGet(complexSamples);
+                long now = System.nanoTime();
+                updatePreviewAudioSampleRate(now, complexSamples, previewSampleRate, false, 0.20);
+                RtlIqBlock block = new RtlIqBlock(buffer, result, now, complexSamples,
+                        previewCenterFrequency, previewListeningFrequency, previewSampleRate,
+                        previewBandwidth, previewModulationType, previewFftLength,
+                        previewRequestedFftLength, true);
+                boolean queued = false;
+                boolean attemptedQueue = false;
+                if (previewAudioEnabled && listener != null) {
+                    attemptedQueue = true;
+                    queued |= offerRtlBlock(audioQueue, block, bufferPool, telemetryAudioDrops);
+                }
+                long frameIntervalNanos = previewAudioEnabled ? 260_000_000L : 80_000_000L;
+                if (listener != null && now - lastSpectrumOfferNanos >= frameIntervalNanos) {
+                    lastSpectrumOfferNanos = now;
+                    attemptedQueue = true;
+                    queued |= offerRtlBlock(spectrumQueue, block, bufferPool, telemetrySpectrumDrops);
+                }
+                if (!queued && (!attemptedQueue || block.references.get() <= 0)) {
+                    recycleHackRfBuffer(bufferPool, buffer);
+                }
+                if (now - telemetryStartNanos >= TELEMETRY_INTERVAL_NANOS) {
+                    emitPreviewTelemetry(now, telemetryStartNanos,
+                            telemetryBytes.getAndSet(0L), telemetryReads.getAndSet(0L),
+                            telemetryIqSamples.getAndSet(0L), telemetryPcmSamples.getAndSet(0L),
+                            telemetryAudioFrames.getAndSet(0L), telemetryFftFrames.getAndSet(0L));
+                    long audioDrops = telemetryAudioDrops.getAndSet(0L);
+                    long spectrumDrops = telemetrySpectrumDrops.getAndSet(0L);
+                    if (audioDrops > 0L || spectrumDrops > 0L) {
+                        log("[USB HackRF] pipeline drops audio " + audioDrops +
+                                ", spectrum " + spectrumDrops);
+                    }
+                    telemetryStartNanos = now;
+                }
+            }
+        } catch (RuntimeException e) {
+            log("[USB HackRF] preview failed: " + e.getMessage());
+        } finally {
+            previewRunning = false;
+            if (started) {
+                log("[USB HackRF] RX stop result " +
+                        hackRfSetTransceiverMode(HackRfOtgProtocol.TRANSCEIVER_MODE_OFF));
+            }
+            joinThreadQuietly(audioThread, 600L);
+            joinThreadQuietly(spectrumThread, 600L);
+            drainRtlQueue(audioQueue, bufferPool);
+            drainRtlQueue(spectrumQueue, bufferPool);
+            previewThread = null;
+            log("[USB HackRF] preview stopped");
+        }
+    }
+
+    private byte[] acquireHackRfBuffer(ArrayBlockingQueue<byte[]> bufferPool) {
+        byte[] buffer = bufferPool.poll();
+        return buffer != null ? buffer : new byte[HACKRF_PREVIEW_TRANSFER_BYTES];
+    }
+
+    private void recycleHackRfBuffer(ArrayBlockingQueue<byte[]> bufferPool, byte[] buffer) {
+        if (buffer != null && buffer.length == HACKRF_PREVIEW_TRANSFER_BYTES) {
+            bufferPool.offer(buffer);
+        }
+    }
+
     private byte[] acquireRtlBuffer(ArrayBlockingQueue<byte[]> bufferPool) {
         byte[] buffer = bufferPool.poll();
         return buffer != null ? buffer : new byte[RTL_PREVIEW_TRANSFER_BYTES];
@@ -2104,7 +2496,11 @@ final class UsbSandbox {
             return;
         }
         if (block.references.decrementAndGet() <= 0) {
-            recycleRtlBuffer(bufferPool, block.bytes);
+            if (block.signedSamples) {
+                recycleHackRfBuffer(bufferPool, block.bytes);
+            } else {
+                recycleRtlBuffer(bufferPool, block.bytes);
+            }
         }
     }
 
@@ -2153,14 +2549,15 @@ final class UsbSandbox {
                 double timingSampleRate = previewAudioSampleRate > 0.0
                         ? previewAudioSampleRate
                         : previewSampleRate;
-                byte[] pcm = audioFrameFromRawRtlIq(block.bytes,
+                byte[] pcm = audioFrameFromRaw8BitIq(block.bytes,
                         block.length,
                         block.centerFrequency,
                         block.listeningFrequency,
                         block.sampleRate,
                         timingSampleRate,
                         block.bandwidth,
-                        block.modulationType);
+                        block.modulationType,
+                        block.signedSamples);
                 if (pcm.length > 0) {
                     telemetryPcmSamples.addAndGet(pcm.length / 2);
                     telemetryAudioFrames.incrementAndGet();
@@ -2197,7 +2594,7 @@ final class UsbSandbox {
                 if (listener == null) {
                     continue;
                 }
-                float[] iqSamples = convertRawRtlIq(block.bytes, block.length);
+                float[] iqSamples = convertRaw8BitIq(block.bytes, block.length, block.signedSamples);
                 FobosNetworkClient.SpectrumFrame frame =
                         spectrumFrameFromIq(iqSamples,
                                 block.centerFrequency,
@@ -2544,6 +2941,8 @@ final class UsbSandbox {
                         .append(fobosApiHint(rawDescriptors));
             } else if (isRtlSdrCandidate(device)) {
                 report.append("\n[USB] RTL-SDR candidate detected: native Android driver path is selected");
+            } else if (isHackRfCandidate(device)) {
+                report.append("\n[USB] HackRF candidate detected: native Android RX-only path is selected");
             }
         } catch (SecurityException e) {
             report.append("\n[USB] open blocked by Android security: ").append(e.getMessage());
@@ -2560,6 +2959,9 @@ final class UsbSandbox {
     private String openReceiverSession(UsbDevice device) {
         if (isRtlSdrCandidate(device)) {
             return openRtlSdrSession(device);
+        }
+        if (isHackRfCandidate(device)) {
+            return openHackRfSession(device);
         }
         StringBuilder report = new StringBuilder();
         report.append("[USB OTG] opening receiver session for ").append(shortDeviceName(device));
@@ -2685,6 +3087,54 @@ final class UsbSandbox {
         return report.toString();
     }
 
+    private String openHackRfSession(UsbDevice device) {
+        StringBuilder report = new StringBuilder();
+        report.append("[USB HackRF] opening RX-only session for ").append(shortDeviceName(device));
+        closeActiveSession();
+        UsbDeviceConnection connection = null;
+        try {
+            connection = usbManager.openDevice(device);
+            if (connection == null) {
+                return report.append("\n[USB HackRF] openDevice returned null").toString();
+            }
+            StreamInterfaceChoice choice = chooseStreamInterface(device);
+            if (choice == null) {
+                connection.close();
+                return report.append("\n[USB HackRF] no bulk IN endpoint found").toString();
+            }
+            if (!connection.claimInterface(choice.usbInterface, true)) {
+                connection.close();
+                return report.append("\n[USB HackRF] claimInterface failed for if")
+                        .append(choice.interfaceIndex).toString();
+            }
+            activeDevice = device;
+            activeConnection = connection;
+            activeInterface = choice.usbInterface;
+            activeBulkInEndpoint = choice.bulkInEndpoint;
+            activeBulkOutEndpoint = choice.bulkOutEndpoint;
+            activeReceiverKind = ActiveUsbReceiverKind.HACKRF;
+            activeAgileApi = false;
+            resetFobosConversionState();
+            connection = null;
+            report.append("\n[USB HackRF] claimed if").append(choice.interfaceIndex)
+                    .append(" id ").append(activeInterface.getId())
+                    .append(", bulk IN ").append(endpointSummary(activeBulkInEndpoint));
+            appendHackRfInfoProbe(report);
+            report.append("\n[USB HackRF] RX-only OTG path ready; select 2, 4, or 8 Msps and press Start");
+        } catch (SecurityException e) {
+            report.append("\n[USB HackRF] open blocked by Android security: ").append(e.getMessage());
+            if (connection != null) {
+                connection.close();
+            }
+        } catch (RuntimeException e) {
+            report.append("\n[USB HackRF] open failed: ").append(e.getMessage());
+            if (connection != null) {
+                connection.close();
+            }
+        }
+        return report.toString();
+    }
+
     private StreamInterfaceChoice chooseStreamInterface(UsbDevice device) {
         StreamInterfaceChoice best = null;
         int bestScore = -1;
@@ -2736,6 +3186,33 @@ final class UsbSandbox {
                 .append(controlResultSummary(fw))
                 .append(", build ")
                 .append(controlResultSummary(build));
+    }
+
+    private void appendHackRfInfoProbe(StringBuilder report) {
+        if (activeConnection == null) {
+            report.append("\n[USB HackRF] board info unavailable: no open session");
+            return;
+        }
+        byte[] boardId = new byte[1];
+        int boardResult = hackRfControlIn(HackRfOtgProtocol.REQUEST_BOARD_ID_READ, 0, 0,
+                boardId, boardId.length);
+        byte[] version = new byte[96];
+        int versionResult = hackRfControlIn(HackRfOtgProtocol.REQUEST_VERSION_STRING_READ, 0, 0,
+                version, version.length - 1);
+        report.append("\n[USB HackRF] board id ");
+        if (boardResult == 1) {
+            report.append(boardId[0] & 0xff);
+        } else {
+            report.append("read ").append(boardResult);
+        }
+        report.append(", firmware ");
+        if (versionResult > 0) {
+            int length = Math.min(versionResult, version.length);
+            report.append(new String(version, 0, length, java.nio.charset.StandardCharsets.US_ASCII)
+                    .replace('\u0000', ' ').trim());
+        } else {
+            report.append("read ").append(versionResult);
+        }
     }
 
     private ControlStringResult readFobosInfoString(int value) {
@@ -2892,8 +3369,9 @@ final class UsbSandbox {
         audioDebugLastLogNanos = 0L;
         audioRawDcI = 8192.0;
         audioRawDcQ = 8192.0;
-        audioRawRtlDcI = 127.5;
-        audioRawRtlDcQ = 127.5;
+        boolean signed8BitIq = activeReceiverKind == ActiveUsbReceiverKind.HACKRF;
+        audioRawRtlDcI = signed8BitIq ? 0.0 : 127.5;
+        audioRawRtlDcQ = signed8BitIq ? 0.0 : 127.5;
         previewAudioSampleRate = 0.0;
         previewMeasuredSampleRate = 0.0;
         previewAudioRateLastNanos = 0L;
@@ -2917,6 +3395,10 @@ final class UsbSandbox {
     }
 
     private float[] convertRawRtlIq(byte[] buffer, int bytesRead) {
+        return convertRaw8BitIq(buffer, bytesRead, false);
+    }
+
+    private float[] convertRaw8BitIq(byte[] buffer, int bytesRead, boolean signedSamples) {
         int usableBytes = Math.max(0, Math.min(bytesRead, buffer.length)) & ~0x1;
         if (usableBytes < 2) {
             return new float[0];
@@ -2926,8 +3408,8 @@ final class UsbSandbox {
         double dcRate = 0.0008;
         int outputIndex = 0;
         for (int pos = 0; pos + 1 < usableBytes; pos += 2) {
-            double real = (buffer[pos] & 0xff) - 127.5;
-            double imag = (buffer[pos + 1] & 0xff) - 127.5;
+            double real = signedSamples ? buffer[pos] : (buffer[pos] & 0xff) - 127.5;
+            double imag = signedSamples ? buffer[pos + 1] : (buffer[pos + 1] & 0xff) - 127.5;
             convertDcI += dcRate * (real - convertDcI);
             convertDcQ += dcRate * (imag - convertDcQ);
             samples[outputIndex++] = (float) ((real - convertDcI) * scale);
@@ -3103,6 +3585,19 @@ final class UsbSandbox {
                                           double timingSampleRate,
                                           double bandwidth,
                                           int modulationType) {
+        return audioFrameFromRaw8BitIq(buffer, bytesRead, centerFrequency, listeningFrequency,
+                nominalSampleRate, timingSampleRate, bandwidth, modulationType, false);
+    }
+
+    private byte[] audioFrameFromRaw8BitIq(byte[] buffer,
+                                           int bytesRead,
+                                           double centerFrequency,
+                                           double listeningFrequency,
+                                           double nominalSampleRate,
+                                           double timingSampleRate,
+                                           double bandwidth,
+                                           int modulationType,
+                                           boolean signedSamples) {
         int usableBytes = Math.max(0, Math.min(bytesRead, buffer.length)) & ~0x1;
         int complexSamples = usableBytes / 2;
         if (complexSamples <= 2 ||
@@ -3159,8 +3654,8 @@ final class UsbSandbox {
             if (pos + 1 >= usableBytes) {
                 continue;
             }
-            double real = (buffer[pos] & 0xff);
-            double imag = (buffer[pos + 1] & 0xff);
+            double real = signedSamples ? buffer[pos] : (buffer[pos] & 0xff);
+            double imag = signedSamples ? buffer[pos + 1] : (buffer[pos + 1] & 0xff);
             audioRawRtlDcI += dcRate * (real - audioRawRtlDcI);
             audioRawRtlDcQ += dcRate * (imag - audioRawRtlDcQ);
             double iSample = (real - audioRawRtlDcI) * rawScale;
@@ -4229,6 +4724,13 @@ final class UsbSandbox {
         stopPreviewThread(700L);
         UsbDeviceConnection connection = activeConnection;
         UsbInterface usbInterface = activeInterface;
+        if (activeReceiverKind == ActiveUsbReceiverKind.HACKRF && connection != null) {
+            try {
+                hackRfSetTransceiverMode(HackRfOtgProtocol.TRANSCEIVER_MODE_OFF);
+            } catch (RuntimeException ignored) {
+                // Disconnect/teardown can race Android's USB stack; release below is still required.
+            }
+        }
         activeReceiverKind = ActiveUsbReceiverKind.NONE;
         rtlBasebandInitialized = false;
         rtlLastSampleRate = 0;
@@ -4273,8 +4775,12 @@ final class UsbSandbox {
         return false;
     }
 
+    private boolean isHackRfCandidate(UsbDevice device) {
+        return HackRfOtgProtocol.isSupportedDevice(device.getVendorId(), device.getProductId());
+    }
+
     private boolean isKnownReceiverCandidate(UsbDevice device) {
-        return isFobosCandidate(device) || isRtlSdrCandidate(device);
+        return isFobosCandidate(device) || isRtlSdrCandidate(device) || isHackRfCandidate(device);
     }
 
     private int devicePriority(UsbDevice device) {
@@ -4286,7 +4792,22 @@ final class UsbSandbox {
             if (isFobosCandidate(device)) {
                 return 1;
             }
+            if (isHackRfCandidate(device)) {
+                return 2;
+            }
             return 2;
+        }
+        if (target == USB_TARGET_HACKRF) {
+            if (isHackRfCandidate(device)) {
+                return 0;
+            }
+            if (isFobosCandidate(device)) {
+                return 1;
+            }
+            if (isRtlSdrCandidate(device)) {
+                return 2;
+            }
+            return 3;
         }
         if (target == USB_TARGET_FOBOS) {
             if (isFobosCandidate(device)) {
@@ -4294,6 +4815,9 @@ final class UsbSandbox {
             }
             if (isRtlSdrCandidate(device)) {
                 return 1;
+            }
+            if (isHackRfCandidate(device)) {
+                return 2;
             }
             return 2;
         }
@@ -4303,7 +4827,10 @@ final class UsbSandbox {
         if (isRtlSdrCandidate(device)) {
             return 1;
         }
-        return 2;
+        if (isHackRfCandidate(device)) {
+            return 2;
+        }
+        return 3;
     }
 
     private String receiverKindLabel(UsbDevice device) {
@@ -4312,6 +4839,9 @@ final class UsbSandbox {
         }
         if (isRtlSdrCandidate(device)) {
             return "RTL-SDR";
+        }
+        if (isHackRfCandidate(device)) {
+            return "HackRF";
         }
         return "USB";
     }
@@ -4322,6 +4852,9 @@ final class UsbSandbox {
         }
         if (target == USB_TARGET_FOBOS) {
             return "Fobos";
+        }
+        if (target == USB_TARGET_HACKRF) {
+            return "HackRF";
         }
         return "Auto";
     }
@@ -4355,7 +4888,8 @@ final class UsbSandbox {
                 formatWord(device.getProductId()),
                 safeVersion(device),
                 isFobosCandidate(device) ? " (Fobos)" :
-                        (isRtlSdrCandidate(device) ? " (RTL-SDR)" : ""));
+                        (isRtlSdrCandidate(device) ? " (RTL-SDR)" :
+                                (isHackRfCandidate(device) ? " (HackRF)" : "")));
     }
 
     private String safeVersion(UsbDevice device) {

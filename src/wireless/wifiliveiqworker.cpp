@@ -245,6 +245,8 @@ void WifiLiveIqWorker::readOutput() {
             }
         } else if (event.value(QStringLiteral("pcap_limit_reached")).toBool()) {
             emit message(QStringLiteral("PCAP file limit reached; live packets continue."));
+        } else if (event.value(QStringLiteral("packet_bus_ready")).isString()) {
+            emit packetBusReady(event.value(QStringLiteral("packet_bus_ready")).toString());
         } else if (event.contains(QStringLiteral("packet_bus_error"))) {
             emit message(QStringLiteral("Wireshark live bridge unavailable: ")
                          + event.value(QStringLiteral("packet_bus_error")).toString());

@@ -51,11 +51,15 @@ WifiPhyWidget::WifiPhyWidget(bool uk, QWidget *parent) : QWidget(parent), ukrain
                 const QFileInfo info(path);
                 if (info.suffix().compare(QStringLiteral("iq8"), Qt::CaseInsensitive) == 0)
                     format->setCurrentText(QStringLiteral("cs8"));
+                if (info.suffix().compare(QStringLiteral("cs16"), Qt::CaseInsensitive) == 0)
+                    format->setCurrentText(QStringLiteral("cs16"));
                 for (const auto &sidecar : {path + ".json", info.dir().filePath(info.completeBaseName() + ".json")}) {
                     QFile file(sidecar); if (!file.open(QIODevice::ReadOnly) || file.size() > 262144) continue;
                     const auto object = QJsonDocument::fromJson(file.readAll()).object();
                     if (object.value("format").toString() == QStringLiteral("full_iq_raw_s8_interleaved"))
                         format->setCurrentText(QStringLiteral("cs8"));
+                    if (object.value("format").toString() == QStringLiteral("full_iq_raw_s16le_interleaved"))
+                        format->setCurrentText(QStringLiteral("cs16"));
                     const double rate = object.value("sampleRate").toDouble(object.value("sampleRateHz").toDouble());
                     const double frequency = object.value("centerFrequency").toDouble(object.value("centerFrequencyHz").toDouble());
                     if (rate > 0) sampleRate->setValue(rate / 1e6);
@@ -192,6 +196,7 @@ WifiPhyWidget::WifiPhyWidget(bool uk, QWidget *parent) : QWidget(parent), ukrain
     connect(liveWorker, &WifiLiveIqWorker::finished, this, [this](bool successful, const QString &message) {
         const bool wasActive = liveActive;
         liveActive = liveStarting = liveStopping = false;
+        liveDescriptor.clear();
         if (wasActive) emit liveActiveChanged(false);
         openButton->setEnabled(QFileInfo(result).size() > 24);
         status->setText(successful ? text("Live capture complete.", "Живе захоплення завершено.") :
@@ -199,6 +204,11 @@ WifiPhyWidget::WifiPhyWidget(bool uk, QWidget *parent) : QWidget(parent), ukrain
         updateLiveButtons();
     });
     connect(liveWorker, &WifiLiveIqWorker::packetRow, this, &WifiPhyWidget::livePacketRow);
+    connect(liveWorker, &WifiLiveIqWorker::packetBusReady, this, [this](const QString &descriptor) {
+        if (!liveActive && !liveStarting) return;
+        liveDescriptor = descriptor;
+        log->appendPlainText(text("Wireshark live capture is ready.", "Живе захоплення у Wireshark готове."));
+    });
     connect(liveWorker, &WifiLiveIqWorker::phyStats, this, &WifiPhyWidget::showPhyStats);
     connect(liveWorker, &WifiLiveIqWorker::message, this, [this](const QString &message) {
         log->appendPlainText(message);
@@ -315,6 +325,7 @@ void WifiPhyWidget::startLive() {
         QStringLiteral("--channel"), QString::number(selectedChannel, 'g', 15),
         QStringLiteral("--threshold"), QString::number(threshold->value(), 'g', 5)};
     if (phyMode->currentIndex() == 1) arguments << QStringLiteral("--extended-phy");
+    liveDescriptor.clear();
     liveStarting = true;
     updateLiveButtons();
     status->setText(text("Starting live PHY...", "Запуск живого PHY..."));

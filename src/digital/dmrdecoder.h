@@ -74,6 +74,7 @@ public:
                      int ambeLayout = DMR_DEFAULT_AMBE_LAYOUT);
     void setLiveTimingHint(bool enabled, double phaseFraction, double confidence);
     void setVoicePayloadEnabled(bool enabled) { voicePayloadEnabled = enabled; }
+    void setPrivacyIndicatorValidator(bool (*validator)(const QString &)) { privacyIndicatorValidator = validator; }
     Result processPcmFrame(const QByteArray &pcmData, int sampleRate, double rfFrequencyHz = 0.0);
 
     struct SyncPattern {
@@ -229,7 +230,8 @@ private:
     void scanAndForwardDataBursts();
     bool queueDataBurstForBackend(const SyncHit &hit,
                                   const SlotTypeInfo &slotType,
-                                  const CachInfo &cach);
+                                  const CachInfo &cach,
+                                  quint64 *failedPiSample = nullptr);
     void scheduleVoiceEmbBursts(const SyncHit &hit, const CachInfo &anchorCach);
     void processPendingVoiceEmb();
     bool measureSyncLevels(const SyncHit &hit, float &minLevel, float &maxLevel) const;
@@ -382,6 +384,8 @@ private:
     QString lockedPatternName;
     quint64 lastVoiceEmbAnchorSample = 0;
     quint64 lastForwardedDataBurstSample = 0;
+    quint64 nextPrivacyIndicatorSample = 0;
+    bool (*privacyIndicatorValidator)(const QString &) = nullptr;
     std::deque<float> sampleBuffer;
     std::deque<PendingEmb> pendingVoiceEmb;
     std::deque<VoiceEmbeddedFrame> voiceEmbeddedFrames;

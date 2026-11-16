@@ -51,6 +51,7 @@ if (Test-Path -LiteralPath $LegacyExecutable) {
 
 $RootFiles = @(
     @{ Source = Join-Path $BuildPath "ObriiSDR.exe"; Name = "ObriiSDR.exe" },
+    @{ Source = Join-Path $BuildPath "ObriiFobosFirmware.exe"; Name = "ObriiFobosFirmware.exe" },
     @{ Source = Join-Path $BuildPath "ObriiAnalyzer.exe"; Name = "ObriiAnalyzer.exe" },
     @{ Source = Join-Path $BuildPath "ObriiFpgaLab.exe"; Name = "ObriiFpgaLab.exe" },
     @{ Source = Join-Path $BuildPath "ObriiIqHub.exe"; Name = "ObriiIqHub.exe" },
@@ -123,6 +124,7 @@ foreach ($File in $RootFiles) {
 }
 
 $HackRfRuntimeSource = Join-Path $Workspace "third_party\runtime\hackrf\windows-x64"
+& (Join-Path $PSScriptRoot 'package_fobos_firmware.ps1') -RuntimeDir $DeployDir
 if (Test-Path -LiteralPath (Join-Path $HackRfRuntimeSource "hackrf.dll")) {
     $HackRfDeployPath = Join-Path $DeployPath "hackrf"
     New-Item -ItemType Directory -Path $HackRfDeployPath -Force | Out-Null
@@ -152,6 +154,22 @@ if (-not (Test-Path -LiteralPath $QWindows)) {
     throw "Qt platform plugin not found: $QWindows"
 }
 Copy-Item -LiteralPath $QWindows -Destination (Join-Path $DeployPath "platforms\qwindows.dll") -Force
+
+$WindowsStyle = Join-Path $QtRoot "plugins\styles\qwindowsvistastyle.dll"
+if (Test-Path -LiteralPath $WindowsStyle -PathType Leaf) {
+    $StylesPath = Join-Path $DeployPath "styles"
+    New-Item -ItemType Directory -Path $StylesPath -Force | Out-Null
+    Copy-Item -LiteralPath $WindowsStyle -Destination $StylesPath -Force
+}
+if ([IO.Path]::GetFullPath($BuildPath) -ne [IO.Path]::GetFullPath($DeployPath)) {
+    foreach ($Name in @('qcleanlooksstyle.dll', 'qmotifstyle.dll', 'qplastiquestyle.dll')) {
+        $SourceStyle = Join-Path $BuildPath "styles/$Name"
+        if (Test-Path -LiteralPath $SourceStyle -PathType Leaf) {
+            New-Item -ItemType Directory -Path (Join-Path $DeployPath 'styles') -Force | Out-Null
+            Copy-Item -LiteralPath $SourceStyle -Destination (Join-Path $DeployPath "styles/$Name") -Force
+        }
+    }
+}
 
 $ImageFormatPlugins = @(
     "qgif.dll",
@@ -268,7 +286,7 @@ $ReleaseDocFiles = @(
     "docs\cli_scan_example.json",
     "docs\cli_iq_trigger_example.json",
     "docs\multi_sdr_architecture.md",
-    "docs\usrp_b210_plan.md"
+    "docs\usrp_b210_setup.md"
 )
 foreach ($DocFile in $ReleaseDocFiles) {
     $DocPath = Join-Path $Workspace $DocFile
@@ -308,11 +326,16 @@ if (Test-Path -LiteralPath (Join-Path $WiresharkPath 'wireshark.exe')) {
 $LicensePath = Join-Path $Workspace "licenses"
 if (Test-Path -LiteralPath $LicensePath) {
     $DeployLicensePath = Join-Path $DeployPath "licenses"
-    if (Test-Path -LiteralPath $DeployLicensePath) {
-        Remove-Item -LiteralPath $DeployLicensePath -Recurse -Force
-    }
     New-Item -ItemType Directory -Path $DeployLicensePath -Force | Out-Null
     Copy-Item -Path (Join-Path $LicensePath "*") -Destination $DeployLicensePath -Recurse -Force
+}
+if ([IO.Path]::GetFullPath($BuildPath) -ne [IO.Path]::GetFullPath($DeployPath)) {
+    foreach ($Name in @('LICENSE.LGPL-2.1.txt', 'LGPL_EXCEPTION.txt', 'qtstyleplugins-335dbece-source.tar.gz')) {
+        $StyleNotice = Join-Path $BuildPath "licenses/qt-styleplugins/$Name"
+        if (Test-Path -LiteralPath $StyleNotice -PathType Leaf) {
+            Copy-Item -LiteralPath $StyleNotice -Destination (Join-Path $DeployPath "licenses/qt-styleplugins/$Name") -Force
+        }
+    }
 }
 
 $DsdNeoExtractPath = Join-Path $Workspace "downloads\dsd-neo\extracted"

@@ -151,6 +151,30 @@ bool hasValidUbxChecksum(const QByteArray &frame) {
            ckB == static_cast<quint8>(frame.at(frame.size() - 1));
 }
 
+namespace {
+constexpr quint32 ItfmEnableBit = quint32(1) << 31;
+}
+
+std::optional<bool> ubxItfmEnabled(const QByteArray &config) {
+    if (config.size() != 8) return std::nullopt;
+    return (ubxU4(config, 0) & ItfmEnableBit) != 0;
+}
+
+QByteArray ubxItfmWithEnabled(const QByteArray &config, bool enabled) {
+    if (config.size() != 8) return {};
+    auto result = config;
+    const quint32 word = ubxU4(config, 0);
+    ubxPutU4(result, 0, enabled ? word | ItfmEnableBit : word & ~ItfmEnableBit);
+    return result;
+}
+
+std::optional<UbxInterferenceStatus> parseUbxMonHw(const QByteArray &payload) {
+    if (payload.size() != 60) return std::nullopt;
+    const auto byte = [&](int offset) { return static_cast<quint8>(payload.at(offset)); };
+    return UbxInterferenceStatus{(byte(22) >> 2) & 3, byte(45), ubxU2(payload, 16),
+                                 ubxU2(payload, 18), byte(20), byte(21)};
+}
+
 QString ubxGnssSystemName(quint8 gnssId) {
     switch (gnssId) {
     case 0:

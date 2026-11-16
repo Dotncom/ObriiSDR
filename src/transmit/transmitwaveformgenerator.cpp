@@ -385,6 +385,7 @@ double TransmitWaveformGenerator::audioLowPassCutoffHz(
     case TxModulation::Qpsk:
     case TxModulation::Rtty:
     case TxModulation::Dmr:
+    case TxModulation::M17Voice:
         return 0.0;
     }
     return 0.0;
@@ -409,6 +410,7 @@ QString TransmitWaveformGenerator::modulationName(TxModulation modulation) {
     case TxModulation::Qpsk: return QStringLiteral("QPSK (raw frame)");
     case TxModulation::Rtty: return QStringLiteral("RTTY 45.45 / ITA2");
     case TxModulation::Dmr: return QStringLiteral("DMR voice (Tier II direct)");
+    case TxModulation::M17Voice: return QStringLiteral("M17 voice (Codec2 3200)");
     }
     return QStringLiteral("Unknown");
 }
@@ -538,6 +540,7 @@ QVector<std::complex<float>> TransmitWaveformGenerator::modulateAudio(
         case TxModulation::Qpsk:
         case TxModulation::Rtty:
         case TxModulation::Dmr:
+        case TxModulation::M17Voice:
             result[i] = std::complex<float>(0.0f, 0.0f);
             break;
         }

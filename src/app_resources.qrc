@@ -8,4 +8,7 @@
     <qresource prefix="/splash">
         <file alias="obrii.png">../packaging/splash/obrii.png</file>
     </qresource>
+    <qresource prefix="/i18n">
+        <file alias="translations.json">../translations.json</file>
+    </qresource>
 </RCC>

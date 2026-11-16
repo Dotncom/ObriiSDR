@@ -24,6 +24,8 @@ public:
     void appendLiveIq(const QByteArray &iq, double sampleRateHz,
                       double centerFrequencyHz, int sampleCount);
     bool isLiveActive() const { return liveActive; }
+    bool isLiveStarting() const { return liveStarting; }
+    QString livePacketBusDescriptor() const { return liveDescriptor; }
     void setCaptureBusy(bool busy);
 signals:
     void captureReady(const QString &path);
@@ -55,6 +57,7 @@ private:
     bool liveAvailable = false, liveActive = false, liveStarting = false,
          liveStopping = false, captureBusy = false;
     QString result;
+    QString liveDescriptor;
     QByteArray processOutputBuffer;
     WifiPhyDiagnostics filePhyDiagnostics;
 };

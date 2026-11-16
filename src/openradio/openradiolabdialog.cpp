@@ -4,18 +4,21 @@
 #include "ax25afsk1200.h"
 #include "ax25livedecoder.h"
 #include "kisscodec.h"
+#include "kissvirtualtx.h"
 #include "m17adapter.h"
 #include "openradiobackend.h"
 #include "openradioprotocol.h"
 #include "virtualsignalframe.h"
 
 #include <QComboBox>
+#include <QCheckBox>
 #include <QAbstractItemView>
 #include <QDateTime>
 #include <QFile>
 #include <QFileDialog>
 #include <QSaveFile>
 #include <QDialogButtonBox>
+#include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QHBoxLayout>
@@ -160,6 +163,50 @@ QWidget *OpenRadioLabDialog::createAx25Page() {
     layout->addLayout(kissControls);
     kissStatus = new QLabel(text("RX only; select FM audio and start receiver", "Лише RX; оберіть FM-аудіо й запустіть приймач"), page);
     layout->addWidget(kissStatus);
+    auto *txControls = new QHBoxLayout();
+    kissTxEnabled = new QCheckBox(text("Enable virtual TX", "Увімкнути віртуальну передачу"), page);
+    kissTxEnabled->setEnabled(false);
+    kissTxChannel = new QLineEdit(QStringLiteral("obrii-virtual-iq"), page);
+    kissTxChannel->setMaxLength(128);
+    kissTxCenter = new QDoubleSpinBox(page);
+    kissTxCenter->setRange(0.1, 7250.0);
+    kissTxCenter->setDecimals(6);
+    kissTxCenter->setValue(144.8);
+    kissTxCenter->setSuffix(QStringLiteral(" MHz"));
+    txControls->addWidget(kissTxEnabled);
+    txControls->addWidget(new QLabel(text("IQ channel", "Канал IQ"), page));
+    txControls->addWidget(kissTxChannel);
+    txControls->addWidget(kissTxCenter);
+    layout->addLayout(txControls);
+    kissTxStatus = new QLabel(page);
+    kissTxStatus->setWordWrap(true);
+    layout->addWidget(kissTxStatus);
+    kissTx = new KissVirtualTx(this);
+    connect(kissTxEnabled, &QCheckBox::toggled, this, [this](bool enabled) {
+        for (auto &decoder : kissClients) decoder.reset();
+        kissTxChannel->setEnabled(!enabled);
+        kissTxCenter->setEnabled(!enabled);
+        if (!enabled) {
+            kissTx->disable();
+            kissTxStatus->clear();
+            return;
+        }
+        const QString channel = kissTxChannel->text().trimmed();
+        if (channel.isEmpty()) {
+            kissTxEnabled->setChecked(false);
+            kissTxStatus->setText(text("Enter a local IQ channel name", "Введіть назву локального каналу IQ"));
+            return;
+        }
+        kissTx->enable(channel, kissTxCenter->value() * 1e6);
+        kissTxStatus->setText(text("Waiting for KISS data on port 0", "Очікування кадрів KISS на порту 0"));
+    });
+    connect(kissTx, &KissVirtualTx::sent, this, [this](int bytes) {
+        kissTxStatus->setText(text("Published to virtual IQ: %1 bytes", "Передано у віртуальний IQ: %1 байтів").arg(bytes));
+    });
+    connect(kissTx, &KissVirtualTx::failed, this, [this](const QString &error) {
+        kissTxEnabled->setChecked(false);
+        kissTxStatus->setText(error);
+    });
     axHex = new QPlainTextEdit(page);
     axHex->setPlaceholderText(text("Encoded bytes", "Закодовані байти"));
     layout->addWidget(axHex);
@@ -178,6 +225,9 @@ void OpenRadioLabDialog::submitAfskAudioFrame(const QByteArray &pcmData, int sam
 
 void OpenRadioLabDialog::toggleKissReceiver() {
     if (kissServer) {
+        kissTxEnabled->setChecked(false);
+        kissTxEnabled->setEnabled(false);
+        kissClients.clear();
         kissServer->close();
         kissServer->deleteLater();
         kissServer = nullptr;
@@ -203,7 +253,7 @@ void OpenRadioLabDialog::toggleKissReceiver() {
         kiss.payload = ax25;
         const QByteArray wire = KissCodec::encode(kiss);
         int sent = 0;
-        for (QTcpSocket *client : kissServer->findChildren<QTcpSocket *>()) {
+        for (QTcpSocket *client : kissClients.keys()) {
             if (client->state() != QAbstractSocket::ConnectedState) continue;
             if (client->bytesToWrite() > 256 * 1024) { client->disconnectFromHost(); continue; }
             if (client->write(wire) == wire.size()) ++sent;
@@ -219,16 +269,38 @@ void OpenRadioLabDialog::toggleKissReceiver() {
     });
     connect(server, &QTcpServer::newConnection, this, [this, server] {
         while (QTcpSocket *client = server->nextPendingConnection()) {
-            QObject::connect(client, &QTcpSocket::readyRead, client, [client] {
-                client->readAll(); // TX injection is not enabled until linked to an RF/virtual TX path.
+            if (kissClients.size() >= 16) {
+                client->abort();
+                client->deleteLater();
+                continue;
+            }
+            kissClients.insert(client, KissStreamDecoder());
+            client->setReadBufferSize(16 * 1024);
+            const auto consume = [this, client] {
+                const QByteArray bytes = client->readAll();
+                auto decoder = kissClients.find(client);
+                if (decoder == kissClients.end() || !kissTxEnabled->isChecked()) return;
+                QStringList errors;
+                const auto frames = decoder->push(bytes, &errors);
+                for (const auto &frame : frames) {
+                    QString error;
+                    if (!kissTx->enqueue(frame, &error)) errors.append(error);
+                }
+                if (!errors.isEmpty()) kissTxStatus->setText(errors.last());
+            };
+            connect(client, &QTcpSocket::readyRead, this, consume);
+            connect(client, &QTcpSocket::disconnected, this, [this, client] {
+                kissClients.remove(client);
+                client->deleteLater();
             });
-            QObject::connect(client, &QTcpSocket::disconnected, client, &QObject::deleteLater);
+            consume();
         }
     });
     axLiveDecoder->start();
     kissPort->setEnabled(false);
+    kissTxEnabled->setEnabled(true);
     kissToggle->setText(text("Stop live KISS RX", "Зупинити живий KISS RX"));
-    kissStatus->setText(QStringLiteral("127.0.0.1:%1 | RX only").arg(kissPort->value()));
+    kissStatus->setText(QStringLiteral("127.0.0.1:%1").arg(kissPort->value()));
 }
 
 QWidget *OpenRadioLabDialog::createM17Page() {

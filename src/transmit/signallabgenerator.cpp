@@ -23,8 +23,8 @@ bool isPowerOfTwo(int value) {
     return value >= 2 && (value & (value - 1)) == 0;
 }
 
-std::complex<double> constellationPoint(SignalLabConstellation constellation,
-                                        std::mt19937 &random) {
+template <typename Draw>
+std::complex<double> constellationPoint(SignalLabConstellation constellation, Draw &random) {
     switch (constellation) {
     case SignalLabConstellation::Bpsk:
         return (random() & 1U) ? std::complex<double>(1.0, 0.0)
@@ -56,6 +56,27 @@ std::complex<double> constellationPoint(SignalLabConstellation constellation,
     return {1.0, 0.0};
 }
 
+class PayloadBits {
+public:
+    explicit PayloadBits(const QByteArray &bytes) : bytes_(bytes) {}
+    unsigned take(int count) {
+        unsigned value = 0;
+        for (int i = 0; i < count; ++i) {
+            value <<= 1;
+            if (bit_ / 8 < bytes_.size()) {
+                value |= (static_cast<unsigned char>(bytes_.at(bit_ / 8)) >> (7 - bit_ % 8)) & 1U;
+                ++bit_;
+            }
+        }
+        return value;
+    }
+    bool hasBits() const { return bit_ / 8 < bytes_.size(); }
+
+private:
+    const QByteArray &bytes_;
+    int bit_ = 0;
+};
+
 SignalLabConstellation waveformConstellation(SignalLabWaveform waveform) {
     switch (waveform) {
     case SignalLabWaveform::Bpsk: return SignalLabConstellation::Bpsk;
@@ -68,7 +89,9 @@ SignalLabConstellation waveformConstellation(SignalLabWaveform waveform) {
     }
 }
 
-double rootRaisedCosine(double t, double beta) {
+}
+
+double SignalLabGenerator::rootRaisedCosine(double t, double beta) {
     beta = (std::clamp)(beta, 0.01, 1.0);
     const double absT = std::abs(t);
     if (absT < 1.0e-9) {
@@ -86,6 +109,7 @@ double rootRaisedCosine(double t, double beta) {
     return numerator / denominator;
 }
 
+namespace {
 QVector<double> parseToneList(const QString &text, double nyquist) {
     QVector<double> tones;
     const QStringList parts = text.split(QRegExp(QStringLiteral("[,;\\s]+")),
@@ -167,6 +191,16 @@ bool generatePulseShaped(const SignalLabConfiguration &configuration,
             phase *= std::polar(1.0, steps[random() & 3U]);
             symbol = phase;
         }
+    } else if (!configuration.payload.isEmpty()) {
+        const auto constellation = waveformConstellation(configuration.waveform);
+        int bitsPerAxis = 2;
+        if (constellation == SignalLabConstellation::Bpsk) bitsPerAxis = 1;
+        if (constellation == SignalLabConstellation::Psk8 || constellation == SignalLabConstellation::Qam64) bitsPerAxis = 3;
+        if (constellation == SignalLabConstellation::Qam256) bitsPerAxis = 4;
+        PayloadBits bits(configuration.payload);
+        auto draw = [&]() { return bits.take(bitsPerAxis); };
+        for (int i = 4; i < symbolCount && bits.hasBits(); ++i)
+            symbols[i] = constellationPoint(constellation, draw);
     } else {
         const SignalLabConstellation constellation = waveformConstellation(configuration.waveform);
         for (std::complex<double> &symbol : symbols) {
@@ -183,7 +217,7 @@ bool generatePulseShaped(const SignalLabConfiguration &configuration,
         for (int offset = -span; offset <= span; ++offset) {
             const int index = center + offset;
             if (index < 0 || index >= symbols.size()) continue;
-            const double pulse = rootRaisedCosine(symbolTime - index, configuration.rolloff);
+            const double pulse = SignalLabGenerator::rootRaisedCosine(symbolTime - index, configuration.rolloff);
             value += symbols[index] * pulse;
         }
         result->iq[sample] = {static_cast<float>(value.real()), static_cast<float>(value.imag())};
@@ -204,6 +238,7 @@ bool generateFsk(const SignalLabConfiguration &configuration,
         static_cast<double>(configuration.sampleRate) / configuration.symbolRate)));
     const double actualRate = static_cast<double>(configuration.sampleRate) / samplesPerSymbol;
     std::mt19937 random(configuration.randomSeed);
+    PayloadBits bits(configuration.payload);
     double target = (random() & 1U) ? 1.0 : -1.0;
     double shaped = target;
     double phase = 0.0;
@@ -215,7 +250,11 @@ bool generateFsk(const SignalLabConfiguration &configuration,
                              : 1.0;
     result->iq.resize(sampleCount);
     for (int sample = 0; sample < sampleCount; ++sample) {
-        if ((sample % samplesPerSymbol) == 0) target = (random() & 1U) ? 1.0 : -1.0;
+        if ((sample % samplesPerSymbol) == 0) {
+            const unsigned bit = configuration.payload.isEmpty() ? (random() & 1U) : bits.take(1);
+            target = bit ? 1.0 : -1.0;
+            if (sample == 0 && !configuration.payload.isEmpty()) shaped = target;
+        }
         shaped += alpha * (target - shaped);
         phase += 2.0 * kPi * configuration.fskDeviationHz * shaped /
                  configuration.sampleRate;
@@ -407,22 +446,21 @@ bool generateOfdm(const SignalLabConfiguration &configuration,
     result->occupiedBandwidthHz = static_cast<double>(active) * configuration.sampleRate / fftSize;
     return true;
 }
+
+qint64 matchableSymbolCount(const SignalLabGenerationResult &result) {
+    if (!result.ok() || result.samplesPerSymbol < 2 || result.sampleRate <= 0 ||
+        !std::isfinite(result.pulseRolloff) || !std::isfinite(result.centerOffsetHz)) return 0;
+    return std::max<qint64>(0, (result.iq.size() - 1) / qint64(result.samplesPerSymbol) - 7);
 }
 
-QVector<std::complex<float>> SignalLabGenerator::matchedSymbols(
-    const SignalLabGenerationResult &result, int maximumPoints, QVector<int> *sampleIndices) {
+QVector<std::complex<float>> matchSymbolRange(const SignalLabGenerationResult &result,
+    qint64 first, qint64 count, qint64 symbolStep, QVector<int> *sampleIndices = nullptr) {
     QVector<std::complex<float>> symbols;
-    if (sampleIndices) sampleIndices->clear();
-    if (!result.ok() || result.samplesPerSymbol < 2 || result.sampleRate <= 0 ||
-        !std::isfinite(result.pulseRolloff) || !std::isfinite(result.centerOffsetHz)) return symbols;
+    if (count <= 0) return symbols;
+    symbols.reserve(int((count + symbolStep - 1) / symbolStep));
     constexpr qint64 span = 4;
     const qint64 sps = result.samplesPerSymbol;
-    const qint64 firstCenter = span * sps;
-    const qint64 lastCenter = result.iq.size() - 1 - span * sps;
-    if (firstCenter > lastCenter) return symbols;
-    maximumPoints = (std::clamp)(maximumPoints, 1, 2500);
-    const qint64 count = (lastCenter - firstCenter) / sps + 1;
-    const qint64 symbolStep = (std::max<qint64>)(1, (count + maximumPoints - 1) / maximumPoints);
+    const qint64 firstCenter = (span + first) * sps;
     // Oversampled, derotated baseband is band-limited. Sampling the matched
     // pulse at up to 64 points/symbol bounds preview work even at gigasample rates.
     const qint64 sampleStep = (std::max<qint64>)(1, (sps + 63) / 64);
@@ -430,7 +468,7 @@ QVector<std::complex<float>> SignalLabGenerator::matchedSymbols(
     QVector<std::complex<double>> taps(halfTaps * 2 + 1);
     for (int tap = -halfTaps; tap <= halfTaps; ++tap) {
         const qint64 offset = tap * sampleStep;
-        const double pulse = rootRaisedCosine(double(offset) / sps, result.pulseRolloff);
+        const double pulse = SignalLabGenerator::rootRaisedCosine(double(offset) / sps, result.pulseRolloff);
         const double phase = -2.0 * kPi * result.centerOffsetHz * offset / result.sampleRate;
         taps[tap + halfTaps] = (pulse * sampleStep / sps) * std::polar(1.0, phase);
     }
@@ -447,6 +485,23 @@ QVector<std::complex<float>> SignalLabGenerator::matchedSymbols(
         if (sampleIndices) sampleIndices->append(static_cast<int>(center));
     }
     return symbols;
+}
+}
+
+QVector<std::complex<float>> SignalLabGenerator::matchedSymbols(
+    const SignalLabGenerationResult &result, int maximumPoints, QVector<int> *sampleIndices) {
+    if (sampleIndices) sampleIndices->clear();
+    maximumPoints = std::clamp(maximumPoints, 1, 2500);
+    const qint64 count = matchableSymbolCount(result);
+    const qint64 step = std::max<qint64>(1, (count + maximumPoints - 1) / maximumPoints);
+    return matchSymbolRange(result, 0, count, step, sampleIndices);
+}
+
+QVector<std::complex<float>> SignalLabGenerator::matchedSymbolBlock(
+    const SignalLabGenerationResult &result, int firstSymbol, int symbolCount) {
+    if (firstSymbol < 0 || symbolCount < 1 ||
+        qint64(firstSymbol) + symbolCount > matchableSymbolCount(result)) return {};
+    return matchSymbolRange(result, firstSymbol, symbolCount, 1);
 }
 
 QString SignalLabGenerator::waveformName(SignalLabWaveform waveform) {

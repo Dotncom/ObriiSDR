@@ -2,6 +2,8 @@
 #include "fobosreceivercore.h"
 #include "iqbuffer.h"
 #include "iq8quantizer.h"
+#include "fulliqrecordingencoder.h"
+#include "atviqworker.h"
 #include "dspiqsourceregistry.h"
 #include "channelizerutils.h"
 #include "diagnosticlogging.h"
@@ -273,6 +275,11 @@ DataProcessor::DataProcessor(QObject *parent)
       activeStreamDescriptor(),
       zoomProcessor(std::make_shared<ZoomSpectrumProcessor>()),
       totalCallbackCounter(0) {
+    atvIqWorker = std::make_unique<AtvIqWorker>(
+        [this](const QByteArray &data, double rate, int count) {
+            if (!iqFrameBudget->reserve(data.size(), count)) return;
+            emit iqFrameReady(data, rate, count, true, monotonicNowNs());
+        }, [this](std::uint64_t samples) { emit atvIqDiscontinuity(samples); });
 }
 
 DataProcessor::~DataProcessor() {
@@ -281,6 +288,7 @@ DataProcessor::~DataProcessor() {
         forceStop(1000);
     }
     finalizeStopped();
+    atvIqWorker.reset();
 }
 
 void DataProcessor::startProcessing(void *device,
@@ -338,6 +346,7 @@ void DataProcessor::startProcessing(const ReceiverStreamDescriptor &stream) {
     activeBackendId = stream.backendId;
     activeBackendName = stream.backendName;
     activeStreamDescriptor = stream;
+    uhdStreamReady_.store(false, std::memory_order_release);
     const uint64_t streamEpoch = iqRetuneEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
     requestedSampleRate = stream.sampleRateHz;
     requestedCenterFrequency = stream.centerFrequencyHz;
@@ -475,6 +484,14 @@ void DataProcessor::run() {
         runVirtualSignalReader(readerStream);
         return;
     }
+#ifdef __linux__
+    if (readerStreamKind == ReceiverBackendStreamKind::FobosStandard) {
+        // A raw IQ pair occupies four bytes. Keep every read a multiple of the
+        // 1024-byte SuperSpeed packet so a full packet fits at the end of the read.
+        constexpr uint32_t samplesPerUsbPacket = 1024 / 4;
+        readBlockSamples -= readBlockSamples % samplesPerUsbPacket;
+    }
+#endif
     if (readerApiKind == FobosApiKind::Agile && requestedAgileScanEnabled.load()) {
         readBlockSamples = (std::max)(readBlockSamples, MIN_SYNC_BLOCK_SAMPLES);
     }
@@ -615,8 +632,8 @@ void DataProcessor::run() {
                 }
             }
             updateStreamDiagnostics(syncBuffer.data(), actual_buf_length, "sync");
-            if (requestedEmitIqFrames.load() || requestedWifiIqFrames.load()) {
-                emitIqFrame(syncBuffer.data(), floatCount);
+            if (requestedEmitIqFrames.load() || requestedWifiIqFrames.load() || requestedFullIqRecording.load() || requestedAtvIqFrames.load()) {
+                emitIqFrame(syncBuffer.data(), floatCount, readEpoch);
             }
             accumulatedPublishMs += publishTimer.elapsed();
 
@@ -1082,20 +1099,60 @@ void DataProcessor::runSoapySdrReader(const ReceiverStreamDescriptor &stream, ui
     running = false;
 }
 
+UhdClockStatus DataProcessor::uhdClockStatus() const {
+    QMutexLocker lock(&uhdStatusMutex);
+    return activeUhdClock;
+}
+
+std::shared_ptr<UhdRxSession> DataProcessor::sharedUhdTxSession(int deviceIndex) const {
+    QMutexLocker lock(&uhdStatusMutex);
+    return running.load() && deviceIndex == activeUhdDuplexDevice ? activeUhdDuplexSession : nullptr;
+}
+
+void DataProcessor::setUhdGnssPollingEnabled(bool enabled) {
+    QMutexLocker lock(&uhdStatusMutex);
+    uhdGnssPollingEnabled.store(enabled);
+    if (!enabled) activeUhdGnss = {};
+}
+
+UhdGnssStatus DataProcessor::uhdGnssStatus() const {
+    QMutexLocker lock(&uhdStatusMutex);
+    return activeUhdGnss;
+}
+
 void DataProcessor::runUhdNativeReader(const ReceiverStreamDescriptor &stream, uint32_t blockSamples) {
-    UhdRxSession session;
+    const auto publishClock = [this](const UhdClockStatus &status) {
+        QMutexLocker lock(&uhdStatusMutex);
+        activeUhdClock = status;
+    };
+    publishClock({});
+    auto sessionOwner = std::make_shared<UhdRxSession>();
+    auto &session = *sessionOwner;
     QString error;
     const double logicalCenter = requestedCenterFrequency.load() > 0.0
                                      ? requestedCenterFrequency.load() : stream.centerFrequencyHz;
-    if (!session.open(stream.uhdNativeDeviceIndex, stream.uhdRxChannel,
+    const int duplexChannel = stream.uhdDuplexEnabled ? stream.uhdRxChannel : -1;
+    const std::vector<UhdRxChannelSettings> channels{{stream.uhdRxChannel, stream.uhdRxGainDb, stream.uhdRxAntenna}};
+    if (!session.open(stream.uhdNativeDeviceIndex, channels,
                       stream.sampleRateHz, logicalCenter + frequencyCalibrationOffsetHz.load(),
-                      stream.uhdRxGainDb, stream.uhdRxAntenna, stream.uhdFpgaImagePath, &error)) {
+                      stream.uhdFpgaImagePath, &error, duplexChannel,
+                      stream.uhdClockSource, stream.uhdGnssBaud)) {
         qWarning().noquote() << "[UHD]" << error;
         if (running.load()) emit readerFailed(UHD_NATIVE_ERR_OPEN, false);
         running = false;
         return;
     }
+    // The reader's session destructor handles a Stop received during synchronous open.
+    if (!running.load()) {
+        setUhdGnssPollingEnabled(false);
+        return;
+    }
     activeDevice = &session;
+    if (stream.uhdDuplexEnabled) {
+        QMutexLocker lock(&uhdStatusMutex);
+        activeUhdDuplexDevice = stream.uhdNativeDeviceIndex;
+        activeUhdDuplexSession = sessionOwner;
+    }
     IqBuffer::setSampleRateEstimate(stream.sampleRateHz);
     asyncMeasuredSamples = 0;
     asyncCallbackCounter = 0;
@@ -1103,17 +1160,51 @@ void DataProcessor::runUhdNativeReader(const ReceiverStreamDescriptor &stream, u
     asyncRateTimer.restart();
     std::vector<float> iq(static_cast<std::size_t>((std::max)(blockSamples, MIN_ASYNC_BLOCK_SAMPLES)) * 2);
     double appliedCenter = logicalCenter;
+    QElapsedTimer clockPoll;
+    QElapsedTimer gnssPoll;
+    const bool profileReads = fobosVerboseLoggingEnabled();
+    QElapsedTimer readTimer;
+    qint64 previousReadEndNs = -1;
+    qint64 maximumReadPauseNs = 0;
+    uint64_t receivedSamples = 0;
+    if (profileReads) readTimer.start();
+    uhdStreamReady_.store(true, std::memory_order_release);
     while (running.load()) {
+        if (!clockPoll.isValid() || clockPoll.hasExpired(1000)) {
+            publishClock(session.clockStatus());
+            clockPoll.start();
+        }
+        if (uhdGnssPollingEnabled.load(std::memory_order_relaxed)) {
+            if (!gnssPoll.isValid() || gnssPoll.hasExpired(100)) {
+                session.requestGnssStatus();
+                const auto status = session.gnssStatus();
+                QMutexLocker lock(&uhdStatusMutex);
+                if (uhdGnssPollingEnabled.load(std::memory_order_relaxed) &&
+                    status.state != QLatin1String("polling")) {
+                    activeUhdGnss = status;
+                }
+                gnssPoll.start();
+            }
+        } else if (gnssPoll.isValid()) {
+            gnssPoll.invalidate();
+        }
         const double nextCenter = requestedCenterFrequency.load();
         if (nextCenter > 0.0 && std::abs(nextCenter - appliedCenter) > 0.5) {
-            if (!session.retune(nextCenter + frequencyCalibrationOffsetHz.load(), &error)) {
+            if (!session.retune(nextCenter + frequencyCalibrationOffsetHz.load(), &error, stream.uhdDuplexEnabled)) {
                 qWarning().noquote() << "[UHD]" << error;
                 emit readerFailed(UHD_NATIVE_ERR_STREAM, false);
                 break;
             }
             appliedCenter = nextCenter;
         }
+        if (profileReads && previousReadEndNs >= 0) {
+            maximumReadPauseNs = (std::max)(maximumReadPauseNs, readTimer.nsecsElapsed() - previousReadEndNs);
+        }
         const int count = session.receive(iq.data(), iq.size() / 2, &error);
+        if (profileReads) {
+            previousReadEndNs = readTimer.nsecsElapsed();
+            if (count > 0) receivedSamples += static_cast<uint64_t>(count);
+        }
         if (count > 0) handleData(iq.data(), static_cast<uint32_t>(count));
         else if (count < 0) {
             if (running.load()) {
@@ -1123,7 +1214,21 @@ void DataProcessor::runUhdNativeReader(const ReceiverStreamDescriptor &stream, u
             break;
         }
     }
+    if (profileReads) {
+        qDebug() << "[UHD RX diagnostics]" << "samples" << receivedSamples
+                 << "elapsedMs" << (std::max)(qint64(0), previousReadEndNs) / 1000000.0
+                 << "overflows" << session.receiveOverflows() << "timeouts" << session.receiveTimeouts()
+                 << "maxReadPauseMs" << maximumReadPauseNs / 1000000.0;
+    }
+    uhdStreamReady_.store(false, std::memory_order_release);
+    if (stream.uhdDuplexEnabled) {
+        QMutexLocker lock(&uhdStatusMutex);
+        activeUhdDuplexSession.reset();
+        activeUhdDuplexDevice = -1;
+    }
     activeDevice = nullptr;
+    setUhdGnssPollingEnabled(false);
+    publishClock({});
     session.close();
     running = false;
 }
@@ -1742,8 +1847,8 @@ void DataProcessor::handleUnsigned8IqData(const unsigned char *buf, uint32_t byt
         }
     }
     updateStreamDiagnostics(floatBuffer.data(), sampleCount, readerMode);
-    if (requestedEmitIqFrames.load() || requestedWifiIqFrames.load()) {
-        emitIqFrame(floatBuffer.data(), floatBuffer.size());
+    if (requestedEmitIqFrames.load() || requestedWifiIqFrames.load() || requestedFullIqRecording.load() || requestedAtvIqFrames.load()) {
+        emitIqFrame(floatBuffer.data(), floatBuffer.size(), callbackEpoch);
     }
 
     const double sampleRate = requestedSampleRate.load();
@@ -1829,8 +1934,8 @@ void DataProcessor::handleData(float *buf, uint32_t buf_length, int agileScanInd
     const qint64 bufferNs = callbackTimer.nsecsElapsed() - beforeBufferNs;
     updateStreamDiagnostics(buf, buf_length, "async");
     const qint64 beforeIqEncodeNs = callbackTimer.nsecsElapsed();
-    if (requestedEmitIqFrames.load() || requestedWifiIqFrames.load()) {
-        emitIqFrame(buf, static_cast<size_t>(buf_length) * FLOATS_PER_IQ_SAMPLE);
+    if (requestedEmitIqFrames.load() || requestedWifiIqFrames.load() || requestedFullIqRecording.load() || requestedAtvIqFrames.load()) {
+        emitIqFrame(buf, static_cast<size_t>(buf_length) * FLOATS_PER_IQ_SAMPLE, callbackEpoch);
     }
     const qint64 workNs = callbackTimer.nsecsElapsed();
     ++asyncProfileCount;
@@ -1904,6 +2009,7 @@ void DataProcessor::handleData(float *buf, uint32_t buf_length, int agileScanInd
 }
 
 void DataProcessor::resetStreamDiagnostics() {
+    fobosIntegrityReportTimer.invalidate();
     streamDiagnosticTimer.invalidate();
     streamDiagnosticLastNs = -1;
     streamDiagnosticCallbacks = 0;
@@ -1930,6 +2036,7 @@ void DataProcessor::resetStreamDiagnostics() {
 void DataProcessor::updateStreamDiagnostics(const float *samples,
                                             uint32_t sampleCount,
                                             const char *readerMode) {
+    updateFobosIntegrityMetrics();
     if (!fobosVerboseLoggingEnabled()) {
         return;
     }
@@ -2102,11 +2209,56 @@ void DataProcessor::updateStreamDiagnostics(const float *samples,
     streamDiagnosticClippedSamples = 0;
 }
 
+void DataProcessor::updateFobosIntegrityMetrics() {
+    if (activeStreamKind != ReceiverBackendStreamKind::FobosAgile) return;
+    if (fobosIntegrityReportTimer.isValid() && fobosIntegrityReportTimer.elapsed() < 250) return;
+    fobosIntegrityReportTimer.start();
+    FobosStreamMetrics m{};
+    // Same receive thread as conversion: no concurrent access to SDK counters.
+    if (getFobosAgileStreamMetricsSafely(static_cast<fobos_sdr_dev_t *>(activeDevice.load()), &m) != FOBOS_ERR_OK ||
+        m.abiVersion != 1 || m.structBytes != sizeof(m)) {
+        emit fobosStreamMetricsReady({{QStringLiteral("utcMs"),QDateTime::currentMSecsSinceEpoch()}});
+        return;
+    }
+    QVariantMap values;
+    values.insert(QStringLiteral("generation"),m.generation);
+    values.insert(QStringLiteral("inspected"),m.componentsInspected);
+    values.insert(QStringLiteral("rails"),m.railComponents);
+    values.insert(QStringLiteral("nearRails"),m.nearRailComponents);
+    values.insert(QStringLiteral("blocks"),m.dmaBlocks);
+    values.insert(QStringLiteral("badHeaders"),m.headerDisagreements);
+    values.insert(QStringLiteral("orderErrors"),m.orderErrors);
+    values.insert(QStringLiteral("iqChanges"),m.iqChangesWithinTransfer);
+    values.insert(QStringLiteral("orientationTransitions"),m.iqOrientationTransitions);
+    values.insert(QStringLiteral("shortTransfers"),m.shortTransfers);
+    values.insert(QStringLiteral("minCode"),m.minCode);
+    values.insert(QStringLiteral("maxCode"),m.maxCode);
+    values.insert(QStringLiteral("modeFlags"),m.modeFlags);
+    values.insert(QStringLiteral("utcMs"),QDateTime::currentMSecsSinceEpoch());
+    values.insert(QStringLiteral("centerHz"),requestedCenterFrequency.load());
+    values.insert(QStringLiteral("epoch"),QVariant::fromValue<qulonglong>(iqRetuneEpoch.load()));
+    unsigned int metadata[32]={};
+    if(getFobosAgileMetadataMetricsSafely(static_cast<fobos_sdr_dev_t *>(activeDevice.load()),metadata,sizeof(metadata))==FOBOS_ERR_OK && metadata[0]==1 && metadata[1]==128) {
+        values.insert(QStringLiteral("metadataEnabled"),metadata[2]!=0);
+        values.insert(QStringLiteral("metadataValid"),metadata[5]);
+        values.insert(QStringLiteral("metadataMissing"),metadata[6]);
+        values.insert(QStringLiteral("metadataCrcErrors"),metadata[7]);
+        values.insert(QStringLiteral("metadataSequenceGaps"),metadata[8]);
+        values.insert(QStringLiteral("metadataReorders"),metadata[9]);
+        values.insert(QStringLiteral("metadataUnstable"),metadata[10]);
+        values.insert(QStringLiteral("metadataRejectedPairs"),QVariant::fromValue<qulonglong>((quint64(metadata[12])<<32)|metadata[11]));
+        values.insert(QStringLiteral("firmwareTuneEpoch"),metadata[14]);
+        values.insert(QStringLiteral("metadataSegments"),metadata[21]);
+    }
+    emit fobosStreamMetricsReady(values);
+}
+
 void DataProcessor::updateNetworkIqSettings(const RadioSettings &settings, bool channelizeFrames) {
     configureNetworkIqStreaming(settings, true, channelizeFrames);
 }
 
-void DataProcessor::configureNetworkIqStreaming(const RadioSettings &settings, bool emitFrames, bool channelizeFrames) {
+void DataProcessor::configureNetworkIqStreaming(const RadioSettings &settings, bool emitFrames, bool channelizeFrames,
+                                               bool atvFrames) {
     bool reset;
     {
         std::lock_guard<std::mutex> lock(networkIqSettingsMutex);
@@ -2123,6 +2275,10 @@ void DataProcessor::configureNetworkIqStreaming(const RadioSettings &settings, b
     }
     const bool wasEnabled = requestedEmitIqFrames.exchange(emitFrames);
     const bool wasChannelized = requestedChannelizeIqFrames.exchange(channelizeFrames);
+    const bool wantAtv = settings.inputMode == INPUT_RF && settings.modulationType == MOD_ATV &&
+                         (atvFrames || (emitFrames && channelizeFrames));
+    atvIqWorker->configure(settings, wantAtv, reset);
+    requestedAtvIqFrames.store(wantAtv, std::memory_order_release);
     if (reset || (!wasEnabled && emitFrames) || wasChannelized != channelizeFrames) {
         networkIqResetRequested = true;
     }
@@ -2130,6 +2286,10 @@ void DataProcessor::configureNetworkIqStreaming(const RadioSettings &settings, b
 
 void DataProcessor::setWifiIqStreamingEnabled(bool enabled) {
     requestedWifiIqFrames.store(enabled, std::memory_order_release);
+}
+
+void DataProcessor::setFullIqRecordingEnabled(bool enabled) {
+    requestedFullIqRecording.store(enabled, std::memory_order_release);
 }
 
 void DataProcessor::resetNetworkIqState() {
@@ -2157,11 +2317,16 @@ void DataProcessor::resetNetworkIqState() {
     networkIqFrameSampleRate = 0.0;
 }
 
-void DataProcessor::emitIqFrame(const float *samples, std::size_t floatCount) {
+void DataProcessor::emitIqFrame(const float *samples, std::size_t floatCount, std::uint64_t sourceEpoch) {
     if (!samples || floatCount == 0 || floatCount > static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
         return;
     }
+    if (sourceEpoch != iqRetuneEpoch.load()) return;
 
+    if (requestedFullIqRecording.load(std::memory_order_acquire))
+        emitFullIqRecordingFrame(samples, floatCount, sourceEpoch);
+    if (sourceEpoch != iqRetuneEpoch.load()) return;
+    if (requestedAtvIqFrames.load(std::memory_order_acquire)) atvIqWorker->push(samples, floatCount);
     const bool regular = requestedEmitIqFrames.load(std::memory_order_acquire);
     const bool wifi = requestedWifiIqFrames.load(std::memory_order_acquire);
     if (!regular && !wifi) return;
@@ -2174,11 +2339,29 @@ void DataProcessor::emitIqFrame(const float *samples, std::size_t floatCount) {
             std::lock_guard<std::mutex> lock(networkIqSettingsMutex);
             settings = networkIqSettings;
         }
-        emitChannelIqFrame(samples, floatCount, settings);
+        if (settings.modulationType != MOD_ATV || settings.inputMode != INPUT_RF)
+            emitChannelIqFrame(samples, floatCount, settings);
         return;
     }
 
     emitFullIqFrame(samples, floatCount);
+}
+
+void DataProcessor::emitFullIqRecordingFrame(const float *samples, std::size_t floatCount, std::uint64_t epoch) {
+    if (floatCount % 2 || floatCount > std::size_t((std::numeric_limits<int>::max)() / 2)) return;
+    const int bytes = int(floatCount * 2);
+    const int count = int(floatCount / 2);
+    const double rate = requestedSampleRate.load();
+    const quint64 firstSample = fullIqRecordingSamples.fetch_add(count, std::memory_order_relaxed);
+    const qint64 utcMs = QDateTime::currentMSecsSinceEpoch();
+    if (!fullIqRecordingBudget->reserve(bytes, count)) return;
+    QByteArray encoded(bytes, Qt::Uninitialized);
+    encodeFullIq16(samples, encoded.data(), floatCount);
+    if (epoch != iqRetuneEpoch.load()) {
+        fullIqRecordingBudget->release(bytes);
+        return; // Never label an old block with the new receiver geometry.
+    }
+    emit fullIqRecordingFrameReady(encoded, rate, count, firstSample, epoch, utcMs);
 }
 
 void DataProcessor::emitFullIqFrame(const float *samples, std::size_t floatCount) {
@@ -3024,6 +3207,9 @@ bool DataProcessor::applyRtlGainSettings(bool agc, int gainTenthsDb) {
 }
 
 void DataProcessor::requestStop() {
+    requestedFullIqRecording.store(false, std::memory_order_release);
+    requestedAtvIqFrames.store(false, std::memory_order_release);
+    if (atvIqWorker) atvIqWorker->configure({}, false, true);
     if (!running.load() && !QThread::isRunning() && activeDevice.load() == nullptr) {
         return;
     }
@@ -3068,26 +3254,24 @@ void DataProcessor::requestStop() {
                     if (fobosVerboseLoggingEnabled() || result != 0) {
                         qDebug() << "[DataProcessor] HackRF async stop" << "result" << result;
                     }
-                } else {
+                } else if (activeStreamKind == ReceiverBackendStreamKind::RtlSdrNative) {
                     bool expected = false;
                     if (asyncCancelRequested.compare_exchange_strong(expected, true)) {
-                        const ReceiverBackendStreamKind streamKind = activeStreamKind;
-                        const FobosApiKind apiKind = activeApiKind.load();
-                        std::thread([readerDevice, streamKind, apiKind]() {
-                            int ret = FOBOS_ERR_OK;
-                            if (streamKind == ReceiverBackendStreamKind::RtlSdrNative) {
-                                ret = cancelRtlSdrAsyncSafely(readerDevice);
-                            } else {
-                                ret = FobosReceiverCore(readerDevice, apiKind).cancelAsync();
-                            }
+                        std::thread([readerDevice]() {
+                            const int ret = cancelRtlSdrAsyncSafely(readerDevice);
                             if (fobosVerboseLoggingEnabled() || ret != FOBOS_ERR_OK) {
-                                qDebug() << "[DataProcessor] async cancel worker finished"
-                                         << "streamKind" << static_cast<int>(streamKind)
-                                         << "result" << ret;
+                                qDebug() << "[DataProcessor] RTL-SDR async cancel" << "result" << ret;
                             }
                         }).detach();
                     } else if (fobosVerboseLoggingEnabled()) {
                         qDebug() << "[DataProcessor] async cancel already requested";
+                    }
+                } else {
+                    // The Fobos APIs only set cancellation flags. The reader sends
+                    // Stop and drains USB. Repeat the request if Start was still pending.
+                    const int ret = FobosReceiverCore(readerDevice, activeApiKind.load()).cancelAsync();
+                    if (fobosVerboseLoggingEnabled() || ret != FOBOS_ERR_OK) {
+                        qDebug() << "[DataProcessor] Fobos async cancel" << "result" << ret;
                     }
                 }
             }
@@ -3118,6 +3302,7 @@ void DataProcessor::finalizeStopped() {
         void *previousDevice = activeDevice.load();
         running = false;
         activeDevice = nullptr;
+        uhdStreamReady_.store(false, std::memory_order_release);
         if (fobosVerboseLoggingEnabled() && (wasRunning || previousDevice)) {
             qDebug() << "[DataProcessor] finalizeStopped: thread is stopped";
         }

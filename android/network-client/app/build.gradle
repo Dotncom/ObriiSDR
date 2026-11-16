@@ -22,8 +22,8 @@ android {
         applicationId 'com.fobosapp.networkclient'
         minSdk 26
         targetSdk 35
-        versionCode 14
-        versionName '8.0.0-android-preview'
+        versionCode 15
+        versionName '9.0.6-android-preview'
 
         externalNativeBuild {
             cmake {

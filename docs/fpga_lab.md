@@ -1,9 +1,7 @@
-# Obrii FPGA Lab (first version)
+# Obrii FPGA Lab
 
-`ObriiFpgaLab` is a separate Qt application. It can run while Obrii SDR receives;
-it does not open the SDR or alter its live FPGA image. Launch it directly from
-the runtime folder, or use **Spectrum measurement -> Obrii FPGA Lab** in the
-main application.
+Launch `ObriiFpgaLab` from the runtime folder or choose **Tools → Obrii FPGA Lab**
+in Obrii SDR. Editing and synthesis can run while Obrii SDR receives.
 
 ## Opening a project
 
@@ -44,6 +42,7 @@ The current block prototypes are:
 - Level trigger: IQ16 passthrough with a separate, valid-aligned `out_trigger`
   pulse based on I²+Q² relative to a full-scale 16-bit reference. It must be
   last in the chain.
+- IQ passthrough: preserves the I and Q words and valid strobe with zero added latency.
 
 The standalone DDC/FIR/decimator/trigger chain has a numerical Icarus Verilog
 test using a known complex tone and a quiet interval, and passes Yosys
@@ -120,7 +119,7 @@ never installs this silently. On Linux the same tab runs the tools natively.
 See the [openXC7 getting-started guide](https://github.com/openXC7/getting-started)
 for supported installation paths. No generated image is programmed into an SDR.
 
-The examined B210-Kintex-7 clone project targets `xc7k325tffg676-2`. Its
+The original vendor B210-Kintex-7 project targets `xc7k325tffg676-2`. Its
 active design references two EDIF half-band filters, one Vivado clock-generator
 IP (`.xci`), two MIF memory-initialization files, and XDC `set_false_path`
 constraints. Those must be replaced or
@@ -130,11 +129,52 @@ and have active copies in `top/b200`; they are not current blockers. Retain the
 vendor's known-working `.bin` as a recovery image. A new `.bit` is not assumed
 to be a UHD-compatible `.bin` until its format and hardware behavior are tested.
 
-The B210-Kintex-7 GitHub repository currently provides a ready `.bin` and a
-separate download link for the full firmware project. The `.bin` alone is not
-enough for editing or rebuilding. FPGA Lab can open the full clone project once
-its actual `.xpr` and HDL sources are available locally, but that integration
-has not been hardware-tested.
+Open the full clone `.xpr` and HDL sources in FPGA Lab to edit or rebuild
+the design. The project browser can inspect a finished `.bin` by size and
+SHA-256. Experimental clone images can be loaded for an RX session through
+Obrii SDR and UHD, as described in [USRP B210 setup](usrp_b210_setup.md).
+Qualifying a vendor image built with the generated IQ pipeline requires a
+separate hardware test.
+
+## Editable B210 openXC7 projects
+
+Open your checkout of [B210-Kintex7-openXC7](https://github.com/Dotncom/B210-Kintex7-openXC7)
+in Lab. In **B210 Kintex-7**, select the vendor source folder and the SISO or
+dual variant, then choose **Create project**. Use a version of the checkout
+that includes `project.py`. Lab opens the new `.obrii-b210.json` project and
+its staged HDL, XDC and SDC files. Reopen the marker or its folder to resume.
+User HDL modules and headers can be placed in the project's `src/user/`.
+The project uses the B210 pinout, clocks, and UHD stream interface as its base.
+
+**Build image** invokes the checkout's Linux/WSL build with the edited sources.
+Use the toolkit environment described in the checkout's README. If the tool
+paths are not exported in the launcher environment, select a trusted `.sh`
+file that exports `B210_YOSYS`, `B210_NEXTPNR_ROOT`, `B210_CHIPDB`,
+`B210_FPGA_AS` and `B210_PRJXRAY_BIN`. Lab builds in native Linux scratch
+storage and copies `.bit`, `.bin`, SHA-256, and timing/log reports to the
+selected folder. Select **IQ passthrough** in the sketch and enable its build
+option to connect the generated RTL between the DDC and RX framer on each
+radio. For this connection the sketch must contain only passthrough blocks.
+
+**Compare through UHD** uses OpenSSH with a trusted host key and a key/agent
+login to Raspberry. When FPGA Lab runs on Raspberry itself, leave SSH blank
+to use the local radio. Enter the absolute paths to ObriiCli and the
+known-good baseline `.bin`. Choose a compatible dual-channel candidate, and
+stop other SDR uses of the board before the test. Lab sends the candidate and
+checks its SHA-256 on the Raspberry, runs the two images sequentially at
+30.72 MS/s per channel, then reloads the baseline through UHD. It reports
+rates, counts, UHD overflows, timeouts and timestamp-derived gaps. A CLI
+that reports only periodic diagnostics produces a partial result. GNSS and
+GPS PPS report separately and require an appropriate UHD library; pass its
+remote absolute path in the library field. A validated GPS position needs
+independent reference data.
+
+On the tested Kintex-7 clone, the previous Dual openXC7 image and the new
+Dual image with the passthrough graph each ran for 15 seconds at 30.72 MS/s
+per channel on Raspberry Pi. Both runs had zero UHD overflows, timeouts and
+timestamp gaps. The new image delivered GGA, RMC and GSV over UHD and eight
+consecutive GPS PPS events. The GNSS module reported a fix. Its coordinates
+were outside the scope of this comparison.
 
 ## B210 clone data path and block placement
 
@@ -143,8 +183,7 @@ The local project routes the radio-chip sample pins through `b200_io` into two
 `ddc_chain`, an RX framer with timing/sequence information, and host-format
 conversion. The resulting 64-bit streams are multiplexed into the GPIF2
 slave-FIFO bridge to the FX3 USB controller. The top level presents each I and
-Q value as 12 radio-chip bits padded to 16. These are findings from the HDL,
-not measurements of the as-yet-unavailable clone hardware.
+Q value as 12 radio-chip bits padded to 16, as described by the vendor HDL.
 
 This favors small, deterministic FPGA work ahead of the USB boundary: optional
 selected-band streams, timestamped events, burst capture and trustworthy

@@ -3,6 +3,8 @@
 #include "qthlocator.h"
 
 #include <QByteArray>
+#include <QDateTime>
+#include <QRegularExpression>
 #include <QStringList>
 
 #include <algorithm>
@@ -235,13 +237,13 @@ bool parseNmeaCoordinate(const QString &value,
     bool minutesOk = false;
     const int degrees = text.left(degreeDigits).toInt(&degreesOk);
     const double minutes = text.mid(degreeDigits).toDouble(&minutesOk);
-    if (!degreesOk || !minutesOk || !std::isfinite(minutes) || minutes < 0.0 || minutes >= 60.0) {
+    if (!degreesOk || degrees < 0 || !minutesOk || !std::isfinite(minutes) || minutes < 0.0 || minutes >= 60.0) {
         return false;
     }
     double result = static_cast<double>(degrees) + minutes / 60.0;
-    if (hemi == QStringLiteral("S") || hemi == QStringLiteral("W")) {
+    if (hemi == (latitude ? QStringLiteral("S") : QStringLiteral("W"))) {
         result = -result;
-    } else if (hemi != QStringLiteral("N") && hemi != QStringLiteral("E")) {
+    } else if (hemi != (latitude ? QStringLiteral("N") : QStringLiteral("E"))) {
         return false;
     }
     if (latitude) {
@@ -321,6 +323,112 @@ bool parseNmeaPositionSentence(const QString &line, ParsedNmeaPosition *position
     position->talker = type.left(type.size() - 3);
     position->sentence = type.right(3);
     return true;
+}
+
+namespace {
+
+QTime nmeaUtcTime(const QString &text) {
+    static const QRegularExpression pattern(QStringLiteral("^([0-9]{6})(?:\\.([0-9]+))?$"));
+    const auto match = pattern.match(text);
+    if (!match.hasMatch()) return {};
+    const auto clock = match.captured(1);
+    return QTime(clock.left(2).toInt(), clock.mid(2, 2).toInt(), clock.right(2).toInt(),
+                 match.captured(2).left(3).leftJustified(3, QLatin1Char('0')).toInt());
+}
+
+QDateTime nmeaRmcUtc(const QString &rmc, const QTime &time, const QDateTime &host) {
+    const auto dateText = rmc.section(QLatin1Char('*'), 0, 0).section(QLatin1Char(','), 9, 9).trimmed();
+    static const QRegularExpression datePattern(QStringLiteral("^[0-9]{6}$"));
+    if (!time.isValid() || !host.isValid() || !datePattern.match(dateText).hasMatch()) return {};
+    const int hostYear = host.date().year();
+    int year = hostYear / 100 * 100 + dateText.right(2).toInt();
+    if (year > hostYear + 50) year -= 100;
+    else if (year < hostYear - 50) year += 100;
+    return QDateTime(QDate(year, dateText.mid(2, 2).toInt(), dateText.left(2).toInt()), time, Qt::UTC);
+}
+
+double gnssDistanceKm(double lat1, double lon1, double lat2, double lon2) {
+    const double latSin = std::sin((lat2 - lat1) * kDegToRad / 2);
+    const double lonSin = std::sin((lon2 - lon1) * kDegToRad / 2);
+    const double a = latSin * latSin + lonSin * lonSin * std::cos(lat1 * kDegToRad) * std::cos(lat2 * kDegToRad);
+    return 12742.0 * std::asin(std::sqrt((std::clamp)(a, 0.0, 1.0)));
+}
+
+double gnssDistanceFromLocatorKm(const ParsedNmeaPosition &fix, const qth::GeoBounds &bounds) {
+    const double centerLon = (bounds.minLongitude + bounds.maxLongitude) / 2;
+    const double lon = centerLon + std::remainder(fix.longitude - centerLon, 360.0);
+    if (lon >= bounds.minLongitude && lon <= bounds.maxLongitude &&
+        fix.latitude >= bounds.minLatitude && fix.latitude <= bounds.maxLatitude) return 0.0;
+    const double nearestLon = (std::clamp)(lon, bounds.minLongitude, bounds.maxLongitude);
+    const double lat = fix.latitude * kDegToRad;
+    const double projectedLat = std::atan2(std::sin(lat), std::cos(lat) * std::cos((lon - nearestLon) * kDegToRad));
+    const double nearestLat = (std::clamp)(projectedLat * kRadToDeg, bounds.minLatitude, bounds.maxLatitude);
+    return gnssDistanceKm(fix.latitude, lon, nearestLat, nearestLon);
+}
+
+} // namespace
+
+QStringList uhdGnssFixRejections(const QString &gga, const QString &rmc, const QString &locator,
+                                double distanceKm, double timeSeconds, const QDateTime &hostUtc) {
+    QStringList reasons;
+    const auto bounds = qth::maidenheadBounds(locator);
+    const bool referenceValid = bounds.valid && locator.trimmed().size() >= 4 && std::isfinite(distanceKm) && distanceKm >= 0;
+    if (!referenceValid) reasons << QStringLiteral("invalid_reference");
+
+    ParsedNmeaPosition ggaFix, rmcFix;
+    const bool ggaValid = parseNmeaPositionSentence(gga, &ggaFix) && ggaFix.sentence == QLatin1String("GGA");
+    const bool rmcValid = parseNmeaPositionSentence(rmc, &rmcFix) && rmcFix.sentence == QLatin1String("RMC");
+    if (!ggaValid) reasons << QStringLiteral("invalid_gga");
+    if (!rmcValid) reasons << QStringLiteral("invalid_rmc");
+    if (ggaValid && rmcValid && gnssDistanceKm(ggaFix.latitude, ggaFix.longitude, rmcFix.latitude, rmcFix.longitude) > 0.1) {
+        reasons << QStringLiteral("gga_rmc_position_mismatch");
+    }
+    if (referenceValid && ((ggaValid && gnssDistanceFromLocatorKm(ggaFix, bounds) > distanceKm) ||
+                           (rmcValid && gnssDistanceFromLocatorKm(rmcFix, bounds) > distanceKm))) {
+        reasons << QStringLiteral("outside_reference_area");
+    }
+
+    const auto ggaTime = nmeaUtcTime(ggaFix.utc);
+    const auto rmcTime = nmeaUtcTime(rmcFix.utc);
+    if (ggaValid && rmcValid && ggaTime.isValid() && rmcTime.isValid() &&
+        std::abs(std::remainder(static_cast<double>(ggaTime.msecsTo(rmcTime)), 86400000.0)) > 50) {
+        reasons << QStringLiteral("gga_rmc_epoch_mismatch");
+    }
+    const auto host = hostUtc.toUTC();
+    const auto utc = nmeaRmcUtc(rmc, rmcTime, host);
+    if (!utc.isValid() || (ggaValid && !ggaTime.isValid()) ||
+        !std::isfinite(timeSeconds) || timeSeconds < 0) {
+        reasons << QStringLiteral("invalid_utc");
+    } else if (std::abs(host.msecsTo(utc)) > timeSeconds * 1000.0) {
+        reasons << QStringLiteral("utc_outside_tolerance");
+    }
+    return reasons;
+}
+
+QStringList combinedGnssFixRejections(const QString &uhdGga, const QString &uhdRmc,
+                                     const QString &serialGga, const QString &serialRmc, const QDateTime &hostUtc) {
+    const auto consistentPair = [&hostUtc](const QString &gga, const QString &rmc,
+                                            ParsedNmeaPosition &fix, QDateTime &utc) {
+        ParsedNmeaPosition rmcFix;
+        if (!parseNmeaPositionSentence(gga, &fix) || fix.sentence != QLatin1String("GGA") ||
+            !parseNmeaPositionSentence(rmc, &rmcFix) || rmcFix.sentence != QLatin1String("RMC")) return false;
+        const auto ggaTime = nmeaUtcTime(fix.utc);
+        const auto rmcTime = nmeaUtcTime(rmcFix.utc);
+        utc = nmeaRmcUtc(rmc, rmcTime, hostUtc.toUTC());
+        return utc.isValid() && ggaTime.isValid() && std::abs(ggaTime.msecsTo(rmcTime)) <= 50 &&
+               gnssDistanceKm(fix.latitude, fix.longitude, rmcFix.latitude, rmcFix.longitude) <= 0.1;
+    };
+    QStringList reasons;
+    ParsedNmeaPosition uhdFix, serialFix;
+    QDateTime uhdUtc, serialUtc;
+    if (!consistentPair(uhdGga, uhdRmc, uhdFix, uhdUtc)) reasons << QStringLiteral("uhd_no_consistent_fix");
+    if (!consistentPair(serialGga, serialRmc, serialFix, serialUtc)) reasons << QStringLiteral("serial_no_consistent_fix");
+    if (!reasons.isEmpty()) return reasons;
+    if (gnssDistanceKm(uhdFix.latitude, uhdFix.longitude, serialFix.latitude, serialFix.longitude) > 0.1) {
+        reasons << QStringLiteral("receiver_position_mismatch");
+    }
+    if (std::abs(uhdUtc.msecsTo(serialUtc)) > 3000) reasons << QStringLiteral("receiver_utc_mismatch");
+    return reasons;
 }
 
 QVector<GnssSystemPreset> gnssSystemPresets() {

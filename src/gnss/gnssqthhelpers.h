@@ -3,9 +3,12 @@
 
 #include <QColor>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 #include <cstddef>
+
+class QDateTime;
 
 inline constexpr double GNSS_L1_BAND_START_HZ = 1559000000.0;
 inline constexpr double GNSS_L1_BAND_END_HZ = 1610000000.0;
@@ -105,6 +108,10 @@ SyntheticPositionResult solveSyntheticPosition(const QVector<SyntheticPseudorang
                                                const Vec3d &initialEcef);
 
 bool parseNmeaPositionSentence(const QString &line, ParsedNmeaPosition *position);
+QStringList uhdGnssFixRejections(const QString &gga, const QString &rmc, const QString &locator,
+                                double distanceKm, double timeSeconds, const QDateTime &hostUtc);
+QStringList combinedGnssFixRejections(const QString &uhdGga, const QString &uhdRmc,
+                                     const QString &serialGga, const QString &serialRmc, const QDateTime &hostUtc);
 
 QVector<GnssSystemPreset> gnssSystemPresets();
 GnssSystemPreset gnssSystemPreset(const QString &id);

@@ -80,6 +80,9 @@ QJsonObject YourClassName::settingsToJson() const {
     settings["audioHighPassHz"] = pendingSettings.audioHighPassHz;
     settings["audioFilterChainJson"] = pendingSettings.audioFilterChainJson;
     settings["simplifiedAudioChannelizer"] = pendingSettings.simplifiedAudioChannelizer;
+    settings["useCorrectedFobosCommands"] = useCorrectedFobosCommands;
+    settings["fobosIfTestMode"] = fobosIfTestMode;
+    settings["adcOverloadProtection"] = adcOverloadProtectionEnabled;
     settings["hfNoiseCancelDepth"] = pendingSettings.hfNoiseCancelDepth;
     settings["hfNoiseCancelRefGainDb"] = pendingSettings.hfNoiseCancelRefGainDb;
     settings["hfNoiseCancelRefDelayNs"] = pendingSettings.hfNoiseCancelRefDelayNs;
@@ -141,9 +144,11 @@ QJsonObject YourClassName::settingsToJson() const {
     settings["spectrumPercentile99"] = spectrumPercentile99Enabled;
     settings["spectrumAmplitudeUnit"] = spectrumAmplitudeUnit;
     settings["extendedRecordingMetadata"] = extendedRecordingMetadataEnabled;
-    settings["qthLatitude"] = qthLatitude;
-    settings["qthLongitude"] = qthLongitude;
-    settings["qthPositionVisible"] = qthPositionVisible;
+    settings["agileContinuousRetune"] = agileContinuousRetuneEnabled;
+    settings["agileContinuousRetuneStepPercent"] = agileContinuousRetuneStepPercent;
+    settings["qthLatitude"] = qthPositionBeforeUhd ? qthPositionBeforeUhd->y() : qthLatitude;
+    settings["qthLongitude"] = qthPositionBeforeUhd ? qthPositionBeforeUhd->x() : qthLongitude;
+    settings["qthPositionVisible"] = qthPositionBeforeUhd ? qthPositionVisibleBeforeUhd : qthPositionVisible;
     settings["qthSource"] = qthSource;
     settings["gnssSerialPortName"] = gnssSerialPortName;
     settings["gnssSerialBaud"] = gnssSerialBaud;
@@ -224,6 +229,7 @@ QJsonObject YourClassName::settingsToJson() const {
     settings["spectrumPersistenceSmoothingMs"] = spectrumPersistenceSmoothingMs;
     settings["spectrumPersistenceStyle"] = spectrumPersistenceStyle;
     settings["waterfallDisplayMode"] = waterfallDisplayMode;
+    settings["waterfallColorPalette"] = waterfallColorPalette;
     settings["multiSdrViewMode"] = multiSdrViewMode;
     settings["waterfall3DResolutionDivisor"] = waterfall3DResolutionDivisor;
     settings["waterfall3DSurfaceStyle"] = waterfall3DSurfaceStyle;
@@ -251,6 +257,11 @@ QJsonObject YourClassName::settingsToJson() const {
     settings["experimentalGpuWaterfall"] = experimentalGpuWaterfall;
     settings["spectrumDisplayReductionMode"] = spectrumDisplayReductionMode;
     settings["spurSuppressionEnabled"] = spurSuppressionEnabled;
+    settings["spurDetectionThresholdDb"] = spurDetectionThresholdDb;
+    settings["receiverNoiseBaselineMode"] = receiverNoiseBaselineMode;
+    settings["receiverNoiseShapeWidthHz"] = receiverNoiseShapeWidthHz;
+    settings["receiverNoiseShapeStrength"] = receiverNoiseShapeStrength;
+    settings["spurCalibrationProfile"] = spurCalibrationProfile.toJson();
     QJsonArray spurMask;
     for (const SpurMaskEntry &entry : spurMaskEntries) {
         if (!std::isfinite(entry.offsetHz) ||
@@ -270,6 +281,7 @@ QJsonObject YourClassName::settingsToJson() const {
 }
 
 void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool normalizeAfterApply) {
+    if (spurSweepActive) return;
     auto readInt = [&settingsJson](const char *key, int currentValue) {
         return settingsJson.contains(key) ? settingsJson.value(key).toInt(currentValue) : currentValue;
     };
@@ -385,6 +397,14 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
     pendingSettings.simplifiedAudioChannelizer =
         readBool("simplifiedAudioChannelizer",
                  pendingSettings.simplifiedAudioChannelizer);
+    const bool correctedFobosCommands = readBool("useCorrectedFobosCommands", useCorrectedFobosCommands);
+    if (correctedFobosCommands != useCorrectedFobosCommands) hardwareSettingsApplied = false;
+    useCorrectedFobosCommands = correctedFobosCommands;
+    const int ifTestMode = (std::clamp)(readInt("fobosIfTestMode", fobosIfTestMode), 0, 3);
+    if (ifTestMode != fobosIfTestMode) hardwareSettingsApplied = false;
+    fobosIfTestMode = ifTestMode;
+    adcOverloadProtectionEnabled = readBool("adcOverloadProtection", adcOverloadProtectionEnabled);
+    adcOverloadGuard.reset();
     pendingSettings.hfNoiseCancelDepth = clampHfNoiseCancelDepth(readDouble("hfNoiseCancelDepth", pendingSettings.hfNoiseCancelDepth));
     pendingSettings.hfNoiseCancelRefGainDb =
         clampHfNoiseCancelRefGainDb(readDouble("hfNoiseCancelRefGainDb", pendingSettings.hfNoiseCancelRefGainDb));
@@ -533,18 +553,30 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
     spectrumAmplitudeUnit = (std::clamp)(readInt("spectrumAmplitudeUnit", spectrumAmplitudeUnit), 0, 3);
     extendedRecordingMetadataEnabled =
         readBool("extendedRecordingMetadata", extendedRecordingMetadataEnabled);
+    agileContinuousRetuneEnabled = readBool("agileContinuousRetune", agileContinuousRetuneEnabled);
+    const double retuneStep = readDouble("agileContinuousRetuneStepPercent", agileContinuousRetuneStepPercent);
+    agileContinuousRetuneStepPercent = std::isfinite(retuneStep)
+        ? (std::clamp)(retuneStep, 0.1, 100.0) : 5.0;
     if (previousScanMeasurementEnabled != scanMeasurementEnabled ||
         std::abs(previousScanMeasurementBinMhz - scanMeasurementBinMhz) > 0.000001) {
         clearScanMeasurement();
     }
-    qthLatitude = (std::clamp)(readDouble("qthLatitude", qthLatitude), -90.0, 90.0);
-    qthLongitude = (std::clamp)(readDouble("qthLongitude", qthLongitude), -180.0, 180.0);
-    qthPositionVisible = settingsJson.value("qthPositionVisible").toBool(qthPositionVisible);
+    const double previousLatitude = qthPositionBeforeUhd ? qthPositionBeforeUhd->y() : qthLatitude;
+    const double previousLongitude = qthPositionBeforeUhd ? qthPositionBeforeUhd->x() : qthLongitude;
+    const bool previousVisibility = qthPositionBeforeUhd ? qthPositionVisibleBeforeUhd : qthPositionVisible;
+    qthLatitude = (std::clamp)(readDouble("qthLatitude", previousLatitude), -90.0, 90.0);
+    qthLongitude = (std::clamp)(readDouble("qthLongitude", previousLongitude), -180.0, 180.0);
+    qthPositionVisible = settingsJson.value("qthPositionVisible").toBool(previousVisibility);
     qthSource = settingsJson.value("qthSource").toString(qthSource).trimmed();
     if (qthSource.isEmpty()) {
         qthSource = QStringLiteral("manual");
     }
-    if (qthSource == QStringLiteral("nmea")) {
+    qthPositionBeforeUhd.reset();
+    if (isUhdGnssSource(qthSource)) {
+        qthPositionBeforeUhd = QPointF(qthLongitude, qthLatitude);
+        qthPositionVisibleBeforeUhd = qthPositionVisible;
+        qthPositionVisible = false;
+    } else if (qthSource == QLatin1String("nmea")) {
         qthPositionVisible = false;
     }
     gnssSerialPortName = settingsJson.value("gnssSerialPortName").toString(gnssSerialPortName).trimmed();
@@ -656,6 +688,10 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
     }
     fftBackendPreference = normalizedFftBackendPreference(
         readInt("fftBackendPreference", fftBackendPreference));
+    if (spectrumUpdateSpin) {
+        const QSignalBlocker blocker(spectrumUpdateSpin);
+        spectrumUpdateSpin->setValue(spectrumUpdateIntervalMs);
+    }
     frequencyCalibrationOffsetHz =
         (std::clamp)(readDouble("frequencyCalibrationOffsetHz", frequencyCalibrationOffsetHz),
                      -10000000.0,
@@ -703,6 +739,10 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
     if (waterfallWidget) {
         waterfallWidget->setRowsPerFrame(waterfallRowsPerFrame);
     }
+    if (waterfallRowsSpin) {
+        const QSignalBlocker blocker(waterfallRowsSpin);
+        waterfallRowsSpin->setValue(waterfallRowsPerFrame);
+    }
     spectrumDisplayMode = (std::clamp)(readInt("spectrumDisplayMode", spectrumDisplayMode), 0, 1);
     spectrumPersistenceSeconds = readDouble("spectrumPersistenceSeconds", spectrumPersistenceSeconds);
     spectrumPersistenceIntensity = readInt("spectrumPersistenceIntensity", spectrumPersistenceIntensity);
@@ -716,6 +756,7 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
     }
     if (graphWidget) graphWidget->setPersistenceEnabled(spectrumDisplayMode == 1);
     waterfallDisplayMode = (std::clamp)(readInt("waterfallDisplayMode", waterfallDisplayMode), 0, 2);
+    applyWaterfallColorPalette(readInt("waterfallColorPalette", waterfallColorPalette));
     multiSdrViewMode = (std::clamp)(readInt("multiSdrViewMode", multiSdrViewMode), 0, 1);
     if (multiSdrViewModeCombo) {
         const QSignalBlocker blocker(multiSdrViewModeCombo);
@@ -941,6 +982,12 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
         }
     }
     spurSuppressionEnabled = readBool("spurSuppressionEnabled", spurSuppressionEnabled);
+    spurDetectionThresholdDb = (std::clamp)(readDouble("spurDetectionThresholdDb", spurDetectionThresholdDb), 3.0, 30.0);
+    receiverNoiseBaselineMode = (std::clamp)(readInt("receiverNoiseBaselineMode", receiverNoiseBaselineMode), 0, 3);
+    receiverNoiseShapeWidthHz = (std::clamp)(readDouble("receiverNoiseShapeWidthHz", receiverNoiseShapeWidthHz), 50000.0, 2000000.0);
+    receiverNoiseShapeStrength = (std::clamp)(readDouble("receiverNoiseShapeStrength", receiverNoiseShapeStrength), 0.0, 1.0);
+    if (settingsJson.contains(QStringLiteral("spurCalibrationProfile")))
+        spurCalibrationProfile = SpurCalibrationProfile::fromJson(settingsJson.value("spurCalibrationProfile").toObject());
     if (settingsJson.contains(QStringLiteral("spurMask"))) {
         QVector<SpurMaskEntry> nextMask;
         const QJsonArray array = settingsJson.value(QStringLiteral("spurMask")).toArray();
@@ -967,4 +1014,5 @@ void YourClassName::applySettingsFromJson(const QJsonObject &settingsJson, bool 
     if (normalizeAfterApply) {
         normalizeTuning(pendingSettings);
     }
+    syncSpectrumProcessingControls();
 }

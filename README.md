@@ -4,7 +4,25 @@ Obrii SDR is a wideband SDR receiver and research workstation, optimized first
 for RigExpert Fobos SDR hardware while also supporting additional receiver
 backends.
 The current packaged release is Windows-first, with active Linux/Raspberry Pi
-support and a separately maintained Android USB/network client. Version 8.2.0
+support and a separately maintained Android USB/network client. Version 9.0.0
+adds the Fobos firmware updater and Dual receiver support, improves DMR and
+receiver controls, and adds live coherent IQ in Multi-SDR. See
+`docs/release_notes_9.0.0.md` for package contents and qualification limits.
+The 9.0.2 preview adds configurable network spectrum cadence, compact
+level encoding, and fixes for Raspberry Pi display and remote zoom.
+See `docs/release_notes_9.0.2.md` for the update and its test coverage.
+The 9.0.3 preview adds M17 microphone and push-to-talk transmission,
+Mesh collision simulation, and combined GNSS satellite display.
+Version 9.0.4 adds editable B210 projects in FPGA Lab, native UHD in
+Obrii Analyzer, streaming clock offsets in Mesh Designer, and seven Windows
+interface styles in both Full and Lite.
+Download the Windows x64 package or the Raspberry Pi ARM64 package and
+follow [the installation guide](docs/install.md).
+
+The 9.0.1 preview adds B210 dual RX, UHD GPS status with optional GSV,
+USRP Lab jobs, and updated Raspberry Pi launch and receive behavior.
+See `docs/release_notes_9.0.1.md` for the preview and its test coverage.
+Version 8.2.0
 adds saved VPN discovery addresses, bounded TCP fallback, an optional node
 directory, isolated live mesh topology changes, and experimental EU868 LoRaWAN
 1.1 and Class B/C simulation. It also fixes GCC/ARM mesh build portability.
@@ -51,8 +69,9 @@ an installed Vivado for a project build without stopping Obrii SDR. It can
 generate standalone RTL experiment blocks, but does not automatically integrate
 them into the vendor image or modify the running receiver. An openXC7 tab now
 checks project portability and can run the open-source toolchain through
-Linux/WSL for standalone RTL modules or compatible pure-Verilog designs; the
-clone's full image still has vendor IP and netlist blockers. See `docs/fpga_lab.md`.
+Linux/WSL for standalone RTL modules or compatible pure-Verilog designs.
+The B210 tab can edit and build the single- and dual-RX openXC7 projects and
+compare RX on a local or remote B210. See `docs/fpga_lab.md`.
 The main application also has an opt-in Multi-SDR spectrum workspace: its
 existing receiver remains RX 1 and up to seven additional native receiver
 sessions can be placed on one stitched frequency axis. Architecture, coherence
@@ -87,7 +106,7 @@ Remove API keys, private coordinates and other sensitive data from any attachmen
 
 ## Windows Release Package
 
-Release 7.0.0 provides Full and Lite packages for both Windows x64 and
+Release 9.0.0 provides Full and Lite packages for both Windows x64 and
 Raspberry/Linux source. Lite uses the same UI and omits optional large research
 backends; on Raspberry build it with `BUILD_LITE=1 ./tools/build_linux.sh`.
 No Wireless add-on or Android package is uploaded with this release.
@@ -97,7 +116,7 @@ The add-on contains the portable GNU Radio
 Wi-Fi and Wireshark tools; to enable them, run `Install-Wireless-AddOn.ps1` beside
 `ObriiSDR.exe` or extract the add-on into that same folder. See
 `docs/wireless_addon.md`. Npcap is not bundled.
-Extract the Linux source with `tar -xzf ObriiSDR-v8.2.0-raspberry-source.tar.gz`;
+Extract the Linux source with `tar -xzf ObriiSDR-v9.0.0-raspberry-source.tar.gz`;
 the build/run shell scripts have executable permissions. Android packages are
 maintained and released separately.
 
@@ -360,10 +379,15 @@ sudo ./tools/install_deps_debian.sh
 sudo cp packaging/linux/99-fobos-sdr.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo udevadm trigger
-./tools/prepare_fobos_linux.sh
+ALLOW_UPSTREAM_FOBOS_CLONE=1 ./tools/prepare_fobos_linux.sh
 ./tools/build_linux.sh
 ./tools/run_linux.sh
 ```
+
+The GUI build creates an **Obrii SDR (Fusion 110%)** shortcut in the application
+menu and on the desktop. Linux launchers use Qt Fusion and 110% scaling by
+default. After moving the source folder, recreate the shortcut with
+`python3 tools/install_linux_shortcut.py`.
 
 For future Raspberry Pi DMR voice/backend testing, start from a Git checkout
 with the optional DMR submodules, or clone them into the unpacked source tree:
@@ -379,7 +403,7 @@ Then build the app and the optional backend modules:
 
 ```bash
 sudo ./tools/install_deps_debian.sh
-./tools/prepare_fobos_linux.sh
+ALLOW_UPSTREAM_FOBOS_CLONE=1 ./tools/prepare_fobos_linux.sh
 ./tools/build_linux.sh
 cmake -S FobosDMRVoiceBackend-gpl -B build/fobos-dmr-voice-backend-gpl \
   -DCMAKE_BUILD_TYPE=Release
@@ -415,24 +439,17 @@ FOBOS_AGILE_ROOT=/path/to/libfobos_sdr \
 ./tools/build_linux.sh
 ```
 
-`tools/prepare_fobos_linux.sh` builds the vendored Fobos source trees shipped
-with the project and installs both Linux libraries into
-`third_party/fobos-linux`:
-
-- `third_party/patched/libfobos`
-- `third_party/patched/libfobos-sdr-agile`
-
-The standard tree is the patched `libfobos` source used by Obrii SDR, so Linux
-builds do not silently fall back to the official upstream version. If the
-vendored trees are missing, the script stops with an error. For a deliberate
-upstream experiment only, run:
+The Raspberry Pi source archive uses the official Standard and Agile SDKs.
+The helper installs them under `third_party/fobos-linux`. To download and
+build both libraries explicitly, run:
 
 ```bash
 ALLOW_UPSTREAM_FOBOS_CLONE=1 ./tools/prepare_fobos_linux.sh
 ```
 
-That clone path is intentionally opt-in because it may not contain the stability
-fixes expected by this application.
+The official SDKs provide standard receiver functions. Optional IF table
+editing and the patched Windows USB runtime are available with the corresponding
+Obrii build and libraries.
 
 Optional local install after a successful Linux build:
 
@@ -459,8 +476,8 @@ HTTP WAV stream instead of the Obrii SDR UDP framing.
 
 An Android USB/network client lives in `android/network-client`. It is a
 separate Android Studio project that can talk to the existing Obrii SDR network
-server over the TCP control channel or run the current direct USB/OTG Fobos
-preview path. The current Android client supports remote
+server over the TCP control channel or run direct USB/OTG Fobos, RTL-SDR and
+experimental receive-only HackRF preview paths. The current Android client supports remote
 start/stop/settings, observer/controller role handling, spectrum/waterfall
 display, zoom/pan, tap-to-tune, frequency presets, band-marker overlays, and
 48 kHz mono ready-audio playback in network mode. The USB/OTG path can open a

@@ -21,12 +21,20 @@ running. The Digital Audio panel's **Open Radio** button opens the manual lab.
   decoder accepts demodulated 48 kHz mono PCM and forwards FCS-valid frames to
   KISS TCP clients on localhost, default port 8001. It does not run when disabled.
 
-KISS transports AX.25 bytes; it is not an RF waveform. The AFSK1200 path runs
-only on explicit WAV import/export or explicit live KISS RX. KISS TX injection
-is not connected to the transmitter yet; incoming KISS bytes are discarded.
-This is not yet a bidirectional TNC or real-air interoperability claim.
-G3RUH-style modems still need a separate optional DSP branch. KISS data
-frames conventionally omit the HDLC FCS.
+- Optional virtual TX in the same GUI tab. Start KISS RX, enter the local
+  virtual IQ channel and center frequency, then select **Enable virtual TX**.
+  Connect your KISS client to `127.0.0.1:8001` (or the selected port). Send
+  port 0 data commands containing AX.25 UI frames with at most 256 information
+  bytes. Omit the FCS. The AFSK1200 modulator adds it and publishes 48 kS/s
+  narrow FM IQ to a listening local virtual receiver or IQ hub.
+
+The virtual TX queue holds up to 16 waiting frames. Disabling TX, stopping KISS
+or closing the lab discards queued frames. If the virtual receiver connection
+fails during TX, the app disables TX and shows the error. In CLI, the RX module
+and `ObriiCli module tx kiss 8002 obrii-virtual-iq 144.8M` use separate ports.
+The TX command listens on loopback and writes 48 kS/s IQ to local IPC. The
+CLI also supports AX.25 UI bursts through UHD with `module tx kiss-uhd`.
+See [Obrii CLI](obrii_cli.md) for its options. G3RUH remains separate work.
 
 ### M17
 
@@ -45,9 +53,22 @@ The lab distinguishes raw packet bytes from the M17 SMS application form
 (`0x05`, UTF-8 text, terminating null) instead of silently treating every text
 box as an application-compatible message.
 
-This is real protocol framing, but not yet a release claim for live RF timing,
-symbol recovery from audio/IQ, Codec 2 voice, or interoperability. Those require the optional
-RF/audio modem path and repeatable real-air captures.
+`ObriiCli module tx m17` emits M17 SMS packets as IQ for file, virtual or
+explicitly selected RF output. The file generator has been verified through
+the production M17 receiver.
+
+For voice, select **M17 voice (Codec2 3200)** in the TX dialog and enter the
+source callsign, destination and CAN. Choose **Microphone** for a continuous
+call, **Microphone PTT** to speak while holding the key, or **Audio file** to
+send a WAV recording. In PTT mode, press Start, then hold the button, hold Space
+with the button focused, or hold F12 in the TX window. Release ends the call.
+Microphone modes generate IQ at 48 kS/s. The CLI command
+`ObriiCli module tx m17-voice` accepts a WAV recording. The encoder loads the optional
+Codec2 runtime and forms clear 40 ms voice frames, cycling the link setup
+information so a receiver can acquire an ongoing transmission. The last frame
+is padded to 40 ms and marked as the end of the stream. The 48 kS/s IQ path
+has been tested through Obrii's own receiver. Interoperability testing with
+physical radios remains pending. [M17 protocol specification](https://spec.m17project.org/files/M17_spec.pdf)
 
 ## Backend Contract
 
@@ -111,6 +132,8 @@ For a static link-topology experiment, add
 `--scenario docs/virtual_iq_link_scenario.json`. The JSON has `version: 1`, a boolean
 `defaultRoute` and a `links` array. Each link names `tx` and `rx`, with optional
 `enabled` (default true), `delayMs` (0..60000) and `gainDb` (-120..60).
+In sample-mix mode an optional `frequencyOffsetHz` adds a signed baseband shift
+strictly within ±Fs/2. Its phase is tied to the mix timeline across frames.
 `defaultRoute: false` delivers only explicitly listed links; true retains the
 old fan-out and lets a link override or disable one pair. Name RX endpoints
 with `--rx student-a@127.0.0.1:17661` and

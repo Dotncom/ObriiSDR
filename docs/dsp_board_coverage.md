@@ -40,6 +40,9 @@ Audit scope: user-visible desktop functions in the current development tree.
   measurement sessions.
 - DMR, CW, SSTV, digital video, GNSS over SDR, serial NMEA/UBX, QTH map,
   presets/calibration, and general settings.
+- The USRP software lab launches bounded Wi-Fi PHY and LTE ZMQ loopbacks,
+  GSM BCCH/PDCH file decoding and GPRS MAC replay. The same job runner
+  serves the local console and CLI. [USRP software lab](usrp_software_lab.md)
 - Open radio launches the isolated M17 and AX.25/KISS framing laboratory and
   virtual-signal envelope builder. It remains a launcher until each protocol
   has a bounded, tested IQ modem block; no placeholder is wired into live DSP.
@@ -53,6 +56,64 @@ only in memory, up to 100 steps and 16 MiB; loading a layout resets it.
 Restoring deleted main-chain filter blocks restores their saved parameters and
 position without replacing surviving same-ID stages or unrelated live filters.
 RF Start/Stop, TX, network permissions and main receiver settings are not undone.
+
+## Laboratory I/Q on the board
+
+Use **Add → I/Q generation and transmission**. Wire **Carrier → Modulator → I/Q stream**.
+The upper modulator input takes carrier offset and amplitude. The lower input takes a
+payload. Set the sample rate, duration and RF center on the I/Q stream block.
+The carrier's absolute frequency is the RF center plus its offset.
+
+- CW, tone and noise use the carrier input. BPSK, QPSK, 16-QAM, 2-FSK and
+  2-GFSK accept UTF-8 text, image bytes or arbitrary file bytes. With no data
+  source they generate a repeatable test sequence. The payload must fit the
+  selected duration and symbol rate. These modes send raw symbols without a
+  framing or file-recovery protocol.
+- AM and FM take a mono or stereo PCM16 WAV file and use audio up to the chosen
+  duration. The I/Q rate must accommodate the input audio bandwidth, carrier
+  offset and FM deviation. A normalized CF32LE file can instead connect directly
+  to the I/Q stream block. Set its sample rate and RF center explicitly.
+- Connect **I/Q stream → DDC channelizer → Branch FFT → Branch spectrum** and
+  enable the DDC branch with simplified mode turned off. **Run I/Q** loops
+  one buffer locally, including with the hardware receiver stopped. The DDC can also feed the existing
+  demodulator and audio output. Use an enabled receiver source in place of
+  the I/Q block to process live reception through those same blocks.
+- Connect **I/Q stream → TX output** for a single burst. **Prepare transmission**
+  asks for confirmation and uses the configured transmitter and its existing RF
+  arming checks. Local I/Q playback and TX are separate actions. The board
+  supports one local loop at a time, with up to two million complex samples per buffer.
+
+### Local packet loopback
+
+Choose **Packet QPSK** on the modulator and wire a **Text**, **Image bytes**, or
+**File bytes** source to its data input. Connect **I/Q stream → QPSK packet
+decoder → Received data** and click **Run I/Q**. The decoder uses the generated
+burst's sample clock and carrier offset to recover data from its I/Q samples.
+It checks the packet type, length and integrity tag before delivering data.
+The output displays text or a supported image preview and saves the original
+received bytes using **Save received data**. The latest result can be saved
+after stopping the loop.
+
+One packet must fit the current I/Q buffer. At 192,000 samples/s, 64,000
+symbols/s and 10 seconds, a packet carries about 160 kB before framing.
+### QPSK reception from a receiver
+
+Connect **Receiver → DDC channelizer → QPSK packet decoder → Received data**.
+Enable the local DDC and start the receiver while the board is visible. Tune the
+DDC to the nominal RF carrier and set **RX symbols/s** to the transmitter's
+effective symbol rate. The transmitter rounds to a whole number of samples per
+symbol, so its effective rate is the I/Q sample rate divided by that number.
+For 1,200 symbols/s, a DDC rate of 12 kS/s and bandwidth of 4.5 kHz leave room
+for the signal and carrier error.
+
+The live decoder finds the 64-symbol preamble, estimates carrier offset and
+symbol phase, and tracks carrier and clock drift while receiving the packet.
+It accepts 100–96,000 symbols/s and DDC rates from 2.5 samples/symbol up to
+384 kS/s. The acquisition range is approximately ±40% of the symbol rate
+when the burst fits in the DDC passband. Retunes and sample gaps reset lock.
+Up to four live decoders can run, with one per local DDC. New Packet QPSK
+transmissions include the preamble. Older bursts can still be decoded with
+the local buffer's known boundaries.
 
 VFO plots select a band from the existing shared main FFT; the selected VFO uses
 the main audio path. DDC branches instead produce their own filtered, decimated

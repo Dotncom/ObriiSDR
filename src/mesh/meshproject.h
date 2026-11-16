@@ -28,6 +28,8 @@ struct Link {
     QJsonObject json() const;
     QString bearer="inherit",txPort="radio",rxPort="radio";
     QJsonObject modem;
+    double frequencyOffsetHz = 0;
+    double clockPpm = 0;
 };
 struct Project {
     double centerHz = 145500000;
@@ -43,6 +45,8 @@ bool validId(const QString &id);
 QJsonArray defaultNodePorts();
 QString validateNodeOptions(const Node &);
 QString validateLinkOptions(const Link &);
+bool validLinkFrequencyOffset(double offsetHz, int sampleRate, bool mixIq);
+bool validLinkClockPpm(double ppm, bool mixIq);
 bool saveJson(const QString &path, const QJsonObject &, QString *error);
 bool loadJson(const QString &path, QJsonObject *, QString *error);
 bool saveLibrary(const QString &path, const QVector<HostPreset> &, QString *error);

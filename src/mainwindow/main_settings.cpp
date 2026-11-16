@@ -1,4 +1,5 @@
 #include "main.h"
+#include "displaylevelstep.h"
 #include "multivfowidget.h"
 #include "appconstants.h"
 #include "appsettingsutils.h"
@@ -179,6 +180,14 @@ void YourClassName::loadPersistentSettings() {
                      62) / 2 * 2;
     pendingSettings.uhdRxChannel =
         (std::clamp)(settings.value("receiver/uhdRxChannel", 0).toInt(), 0, 1);
+    pendingSettings.uhdDuplexEnabled = settings.value("receiver/uhdDuplexEnabled", false).toBool();
+    const auto uhdClock = settings.value("receiver/uhdClockSource").toString();
+    if (uhdClock == QLatin1String("internal") || uhdClock == QLatin1String("external"))
+        pendingSettings.uhdClockSource = uhdClock;
+    else
+        pendingSettings.uhdClockSource = QStringLiteral("auto");
+    const int uhdGnssBaud = settings.value("receiver/uhdGnssBaud", 0).toInt();
+    pendingSettings.uhdGnssBaud = uhdGnssBaud == 9600 || uhdGnssBaud == 38400 ? uhdGnssBaud : 0;
     pendingSettings.uhdRxGainDb =
         (std::clamp)(settings.value("receiver/uhdRxGainDb", 30.0).toDouble(), 0.0, 100.0);
     pendingSettings.uhdRxAntenna =
@@ -281,6 +290,9 @@ void YourClassName::loadPersistentSettings() {
     pendingSettings.simplifiedAudioChannelizer =
         settings.value("audio/simplifiedChannelizer",
                        pendingSettings.simplifiedAudioChannelizer).toBool();
+    useCorrectedFobosCommands = settings.value("receiver/useCorrectedFobosCommands", true).toBool();
+    fobosIfTestMode = (std::clamp)(settings.value("receiver/ifTestMode", 3).toInt(), 0, 3);
+    adcOverloadProtectionEnabled = settings.value("receiver/adcOverloadProtection", false).toBool();
     if (multiVfoWidget) {
         multiVfoWidget->setConfigurationJson(
             settings.value(QStringLiteral("multiVfo/configuration"), QStringLiteral("{\"version\":1,\"enabled\":false,\"channels\":[]}"))
@@ -344,10 +356,21 @@ void YourClassName::loadPersistentSettings() {
     qthLongitude = (std::clamp)(settings.value("gpsQth/longitude", qthLongitude).toDouble(), -180.0, 180.0);
     qthPositionVisible = settings.value("gpsQth/positionVisible", qthPositionVisible).toBool();
     qthSource = settings.value("gpsQth/source", qthSource).toString().trimmed();
+    uhdGnssValidationEnabled = settings.value("gpsQth/uhdValidationEnabled", false).toBool();
+    uhdGnssReferenceLocator = settings.value("gpsQth/uhdReferenceLocator").toString().trimmed().toUpper();
+    uhdGnssMaxDistanceKm = (std::clamp)(settings.value("gpsQth/uhdMaxDistanceKm", 10.0).toDouble(), 0.0, 1000.0);
+    uhdGnssMaxTimeErrorSeconds = (std::clamp)(settings.value("gpsQth/uhdMaxTimeErrorSeconds", 5.0).toDouble(), 0.0, 3600.0);
+    uhdGnssLogRejections = settings.value("gpsQth/uhdLogRejections", false).toBool();
+    uhdGnssShowRejections = settings.value("gpsQth/uhdShowRejections", false).toBool();
     if (qthSource.isEmpty()) {
         qthSource = QStringLiteral("manual");
     }
-    if (qthSource == QStringLiteral("nmea")) {
+    qthPositionBeforeUhd.reset();
+    if (isUhdGnssSource(qthSource)) {
+        qthPositionBeforeUhd = QPointF(qthLongitude, qthLatitude);
+        qthPositionVisibleBeforeUhd = qthPositionVisible;
+        qthPositionVisible = false;
+    } else if (qthSource == QLatin1String("nmea")) {
         qthPositionVisible = false;
     }
     gnssSerialPortName =
@@ -634,6 +657,14 @@ void YourClassName::loadPersistentSettings() {
         agileScanPresets[QStringLiteral("FPV 3.3GHz sparse")] =
             agileScanPresetSpec(QStringLiteral("3200-3500"), 50.0);
     }
+    if (!agileScanPresets.contains(QStringLiteral("FPV 6GHz channels 6110-6890"))) {
+        agileScanPresets[QStringLiteral("FPV 6GHz channels 6110-6890")] =
+            agileScanPresetSpec(fpv6GhzScanTargetsMhz(6900.0), 20.0);
+    }
+    if (!agileScanPresets.contains(QStringLiteral("FPV 6GHz channels 6110-7210 (experimental)"))) {
+        agileScanPresets[QStringLiteral("FPV 6GHz channels 6110-7210 (experimental)")] =
+            agileScanPresetSpec(fpv6GhzScanTargetsMhz(7210.0), 20.0);
+    }
     if (!agileScanPresets.contains(QStringLiteral("GNSS L1 1559-1610 50MHz"))) {
         agileScanPresets[QStringLiteral("GNSS L1 1559-1610 50MHz")] =
             agileScanPresetSpec(QStringLiteral("1559-1610"), GNSS_USEFUL_STANDARD_SPAN_HZ / 1000000.0);
@@ -806,6 +837,9 @@ void YourClassName::loadPersistentSettings() {
     showAmateurBandMarkers = settings.value("display/amateurBandMarkers", showAmateurBandMarkers).toBool();
     compactBandMarkers = settings.value("display/compactBandMarkers", compactBandMarkers).toBool();
     spurSuppressionEnabled = settings.value("display/spurSuppressionEnabled", spurSuppressionEnabled).toBool();
+    spurDetectionThresholdDb = (std::clamp)(settings.value("display/spurThresholdDb", 6.0).toDouble(), 3.0, 30.0);
+    spurCalibrationProfile = SpurCalibrationProfile::fromJson(QJsonDocument::fromJson(
+        settings.value("display/spurCalibrationProfile").toByteArray()).object());
     diagnosticVerboseLogging =
         settings.value("diagnostics/verboseLogging",
                        fobosVerboseLoggingDefaultEnabled()).toBool();
@@ -850,6 +884,18 @@ void YourClassName::loadPersistentSettings() {
     }
     fftBackendPreference = normalizedFftBackendPreference(
         settings.value("ui/fftBackendPreference", fftBackendPreference).toInt());
+    if (spectrumUpdateSpin) {
+        const QSignalBlocker blocker(spectrumUpdateSpin);
+        spectrumUpdateSpin->setValue(spectrumUpdateIntervalMs);
+    }
+    if (displayLevelStepSpin) {
+        const int step = (std::clamp)(settings.value("ui/displayLevelStepTenths", 0).toInt(),
+                                      0, DisplayLevelStep::MaximumTenths);
+        const QSignalBlocker blocker(displayLevelStepSpin);
+        displayLevelStepSpin->setValue(step / 10.0);
+        graphWidget->setDisplayLevelStep(step);
+        waterfallWidget->setDisplayLevelStep(step);
+    }
     frequencyCalibrationOffsetHz =
         (std::clamp)(settings.value("calibration/frequencyOffsetHz",
                                     frequencyCalibrationOffsetHz).toDouble(),
@@ -865,7 +911,9 @@ void YourClassName::loadPersistentSettings() {
     receiverNoiseBaselineMode = (std::clamp)(
         settings.value("calibration/noiseBaselineMode", receiverNoiseBaselineMode).toInt(),
         static_cast<int>(ReceiverNoiseBaselineMode::Off),
-        static_cast<int>(ReceiverNoiseBaselineMode::ExcessPower));
+        static_cast<int>(ReceiverNoiseBaselineMode::WideShape));
+    receiverNoiseShapeWidthHz = (std::clamp)(settings.value("calibration/noiseShapeWidthHz", 150000.0).toDouble(), 50000.0, 2000000.0);
+    receiverNoiseShapeStrength = (std::clamp)(settings.value("calibration/noiseShapeStrength", 1.0).toDouble(), 0.0, 1.0);
     receiverNoiseBaselineTargetDb = (std::clamp)(
         settings.value("calibration/noiseBaselineTargetDb", receiverNoiseBaselineTargetDb).toDouble(),
         -220.0,
@@ -935,6 +983,10 @@ void YourClassName::loadPersistentSettings() {
     if (waterfallWidget) {
         waterfallWidget->setRowsPerFrame(waterfallRowsPerFrame);
     }
+    if (waterfallRowsSpin) {
+        const QSignalBlocker blocker(waterfallRowsSpin);
+        waterfallRowsSpin->setValue(waterfallRowsPerFrame);
+    }
     spectrumDisplayMode = (std::clamp)(settings.value("ui/spectrumDisplayMode", 0).toInt(), 0, 1);
     spectrumPersistenceSeconds = settings.value("ui/spectrumPersistenceSeconds", 1.6).toDouble();
     spectrumPersistenceIntensity = settings.value("ui/spectrumPersistenceIntensity", 100).toInt();
@@ -949,6 +1001,7 @@ void YourClassName::loadPersistentSettings() {
     if (graphWidget) graphWidget->setPersistenceEnabled(spectrumDisplayMode == 1);
     waterfallDisplayMode =
         (std::clamp)(settings.value("ui/waterfallDisplayMode", waterfallDisplayMode).toInt(), 0, 2);
+    applyWaterfallColorPalette(settings.value("ui/waterfallColorPalette", waterfallColorPalette).toInt());
     multiSdrViewMode =
         (std::clamp)(settings.value("ui/multiSdrViewMode", multiSdrViewMode).toInt(), 0, 1);
     if (multiSdrViewModeCombo) {
@@ -1209,6 +1262,10 @@ void YourClassName::loadPersistentSettings() {
                                     AGILE_LIVE_RETUNE_DEFAULT_COMMAND_INTERVAL_MS).toInt(),
                      AGILE_LIVE_RETUNE_MIN_COMMAND_INTERVAL_MS,
                      AGILE_LIVE_RETUNE_MAX_COMMAND_INTERVAL_MS);
+    agileContinuousRetuneEnabled = settings.value("ui/agileContinuousRetune", false).toBool();
+    const double retuneStep = settings.value("ui/agileContinuousRetuneStepPercent", 5.0).toDouble();
+    agileContinuousRetuneStepPercent = std::isfinite(retuneStep)
+        ? (std::clamp)(retuneStep, 0.1, 100.0) : 5.0;
     fineTuneScaleHoldMode = settings.value("ui/fineTuneScaleHoldMode", fineTuneScaleHoldMode).toBool();
     spectrumFrameBufferEnabled =
         settings.value("spectrumFrames/bufferEnabled", spectrumFrameBufferEnabled).toBool();
@@ -1258,11 +1315,21 @@ void YourClassName::loadPersistentSettings() {
     serverDisableLocalVisualAudio = settings.value("network/serverDisableLocalVisualAudio", serverDisableLocalVisualAudio).toBool();
     networkFullResolutionSpectrumFrames =
         settings.value("network/fullResolutionSpectrumFrames", networkFullResolutionSpectrumFrames).toBool();
+    networkSpectrumLevelStepTenths =
+        (std::clamp)(settings.value("network/spectrumLevelStepTenths",
+                                   DisplayLevelStep::DefaultNetworkTenths).toInt(),
+                     DisplayLevelStep::DefaultNetworkTenths, DisplayLevelStep::MaximumTenths);
+    networkSpectrumMaxFps =
+        (std::clamp)(settings.value("network/spectrumMaxFps", NETWORK_SPECTRUM_FPS_DEFAULT).toInt(),
+                     NETWORK_SPECTRUM_FPS_MIN, NETWORK_SPECTRUM_FPS_MAX);
     audioRelayTransmitEnabled = settings.value("audioRelay/transmitEnabled", audioRelayTransmitEnabled).toBool();
+    audioRelayDisableLocalVisualAudio = settings.value("audioRelay/disableLocalVisualAudio", false).toBool();
     audioRelayHost = settings.value("audioRelay/host", audioRelayHost).toString();
     audioRelayPort = static_cast<quint16>((std::clamp)(settings.value("audioRelay/port", static_cast<int>(audioRelayPort)).toInt(), 1, 65535));
     audioRelayReceiveEnabled = settings.value("audioRelay/receiveEnabled", audioRelayReceiveEnabled).toBool();
     audioRelayListenPort = static_cast<quint16>((std::clamp)(settings.value("audioRelay/listenPort", static_cast<int>(audioRelayListenPort)).toInt(), 1, 65535));
+    audioRelayBufferMs = (std::clamp)(settings.value("audioRelay/bufferMs", AUDIO_RELAY_BUFFER_DEFAULT_MS).toInt(),
+                                      AUDIO_RELAY_BUFFER_MIN_MS, AUDIO_RELAY_BUFFER_MAX_MS);
     audioHttpStreamEnabled = settings.value("audioHttpStream/enabled", audioHttpStreamEnabled).toBool();
     audioHttpStreamPort = static_cast<quint16>((std::clamp)(settings.value("audioHttpStream/port", static_cast<int>(audioHttpStreamPort)).toInt(), 1, 65535));
     digitalDecodeEnabled = settings.value("digital/decodeEnabled", digitalDecodeEnabled).toBool();
@@ -1564,6 +1631,8 @@ void YourClassName::flushPendingPersistentSettingsSave() {
 }
 
 void YourClassName::savePersistentSettings() {
+    // Sweep frequencies are temporary; never persist them as the user's tuning.
+    if (spurSweepActive) return;
     if (!persistentSettingsReady) {
         return;
     }
@@ -1632,6 +1701,9 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("receiver/hackRfLnaGainDb", settingsToSave.hackRfLnaGainDb);
     settings.setValue("receiver/hackRfVgaGainDb", settingsToSave.hackRfVgaGainDb);
     settings.setValue("receiver/uhdRxChannel", settingsToSave.uhdRxChannel);
+    settings.setValue("receiver/uhdDuplexEnabled", settingsToSave.uhdDuplexEnabled);
+    settings.setValue("receiver/uhdClockSource", settingsToSave.uhdClockSource);
+    settings.setValue("receiver/uhdGnssBaud", settingsToSave.uhdGnssBaud);
     settings.setValue("receiver/uhdRxGainDb", settingsToSave.uhdRxGainDb);
     settings.setValue("receiver/uhdRxAntenna", settingsToSave.uhdRxAntenna);
     settings.setValue("receiver/uhdFpgaImagePath", settingsToSave.uhdFpgaImagePath);
@@ -1699,10 +1771,16 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("listeningScan/targetsMhz", listeningScanTargetsMhz);
     settings.setValue("listeningScan/dwellMs", listeningScanDwellMs);
     settings.setValue("listeningScan/settleMs", listeningScanSettleMs);
-    settings.setValue("gpsQth/latitude", qthLatitude);
-    settings.setValue("gpsQth/longitude", qthLongitude);
-    settings.setValue("gpsQth/positionVisible", qthPositionVisible);
+    settings.setValue("gpsQth/latitude", qthPositionBeforeUhd ? qthPositionBeforeUhd->y() : qthLatitude);
+    settings.setValue("gpsQth/longitude", qthPositionBeforeUhd ? qthPositionBeforeUhd->x() : qthLongitude);
+    settings.setValue("gpsQth/positionVisible", qthPositionBeforeUhd ? qthPositionVisibleBeforeUhd : qthPositionVisible);
     settings.setValue("gpsQth/source", qthSource);
+    settings.setValue("gpsQth/uhdValidationEnabled", uhdGnssValidationEnabled);
+    settings.setValue("gpsQth/uhdReferenceLocator", uhdGnssReferenceLocator);
+    settings.setValue("gpsQth/uhdMaxDistanceKm", uhdGnssMaxDistanceKm);
+    settings.setValue("gpsQth/uhdMaxTimeErrorSeconds", uhdGnssMaxTimeErrorSeconds);
+    settings.setValue("gpsQth/uhdLogRejections", uhdGnssLogRejections);
+    settings.setValue("gpsQth/uhdShowRejections", uhdGnssShowRejections);
     settings.setValue("gpsQth/nmeaSerialPort", gnssSerialPortName);
     settings.setValue("gpsQth/nmeaSerialBaud", gnssSerialBaud);
     settings.setValue("gpsQth/positionPolicy", normalizedGnssPositionPolicy(gnssPositionPolicy));
@@ -1931,6 +2009,9 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("display/amateurBandMarkers", showAmateurBandMarkers);
     settings.setValue("display/compactBandMarkers", compactBandMarkers);
     settings.setValue("display/spurSuppressionEnabled", spurSuppressionEnabled);
+    settings.setValue("display/spurThresholdDb", spurDetectionThresholdDb);
+    settings.setValue("display/spurCalibrationProfile",
+        QJsonDocument(spurCalibrationProfile.toJson()).toJson(QJsonDocument::Compact));
     settings.setValue("diagnostics/verboseLogging", diagnosticVerboseLogging);
     settings.setValue("recording/extendedMetadata", extendedRecordingMetadataEnabled);
     settings.beginWriteArray(QStringLiteral("display/spurMask"));
@@ -1952,12 +2033,16 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("ui/language", uiLanguage);
     settings.setValue("ui/fineTuneControlMode", fineTuneControlMode);
     settings.setValue("ui/spectrumUpdateIntervalMs", spectrumUpdateIntervalMs);
+    if (displayLevelStepSpin)
+        settings.setValue("ui/displayLevelStepTenths", qRound(displayLevelStepSpin->value() * 10.0));
     settings.setValue("ui/fftBackendPreference",
                       normalizedFftBackendPreference(fftBackendPreference));
     settings.setValue("calibration/frequencyOffsetHz", frequencyCalibrationOffsetHz);
     settings.setValue("calibration/amplitudeOffsetDb", amplitudeCalibrationOffsetDb);
     settings.setValue("calibration/tableEnabled", calibrationTableEnabled);
     settings.setValue("calibration/noiseBaselineMode", receiverNoiseBaselineMode);
+    settings.setValue("calibration/noiseShapeWidthHz", receiverNoiseShapeWidthHz);
+    settings.setValue("calibration/noiseShapeStrength", receiverNoiseShapeStrength);
     settings.setValue("calibration/noiseBaselineTargetDb", receiverNoiseBaselineTargetDb);
     settings.setValue("calibration/noiseBaselineCaptureFrames", receiverNoiseBaselineCaptureFrames);
     settings.setValue("calibration/yFactorApplyEnabled", receiverYFactorApplyEnabled);
@@ -1987,6 +2072,7 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("ui/spectrumPersistenceSmoothingMs", spectrumPersistenceSmoothingMs);
     settings.setValue("ui/spectrumPersistenceStyle", spectrumPersistenceStyle);
     settings.setValue("ui/waterfallDisplayMode", waterfallDisplayMode);
+    settings.setValue("ui/waterfallColorPalette", waterfallColorPalette);
     settings.setValue("ui/multiSdrViewMode", multiSdrViewMode);
     settings.setValue("ui/waterfall3DResolutionDivisor", waterfall3DResolutionDivisor);
     settings.setValue("ui/waterfall3DSurfaceStyle", waterfall3DSurfaceStyle);
@@ -2020,6 +2106,8 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("ui/spectrumPeakMeterStyle", spectrumPeakMeterStyle);
     settings.setValue("ui/showExtendedSpectrumInfo", showExtendedSpectrumInfo);
     settings.setValue("ui/agileLiveRetuneIntervalMs", agileLiveRetuneCommandIntervalMs);
+    settings.setValue("ui/agileContinuousRetune", agileContinuousRetuneEnabled);
+    settings.setValue("ui/agileContinuousRetuneStepPercent", agileContinuousRetuneStepPercent);
     settings.setValue("ui/fineTuneScaleHoldMode", fineTuneScaleHoldMode);
     settings.setValue("spectrumFrames/bufferEnabled", spectrumFrameBufferEnabled);
     settings.setValue("spectrumFrames/prebufferSeconds", spectrumFramePrebufferSeconds);
@@ -2032,6 +2120,9 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("audio/filterChainJson", pendingSettings.audioFilterChainJson);
     settings.setValue("audio/simplifiedChannelizer",
                       pendingSettings.simplifiedAudioChannelizer);
+    settings.setValue("receiver/useCorrectedFobosCommands", useCorrectedFobosCommands);
+    settings.setValue("receiver/ifTestMode", fobosIfTestMode);
+    settings.setValue("receiver/adcOverloadProtection", adcOverloadProtectionEnabled);
     settings.setValue("hfNoiseCancel/depth", pendingSettings.hfNoiseCancelDepth);
     settings.setValue("hfNoiseCancel/refGainDb", pendingSettings.hfNoiseCancelRefGainDb);
     settings.setValue("hfNoiseCancel/refDelayNs", pendingSettings.hfNoiseCancelRefDelayNs);
@@ -2056,11 +2147,15 @@ void YourClassName::savePersistentSettings() {
     settings.setValue("network/remoteVfoSquelchDb", remoteVfoSquelchDb);
     settings.setValue("network/serverDisableLocalVisualAudio", serverDisableLocalVisualAudio);
     settings.setValue("network/fullResolutionSpectrumFrames", networkFullResolutionSpectrumFrames);
+    settings.setValue("network/spectrumLevelStepTenths", networkSpectrumLevelStepTenths);
+    settings.setValue("network/spectrumMaxFps", networkSpectrumMaxFps);
     settings.setValue("audioRelay/transmitEnabled", audioRelayTransmitEnabled);
+    settings.setValue("audioRelay/disableLocalVisualAudio", audioRelayDisableLocalVisualAudio);
     settings.setValue("audioRelay/host", audioRelayHost);
     settings.setValue("audioRelay/port", static_cast<int>(audioRelayPort));
     settings.setValue("audioRelay/receiveEnabled", audioRelayReceiveEnabled);
     settings.setValue("audioRelay/listenPort", static_cast<int>(audioRelayListenPort));
+    settings.setValue("audioRelay/bufferMs", audioRelayBufferMs);
     settings.setValue("audioHttpStream/enabled", audioHttpStreamEnabled);
     settings.setValue("audioHttpStream/port", static_cast<int>(audioHttpStreamPort));
     settings.setValue("digital/decodeEnabled", digitalDecodeEnabled);

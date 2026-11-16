@@ -17,7 +17,8 @@ bool SpectrumIqEventRecorder::start(const QString &eventBasePath,
                                     qint64 spectrumFirstFrameUtcMsValue,
                                     QString *errorMessage) {
     stop();
-    if (eventBasePath.isEmpty()) {
+    if (eventBasePath.isEmpty() ||
+        (mode != Mode::ChannelIqS16 && mode != Mode::FullIqS8 && mode != Mode::FullIqS16)) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("empty event base path");
         }
@@ -45,10 +46,12 @@ bool SpectrumIqEventRecorder::start(const QString &eventBasePath,
     waveLayout = {};
     filePath = eventBasePath + (mode == Mode::ChannelIqS16
                                     ? QStringLiteral("_channel_iq.wav")
-                                    : QStringLiteral("_full_iq_s8.iq8"));
+                                    : mode == Mode::FullIqS16 ? QStringLiteral("_full_iq_s16.cs16")
+                                                             : QStringLiteral("_full_iq_s8.iq8"));
     sidecarPath = eventBasePath + (mode == Mode::ChannelIqS16
                                        ? QStringLiteral("_channel_iq.json")
-                                       : QStringLiteral("_full_iq_s8.json"));
+                                       : mode == Mode::FullIqS16 ? QStringLiteral("_full_iq_s16.json")
+                                                                : QStringLiteral("_full_iq_s8.json"));
 
     return mode == Mode::ChannelIqS16 ? openChannelWav(errorMessage) : openFullIqRaw(errorMessage);
 }
@@ -58,6 +61,9 @@ void SpectrumIqEventRecorder::stop() {
         return;
     }
     patchWavHeader();
+    if (activeMode != Mode::ChannelIqS16 && outputFile.isOpen() &&
+        outputFile.size() != qint64(writtenBytes) && !outputFile.resize(qint64(writtenBytes)))
+        ++writeErrors; // Discard a short-write tail; retain complete IQ frames only.
     if (outputFile.isOpen()) {
         QElapsedTimer timer;
         timer.start();
@@ -97,7 +103,7 @@ bool SpectrumIqEventRecorder::appendFrame(const QByteArray &iqData,
     if (!active || !outputFile.isOpen() || iqData.isEmpty()) {
         return false;
     }
-    const int bytesPerSample = activeMode == Mode::ChannelIqS16 ? 4 : 2;
+    const int bytesPerSample = activeMode == Mode::FullIqS8 ? 2 : 4;
     if (!std::isfinite(sampleRate) || sampleRate != recordingSampleRate || sampleCount <= 0 ||
         qint64(sampleCount) * bytesPerSample != iqData.size()) {
         ++writeErrors;
@@ -121,7 +127,7 @@ bool SpectrumIqEventRecorder::appendFrame(const QByteArray &iqData,
         active = false;
         return false;
     }
-    if (activeMode == Mode::FullIqS8) writtenBytes += static_cast<quint64>(iqData.size());
+    if (activeMode != Mode::ChannelIqS16) writtenBytes += static_cast<quint64>(iqData.size());
     ++framesWritten;
     if (frameUtcMs > 0) lastFrameUtcMs = frameUtcMs;
     return true;
@@ -190,14 +196,15 @@ bool SpectrumIqEventRecorder::writeSidecar() const {
 }
 
 bool SpectrumIqEventRecorder::writeSigMfMetadata() const {
-    if (activeMode != Mode::FullIqS8 || filePath.isEmpty()) return false;
+    if (activeMode == Mode::ChannelIqS16 || filePath.isEmpty()) return false;
     const QFileInfo dataInfo(filePath);
     const QString metadataPath = dataInfo.absoluteDir().filePath(
         dataInfo.completeBaseName() + QStringLiteral(".sigmf-meta"));
     QFile metadataFile(metadataPath);
     if (!metadataFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) return false;
 
-    const QJsonObject root = RecordingFormatCore::sigMfMetadata(QStringLiteral("ci8"), recordingSampleRate,
+    const QJsonObject root = RecordingFormatCore::sigMfMetadata(
+        activeMode == Mode::FullIqS16 ? QStringLiteral("ci16_le") : QStringLiteral("ci8"), recordingSampleRate,
         dataInfo.fileName(), recordingSettings.centerFrequency, firstFrameUtcMs,
         {{"core:description", QStringLiteral("Obrii SDR full-band IQ event recording")}});
     const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
@@ -209,7 +216,16 @@ QJsonObject SpectrumIqEventRecorder::makeMetadataObject() const {
     root["app"] = QStringLiteral("ObriiSDR");
     root["format"] = activeMode == Mode::ChannelIqS16
                          ? QStringLiteral("channel_iq_wav_s16le")
-                         : QStringLiteral("full_iq_raw_s8_interleaved");
+                         : activeMode == Mode::FullIqS16 ? QStringLiteral("full_iq_raw_s16le_interleaved")
+                                                       : QStringLiteral("full_iq_raw_s8_interleaved");
+    if (activeMode == Mode::FullIqS16) {
+        root["sampleEncoding"] = QStringLiteral("ci16_le");
+        root["inputGain"] = 1.0;
+        root["sampleScale"] = 1.0 / 32768.0;
+    }
+    const double bytesPerIqSample = activeMode == Mode::FullIqS8 ? 2.0 : 4.0;
+    root["sampleCount"] = double(writtenBytes) / bytesPerIqSample;
+    root["durationSamplesSeconds"] = double(writtenBytes) / bytesPerIqSample / recordingSampleRate;
     root["recordedAtLocal"] = QDateTime::currentDateTime().toString(Qt::ISODateWithMs);
     root["filePath"] = filePath;
     root["sampleRate"] = recordingSampleRate;
@@ -228,8 +244,6 @@ QJsonObject SpectrumIqEventRecorder::makeMetadataObject() const {
     if (firstFrameUtcMs > 0 && lastFrameUtcMs > firstFrameUtcMs) {
         const double durationSeconds =
             static_cast<double>(lastFrameUtcMs - firstFrameUtcMs) / 1000.0;
-        const double bytesPerIqSample =
-            activeMode == Mode::ChannelIqS16 ? 4.0 : 2.0;
         const double sampleCount = static_cast<double>(writtenBytes) / bytesPerIqSample;
         root["durationUtcSeconds"] = durationSeconds;
         if (sampleCount > 0.0 && durationSeconds > 0.0) {

@@ -1,7 +1,12 @@
 #include "analyzerinstrumentplan.h"
+#include "analyzerinstrumentscpi.h"
+#include "analyzerinstrumentsimulation.h"
 
 #include <QCoreApplication>
+#include <QEventLoop>
 #include <QJsonDocument>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTextStream>
 
 #include <cmath>
@@ -14,6 +19,161 @@ void check(bool condition, const QString &message) {
     if (condition) return;
     QTextStream(stderr) << "FAIL: " << message << '\n';
     ++failures;
+}
+
+void testScpi() {
+    QTcpServer server;
+    check(server.listen(QHostAddress::LocalHost, 0), QStringLiteral("listen on a simulated SCPI instrument"));
+    bool output = false;
+    bool readWhileOff = false;
+    int readings = 0;
+    QByteArray frequency;
+    QList<QByteArray> tuned;
+    QObject::connect(&server, &QTcpServer::newConnection, &server, [&] {
+        auto *client = server.nextPendingConnection();
+        const auto read = [&, client] {
+            while (client->canReadLine()) {
+                const auto command = client->readLine().trimmed();
+                if (command == "*IDN?") client->write("Obrii,SCPI fixture,0,1\n");
+                else if (command == "*OPC?") client->write("1\n");
+                else if (command == "SYST:ERR?") client->write("0,No error\n");
+                else if (command == "OUTP OFF") output = false;
+                else if (command == "OUTP ON") output = true;
+                else if (command.startsWith("FREQ ")) {
+                    frequency = command;
+                    tuned.append(frequency);
+                } else if (command == "READ?") {
+                    readWhileOff |= !output;
+                    client->write(++readings % 2 ? "-40\n" : "-50\n");
+                }
+            }
+        };
+        QObject::connect(client, &QTcpSocket::readyRead, client, read);
+        QObject::connect(client, &QTcpSocket::disconnected, client, &QObject::deleteLater);
+        read();
+    });
+    AnalyzerInstrumentPlan plan;
+    plan.useExternalGenerator = true;
+    plan.scpi.enabled = true;
+    plan.scpi.resource = QStringLiteral("TCPIP0::127.0.0.1::%1::SOCKET").arg(server.serverPort());
+    plan.scpi.readCommand = QStringLiteral("READ?");
+    plan.scpi.timeoutMs = 1000;
+    plan.capabilities.receiverAvailable = plan.capabilities.externalGenerator = true;
+    plan.capabilities.receiverChannels = 1;
+    plan.capabilities.maximumSafeOutputDbm = -25;
+    plan.points = 3;
+    plan.averages = 2;
+    plan.bidirectionalSweep = true;
+    plan.settleMs = 1;
+    plan.dwellMs = 1;
+
+    AnalyzerInstrumentScpi backend;
+    QEventLoop loop;
+    QVector<AnalyzerMeasurementPoint> points;
+    QString result;
+    bool completed = false;
+    const auto run = [&](bool cancel) {
+        completed = false;
+        points.clear();
+        check(backend.start(plan, [&](const AnalyzerMeasurementPoint &point) {
+            points.append(point);
+            if (cancel) backend.cancel();
+        }, [&](const QString &error) { result = error; completed = true; loop.quit(); }),
+        QStringLiteral("start SCPI sweep"));
+        QTimer::singleShot(4000, &loop, &QEventLoop::quit);
+        loop.exec();
+        check(completed && !output, QStringLiteral("SCPI sweep completes with output OFF"));
+    };
+    run(false);
+    check(result.isEmpty() && points.size() == 5 && readings == 10 && !readWhileOff &&
+          tuned.size() == 5 && tuned.first() == tuned.last(),
+          QStringLiteral("SCPI sweeps both directions and measures with RF enabled"));
+    if (!points.isEmpty()) {
+        const auto point = points.first();
+        check(point.forwardOnly && !point.toJson().contains(QStringLiteral("s11Magnitude")) &&
+              std::abs(point.forwardDb - 10.0 * std::log10(0.000055)) < 1e-9,
+              QStringLiteral("SCPI averages linear power and exports only measured values"));
+    }
+    plan.settleMs = 200;
+    run(true);
+    check(result.contains(QStringLiteral("stopped")) && points.size() == 1,
+          QStringLiteral("SCPI cancels a sweep after a partial result"));
+    plan.sourceLevelDbm = -20;
+    check(!AnalyzerInstrumentScpi::validationError(plan).isEmpty(),
+          QStringLiteral("SCPI enforces the declared output limit"));
+}
+
+void testSimulation() {
+    AnalyzerInstrumentSimulation simulation;
+    AnalyzerInstrumentPlan plan;
+    plan.mode = AnalyzerInstrumentMode::VectorNetworkAnalyzer;
+    plan.startHz = 5e6;
+    plan.stopHz = 15e6;
+    plan.points = 3;
+    plan.bidirectionalSweep = true;
+    plan.settleMs = 1.0;
+    plan.dwellMs = 1.0;
+    plan.averages = 2;
+    plan.useExternalGenerator = true;
+    plan.scpi.enabled = true;
+    plan.scpi.resource = QStringLiteral("fixture");
+    plan.calibration.openMeasured = true;
+    QVector<AnalyzerMeasurementPoint> points;
+    QString completion;
+    int completions = 0;
+    QEventLoop loop;
+    const auto run = [&](bool cancel) {
+        points.clear();
+        completion.clear();
+        completions = 0;
+        const auto report = [&](const AnalyzerMeasurementPoint &point) {
+            points.append(point);
+            if (cancel && points.size() == 2) simulation.cancel();
+        };
+        const auto done = [&](const QString &error) {
+            ++completions;
+            completion = error;
+            loop.quit();
+        };
+        check(simulation.start(plan, report, done), QStringLiteral("simulation start"));
+        check(points.isEmpty(), QStringLiteral("simulation start must return before measurements"));
+        check(!simulation.start(plan, report, done), QStringLiteral("reject concurrent simulation"));
+        QTimer deadline;
+        deadline.setSingleShot(true);
+        QObject::connect(&deadline, &QTimer::timeout, &loop, &QEventLoop::quit);
+        deadline.start(2000);
+        loop.exec();
+        check(completions == 1, QStringLiteral("simulation completes once"));
+        simulation.cancel();
+        check(completions == 1, QStringLiteral("cancel after completion is idempotent"));
+    };
+    run(false);
+    QVector<double> frequencies;
+    for (const auto &point : points) frequencies.append(point.frequencyHz);
+    check(completion.isEmpty() && frequencies == QVector<double>{5e6, 10e6, 15e6, 10e6, 5e6},
+          QStringLiteral("both passes visit the expected frequencies once per direction"));
+    if (points.size() >= 2) {
+        const auto &corner = points.at(1);
+        const double expected = std::cos(0.002) / std::sqrt(2.0);
+        check(corner.valid && std::abs(corner.s21Magnitude - expected) < 1e-12 &&
+              std::abs(corner.s11Magnitude - expected) < 1e-12 &&
+              std::abs(corner.phaseDegrees + 45.0) < 1e-12,
+              QStringLiteral("averaged complex S-parameters at the 10 MHz corner"));
+    }
+    run(true);
+    check(!completion.isEmpty() && points.size() == 2, QStringLiteral("stop keeps the measured prefix"));
+    run(false);
+    check(completion.isEmpty() && points.size() == 5, QStringLiteral("restart after cancellation"));
+
+    const auto saved = AnalyzerInstrumentSimulation::simulationPlan(plan);
+    check(!saved.useExternalGenerator && !saved.scpi.enabled && saved.scpi.resource.isEmpty() &&
+          !saved.calibration.openMeasured && !simulation.capabilities().transmitterAvailable,
+          QStringLiteral("simulation uses no SCPI, TX or claimed hardware calibration"));
+    plan.points = std::numeric_limits<int>::max();
+    check(!AnalyzerInstrumentSimulation::validationError(plan).isEmpty(), QStringLiteral("simulation rejects oversized plans"));
+    plan.points = 8000;
+    check(!AnalyzerInstrumentSimulation::validationError(plan).isEmpty(),
+          QStringLiteral("both directions count toward the simulation limit"));
 }
 }
 
@@ -60,6 +220,8 @@ int main(int argc, char **argv) {
     measured.valid = true;
     session.points.append(measured);
     session.eventLog.append(QStringLiteral("fixture"));
+    session.backendId = QStringLiteral("simulation-ideal-low-pass");
+    session.outcome = QStringLiteral("cancelled");
     const AnalyzerMeasurementSession restoredSession =
         AnalyzerMeasurementSession::fromJson(session.toJson());
     check(restoredSession.points.size() == 1 && restoredSession.points.first().valid,
@@ -67,6 +229,8 @@ int main(int argc, char **argv) {
     check(restoredSession.eventLog.size() == 1 &&
               restoredSession.eventLog.first() == QStringLiteral("fixture"),
           QStringLiteral("session event-log JSON round-trip"));
+    check(restoredSession.backendId == session.backendId && restoredSession.outcome == session.outcome,
+          QStringLiteral("simulation provenance and outcome JSON round-trip"));
 
     const QVector<double> grid = AnalyzerInstrumentPlanner::frequencyGrid(draft);
     check(grid.size() == draft.points, QStringLiteral("frequency grid size"));
@@ -132,7 +296,24 @@ int main(int argc, char **argv) {
                    1.2222222222222223) < 1.0e-12,
           QStringLiteral("SWR calculation"));
 
-    QTextStream(stdout) << "Analyzer instrument plan self-test: "
+    using Complex = std::complex<double>;
+    const std::array<Complex, 3> standards{{{0.99, 0.05}, {-0.94, -0.11}, {0.015, -0.02}}};
+    const Complex expected{0.22, -0.34};
+    const auto measure = [](Complex gamma) {
+        return (Complex{0.08, -0.02} + Complex{0.62, 0.15} * gamma) /
+               (1.0 + Complex{0.07, -0.13} * gamma);
+    };
+    std::array<Complex, 3> readings{{measure(standards[0]), measure(standards[1]), measure(standards[2])}};
+    Complex corrected;
+    check(AnalyzerInstrumentPlanner::correctOnePort(standards, readings, measure(expected), corrected) &&
+              std::abs(corrected - expected) < 1e-12, QStringLiteral("complex Open/Short/Load correction"));
+    readings.fill(readings[0]);
+    check(!AnalyzerInstrumentPlanner::correctOnePort(standards, readings, measure(expected), corrected),
+          QStringLiteral("singular Open/Short/Load calibration must be rejected"));
+
+    testSimulation();
+    testScpi();
+    QTextStream(stdout) << "Analyzer instrument plan and simulation self-test: "
                         << (failures == 0 ? "PASS" : "FAIL") << '\n';
     return failures == 0 ? 0 : 1;
 }

@@ -19,6 +19,7 @@ class QSpinBox;
 class FpgaLogicEditor final : public QDialog {
 public:
     explicit FpgaLogicEditor(const QString &projectRoot, QWidget *parent = nullptr);
+    ~FpgaLogicEditor() override;
     QString requestedSynthesisRtl() const { return requestedSynthesisRtl_; }
 
 protected:

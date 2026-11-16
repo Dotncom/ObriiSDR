@@ -989,20 +989,20 @@ ResearchAnalysisDialog::ResearchAnalysisDialog(Translator translator,
     analyzerLayout->addStretch(1);
     tabs->addTab(analyzerPage, trText(QStringLiteral("research_analyzer_tab"), QStringLiteral("Spectrum analyzer")));
 
-    densityWidget = new SignalDensityWidget(translator, tabs);
+    densityWidget = new SignalDensityWidget(this->translator, tabs);
     tabs->addTab(densityWidget,
                  trText(QStringLiteral("research_density_tab"),
                         QStringLiteral("Density / persistence")));
-    maskWidget = new SpectrumMaskWidget(translator, this->maskTriggerHandler, tabs);
+    maskWidget = new SpectrumMaskWidget(this->translator, this->maskTriggerHandler, tabs);
     tabs->addTab(maskWidget,
                  trText(QStringLiteral("research_masks_tab"),
                         QStringLiteral("Masks / baseline")));
-    pulseWidget = new PulseAnalysisWidget(translator, tabs);
+    pulseWidget = new PulseAnalysisWidget(this->translator, tabs);
     tabs->addTab(pulseWidget,
                  trText(QStringLiteral("research_pulse_tab"),
                         QStringLiteral("Pulses / periodicity")));
     sessionWidget = new MeasurementSessionWidget(
-        translator, this->sessionFrequencySetter, tabs);
+        this->translator, this->sessionFrequencySetter, tabs);
     tabs->addTab(sessionWidget,
                  trText(QStringLiteral("research_session_tab"),
                         QStringLiteral("Measurement session")));

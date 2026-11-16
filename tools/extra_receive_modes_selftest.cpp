@@ -152,6 +152,14 @@ int main(int argc, char **argv) {
     std::cout << received.text.join('\n').toStdString() << '\n';
     check(received.text.join(' ').contains("M17 LIVE TEST"), "M17 noisy RRC waveform packet reception");
     if (!worker.isEmpty()) {
+        const auto generated = M17Adapter::modulatePacket(packet, 0.5f);
+        QByteArray generatedIq;
+        for (const auto &sample : generated) {
+            const float iq[] = {sample.real(), sample.imag()};
+            generatedIq.append(reinterpret_cast<const char *>(iq), sizeof(iq));
+        }
+        check(!generated.isEmpty() && workerOutput(worker, "m17", generatedIq, 2, 48000).count("M17 LIVE TEST") >= 2,
+              "M17 TX IQ through the production RX worker");
         const auto waveform = modulate(packet.symbols);
         QByteArray channelIq;
         double angle = 0;
@@ -205,6 +213,60 @@ int main(int argc, char **argv) {
     m17.reset();
     check(receive(m17, QByteArray(48000, 0)).text.isEmpty(), "M17 silence rejects false packets");
     check(m17.voiceAvailable(), "Codec2 runtime loaded");
+    {
+        constexpr int frames = 8;
+        QVector<float> voice((frames - 1) * 320 + 100);
+        for (int i = 0; i < voice.size(); ++i)
+            voice[i] = float(0.28 * std::sin(2 * Pi * 210 * i / 8000) +
+                             0.12 * std::sin(2 * Pi * 390 * i / 8000));
+        const auto iq = M17Adapter::modulateVoice("K1ABC", "@ALL", 7, voice, 0.5f, 48000, &error);
+        check(error.isEmpty() && iq.size() == (frames + 3) * 192 * 10 + 80,
+              "M17 voice TX includes setup, padded final frame and EOT");
+        QByteArray discriminator;
+        for (int i = 1; i < iq.size(); ++i)
+            appendPcm(discriminator, std::arg(iq[i] * std::conj(iq[i - 1])));
+        m17.reset();
+        const auto voiceResult = receive(m17, discriminator);
+        std::cout << "M17 voice round trip PCM bytes " << voiceResult.voicePcm.size() << ' '
+                  << voiceResult.text.join(' ').toStdString() << '\n';
+        check(voiceResult.text.join(' ').contains("K1ABC") &&
+              voiceResult.text.join(' ').contains("CAN 7"), "M17 voice TX link setup decoded");
+        check(voiceResult.voicePcm.size() == frames * 1920 * 2 &&
+              voiceResult.voicePcm != QByteArray(frames * 1920 * 2, 0),
+              "M17 voice TX and RX recover all Codec2 frames including the partial final frame");
+        M17VoiceStream stream;
+        auto liveIq = stream.begin("K1ABC", "@ALL", 7, 0.5f, &error);
+        bool liveOk = error.isEmpty() && liveIq.size() == 3840 && stream.isActive();
+        bool emittedWhileHeld = false;
+        for (int offset = 0; offset < voice.size(); offset += 137) {
+            const auto chunk = stream.pushAudio(voice.mid(offset, 137), &error);
+            liveOk &= error.isEmpty();
+            emittedWhileHeld |= !chunk.isEmpty();
+            liveIq += chunk;
+        }
+        liveIq += stream.finish(&error);
+        check(liveOk && emittedWhileHeld && error.isEmpty() && !stream.isActive() && liveIq == iq,
+              "M17 microphone chunks reproduce the WAV waveform with continuous phase and a final frame");
+        auto nextCall = stream.begin("K1ABC", "@ALL", 7, 0.5f, &error);
+        nextCall += stream.finish(&error);
+        check(error.isEmpty() && nextCall ==
+              M17Adapter::modulateVoice("K1ABC", "@ALL", 7, QVector<float>(320, 0.0f), 0.5f, 48000),
+              "M17 immediate PTT release ends cleanly and a new call has fresh encoder state");
+        check(stream.finish(&error).isEmpty() && stream.pushAudio(voice, &error).isEmpty(),
+              "M17 stream stays silent while PTT is released");
+        if (!worker.isEmpty()) {
+            QByteArray iqBytes;
+            for (auto sample : iq) {
+                const float pair[] = {sample.real(), sample.imag()};
+                iqBytes.append(reinterpret_cast<const char *>(pair), sizeof(pair));
+            }
+            const auto output = workerOutput(worker, "m17", iqBytes, 2, 48000);
+            check(output.count("K1ABC") >= 2 && output.contains("voicePcm") && output.contains("pcmBase64"),
+                  "M17 voice TX IQ through the production RX worker");
+        }
+        check(M17Adapter::modulateVoice("K1ABC", "@ALL", 16, voice, 0.5f, 48000, &error).isEmpty() &&
+              !error.isEmpty(), "M17 voice TX rejects an invalid CAN");
+    }
     QLibrary codecLib(QCoreApplication::applicationDirPath() + "/libcodec2");
     if (!codecLib.load()) { codecLib.setFileName("libcodec2"); codecLib.load(); }
     auto create = reinterpret_cast<void *(*)(int)>(codecLib.resolve("codec2_create"));

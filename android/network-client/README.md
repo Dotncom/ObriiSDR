@@ -53,12 +53,12 @@ Android USB stacks.
 - Uses a collapsible controls panel so the spectrum/waterfall can fill the
   screen, especially in landscape orientation.
 - Includes a USB/OTG panel for direct-receiver work. It can list
-  Android-visible USB devices, request permission for a likely Fobos device, and
-  safely open/close the device to verify Android USB Host access. It also has
-  an experimental OTG session probe that claims the likely streaming interface,
-  reports bulk endpoints, reads firmware info with a safe vendor control
-  transfer, performs short one-shot bulk read tests, and can start an
-  experimental live OTG preview with Android-side FFT frames.
+  Android-visible USB devices, request permission for a likely Fobos, RTL-SDR,
+  or HackRF device, and safely open/close the device to verify Android USB Host
+  access. It also has an experimental OTG session probe that claims the likely
+  streaming interface, reports bulk endpoints, reads device information with a
+  safe control transfer, performs short one-shot bulk-read tests, and can start
+  a live Android-side FFT/audio preview.
 
 ## Current Scope
 
@@ -71,6 +71,8 @@ start acquisition first. Change between shared and VFO modes while disconnected.
 The USB/OTG path remains experimental. It includes a native USB/DSP bridge and
 local preview/audio paths, but does not replace the full desktop pipeline.
 Device, phone, powered-hub and USB-stack combinations still need hardware tests.
+HackRF OTG is receive-only and starts conservatively at 2, 4 or 8 MS/s; it does
+not expose any Android TX command.
 
 ## Build
 
@@ -151,3 +153,28 @@ Expected Fobos identifiers from the patched desktop libraries:
 - VID/PID: `16d0:132e`
 - Standard API generation: `bcdDevice 0000`
 - Agile API generation: `bcdDevice 0101`
+
+## HackRF OTG Test Flow (experimental, RX only)
+
+The Android target selector cycles **Auto → RTL → HackRF → Fobos**. Select
+**HackRF** before opening a device when more than one receiver is attached.
+The application recognizes the public USB identifiers for HackRF One
+(`1d50:6089`) and Jawbreaker (`1d50:604b`). It intentionally does not claim
+RAD1O because that hardware has not been validated in this client.
+
+1. Use a powered OTG hub: HackRF One plus a phone can exceed the phone's stable
+   USB power budget.
+2. Connect the HackRF, select **USB HackRF**, press **USB scan**, then
+   **USB permission/open** and accept Android's prompt.
+3. Press **OTG open**. The log should name the bulk-IN endpoint and report a
+   board identifier and firmware string.
+4. Switch the top mode from **Net** to **OTG**, select 2, 4, or 8 MS/s and RF
+   input, then press **Start**.
+5. The app sends only the documented RX control sequence: frequency, sample
+   rate, automatic analogue filter, LNA/VGA gains and receive start. IQ is
+   signed 8-bit interleaved I/Q. Press **Stop** before unplugging.
+
+The direct HackRF path is not hardware-validated in this repository release.
+If it fails on a phone, include the Android USB log, phone/Android version,
+HackRF board/firmware version and whether a powered hub was used when reporting
+the result. Do not use this path for transmitting.

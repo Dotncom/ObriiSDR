@@ -1129,8 +1129,11 @@ void DigitalDecoder::configureDmrPrivacy(const RadioSettings &settings) {
     const int effectiveMode = settings.dmrPrivacyAutoKeySelection
                                   ? DMR_PRIVACY_AUTO
                                   : settings.dmrPrivacyMode;
+    const bool enabled = settings.modulationType == MOD_DMR && dmrVoiceOutputEnabled;
+    dmrDecoder.setPrivacyIndicatorValidator(enabled && effectiveMode == DMR_PRIVACY_AUTO
+        ? &DmrPrivacyProcessor::isValidPi : nullptr);
     if (!dmrPrivacy.configure(effectiveMode,
-                              settings.modulationType == MOD_DMR && dmrVoiceOutputEnabled,
+                              enabled,
                               settings.dmrPrivacyKeyHex, settings.dmrPrivacyKeyId)) return;
     dmrVocoder.reset();
     dmrPayloadProbeVocoder.reset();
@@ -1759,13 +1762,15 @@ void DigitalDecoder::processPcmFrame(const QByteArray &pcmData, const RadioSetti
                          << "vocoderErrors" << vocoderErrors;
                 if (dmrPrivacy.isActive()) {
                     const auto &privacy = dmrPrivacy.statistics();
-                    qDebug() << "[DMR native privacy] mode" << dmrPrivacyModeId(settings.dmrPrivacyMode)
+                    qDebug() << "[DMR native privacy] mode"
+                             << dmrPrivacyModeId(settings.dmrPrivacyAutoKeySelection ? DMR_PRIVACY_AUTO : settings.dmrPrivacyMode)
                              << "keyBits" << dmrPrivacy.keyBits()
                              << "applied" << privacy.applied << "silence" << privacy.silence
                              << "unaligned" << privacy.unaligned
                              << "invalidKey" << privacy.invalidKey
                              << "invalidPayload" << privacy.invalidPayload
                              << "missingMi" << privacy.missingMi << "keyMismatch" << privacy.keyMismatch
+                             << "missingPi" << privacy.missingPi
                              << "piAccepted" << privacy.piAccepted << "piRejected" << privacy.piRejected
                              << "lateEntryAccepted" << privacy.lateEntryAccepted
                              << "lateEntryRejected" << privacy.lateEntryRejected

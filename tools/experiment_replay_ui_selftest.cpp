@@ -78,6 +78,28 @@ int main(int argc, char **argv) {
             require(viewer.experimentReplayState().value("paused").toBool(), "Allowlisted IQ auto-started playback");
         }
         {
+            const auto full16Path=directory.filePath("quality_full_iq_s16.cs16");
+            { QFile file(full16Path); require(file.open(QIODevice::WriteOnly),"Cannot create full IQ16 fixture");
+              file.write(QByteArray(65536,'\0')); }
+            auto full=fixture(false);
+            full.metadata["sourceSampleRate"]=50000000.;
+            SpectrumFrameReplayDialog viewer(nullptr,true);QString error;
+            require(viewer.loadExperimentRecording(directory.filePath("quality_spectrum.fbspec"),
+                std::move(full),{},&error,{full16Path}),qPrintable(error));
+            require(viewer.experimentReplayState().value("fullIqAvailable").toBool(),
+                    "Full IQ16 companion not discovered");
+            auto *audio=viewer.findChild<QCheckBox *>("replayAudio");
+            auto *play=viewer.findChild<QPushButton *>("replayPlay");
+            require(audio && audio->isEnabled() && play,"Full IQ16 replay controls unavailable");
+            audio->setChecked(true);play->click();
+            const auto state=viewer.experimentReplayState();
+            require(state.value("iqPlaybackActive").toBool() &&
+                    state.value("iqPlaybackBytesPerSample").toInt()==4 &&
+                    state.value("iqPlaybackSampleRate").toDouble()==50000000.,
+                    "Full IQ16 was confused with a low-rate channel WAV");
+            play->click();
+        }
+        {
             SpectrumFrameReplayDialog viewer(nullptr, true); QString error;
             auto tall = fixture(false);
             tall.frames.resize(65536, tall.frames.front());

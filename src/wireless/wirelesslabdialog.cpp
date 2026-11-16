@@ -193,7 +193,9 @@ WirelessLabDialog::WirelessLabDialog(bool uk, QWidget *parent)
     auto *wireshark = new QPushButton(QStringLiteral("Wireshark"), this);
     auto *exportButton = new QPushButton(text("Export CSV", "Експорт CSV"), this);
     auto *clearButton = new QPushButton(text("Clear", "Очистити"), this);
-    for (auto *button : {openButton, captureButton, stopButton, wireshark, exportButton, clearButton})
+    auto *usrp = new QPushButton(text("USRP lab", "Стенд USRP"), this);
+    connect(usrp, &QPushButton::clicked, this, &WirelessLabDialog::usrpLabRequested);
+    for (auto *button : {openButton, captureButton, stopButton, wireshark, exportButton, clearButton, usrp})
         commands->addWidget(button);
     commands->addStretch();
     audioCheckbox = new QCheckBox(text("Audio", "Аудіо"), this);
@@ -321,7 +323,14 @@ WirelessLabDialog::WirelessLabDialog(bool uk, QWidget *parent)
         QString executable = QDir(QFileInfo(programEdit->text()).absolutePath()).filePath(wiresharkName);
         const QString bundled = QDir(QCoreApplication::applicationDirPath())
             .filePath(QStringLiteral("wireshark/") + wiresharkName);
-        if (phy->isLiveActive()) {
+        const bool live = phy->isLiveActive() || phy->isLiveStarting();
+        const QString descriptor = phy->livePacketBusDescriptor();
+        if (live && !QFileInfo(descriptor).isFile()) {
+            status->setText(text("Wait for the live Wi-Fi decoder to report that Wireshark is ready. See the PHY log if it fails.",
+                                 "Дочекайтеся повідомлення про готовність Wireshark. Якщо запуск не вдався, перевірте журнал Wi-Fi PHY."));
+            return;
+        }
+        if (live) {
             const auto hasExtcap = [](const QString &path) {
                 return QFileInfo::exists(path) && QFileInfo::exists(
                     QDir(QFileInfo(path).absolutePath()).filePath(
@@ -343,12 +352,13 @@ WirelessLabDialog::WirelessLabDialog(bool uk, QWidget *parent)
         }
         QStringList arguments;
         if (!profileCombo->currentText().trimmed().isEmpty()) arguments << "-C" << profileCombo->currentText().trimmed();
-        if (phy->isLiveActive())
+        if (live)
             arguments << "-k" << "-i" << "obrii_wifi";
         else if (!captureFile.isEmpty())
             arguments << "-r" << captureFile;
         QProcess launch; launch.setProgram(executable); launch.setArguments(arguments);
         auto environment = QProcessEnvironment::systemEnvironment();
+        if (live) environment.insert(QStringLiteral("OBRII_WIFI_BUS_DESCRIPTOR"), descriptor);
         environment.remove("QT_PLUGIN_PATH"); environment.remove("QT_QPA_PLATFORM_PLUGIN_PATH"); environment.remove("QT_QPA_PLATFORM");
         launch.setProcessEnvironment(environment);
         if (executable.isEmpty() || !launch.startDetached())

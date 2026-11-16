@@ -7,6 +7,9 @@
 #include <QStringList>
 #include <QVector>
 
+#include <array>
+#include <complex>
+
 enum class AnalyzerInstrumentMode {
     TrackingGenerator,
     ScalarNetworkAnalyzer,
@@ -112,6 +115,7 @@ struct AnalyzerMeasurementPoint {
     double s11Magnitude = 0.0;
     double s21Magnitude = 0.0;
     bool valid = false;
+    bool forwardOnly = false;
 
     QJsonObject toJson() const;
     static AnalyzerMeasurementPoint fromJson(const QJsonObject &object);
@@ -125,6 +129,8 @@ struct AnalyzerMeasurementSession {
     AnalyzerInstrumentPlan plan;
     QVector<AnalyzerMeasurementPoint> points;
     QStringList eventLog;
+    QString backendId;
+    QString outcome;
 
     QJsonObject toJson() const;
     static AnalyzerMeasurementSession fromJson(const QJsonObject &object);
@@ -141,6 +147,9 @@ public:
     static double returnLossDb(double reflectionMagnitude);
     static double swrFromReflectionMagnitude(double reflectionMagnitude);
     static double reflectionMagnitudeFromReturnLoss(double returnLossDb);
+    static bool correctOnePort(const std::array<std::complex<double>, 3> &standards,
+                               const std::array<std::complex<double>, 3> &measuredStandards,
+                               std::complex<double> measuredDevice, std::complex<double> &corrected);
 };
 
 #endif

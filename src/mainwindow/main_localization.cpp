@@ -172,6 +172,10 @@ void YourClassName::applyUiLanguage() {
         commandConsoleButton->setToolTip(uiText(QStringLiteral("command_console"), QStringLiteral("Console")));
         commandConsoleButton->setAccessibleName(commandConsoleButton->toolTip());
     }
+    if (zoomSpectrumButton) zoomSpectrumButton->setToolTip(uiText(
+        "zoom_spectrum_tooltip", "Open a narrowband spectrum for the range selected with the mouse."));
+    if (zoomDensityButton) zoomDensityButton->setToolTip(uiText(
+        "zoom_density_tooltip", "Open a density plot for the range selected with the mouse."));
     const auto widgets = findChildren<QWidget*>();
     for (QWidget *widget : widgets) {
         const QString key = widget->property("i18nKey").toString();
@@ -209,6 +213,10 @@ void YourClassName::applyUiLanguage() {
     setComboItemText(spectrumDisplayModeCombo, 0, QStringLiteral("spectrum_display_line"), QStringLiteral("Line spectrum"));
     setComboItemText(spectrumPersistenceStyleCombo, 0, QStringLiteral("spectrum_persistence_classic"), QStringLiteral("Classic"));
     setComboItemText(spectrumPersistenceStyleCombo, 1, QStringLiteral("spectrum_persistence_contours"), QStringLiteral("Contours"));
+    if (spectrumPersistenceTimeSpin) spectrumPersistenceTimeSpin->setToolTip(uiText(
+        QStringLiteral("spectrum_persistence_time_tooltip"), QStringLiteral("Afterglow memory of recent spectra.")));
+    if (spectrumPersistenceIntensitySpin) spectrumPersistenceIntensitySpin->setToolTip(uiText(
+        QStringLiteral("spectrum_persistence_intensity_tooltip"), QStringLiteral("Display brightness, independent of receiver gain.")));
     if (spectrumPersistenceStyleCombo) spectrumPersistenceStyleCombo->setToolTip(uiText(
         QStringLiteral("spectrum_persistence_style_tooltip"),
         QStringLiteral("Contours keeps raw amplitude states and sharpens density vertically. Classic uses amplitude smoothing. Line spectrum smoothing is independent.")));
@@ -236,6 +244,23 @@ void YourClassName::applyUiLanguage() {
                      static_cast<int>(MyWaterfallWidget::DisplayMode::Waterfall3DWithMini),
                      QStringLiteral("waterfall_display_3d_mini"),
                      QStringLiteral("3D + mini waterfall"));
+    using ColorPalette = MyWaterfallWidget::ColorPalette;
+    setComboItemText(waterfallColorPaletteCombo, static_cast<int>(ColorPalette::Classic),
+                     QStringLiteral("waterfall_palette_classic"), QStringLiteral("Classic"));
+    setComboItemText(waterfallColorPaletteCombo, static_cast<int>(ColorPalette::Thermal),
+                     QStringLiteral("waterfall_palette_thermal"), QStringLiteral("Thermal"));
+    setComboItemText(waterfallColorPaletteCombo, static_cast<int>(ColorPalette::Ice),
+                     QStringLiteral("waterfall_palette_ice"), QStringLiteral("Ice"));
+    setComboItemText(waterfallColorPaletteCombo, static_cast<int>(ColorPalette::VioletYellow),
+                     QStringLiteral("waterfall_palette_violet"), QStringLiteral("Violet"));
+    setComboItemText(waterfallColorPaletteCombo, static_cast<int>(ColorPalette::Amber),
+                     QStringLiteral("waterfall_palette_amber"), QStringLiteral("Amber"));
+    setComboItemText(waterfallColorPaletteCombo, static_cast<int>(ColorPalette::Grayscale),
+                     QStringLiteral("waterfall_palette_grayscale"), QStringLiteral("Grayscale"));
+    if (waterfallColorPaletteCombo) {
+        waterfallColorPaletteCombo->setToolTip(uiText(QStringLiteral("waterfall_palette_tooltip"),
+            QStringLiteral("Color palette for new rows of the main waterfall.")));
+    }
     if (waterfallDisplayModeCombo) {
         waterfallDisplayModeCombo->setToolTip(waterfall3DAlternativeView
             ? uiText(QStringLiteral("alternative_interface_mode_locked"),
@@ -441,8 +466,8 @@ void YourClassName::applyUiLanguage() {
                      QStringLiteral("Spectrum + Channel IQ"));
     setComboItemText(spectrumEventModeCombo,
                      2,
-                     QStringLiteral("spectrum_event_full_iq"),
-                     QStringLiteral("Spectrum + Full IQ short"));
+                     QStringLiteral("spectrum_event_full_iq16"),
+                     QStringLiteral("Spectrum + Full IQ 16-bit"));
     if (spectrumFrameRecordButton) {
         spectrumFrameRecordButton->setToolTip(uiText(
             QStringLiteral("spectrum_rec_tooltip"),
@@ -763,6 +788,17 @@ void YourClassName::applyUiLanguage() {
     updateAgileScanControls();
     updateScanMeasurementStatus();
     updateSpurSuppressionStatus();
+    syncSpectrumProcessingControls();
+    if (spectrumUpdateSpin) {
+        spectrumUpdateSpin->setSpecialValueText(uiText("auto", "Auto"));
+        spectrumUpdateSpin->setToolTip(uiText("spectrum_update_interval_tooltip", "Spectrum and waterfall update interval. Auto keeps the FFT-dependent default."));
+    }
+    if (displayLevelStepSpin)
+        displayLevelStepSpin->setSpecialValueText(uiText("display_level_step_off", "Full precision"));
+    if (waterfallRowsSpin) {
+        waterfallRowsSpin->setSuffix(uiLanguage == QStringLiteral("uk") ? QStringLiteral(" рядків/кадр") : QStringLiteral(" rows/frame"));
+        waterfallRowsSpin->setToolTip(uiText("waterfall_speed_tooltip", "Visual waterfall scroll speed. Higher values move more rows per FFT frame without increasing FFT load."));
+    }
     updateVideoProcessorMode();
     updateDigitalDecoderMode();
     updateNetworkButtonText();

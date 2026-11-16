@@ -6,7 +6,7 @@
 #include "dmrprivacyutils.h"
 #include "dsdneobridge.h"
 #include "gophertrunkbridge.h"
-#include "openradiolabdialog.h"
+#include "openradio/openradiolabdialog.h"
 #include "tuningutils.h"
 
 #include <QAbstractItemView>

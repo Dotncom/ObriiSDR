@@ -205,6 +205,7 @@ class PacketSink(gr.basic_block):
             try:
                 self.bus = PacketBus()
                 self.bus.start()
+                report({"packet_bus_ready": str(self.bus.descriptor.resolve())})
             except OSError as error:
                 self.bus = None
                 report({"packet_bus_error": str(error)})

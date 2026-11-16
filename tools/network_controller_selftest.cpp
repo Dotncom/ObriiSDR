@@ -144,6 +144,7 @@ int main(int argc, char **argv) {
             const QStringList peers = capabilityServer.readyPeerIds();
             return capabilityClient.isControlReady() && peers.size() == 1 &&
                    capabilityServer.peerSupportsCompactSpectrum(peers.first()) &&
+                   capabilityServer.peerSupportsPackedSpectrum(peers.first()) &&
                    capabilityServer.peerSupportsBinaryAudio(peers.first());
         }), "Compact display and binary audio capabilities were not negotiated");
 

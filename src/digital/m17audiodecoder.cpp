@@ -1,6 +1,5 @@
 #include "m17audiodecoder.h"
-#include <QCoreApplication>
-#include <QLibrary>
+#include "../openradio/m17codec2library.h"
 #include <QtEndian>
 extern "C" {
 #include "m17.h"
@@ -40,19 +39,12 @@ struct M17AudioDecoder::Impl {
     float previousInput = 0.0f;
 
     Impl() {
-        const QStringList names = {
-            QCoreApplication::applicationDirPath() + QStringLiteral("/libcodec2"),
-            QStringLiteral("codec2"), QStringLiteral("libcodec2"), QStringLiteral("libcodec2.so.1.2")};
-        for (const QString &name : names) {
-            library.setFileName(name);
-            if (!library.load()) continue;
-            create = reinterpret_cast<Create>(library.resolve("codec2_create"));
-            destroy = reinterpret_cast<Destroy>(library.resolve("codec2_destroy"));
-            decode = reinterpret_cast<Decode>(library.resolve("codec2_decode"));
-            samples = reinterpret_cast<Samples>(library.resolve("codec2_samples_per_frame"));
-            if (create && destroy && decode && samples) break;
-            create = nullptr; library.unload();
-        }
+        if (!loadM17Codec2(library, {"codec2_create", "codec2_destroy", "codec2_decode", "codec2_samples_per_frame"}))
+            return;
+        create = reinterpret_cast<Create>(library.resolve("codec2_create"));
+        destroy = reinterpret_cast<Destroy>(library.resolve("codec2_destroy"));
+        decode = reinterpret_cast<Decode>(library.resolve("codec2_decode"));
+        samples = reinterpret_cast<Samples>(library.resolve("codec2_samples_per_frame"));
     }
     ~Impl() { resetCodec(); }
     void resetCodec() { if (codec && destroy) destroy(codec); codec = nullptr; codecMode = -1; }
@@ -145,7 +137,7 @@ struct M17AudioDecoder::Impl {
                     }
                 }
             }
-            if (sequence & 0x8000) { haveLsf = false; resetCodec(); }
+            if (sequence & 0x8000) { haveLsf = false; lichMask = 0; resetCodec(); }
         }
     }
     float at(qint64 position) const { return history[static_cast<std::size_t>(position - (tick - qint64(history.size()) + 1))]; }
@@ -165,7 +157,11 @@ struct M17AudioDecoder::Impl {
         }
         if (history.size() < 80) return;
         const int8_t *patterns[] = {lsf_sync_symbols, str_sync_symbols, pkt_sync_symbols};
+        const bool stream = lsf.type[1] & M17_TYPE_STREAM;
         for (int kind = 0; kind < 3; ++kind) {
+            // A sync-like sequence inside a payload can precede the next frame.
+            // Use the active LSF to rule out the other data frame format.
+            if (haveLsf && kind == (stream ? 2 : 1)) continue;
             float mx = 0, my = 0;
             for (int i = 0; i < 8; ++i) { mx += patterns[kind][i] / 8.0f; my += at(tick - (7 - i) * 10) / 8.0f; }
             float cov = 0, var = 0, energy = 0;

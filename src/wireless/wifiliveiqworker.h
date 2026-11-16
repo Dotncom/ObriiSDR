@@ -28,6 +28,7 @@ signals:
     void started();
     void finished(bool successful, const QString &message);
     void packetRow(const QStringList &row);
+    void packetBusReady(const QString &descriptor);
     void progress(quint64 packets, quint64 droppedSamples, qint64 bufferedBytes,
                   double fedMegasamplesPerSecond, quint64 fedSamples,
                   quint64 decodedSamples);

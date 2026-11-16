@@ -27,7 +27,7 @@ Full Windows includes the redistributable Codec2 runtime, its dependencies,
 notices and exact source package. Lite omits it. Debian/Raspberry voice can use
 the distribution's `libcodec2-dev`. See `docs/ft4_m17_receive.md`.
 UHD and matching vendor FPGA images remain separate; follow
-`docs/usrp_b210_plan.md`. Never replace the Kintex-7 clone's image automatically.
+`docs/usrp_b210_setup.md`. Never replace the Kintex-7 clone's image automatically.
 The separate Wireless add-on is not included or republished. See
 `docs/wireless_addon.md` for installation. Absent decoder engines are reported
 and do not load during ordinary reception.

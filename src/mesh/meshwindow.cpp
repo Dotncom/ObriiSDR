@@ -2,6 +2,7 @@
 #include "meshspectrum.h"
 #include "meshpacketdialog.h"
 #include "meshremotedialog.h"
+#include "../openradio/virtualiqhub.h"
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
@@ -86,7 +87,9 @@ QDoubleSpinBox *spin(double min,double max,int decimals,QWidget *parent) {
 QString nodeLabel(const Project &p,const QString &id){for(const auto &n:p.nodes)if(n.id==id)return n.name;return id;}
 bool linkMatches(const Link &link,const QJsonObject &applied) {
     return !applied.isEmpty()&&applied.value("enabled").toBool()==link.enabled&&applied.value("delayMs").toInt()==link.delayMs&&
-        std::abs(applied.value("gainDb").toDouble()-link.gainDb)<0.0001;
+        std::abs(applied.value("gainDb").toDouble()-link.gainDb)<0.0001&&
+        applied.value("frequencyOffsetHz").toDouble()==link.frequencyOffsetHz&&
+        applied.value("clockPpm").toDouble()==link.clockPpm;
 }
 void unavailable(QComboBox *combo,int index,const QString &reason){
     if(auto model=qobject_cast<QStandardItemModel *>(combo->model())){model->item(index)->setEnabled(false);model->item(index)->setToolTip(reason);}
@@ -209,7 +212,18 @@ Window::Window(const QString &libraryFile,QWidget *parent):QMainWindow(parent),l
     auto linkPage=new QWidget;auto lf=new QFormLayout(linkPage);linkTitle=new QLabel;gain=spin(-120,60,1,this);gain->setSuffix(" dB");delay=new QSpinBox;delay->setRange(0,500);delay->setSuffix(" ms");enabled=new QCheckBox(tr("Увімкнений"));
     lf->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);lf->setRowWrapPolicy(QFormLayout::WrapLongRows);
     gain->setObjectName("linkGainDb");delay->setObjectName("linkDelayMs");enabled->setObjectName("linkEnabled");
-    lf->addRow(linkTitle);lf->addRow(tr("Підсилення / ослаблення"),gain);lf->addRow(tr("Затримка"),delay);lf->addRow(enabled);
+    lf->addRow(linkTitle);lf->addRow(tr("Підсилення / ослаблення"),gain);lf->addRow(tr("Затримка"),delay);
+    linkFrequencyOffset=spin(-1e6,1e6,2,this);
+    linkFrequencyOffset->setObjectName("linkFrequencyOffsetHz");
+    linkFrequencyOffset->setSuffix(tr(" Гц"));
+    linkFrequencyOffset->setToolTip(tr("Зсув несучої цього віртуального зв’язку. Діє в режимі суми IQ."));
+    lf->addRow(tr("Частотний зсув IQ"),linkFrequencyOffset);
+    const double maxPpm=VirtualIqLinkSettings::MaximumClockPpm;
+    linkClockPpm=spin(-maxPpm,maxPpm,2,this);
+    linkClockPpm->setObjectName("linkClockPpm");
+    linkClockPpm->setSuffix(" ppm");
+    linkClockPpm->setToolTip(tr("Розбіжність такту джерела з тактом приймача. Додатне значення стискає сигнал у часі."));
+    lf->addRow(tr("Розбіжність тактів IQ"),linkClockPpm);lf->addRow(enabled);
     linkBearer=new QComboBox;linkBearer->setObjectName("linkBearer");linkBearer->addItem(tr("Успадкувати режим сеансу"),"inherit");linkBearer->addItem(tr("Дані · TCP"),"data");linkBearer->addItem(tr("IQ · між вузлами"),"iq");
     linkTxPort=new QLineEdit("radio");linkRxPort=new QLineEdit("radio");linkTxPort->setObjectName("linkTxPort");linkRxPort->setObjectName("linkRxPort");
     for(auto field:{linkTxPort,linkRxPort}){field->setMaxLength(64);field->setValidator(new QRegularExpressionValidator(QRegularExpression("[A-Za-z][A-Za-z0-9_.-]{0,63}"),field));}
@@ -233,6 +247,18 @@ Window::Window(const QString &libraryFile,QWidget *parent):QMainWindow(parent),l
     applyLinkButton->setToolTip(tr("Нові умови діють на наступні IQ-кадри. Буферизовані дані дограються за попередніми умовами."));properties->addWidget(linkPage);
     auto editLink=[this]{if(formBusy||selectedLink.isEmpty())return;for(auto &l:project.links)if(l.tx+"/"+l.rx==selectedLink){l.gainDb=gain->value();l.delayMs=delay->value();l.enabled=enabled->isChecked();}dirty();refreshTopology();};
     connect(gain,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[editLink]{editLink();});connect(delay,QOverload<int>::of(&QSpinBox::valueChanged),this,[editLink]{editLink();});connect(enabled,&QCheckBox::toggled,this,[editLink]{editLink();});
+    auto editIqLink=[this](double Link::*field,double value){
+        if(formBusy||selectedLink.isEmpty())return;
+        for(auto &link:project.links)if(link.tx+"/"+link.rx==selectedLink){
+            link.*field=value;
+            dirty();refreshTopology();
+            break;
+        }
+    };
+    connect(linkFrequencyOffset,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,
+            [editIqLink](double hz){editIqLink(&Link::frequencyOffsetHz,hz);});
+    connect(linkClockPpm,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,
+            [editIqLink](double ppm){editIqLink(&Link::clockPpm,ppm);});
     auto logDock=new QDockWidget(tr("Події сеансу"),this);logs=new QPlainTextEdit;logs->setReadOnly(true);logs->setMaximumBlockCount(500);logDock->setWidget(logs);addDockWidget(Qt::BottomDockWidgetArea,logDock);logDock->setMaximumHeight(190);
     spectrumDock=new QDockWidget(tr("Спектр вузла"),this);spectrumDock->setObjectName("nodeSpectrumDock");
     auto preview=new QWidget;auto previewLayout=new QVBoxLayout(preview);auto previewControls=new QHBoxLayout;
@@ -292,7 +318,8 @@ void Window::linksGeometry() {
     if(remoteDialog&&remoteDialog->sessionActive())on=on&&remoteDialog->nodeState(l.tx).value("available").toBool()&&remoteDialog->nodeState(l.rx).value("available").toBool();
         const QColor color=changed?QColor("#e8b45d"):on?QColor("#52a9c2"):QColor("#64707b");
         item->setPen(QPen(color,2,on?Qt::SolidLine:Qt::DashLine));item->setBrush(color);
-        item->setToolTip(l.tx+":"+l.txPort+" → "+l.rx+":"+l.rxPort+QString(" · %1 · %2 · %3 dB · %4 ms").arg(l.bearer,l.modem.value("type").toString("afsk1200")).arg(l.gainDb).arg(l.delayMs)+(changed?tr(" · не застосовано"):""));}
+        const auto offset=l.frequencyOffsetHz==0?QString():tr(" · зсув %1 Гц").arg(l.frequencyOffsetHz,0,'f',2);
+        item->setToolTip(l.tx+":"+l.txPort+" → "+l.rx+":"+l.rxPort+QString(" · %1 · %2 · %3 dB · %4 ms").arg(l.bearer,l.modem.value("type").toString("afsk1200")).arg(l.gainDb).arg(l.delayMs)+offset+(changed?tr(" · не застосовано"):""));}
 }
 void Window::selection() {
     if(formBusy)return;formBusy=true;selectedLink.clear();properties->setCurrentIndex(0);
@@ -310,6 +337,10 @@ void Window::selection() {
     if(id.isEmpty())for(auto item:scene->selectedItems())if(item->data(0)=="link"){
         selectedLink=item->data(1).toString();for(const auto &l:project.links)if(l.tx+"/"+l.rx==selectedLink){
             properties->setCurrentIndex(2);linkTitle->setText(nodeLabel(project,l.tx)+" → "+nodeLabel(project,l.rx));gain->setValue(l.gainDb);delay->setValue(l.delayMs);enabled->setChecked(l.enabled);
+            const double maximumOffset=project.sampleRate/2.0-0.01;
+            linkFrequencyOffset->setRange(-maximumOffset,maximumOffset);
+            linkFrequencyOffset->setValue(l.frequencyOffsetHz);
+            linkClockPpm->setValue(l.clockPpm);
             linkBearer->setCurrentIndex(linkBearer->findData(l.bearer));linkTxPort->setText(l.txPort);linkRxPort->setText(l.rxPort);linkModem->setCurrentIndex(linkModem->findData(l.modem.value("type").toString("afsk1200")));
             loraSf->setValue(l.modem.value("sf").toInt(7));const int bw=l.modem.value("bw").toInt(125000);if(loraBandwidth->findData(bw)<0)loraBandwidth->addItem(QString::number(bw)+" Hz",bw);loraBandwidth->setCurrentIndex(loraBandwidth->findData(bw));
             loraCodingRate->setCurrentIndex(loraCodingRate->findData(l.modem.value("cr").toInt(1)));loraOversampling->setCurrentIndex(loraOversampling->findData(l.modem.value("os").toInt(1)));loraPreamble->setValue(l.modem.value("preamble").toInt(16));loraSyncWord->setValue(l.modem.value("syncWord").toInt(43));
@@ -404,14 +435,21 @@ void Window::refreshRuntime() {
     startRxButton->setEnabled(ready&&!running&&!pending);stopRxButton->setEnabled(ready&&running&&!pending);
     stopTxButton->setEnabled(live&&selected.value("txRunning").toBool());
     const auto hub=runtime.hubSnapshot();
+    const bool editIq=project.mixIq&&!extended&&(idle||live);
+    linkFrequencyOffset->setEnabled(editIq);
+    linkClockPpm->setEnabled(editIq);
     applyLinkButton->setEnabled(false);
     linkActual->setText(idle?tr("Буде задано під час запуску"):tr("Очікування хаба"));
     for(const auto &l:project.links)if(l.tx+"/"+l.rx==selectedLink) {
         const auto applied=confirmedLinks.value(selectedLink);
         applyLinkButton->setEnabled(live&&!hub.contains("controlError")&&!hub.value("pending").toBool()&&!linkMatches(l,applied));
-        if(live&&!applied.isEmpty())linkActual->setText(QString("%1 · %2 dB · %3 ms\n%4 %5%6")
+        const double hz=applied.value("frequencyOffsetHz").toDouble();
+        QString iqState=hz==0?QString():tr(" · зсув %1 Гц").arg(hz,0,'f',2);
+        const double ppm=applied.value("clockPpm").toDouble();
+        if(ppm!=0)iqState+=tr(" · такт %1 ppm").arg(ppm,0,'f',2);
+        if(live&&!applied.isEmpty())linkActual->setText(QString("%1 · %2 dB · %3 ms%4\n%5 %6%7")
             .arg(applied.value("enabled").toBool()?tr("Увімкнений"):tr("Вимкнений"))
-            .arg(applied.value("gainDb").toDouble(),0,'f',1).arg(applied.value("delayMs").toInt())
+            .arg(applied.value("gainDb").toDouble(),0,'f',1).arg(applied.value("delayMs").toInt()).arg(iqState)
             .arg(tr("Ревізія")).arg(hub.value("revision").toString())
             .arg(hub.value("pending").toBool()?tr(" · застосовується"):linkMatches(l,applied)?"":tr(" · є незастосовані зміни")));
     }

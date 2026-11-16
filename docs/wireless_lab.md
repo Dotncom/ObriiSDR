@@ -2,7 +2,7 @@
 
 ## Available Now
 
-Open **Spectrum measurements > Wireless lab (beta)**, or add the **Wireless lab**
+Open **Tools → Wireless lab (beta)**, or add the **Wireless lab**
 block to the DSP board. This is a separate, resizable window, not a new decoder
 inside the receiver callback.
 
@@ -48,8 +48,10 @@ inside the receiver callback.
   The wireless lab duplicates the main spectrum/waterfall update interval
   control; both edit the same persisted setting. Reducing display refresh can
   leave more CPU time for the live PHY, but does not remove IQ drops by itself.
-  With the matching development-build Wireless add-on, press **Wireshark**
-  during live decoding to open the `Obrii SDR live Wi-Fi frames` extcap source.
+  With the matching Wireless add-on, start live Wi-Fi PHY decoding and wait
+  for the PHY log to say **Wireshark live capture is ready**. Then press
+  **Wireshark** to open the `Obrii SDR live Wi-Fi frames` extcap source.
+  The decoder creates `packet-bus.json` when its local packet bus starts.
   A local bounded packet bus fans out decoded radiotap frames independently of
   the saved PCAP. Stopping live IQ closes this source; the Wireshark button
   opens the saved PCAP when live decoding is inactive. The bus is not a virtual

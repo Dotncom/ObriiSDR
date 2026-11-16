@@ -7,6 +7,7 @@
 #include <QCryptographicHash>
 #include <QFile>
 #include <QFontMetrics>
+#include <QHelpEvent>
 #include <QMouseEvent>
 #include <QNetworkAccessManager>
 #include <QNetworkDiskCache>
@@ -20,6 +21,7 @@
 #include <QSslSocket>
 #include <QStandardPaths>
 #include <QThread>
+#include <QToolTip>
 #include <QUrl>
 #include <QWheelEvent>
 
@@ -1209,14 +1211,21 @@ void QthMapWidget::drawSatelliteMarkers(QPainter &painter, const QRectF &mapRect
             painter.drawLine(qthPoint, point);
         }
 
-        painter.setBrush(color);
-        painter.setPen(QPen(satellite.usedInFix ? QColor(255, 255, 255) : QColor(20, 24, 28),
-                            satellite.usedInFix ? 2 : 1));
-        painter.drawEllipse(point, 7.0, 7.0);
+        if (satellite.outlinedSquare) {
+            painter.setBrush(Qt::NoBrush);
+            painter.setPen(QPen(color, satellite.usedInFix ? 3 : 2));
+            painter.drawRect(QRectF(point - QPointF(9.0, 9.0), QSizeF(18.0, 18.0)));
+        } else {
+            painter.setBrush(color);
+            painter.setPen(QPen(satellite.usedInFix ? QColor(255, 255, 255) : QColor(20, 24, 28),
+                                satellite.usedInFix ? 2 : 1));
+            painter.drawEllipse(point, 7.0, 7.0);
+        }
 
         painter.setPen(satellite.enabled ? QColor(245, 248, 252) : QColor(135, 145, 155));
         const QString label = QStringLiteral("%1 %2°").arg(satellite.label).arg(satellite.elevationDeg);
-        painter.drawText(point + QPointF(10.0, 4.0), label);
+        const qreal labelX = satellite.outlinedSquare ? -11.0 - painter.fontMetrics().horizontalAdvance(label) : 10.0;
+        painter.drawText(point + QPointF(labelX, 4.0), label);
     }
 
     painter.restore();
@@ -1401,6 +1410,45 @@ void QthMapWidget::drawRasterOverlay(QPainter &painter, const QRectF &mapRect) {
     }
     painter.restore();
 }
+void QthMapWidget::setRejectedFixMarkers(const QVector<qth::RejectedFixMarker> &markers) {
+    rejectedFixMarkers = markers;
+    update();
+}
+
+void QthMapWidget::drawRejectedFixMarkers(QPainter &painter, const QRectF &mapRect) {
+    if (rejectedFixMarkers.isEmpty()) return;
+    painter.save();
+    painter.setClipRect(mapRect);
+    const QPointF downRight(6, 6), upRight(6, -6);
+    for (const auto &marker : rejectedFixMarkers) {
+        const auto point = geoToPoint(marker.position.latitude, marker.position.longitude, mapRect);
+        if (!mapRect.contains(point)) continue;
+        painter.setPen(QPen(QColor(20, 24, 28), 4, Qt::SolidLine, Qt::RoundCap));
+        painter.drawLine(point - downRight, point + downRight);
+        painter.drawLine(point - upRight, point + upRight);
+        painter.setPen(QPen(QColor(255, 120, 120), 2, Qt::SolidLine, Qt::RoundCap));
+        painter.drawLine(point - downRight, point + downRight);
+        painter.drawLine(point - upRight, point + upRight);
+    }
+    painter.restore();
+}
+
+bool QthMapWidget::event(QEvent *event) {
+    if (event->type() == QEvent::ToolTip && !rejectedFixMarkers.isEmpty()) {
+        const auto *help = static_cast<QHelpEvent *>(event);
+        const QRectF mapRect = rect().adjusted(18, 18, -18, -34);
+        for (auto it = rejectedFixMarkers.crbegin(); it != rejectedFixMarkers.crend(); ++it) {
+            const auto point = geoToPoint(it->position.latitude, it->position.longitude, mapRect);
+            const QRect hit = QRect(point.toPoint() - QPoint(9, 9), QSize(19, 19)).intersected(mapRect.toRect());
+            if (mapRect.contains(point) && hit.contains(help->pos())) {
+                QToolTip::showText(help->globalPos(), it->tooltip, this, hit);
+                return true;
+            }
+        }
+    }
+    return QWidget::event(event);
+}
+
 void QthMapWidget::paintEvent(QPaintEvent *event) {
     Q_UNUSED(event);
 
@@ -1434,6 +1482,7 @@ void QthMapWidget::paintEvent(QPaintEvent *event) {
     if (drawSatellites) {
         drawSatelliteMarkers(painter, mapRect);
     }
+    drawRejectedFixMarkers(painter, mapRect);
     if (positionStatusVisible) drawMarkerAndTitle(painter, mapRect);
     drawFooter(painter, mapRect);
 }

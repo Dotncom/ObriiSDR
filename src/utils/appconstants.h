@@ -26,12 +26,16 @@ inline constexpr int NETWORK_CHANNEL_SPECTRUM_MAX_BINS = 768;
 inline constexpr int NETWORK_SPECTRUM_INTERVAL_MS = 100;
 inline constexpr int NETWORK_CHANNEL_SPECTRUM_INTERVAL_MS = 160;
 inline constexpr int NETWORK_FULL_RESOLUTION_SPECTRUM_INTERVAL_MS = 50;
+inline constexpr int NETWORK_SPECTRUM_FPS_MIN = 1;
+inline constexpr int NETWORK_SPECTRUM_FPS_MAX = 60;
+inline constexpr int NETWORK_SPECTRUM_FPS_DEFAULT = 20;
+inline constexpr qint64 NETWORK_FULL_RESOLUTION_SPECTRUM_BYTES_PER_SECOND = 1536 * 1024;
 inline constexpr qint64 NETWORK_IQ_MAX_PENDING_BYTES = 8 * 1024 * 1024;
 inline constexpr qint64 NETWORK_CHANNEL_IQ_LOW_LATENCY_PENDING_BYTES = 2 * 1024 * 1024;
 inline constexpr std::uint64_t NETWORK_IQ_DROP_LOG_INTERVAL = 200;
 inline constexpr int NETWORK_SETTINGS_ACK_TIMEOUT_MS = 1000;
 inline constexpr double NETWORK_AUDIO_PREBUFFER_SECONDS = 0.55;
-inline constexpr qint64 NETWORK_SPECTRUM_MAX_PENDING_BYTES = 4 * 1024 * 1024;
+inline constexpr qint64 NETWORK_SPECTRUM_MAX_PENDING_BYTES = 64 * 1024;
 
 inline constexpr int RTL_TCP_DEVICE_INDEX = -1000;
 inline constexpr int RTLSDR_NATIVE_DEVICE_INDEX_BASE = -2000;
@@ -59,6 +63,9 @@ inline constexpr int DMR_BACKEND_GOPHERTRUNK = 3;
 inline constexpr double DMR_CENTER_MIN_OFFSET_HZ = 25000.0;
 
 inline constexpr int AUDIO_RELAY_HEADER_BYTES = 12;
+inline constexpr int AUDIO_RELAY_BUFFER_MIN_MS = 40;
+inline constexpr int AUDIO_RELAY_BUFFER_DEFAULT_MS = 160;
+inline constexpr int AUDIO_RELAY_BUFFER_MAX_MS = 400;
 inline constexpr qint64 AUDIO_HTTP_MAX_PENDING_BYTES = 512 * 1024;
 inline constexpr int AUDIO_LOW_PASS_SLIDER_STEP_HZ = 100;
 inline constexpr int AUDIO_LOW_PASS_SLIDER_MAX = 200;

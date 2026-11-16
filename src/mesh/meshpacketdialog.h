@@ -12,6 +12,7 @@ class QTableWidget;
 class QPlainTextEdit;
 class QPushButton;
 class QCheckBox;
+class QDoubleSpinBox;
 
 namespace Mesh {
 class IqBearer;
@@ -27,6 +28,7 @@ private:
     void send();
     void displayPayload();
     void updateLink(const QString &,const QString &,QCheckBox *,QSpinBox *);
+    void editNodeMotion();
     void save(bool results);
     void open();
     void restartMode();
@@ -40,7 +42,10 @@ private:
     quint64 shown=0;
     QComboBox *source=nullptr,*destination=nullptr,*encoding=nullptr,*mode=nullptr;
     QLineEdit *text=nullptr;
-    QSpinBox *ttl=nullptr;
+    QSpinBox *ttl=nullptr,*retries=nullptr,*airBitrate=nullptr;
+    QDoubleSpinBox *radioRange=nullptr;
+    QPushButton *editMotion=nullptr;
+    QCheckBox *avoidFailedLinks=nullptr;
     QLabel *metrics=nullptr,*routeLabel=nullptr,*errorLabel=nullptr;
     QTableWidget *packets=nullptr,*nodes=nullptr,*links=nullptr;
     QPlainTextEdit *payload=nullptr;

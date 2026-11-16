@@ -18,7 +18,10 @@ INTERFACE = "obrii_wifi"
 def capture(fifo, capture_filter):
     if capture_filter:
         raise ValueError("Capture filters are not supported; use a Wireshark display filter")
-    descriptor = json.loads(default_descriptor_path().read_text(encoding="utf-8"))
+    try:
+        descriptor = json.loads(default_descriptor_path().read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise ValueError("Start live Wi-Fi PHY decoding in Obrii SDR and wait for it to initialize") from None
     if (descriptor.get("schema") != SCHEMA or descriptor.get("host") != "127.0.0.1"
             or descriptor.get("linktype") != 127
             or not isinstance(descriptor.get("port"), int)

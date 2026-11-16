@@ -38,6 +38,26 @@ void checkLanguage(const QString &language) {
     require(fullText.contains(QStringLiteral("BFP8")) &&
             fullText.contains(QStringLiteral("KISS")),
             "Recent DSP and open-radio features are missing from help");
+    const bool uk=language.startsWith(QStringLiteral("uk"),Qt::CaseInsensitive);
+    require(fullText.contains(uk ? QStringLiteral("Перестроювання Фобоса") : QStringLiteral("Fobos retuning")) &&
+            fullText.contains(QStringLiteral("Standard")) && fullText.contains(QStringLiteral("Agile")) &&
+            fullText.contains(uk ? QStringLiteral("2,5 МГц") : QStringLiteral("2.5 MHz")) &&
+            fullText.contains(uk ? QStringLiteral("Власна прошивка для цієї функції не потрібна")
+                                 : QStringLiteral("Custom receiver firmware is not required")),
+            "Fobos Standard/Agile retuning scope, firmware compatibility or percent-step example missing");
+    require(fullText.contains(uk ? QStringLiteral("Окремий згортаний розділ **FFT** під **«Частоти»**")
+                                 : QStringLiteral("**FFT** section below **Frequencies**")) &&
+            fullText.contains(uk ? QStringLiteral("лише в докладних даних водоспаду")
+                                 : QStringLiteral("only in extended waterfall information")) &&
+            fullText.contains(uk ? QStringLiteral("типово вимкнено") : QStringLiteral("defaults off")),
+            "FFT placement, waterfall-only telemetry or metadata default missing from help");
+    require(fullText.contains(uk ? QStringLiteral("Цифровий фосфор коротко")
+                                 : QStringLiteral("Digital phosphor, briefly")) &&
+            fullText.contains(uk ? QStringLiteral("Контури") : QStringLiteral("Contours")) &&
+            fullText.contains(QStringLiteral("ObriiFobosFirmware.exe")) &&
+            fullText.contains(QStringLiteral("firmware/fobos/catalog.json")) &&
+            fullText.contains(uk ? QStringLiteral("Знайти приймач") : QStringLiteral("Find receiver")),
+            "Digital-phosphor overview or practical firmware update instructions missing");
     require(sections[5].text.contains(QStringLiteral("FT4")) &&
             sections[5].text.contains(QStringLiteral("M17")) &&
             sections[5].text.contains(QStringLiteral("--module-voice-stdout")) &&

@@ -1,4 +1,5 @@
 #include "iqchannelizer.h"
+#include "channelizerutils.h"
 #include "iqbuffer.h"
 
 #include <algorithm>
@@ -360,9 +361,77 @@ void benchmark() {
     std::cout << "50 MS/s channelizer: 100 ms of input processed in " << ms << " ms\n";
 }
 }
+static void testWideFmAt(double rate, double offset) {
+    RadioSettings settings;
+    settings.inputMode = INPUT_RF;
+    settings.modulationType = MOD_WFM;
+    settings.bandwidth = 200000;
+    settings.sampleRate = rate;
+    settings.centerFrequency = 102.287174e6;
+    settings.listeningFrequency = settings.centerFrequency + offset;
+    IqChannelizer::Options referenceOptions;
+    referenceOptions.outputRateHz = channelizerTargetRate(settings);
+    referenceOptions.cutoffHz = channelizerCutoff(settings, referenceOptions.outputRateHz);
+    std::vector<float> iq(262147 * 2);
+    const double carrierStep = 6.283185307179586 * offset / rate;
+    for (std::size_t n = 0; n < iq.size() / 2; ++n) {
+        const double phase = (carrierStep + 0.004) * n + 0.8 * std::sin(0.0005 * n);
+        iq[2*n] = float(0.03 * std::cos(phase) + 0.21 * std::sin(0.6 * n));
+        iq[2*n+1] = float(0.03 * std::sin(phase) + 0.21 * std::cos(0.6 * n));
+    }
+    iq[307] = std::numeric_limits<float>::quiet_NaN();
+    iq[17020] = std::numeric_limits<float>::infinity();
+    RadioSettings referenceSettings = settings;
+    referenceSettings.listeningFrequency = settings.centerFrequency;
+    auto baseband = iq;
+    if (offset != 0.0) {
+        // Use a double-precision oscillator as the reference. The legacy
+        // scalar oscillator can accumulate phase error over a long callback.
+        for (std::size_t n = 0; n < iq.size() / 2; ++n) {
+            const double i = std::isfinite(iq[2*n]) ? iq[2*n] : 0.0;
+            const double q = std::isfinite(iq[2*n+1]) ? iq[2*n+1] : 0.0;
+            const double c = std::cos(carrierStep * n), s = std::sin(carrierStep * n);
+            baseband[2*n] = float(i*c + q*s);
+            baseband[2*n+1] = float(q*c - i*s);
+        }
+    }
+    IqChannelizer reference, whole, chunked;
+    std::vector<float> expected, actual, piece, assembled;
+    require(reference.processFloatIq(baseband.data(), baseband.size(), referenceSettings,
+                                     expected, false, &referenceOptions).valid,
+            "WFM scalar reference failed");
+    require(whole.processFloatIq(iq.data(), iq.size(), settings, actual, false).valid &&
+            !actual.empty() && actual.size() == expected.size(), "WFM front decimation cadence changed");
+    // A strong near-channel tone also exercises roundoff in the scalar rolling sums.
+    const float referenceTolerance = offset == 0.0 ? 5e-6f : 1.5e-5f;
+    for (std::size_t n = 0; n < actual.size(); ++n)
+        require(std::abs(actual[n] - expected[n]) < referenceTolerance, "WFM block front filter changed response");
+    for (std::size_t position = 0; position < iq.size();) {
+        const auto count = (std::min)(std::size_t(4738), iq.size() - position);
+        require(chunked.processFloatIq(iq.data() + position, count, settings, piece, false).valid,
+                "WFM irregular chunk rejected");
+        assembled.insert(assembled.end(), piece.begin(), piece.end());
+        position += count;
+    }
+    require(assembled.size() == actual.size(), "WFM frame count depends on IQ block boundaries");
+    const float chunkTolerance = offset == 0.0 ? 0.0f : 2e-6f;
+    for (std::size_t n = 0; n < actual.size(); ++n)
+        require(std::abs(assembled[n] - actual[n]) <= chunkTolerance, "WFM phase depends on IQ block boundaries");
+}
+
+static void testWideFm() {
+    for (const double rate : {28e6, 56e6, 112e6}) {
+        testWideFmAt(rate, 0.0);
+#if defined(__aarch64__) && defined(__ARM_NEON)
+        testWideFmAt(rate, -5.3e6);
+        testWideFmAt(rate, 8.1e6);
+#endif
+    }
+}
+
 int main() {
     try {
-        testFrontFilter(); testChunking(); testNonfiniteInput(); testIndependentQueues();
+        testFrontFilter(); testChunking(); testWideFm(); testNonfiniteInput(); testIndependentQueues();
         testDeferredSnapshots(); testConcurrentSnapshots(); benchmark();
         std::cout << "IQ channelizer/independent queue tests: PASS\n";
         return 0;

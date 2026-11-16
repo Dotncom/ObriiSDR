@@ -7,10 +7,12 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 
 namespace {
 constexpr quint32 kMagic = 0x4f594643u; // OYFC
-constexpr quint32 kVersion = 1u;
+constexpr quint32 kLegacyVersion = 1u;
+constexpr quint32 kVersion = 2u;
 constexpr int kMaximumProfiles = 16;
 constexpr int kMaximumStoredBins = 32768;
 constexpr int kMaximumSerializedBins = 1048576;
@@ -59,9 +61,9 @@ void readKey(QDataStream &in, ReceiverNoiseBaselineKey &key) {
     key.calibrationPointCount = calibrationPointCount;
 }
 
-double reducedPower(const std::vector<float> &levelsDb,
-                    std::size_t begin,
-                    std::size_t end) {
+std::optional<double> reducedPower(const std::vector<float> &levelsDb,
+                                   std::size_t begin,
+                                   std::size_t end) {
     constexpr std::size_t kMaximumSamples = 16;
     const std::size_t span = end > begin ? end - begin : 0;
     const std::size_t step = span > kMaximumSamples ? span / kMaximumSamples : 1;
@@ -74,7 +76,18 @@ double reducedPower(const std::vector<float> &levelsDb,
         sum += std::pow(10.0, levelsDb[index] / 10.0);
         ++count;
     }
-    return count > 0 ? (std::max)(kMinimumPower, sum / count) : kMinimumPower;
+    if (count == 0) return std::nullopt;
+    return (std::max)(kMinimumPower, sum / count);
+}
+
+float powerMeanUncertaintyDb(double mean, double sumSquaredDeviations, int frames) {
+    if (frames < 2 || !std::isfinite(mean) || mean <= kMinimumPower ||
+        !std::isfinite(sumSquaredDeviations)) {
+        return std::numeric_limits<float>::quiet_NaN();
+    }
+    const double standardError = std::sqrt((std::max)(0.0, sumSquaredDeviations) /
+                                           (static_cast<double>(frames) * (frames - 1)));
+    return static_cast<float>(10.0 / std::log(10.0) * (standardError / mean));
 }
 
 bool finitePositiveVector(const QVector<float> &values) {
@@ -106,6 +119,7 @@ bool ReceiverYFactorProfile::isValid() const {
         coldPower.size() != hotPower.size() ||
         coldPower.size() != equivalentNoiseTemperatureKelvin.size() ||
         coldPower.size() != noiseFigureDb.size() ||
+        (!ratioRepeatabilityDb.isEmpty() && coldPower.size() != ratioRepeatabilityDb.size()) ||
         !finitePositiveVector(coldPower) || !finitePositiveVector(hotPower)) {
         return false;
     }
@@ -121,7 +135,7 @@ void ReceiverYFactorCalibration::beginColdCapture(const ReceiverNoiseBaselineKey
     stageTargetFrames = (std::clamp)(targetFrames, 8, 512);
     stageMinimumFrequencyHz = 0.0;
     stageMaximumFrequencyHz = 0.0;
-    stagePowerSum.clear();
+    stagePower.clear();
 }
 
 bool ReceiverYFactorCalibration::beginHotCapture(const ReceiverNoiseBaselineKey &key,
@@ -163,7 +177,7 @@ bool ReceiverYFactorCalibration::beginHotCapture(const ReceiverNoiseBaselineKey 
     stageTargetFrames = (std::clamp)(targetFrames, 8, 512);
     stageMinimumFrequencyHz = 0.0;
     stageMaximumFrequencyHz = 0.0;
-    stagePowerSum.clear();
+    stagePower.clear();
     return true;
 }
 
@@ -177,9 +191,9 @@ bool ReceiverYFactorCalibration::appendCaptureFrame(const std::vector<float> &fr
         if (error) *error = QStringLiteral("Invalid spectrum frame.");
         return false;
     }
-    if (stagePowerSum.isEmpty()) {
+    if (stagePower.isEmpty()) {
         const int storedBins = (std::min)(static_cast<int>(sourceCount), kMaximumStoredBins);
-        stagePowerSum.fill(0.0, storedBins);
+        stagePower.resize(storedBins);
         stageMinimumFrequencyHz = frequencies.front();
         stageMaximumFrequencyHz = frequencies[sourceCount - 1];
     } else {
@@ -190,12 +204,21 @@ bool ReceiverYFactorCalibration::appendCaptureFrame(const std::vector<float> &fr
             return false;
         }
     }
-    const int storedBins = stagePowerSum.size();
+    const int storedBins = stagePower.size();
+    const int frames = stageFrames + 1;
     for (int bin = 0; bin < storedBins; ++bin) {
         const std::size_t begin = static_cast<std::size_t>(bin) * sourceCount / storedBins;
         std::size_t end = static_cast<std::size_t>(bin + 1) * sourceCount / storedBins;
         end = (std::max)(end, begin + 1);
-        stagePowerSum[bin] += reducedPower(levelsDb, begin, (std::min)(end, sourceCount));
+        const auto power = reducedPower(levelsDb, begin, (std::min)(end, sourceCount));
+        CapturePower &stats = stagePower[bin];
+        const double value = power.value_or(kMinimumPower);
+        const double delta = value - stats.mean;
+        stats.mean += delta / frames;
+        if (power && value > kMinimumPower)
+            stats.sumSquaredDeviations += delta * (value - stats.mean);
+        else
+            stats.sumSquaredDeviations = std::numeric_limits<double>::quiet_NaN();
     }
     ++stageFrames;
     return true;
@@ -236,19 +259,25 @@ void ReceiverYFactorCalibration::finishColdCapture() {
     pendingMinimumFrequencyHz = stageMinimumFrequencyHz;
     pendingMaximumFrequencyHz = stageMaximumFrequencyHz;
     pendingColdFrames = stageFrames;
-    pendingColdPower.resize(stagePowerSum.size());
-    for (int index = 0; index < stagePowerSum.size(); ++index) {
-        pendingColdPower[index] = static_cast<float>(
-            (std::max)(kMinimumPower, stagePowerSum[index] / stageFrames));
+    pendingColdPower.resize(stagePower.size());
+    pendingColdRepeatabilityDb.resize(stagePower.size());
+    for (int index = 0; index < stagePower.size(); ++index) {
+        const CapturePower &stats = stagePower.at(index);
+        pendingColdPower[index] = static_cast<float>((std::max)(kMinimumPower, stats.mean));
+        pendingColdRepeatabilityDb[index] = powerMeanUncertaintyDb(
+            stats.mean, stats.sumSquaredDeviations, stageFrames);
     }
     captureStage = YFactorCaptureStage::None;
     stageFrames = 0;
     stageTargetFrames = 0;
-    stagePowerSum.clear();
+    stagePower.clear();
 }
 
 bool ReceiverYFactorCalibration::finishHotCapture(QString *error) {
-    if (!coldReady(captureKey) || stagePowerSum.size() != pendingColdPower.size()) {
+    const double toleranceHz = (std::max)(1.0, captureKey.receiver.sampleRateHz * 1.0e-6);
+    if (!coldReady(captureKey) || stagePower.size() != pendingColdPower.size() ||
+        std::abs(stageMinimumFrequencyHz - pendingMinimumFrequencyHz) > toleranceHz ||
+        std::abs(stageMaximumFrequencyHz - pendingMaximumFrequencyHz) > toleranceHz) {
         if (error) *error = QStringLiteral("Cold and hot captures do not have matching geometry.");
         return false;
     }
@@ -264,15 +293,20 @@ bool ReceiverYFactorCalibration::finishHotCapture(QString *error) {
     profile.coldFrames = pendingColdFrames;
     profile.hotFrames = stageFrames;
     profile.capturedUtcMs = QDateTime::currentMSecsSinceEpoch();
-    profile.hotPower.resize(stagePowerSum.size());
+    profile.hotPower.resize(stagePower.size());
     profile.equivalentNoiseTemperatureKelvin.fill(
-        std::numeric_limits<float>::quiet_NaN(), stagePowerSum.size());
-    profile.noiseFigureDb.fill(std::numeric_limits<float>::quiet_NaN(), stagePowerSum.size());
+        std::numeric_limits<float>::quiet_NaN(), stagePower.size());
+    profile.noiseFigureDb.fill(std::numeric_limits<float>::quiet_NaN(), stagePower.size());
+    profile.ratioRepeatabilityDb.resize(stagePower.size());
 
-    for (int index = 0; index < stagePowerSum.size(); ++index) {
+    for (int index = 0; index < stagePower.size(); ++index) {
+        const CapturePower &stats = stagePower.at(index);
         const double coldPower = (std::max)(kMinimumPower, static_cast<double>(profile.coldPower[index]));
-        const double hotPower = (std::max)(kMinimumPower, stagePowerSum[index] / stageFrames);
+        const double hotPower = (std::max)(kMinimumPower, stats.mean);
         profile.hotPower[index] = static_cast<float>(hotPower);
+        const float hotRepeatabilityDb = powerMeanUncertaintyDb(
+            stats.mean, stats.sumSquaredDeviations, stageFrames);
+        profile.ratioRepeatabilityDb[index] = std::hypot(pendingColdRepeatabilityDb.at(index), hotRepeatabilityDb);
         const double y = hotPower / coldPower;
         if (!std::isfinite(y) || y <= 1.000001) {
             continue;
@@ -299,7 +333,7 @@ bool ReceiverYFactorCalibration::finishHotCapture(QString *error) {
     captureStage = YFactorCaptureStage::None;
     stageFrames = 0;
     stageTargetFrames = 0;
-    stagePowerSum.clear();
+    stagePower.clear();
     clearPendingCold();
     return true;
 }
@@ -308,18 +342,20 @@ void ReceiverYFactorCalibration::cancelCapture() {
     captureStage = YFactorCaptureStage::None;
     stageFrames = 0;
     stageTargetFrames = 0;
-    stagePowerSum.clear();
+    stagePower.clear();
 }
 
 void ReceiverYFactorCalibration::clearPendingCold() {
     pendingColdPower.clear();
+    pendingColdRepeatabilityDb.clear();
     pendingColdFrames = 0;
     pendingMinimumFrequencyHz = 0.0;
     pendingMaximumFrequencyHz = 0.0;
 }
 
 bool ReceiverYFactorCalibration::coldReady(const ReceiverNoiseBaselineKey &key) const {
-    return pendingColdFrames > 0 && pendingColdPower.size() >= 2 && pendingColdKey.matches(key);
+    return pendingColdFrames > 0 && pendingColdPower.size() >= 2 &&
+           pendingColdPower.size() == pendingColdRepeatabilityDb.size() && pendingColdKey.matches(key);
 }
 
 int ReceiverYFactorCalibration::matchingProfileIndex(const ReceiverNoiseBaselineKey &key) const {
@@ -389,7 +425,10 @@ QByteArray ReceiverYFactorCalibration::serialize() const {
     QDataStream out(&payload, QIODevice::WriteOnly);
     out.setByteOrder(QDataStream::LittleEndian);
     out.setVersion(QDataStream::Qt_5_12);
-    out << kMagic << kVersion << quint32(profiles.size());
+    const bool haveRepeatability = std::any_of(profiles.cbegin(), profiles.cend(),
+        [](const ReceiverYFactorProfile &profile) { return !profile.ratioRepeatabilityDb.isEmpty(); });
+    const quint32 version = haveRepeatability ? kVersion : kLegacyVersion;
+    out << kMagic << version << quint32(profiles.size());
     for (const ReceiverYFactorProfile &profile : profiles) {
         writeKey(out, profile.key);
         out << qint32(profile.sourceMode)
@@ -398,10 +437,13 @@ QByteArray ReceiverYFactorCalibration::serialize() const {
             << qint32(profile.coldFrames) << qint32(profile.hotFrames)
             << qint32(profile.validBins) << profile.capturedUtcMs
             << quint32(profile.coldPower.size());
+        const bool profileHasRepeatability = !profile.ratioRepeatabilityDb.isEmpty();
+        if (version == kVersion) out << profileHasRepeatability;
         for (int index = 0; index < profile.coldPower.size(); ++index) {
             out << profile.coldPower[index] << profile.hotPower[index]
                 << profile.equivalentNoiseTemperatureKelvin[index]
                 << profile.noiseFigureDb[index];
+            if (profileHasRepeatability) out << profile.ratioRepeatabilityDb[index];
         }
     }
     return qCompress(payload, 6);
@@ -420,7 +462,7 @@ bool ReceiverYFactorCalibration::deserialize(const QByteArray &encoded, QString 
     in.setVersion(QDataStream::Qt_5_12);
     quint32 magic = 0, version = 0, count = 0;
     in >> magic >> version >> count;
-    if (magic != kMagic || version != kVersion || count > kMaximumProfiles) {
+    if (magic != kMagic || (version != kVersion && version != kLegacyVersion) || count > kMaximumProfiles) {
         if (error) *error = QStringLiteral("Unsupported Y-factor profile format.");
         return false;
     }
@@ -430,11 +472,13 @@ bool ReceiverYFactorCalibration::deserialize(const QByteArray &encoded, QString 
         ReceiverYFactorProfile profile;
         qint32 sourceMode = 0, coldFrames = 0, hotFrames = 0, validBins = 0;
         quint32 bins = 0;
+        bool profileHasRepeatability = false;
         readKey(in, profile.key);
         in >> sourceMode
            >> profile.coldTemperatureKelvin >> profile.hotTemperatureKelvin >> profile.enrDb
            >> profile.minimumFrequencyHz >> profile.maximumFrequencyHz
            >> coldFrames >> hotFrames >> validBins >> profile.capturedUtcMs >> bins;
+        if (version == kVersion) in >> profileHasRepeatability;
         if (in.status() != QDataStream::Ok || bins < 2 || bins > kMaximumSerializedBins) {
             if (error) *error = QStringLiteral("Y-factor profile is truncated or too large.");
             return false;
@@ -447,10 +491,19 @@ bool ReceiverYFactorCalibration::deserialize(const QByteArray &encoded, QString 
         profile.hotPower.resize(static_cast<int>(bins));
         profile.equivalentNoiseTemperatureKelvin.resize(static_cast<int>(bins));
         profile.noiseFigureDb.resize(static_cast<int>(bins));
+        if (profileHasRepeatability) profile.ratioRepeatabilityDb.resize(static_cast<int>(bins));
         for (quint32 bin = 0; bin < bins; ++bin) {
             const int i = static_cast<int>(bin);
             in >> profile.coldPower[i] >> profile.hotPower[i]
                >> profile.equivalentNoiseTemperatureKelvin[i] >> profile.noiseFigureDb[i];
+            if (profileHasRepeatability) {
+                float &repeatability = profile.ratioRepeatabilityDb[i];
+                in >> repeatability;
+                if (!std::isnan(repeatability) && (!std::isfinite(repeatability) || repeatability < 0.0f)) {
+                    if (error) *error = QStringLiteral("Y-factor profile contains an invalid repeatability value.");
+                    return false;
+                }
+            }
         }
         if (in.status() != QDataStream::Ok || !profile.isValid()) {
             if (error) *error = QStringLiteral("Y-factor profile contains invalid values.");

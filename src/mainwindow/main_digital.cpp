@@ -6,7 +6,7 @@
 #include "gophertrunkbridge.h"
 #include "iqbuffer.h"
 #include "tuningutils.h"
-#include "openradiolabdialog.h"
+#include "openradio/openradiolabdialog.h"
 
 #include <QAbstractItemView>
 #include <QCoreApplication>
@@ -51,11 +51,7 @@ void YourClassName::openOpenRadioLab() {
 }
 
 void YourClassName::processSstvAudioFrame(const QByteArray &pcmData) {
-    const bool suppressServerLocalOutput =
-        networkMode == NetworkMode::Server &&
-        serverDisableLocalVisualAudio &&
-        networkController &&
-        networkController->isControlReady();
+    const bool suppressServerLocalOutput = serverLocalOutputSuppressed();
     if (!videoProcessor ||
         !videoProcessorThread ||
         !videoDecodeEnabled ||
@@ -77,11 +73,7 @@ void YourClassName::processSstvAudioFrame(const QByteArray &pcmData) {
 }
 
 void YourClassName::processAptAudioFrame(const QByteArray &pcmData) {
-    const bool suppressServerLocalOutput =
-        networkMode == NetworkMode::Server &&
-        serverDisableLocalVisualAudio &&
-        networkController &&
-        networkController->isControlReady();
+    const bool suppressServerLocalOutput = serverLocalOutputSuppressed();
     if (!videoProcessor ||
         !videoProcessorThread ||
         !videoDecodeEnabled ||
@@ -103,11 +95,7 @@ void YourClassName::processAptAudioFrame(const QByteArray &pcmData) {
 }
 
 void YourClassName::processWefaxAudioFrame(const QByteArray &pcmData) {
-    const bool suppressServerLocalOutput =
-        networkMode == NetworkMode::Server &&
-        serverDisableLocalVisualAudio &&
-        networkController &&
-        networkController->isControlReady();
+    const bool suppressServerLocalOutput = serverLocalOutputSuppressed();
     if (!videoProcessor ||
         !videoProcessorThread ||
         !videoDecodeEnabled ||
@@ -129,11 +117,7 @@ void YourClassName::processWefaxAudioFrame(const QByteArray &pcmData) {
 }
 
 bool YourClassName::isVideoDecodeActive() const {
-    const bool suppressServerLocalOutput =
-        networkMode == NetworkMode::Server &&
-        serverDisableLocalVisualAudio &&
-        networkController &&
-        networkController->isControlReady();
+    const bool suppressServerLocalOutput = serverLocalOutputSuppressed();
     return videoDecodeEnabled &&
            isAnyVideoOutputVisible() &&
            videoDecodeCheckbox &&
@@ -227,11 +211,22 @@ void YourClassName::processVideoIqFrame(const QByteArray &iqData, double sampleR
         return;
     }
 
-    // Analog television needs every channel-IQ block in order. Dropping a block
-    // while the previous one is pending destroys raster timing even when HSync
-    // remains locally detectable inside each surviving block.
+    const auto budget = videoIqQueueBudget;
+    if (!budget->reserve(iqData.size(), quint64(sampleCount))) return;
+    const auto dropped = budget->takeDroppedFrames();
+    const auto droppedSamples = budget->takeDroppedSamples();
+    if (dropped) {
+        qWarning() << "[Video IQ queue] dropped" << dropped << "frames /" << droppedSamples << "samples";
+        if (videoStatusLabel) videoStatusLabel->setText(uiText(
+            QStringLiteral("video_decode_overloaded"),
+            QStringLiteral("Video decoder overloaded; synchronizing again")));
+    }
+    // Release even when Qt discards a queued call during decoder teardown.
+    const auto reservation = std::shared_ptr<void>(nullptr,
+        [budget, bytes = iqData.size()](void *) { budget->release(bytes); });
     QMetaObject::invokeMethod(videoProcessor,
-                              [processor = videoProcessor, iqData, sampleRate, sampleCount]() {
+                              [processor = videoProcessor, iqData, sampleRate, sampleCount, reservation, dropped]() {
+                                  if (dropped) processor->reset();
                                   processor->processIqFrame(iqData, sampleRate, sampleCount);
                               },
                               Qt::QueuedConnection);
@@ -295,11 +290,7 @@ void YourClassName::updateVideoProcessorMode() {
     const bool aptTest = testPatternEnabled && pendingSettings.modulationType == MOD_APT;
     const bool wefaxTest = testPatternEnabled && pendingSettings.modulationType == MOD_WEFAX;
     const bool lrptTest = testPatternEnabled && pendingSettings.modulationType == MOD_LRPT;
-    const bool suppressServerLocalOutput =
-        networkMode == NetworkMode::Server &&
-        serverDisableLocalVisualAudio &&
-        networkController &&
-        networkController->isControlReady();
+    const bool suppressServerLocalOutput = serverLocalOutputSuppressed();
     const bool sstvEnabled =
         isAnyVideoOutputVisible() &&
         pendingSettings.modulationType == MOD_SSTV &&
@@ -450,8 +441,21 @@ void YourClassName::updateVideoProcessorMode() {
                               Qt::QueuedConnection);
 }
 
-RadioSettings YourClassName::audioProcessorSettings() const {
+RadioSettings YourClassName::liveReceiverSettings() const {
     RadioSettings settings = pendingSettings;
+    if (agileContinuousRetuneEnabled && hardwareSettingsApplied &&
+        !offlineIqPlaybackActive && !isNetworkClientMode() &&
+        hasActiveFobosDevice() && runState == RadioRunState::Running &&
+        !(activeFobosApiKind == FobosApiKind::Agile ? agileScanEnabled : standardScanEnabled) &&
+        pendingSettings.inputMode == INPUT_RF) {
+        settings.centerFrequency = appliedHardwareSettings.actualFrequency;
+        settings.actualFrequency = appliedHardwareSettings.actualFrequency;
+    }
+    return settings;
+}
+
+RadioSettings YourClassName::audioProcessorSettings() const {
+    RadioSettings settings = liveReceiverSettings();
     if (dmrBasebandRateCombo) {
         settings.dmrBasebandSampleRate =
             normalizedDmrBasebandSampleRate(dmrBasebandRateCombo->currentData().toInt());
@@ -479,7 +483,7 @@ RadioSettings YourClassName::audioProcessorSettings() const {
 }
 
 RadioSettings YourClassName::spectrumProcessingSettings() const {
-    RadioSettings settings = pendingSettings;
+    RadioSettings settings = liveReceiverSettings();
     if (dmrBasebandRateCombo) {
         settings.dmrBasebandSampleRate =
             normalizedDmrBasebandSampleRate(dmrBasebandRateCombo->currentData().toInt());

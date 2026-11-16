@@ -19,4 +19,10 @@ if [ -d "${RUNTIME_DIR}" ]; then
 fi
 
 export LD_LIBRARY_PATH="${LOCAL_FOBOS_PREFIX}/lib:${FOBOS_STANDARD_ROOT:-/usr/local}/lib:${FOBOS_AGILE_ROOT:-/usr/local}/lib:${LD_LIBRARY_PATH:-}"
+unset QT_QPA_PLATFORMTHEME
+export QT_STYLE_OVERRIDE="${QT_STYLE_OVERRIDE:-Fusion}"
+export QT_SCALE_FACTOR="${QT_SCALE_FACTOR:-1.1}"
+if [ -d "${BUILD_DIR}/uhd-images" ]; then
+    export UHD_IMAGES_DIR="${UHD_IMAGES_DIR:-${BUILD_DIR}/uhd-images}"
+fi
 exec "${APP}" "$@"

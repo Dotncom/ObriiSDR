@@ -7,7 +7,7 @@ call to the receiver path.
 
 ## Starting it
 
-- Open **Spectrum measurement -> Obrii Analyzer** in Obrii SDR to launch the
+- Open **Tools → Obrii Analyzer** in Obrii SDR to launch the
   analyzer with `--connect`. The main application keeps ownership of the SDR;
   the analyzer receives a bounded local spectrum stream.
 - Run `ObriiAnalyzer` directly to inspect an Obrii spectrum-frame recording.
@@ -17,10 +17,14 @@ call to the receiver path.
 - The analyzer follows the English/Ukrainian interface language selected in
   Obrii SDR's general settings, including controls, sweep states, measurement
   summaries and file dialogs.
-- Without Obrii SDR, select a detected Fobos Standard/Agile, HackRF or native
-  RTL-SDR device, set center frequency, sample rate, FFT and gains, then press
+- Without Obrii SDR, select a detected Fobos Standard/Agile, HackRF, RTL-SDR
+  or **USRP UHD native** device. Set center frequency, sample rate, FFT and gain, then press
   **Start receiver**. This is a deliberately small spectrum-only acquisition
   path and does not start Obrii SDR's audio, decoder or workspace subsystems.
+- With **USRP UHD native**, choose the RX channel, gain in dB and antenna before
+  starting. Set **FPGA image** to the compatible image if required by your board.
+  The wide sweep uses successive UHD retunes on that same channel. For UHD and
+  image setup, see [USRP B210 setup](usrp_b210_setup.md).
 - Center frequency can be entered in GHz, MHz or kHz without changing its
   physical value. While the standalone receiver is active, center and gains
   apply live; sample rate, FFT/Hz-per-bin, input and display-reduction changes
@@ -40,7 +44,7 @@ call to the receiver path.
 ## Multi-SDR mosaic
 
 - The main Obrii SDR window exposes the same **Multi-SDR...** tool under
-  Spectrum measurement. RX 1 is then the already running main receiver, so its
+  **Receiver**. RX 1 is then the already running main receiver, so its
   proven audio, decoders and IQ path remain untouched; RX 2 and later slots are
   independent spectrum sessions. **Add receiver** creates slots up to RX 8 and
   **Remove last** releases them. The standalone Analyzer can instead own every
@@ -126,7 +130,7 @@ recording and experiment-bundle paths.
   by 1-100. This permits sub-pixel-Hz inspection of a 50 MS/s capture when the
   source FFT has sufficient resolution; left-drag pans inside the source span.
 
-## Instrument laboratory foundation
+## Instrument laboratory
 
 The **Instrument lab...** button opens a hardware-gated workspace for every
 planned analyzer instrument stage:
@@ -142,17 +146,27 @@ planned analyzer instrument stage:
 
 The shared measurement core now owns the capability model, validation rules,
 frequency-grid generation, return-loss/SWR formulas and JSON round trips. A
-small backend interface is the future boundary for native UHD, so RF handles do
-not leak into the UI and capability/safety checks cannot be bypassed.
+backend interface lets the TCP SCPI sweep run in a worker while the Analyzer
+stays responsive.
 
-This is deliberately a draft execution layer. The UI can create, validate,
-save and reopen plans and empty session templates, but **Execute RF** remains
-disabled until a hardware adapter has been qualified. Checking a calibration
-box records a completed procedure; it does not fabricate coefficients. SNA,
-return-loss and VNA data must stay labelled diagnostic until the required
-normalization or fixture calibration is present. This lets development pause
-safely until the B210-class receiver arrives without presenting a simulated
-instrument as a finished one.
+Set the frequencies and timing under **Measurement plan**, then open
+**Results → Run simulation**. The virtual DUT is an ideal one-pole low-pass
+with a 10 MHz cutoff. The table shows forward level, S21, return loss, SWR
+and S21 phase. The run uses the plan's settle, dwell and averaging values.
+A bidirectional run starts the return pass at the next lower frequency.
+**Stop** keeps the completed points. **Save results…** writes a session JSON
+with the simulation backend ID and a completed or cancelled outcome.
+
+For **Run SCPI sweep**, select the tracking-generator mode and the external
+SCPI source. Enter a `TCPIP0::HOST::PORT::SOCKET` resource for an instrument
+that can both generate the stimulus and read received power. The profile
+configures its frequency, power, RF output and read command. The instrument
+must support `*OPC?` and `SYST:ERR?`. The read command must return one
+numeric dBm value. Set the maximum output in the hardware limits and confirm
+RF before starting. The run averages in linear power and requests output OFF
+on completion or cancellation. The Results tab and JSON store measured
+forward power. Calibrated SNA, return-loss and VNA still require their
+corresponding adapters and fixtures.
 
 Plan validation rejects non-finite source/safety levels, invalid hardware
 frequency ranges and reference impedance, and available RX/TX devices without
@@ -162,8 +176,19 @@ inputs before allocating memory. Plan import checks the format version and
 instrument mode; plan and session-template saves use atomic replacement and
 report write failures.
 
-The current Windows bundle contains UHD command-line/runtime components used by
-the wireless toolchain, but not a SoapyUHD device module. A future USRP can be
-used through this acquisition path once a matching SoapyUHD module is deployed;
-native UHD transport is tracked separately in `usrp_b210_plan.md` so the
-analyzer does not silently depend on Wi-Fi tooling.
+For existing complex reflection measurements, use **Calibration → Correct
+recorded S11 (Open / Short / Load)**. The input is a JSON object with a `points`
+array sorted by `frequencyHz`. Each complex value is `[real, imag]` and each
+standard array is ordered Open, Short, Load. An ideal-standard example is
+
+```json
+{"points":[{"frequencyHz":150000000,"standards":[[1,0],[-1,0],[0,0]],"measuredStandards":[[0.7,0],[-0.5,0],[0.1,0]],"measuredDevice":[0.25,0]}]}
+```
+
+Use the characterized standards at each frequency for physical measurements.
+The saved JSON contains complex `s11`, `returnLossDb` and `swr` per point. A
+non-finite metric is `null`. The operation uses the supplied measurements and
+does not start RF or capture calibration data.
+
+The native USRP entry uses a compatible UHD runtime. A SoapySDR installation
+with a matching SoapyUHD module can also list the device through SoapySDR.

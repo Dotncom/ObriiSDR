@@ -159,15 +159,20 @@ QString AnalyzerPlanValidation::summary() const {
 }
 
 QJsonObject AnalyzerMeasurementPoint::toJson() const {
-    return {{QStringLiteral("frequencyHz"), frequencyHz},
+    QJsonObject json{{QStringLiteral("frequencyHz"), frequencyHz},
             {QStringLiteral("stimulusDbm"), stimulusDbm},
-            {QStringLiteral("referenceDb"), referenceDb},
             {QStringLiteral("forwardDb"), forwardDb},
-            {QStringLiteral("reflectedDb"), reflectedDb},
-            {QStringLiteral("phaseDegrees"), phaseDegrees},
-            {QStringLiteral("s11Magnitude"), s11Magnitude},
-            {QStringLiteral("s21Magnitude"), s21Magnitude},
             {QStringLiteral("valid"), valid}};
+    if (forwardOnly) {
+        json.insert(QStringLiteral("forwardOnly"), true);
+    } else {
+        json.insert(QStringLiteral("referenceDb"), referenceDb);
+        json.insert(QStringLiteral("reflectedDb"), reflectedDb);
+        json.insert(QStringLiteral("phaseDegrees"), phaseDegrees);
+        json.insert(QStringLiteral("s11Magnitude"), s11Magnitude);
+        json.insert(QStringLiteral("s21Magnitude"), s21Magnitude);
+    }
+    return json;
 }
 
 AnalyzerMeasurementPoint AnalyzerMeasurementPoint::fromJson(const QJsonObject &object) {
@@ -181,6 +186,7 @@ AnalyzerMeasurementPoint AnalyzerMeasurementPoint::fromJson(const QJsonObject &o
     value.s11Magnitude = finiteOr(object, "s11Magnitude", 0.0);
     value.s21Magnitude = finiteOr(object, "s21Magnitude", 0.0);
     value.valid = object.value(QStringLiteral("valid")).toBool();
+    value.forwardOnly = object.value(QStringLiteral("forwardOnly")).toBool();
     return value;
 }
 
@@ -189,7 +195,7 @@ QJsonObject AnalyzerMeasurementSession::toJson() const {
     for (const AnalyzerMeasurementPoint &point : points) pointArray.append(point.toJson());
     QJsonArray logArray;
     for (const QString &entry : eventLog) logArray.append(entry);
-    return {{QStringLiteral("schema"), QStringLiteral("obrii-analyzer-session-v1")},
+    QJsonObject json{{QStringLiteral("schema"), QStringLiteral("obrii-analyzer-session-v1")},
             {QStringLiteral("sessionId"), sessionId},
             {QStringLiteral("applicationVersion"), applicationVersion},
             {QStringLiteral("startedUtc"), startedUtc.toUTC().toString(Qt::ISODateWithMs)},
@@ -197,12 +203,17 @@ QJsonObject AnalyzerMeasurementSession::toJson() const {
             {QStringLiteral("plan"), plan.toJson()},
             {QStringLiteral("points"), pointArray},
             {QStringLiteral("eventLog"), logArray}};
+    if (!backendId.isEmpty()) json.insert(QStringLiteral("backendId"), backendId);
+    if (!outcome.isEmpty()) json.insert(QStringLiteral("outcome"), outcome);
+    return json;
 }
 
 AnalyzerMeasurementSession AnalyzerMeasurementSession::fromJson(const QJsonObject &object) {
     AnalyzerMeasurementSession value;
     value.sessionId = object.value(QStringLiteral("sessionId")).toString();
     value.applicationVersion = object.value(QStringLiteral("applicationVersion")).toString();
+    value.backendId = object.value(QStringLiteral("backendId")).toString();
+    value.outcome = object.value(QStringLiteral("outcome")).toString();
     value.startedUtc = QDateTime::fromString(object.value(QStringLiteral("startedUtc")).toString(), Qt::ISODateWithMs);
     value.completedUtc = QDateTime::fromString(object.value(QStringLiteral("completedUtc")).toString(), Qt::ISODateWithMs);
     value.plan = AnalyzerInstrumentPlan::fromJson(object.value(QStringLiteral("plan")).toObject());
@@ -363,4 +374,45 @@ double AnalyzerInstrumentPlanner::swrFromReflectionMagnitude(double reflectionMa
 double AnalyzerInstrumentPlanner::reflectionMagnitudeFromReturnLoss(double returnLoss) {
     if (!std::isfinite(returnLoss)) return returnLoss > 0.0 ? 0.0 : 1.0;
     return std::pow(10.0, -returnLoss / 20.0);
+}
+
+bool AnalyzerInstrumentPlanner::correctOnePort(
+    const std::array<std::complex<double>, 3> &standards,
+    const std::array<std::complex<double>, 3> &measuredStandards,
+    std::complex<double> measuredDevice, std::complex<double> &corrected) {
+    using Complex = std::complex<double>;
+    // Solve m = (a + b * gamma) / (1 + c * gamma) for the three measured standards.
+    std::array<std::array<Complex, 4>, 3> rows;
+    double scale = 1.0;
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        rows[i] = {1.0, standards[i], -measuredStandards[i] * standards[i], measuredStandards[i]};
+        for (const auto value : rows[i]) {
+            const double magnitude = std::abs(value);
+            if (!std::isfinite(magnitude)) return false;
+            scale = std::max(scale, magnitude);
+        }
+    }
+    for (std::size_t column = 0; column < rows.size(); ++column) {
+        auto pivot = std::max_element(rows.begin() + column, rows.end(), [column](const auto &a, const auto &b) {
+            return std::abs(a[column]) < std::abs(b[column]);
+        });
+        const Complex divisor = (*pivot)[column];
+        if (!(std::abs(divisor) > 1e-12 * scale)) return false;
+        std::iter_swap(rows.begin() + column, pivot);
+        for (std::size_t j = column; j < rows[column].size(); ++j) rows[column][j] /= divisor;
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            if (i == column) continue;
+            const Complex factor = rows[i][column];
+            for (std::size_t j = column; j < rows[i].size(); ++j) rows[i][j] -= factor * rows[column][j];
+        }
+    }
+    const Complex tracking = rows[1][3];
+    const Complex mismatch = measuredDevice * rows[2][3];
+    const Complex denominator = tracking - mismatch;
+    if (!std::isfinite(std::abs(denominator)) ||
+        !(std::abs(denominator) > 1e-12 * std::max({1.0, std::abs(tracking), std::abs(mismatch)}))) return false;
+    const Complex gamma = (measuredDevice - rows[0][3]) / denominator;
+    if (!std::isfinite(std::abs(gamma))) return false;
+    corrected = gamma;
+    return true;
 }

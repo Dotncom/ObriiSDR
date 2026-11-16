@@ -12,7 +12,8 @@ class SpectrumIqEventRecorder {
 public:
     enum class Mode {
         ChannelIqS16,
-        FullIqS8
+        FullIqS8,
+        FullIqS16
     };
 
     bool start(const QString &eventBasePath,

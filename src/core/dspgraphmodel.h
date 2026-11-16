@@ -10,11 +10,17 @@
 #include <QVector>
 #include <QSet>
 
-enum class DspLinkKind { Control, Settings, Vfo, Iq, Spectrum, Audio, Documentation, Invalid };
+enum class DspLinkKind { Control, Settings, Vfo, Iq, Spectrum, Audio, Carrier, Payload, LabIq, DecodedPayload, Documentation, Invalid };
 constexpr int DspMaxBranches = 8;
 DspLinkKind dspLinkKind(const QString &sourceType, const QString &targetType);
 QString dspLinkDescription(DspLinkKind kind, bool ukrainian);
+QString dspLinkRateError(const QString &sourceType, const QJsonObject &sourceSettings,
+                         const QString &targetType, const QJsonObject &targetSettings,
+                         bool ukrainian = false);
 bool dspIsBranchType(const QString &type);
+bool dspIsSignalBlock(const QString &type);
+DspSourceIdentity dspSignalSource(const QString &blockId);
+DspSourceIdentity dspPacketBranchSource(const QString &blockId);
 
 struct DspBranchFftConfig {
     QString id;
@@ -39,6 +45,8 @@ struct DspBranchConfig {
     bool external = false;
     bool iqConsumer = false;
     int iqSamples = 4096;
+    QString packetDecoderId;
+    double packetSymbolRate = 1200.0;
     QVector<DspBranchFftConfig> ffts;
     QString demodulatorId;
     QString audioOutputId;
@@ -57,6 +65,7 @@ struct DspGraphPlan {
     QHash<QString, QString> spectrumRoutes;
     QHash<QString, QString> researchRoutes;
     QHash<QString, QString> audioRoutes; // Audio block -> DDC branch.
+    QHash<QString, QString> branchInputErrors; // Disabled DDC branch -> reason.
     int pfbChannels = 0;
     int pfbTaps = 16;
     // Bindings to the one existing main FFT, not independent FFT workers.
@@ -69,6 +78,6 @@ struct DspGraphPlan {
     QByteArray executionKey;
 };
 
-DspGraphPlan compileDspGraph(const QJsonObject &graph);
+DspGraphPlan compileDspGraph(const QJsonObject &graph, bool ukrainian = false);
 // Explicit one-shot application; ordinary legacy wires remain descriptive.
 QStringList compileDspAudioFilterOrder(const QJsonObject &graph, QString *error);

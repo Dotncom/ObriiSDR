@@ -31,6 +31,9 @@ struct ReceiverYFactorProfile {
     QVector<float> hotPower;
     QVector<float> equivalentNoiseTemperatureKelvin;
     QVector<float> noiseFigureDb;
+    // Statistical standard uncertainty of Y in dB, assuming independent frames.
+    // Empty for older profiles. NaN marks bins without an estimate.
+    QVector<float> ratioRepeatabilityDb;
     int coldFrames = 0;
     int hotFrames = 0;
     int validBins = 0;
@@ -83,6 +86,11 @@ public:
     bool deserialize(const QByteArray &encoded, QString *error = nullptr);
 
 private:
+    struct CapturePower {
+        double mean = 0.0;
+        double sumSquaredDeviations = 0.0;
+    };
+
     int matchingProfileIndex(const ReceiverNoiseBaselineKey &key) const;
     bool appendCaptureFrame(const std::vector<float> &frequencies,
                             const std::vector<float> &levelsDb,
@@ -97,12 +105,13 @@ private:
     int stageTargetFrames = 0;
     double stageMinimumFrequencyHz = 0.0;
     double stageMaximumFrequencyHz = 0.0;
-    QVector<double> stagePowerSum;
+    QVector<CapturePower> stagePower;
 
     ReceiverNoiseBaselineKey pendingColdKey;
     double pendingMinimumFrequencyHz = 0.0;
     double pendingMaximumFrequencyHz = 0.0;
     QVector<float> pendingColdPower;
+    QVector<float> pendingColdRepeatabilityDb;
     int pendingColdFrames = 0;
 
     YFactorSourceMode pendingSourceMode = YFactorSourceMode::Temperatures;

@@ -1,4 +1,11 @@
 #include "main.h"
+#include "core/fobosifselection.h"
+#include "core/fobosruntimeif.h"
+#include <QStandardItemModel>
+#include <QStyle>
+#include <QStyleFactory>
+#include <QTableWidget>
+#include <QHeaderView>
 #include "multivfowidget.h"
 
 #include "appconstants.h"
@@ -7,7 +14,7 @@
 #include "diagnosticlogging.h"
 #include "dspflowpanel.h"
 #include "spaceeventsfeed.h"
-#include "wirelesslabdialog.h"
+#include "wireless/wirelesslabdialog.h"
 #include "ffttuningdialog.h"
 #include "multisdrdialog.h"
 #include "spectrumfftworker.h"
@@ -38,6 +45,8 @@
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QScrollArea>
+#include <QScreen>
 #include <QStandardItem>
 #include <QStandardItemModel>
 #include <QToolButton>
@@ -268,11 +277,27 @@ void YourClassName::openApplicationHelp() {
 }
 
 void YourClassName::openApplicationSettings() {
-    QDialog dialog(this);
+    if (auto *existing = findChild<QDialog *>(QStringLiteral("applicationSettingsDialog"))) {
+        existing->show(); existing->raise(); existing->activateWindow(); return;
+    }
+    updateSpurSuppressionStatus();
+    QDialog &dialog = *new QDialog(this);
+    dialog.setObjectName(QStringLiteral("applicationSettingsDialog"));
+    dialog.setAttribute(Qt::WA_DeleteOnClose);
+    dialog.setModal(false);
+    dialog.setWindowModality(Qt::NonModal);
     dialog.setWindowTitle(uiText(QStringLiteral("settings"), QStringLiteral("Settings...")));
     dialog.setMinimumWidth(420);
 
-    QVBoxLayout *rootLayout = new QVBoxLayout(&dialog);
+    auto *outerLayout = new QVBoxLayout(&dialog);
+    auto *scrollArea = new QScrollArea(&dialog);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+    auto *content = new QWidget(scrollArea);
+    QVBoxLayout *rootLayout = new QVBoxLayout(content);
+    scrollArea->setWidget(content);
+    outerLayout->addWidget(scrollArea);
+    dialog.resize(720, (std::min)(850, QApplication::primaryScreen()->availableGeometry().height() - 80));
 
     QFormLayout *generalLayout = new QFormLayout();
     QComboBox *languageCombo = new QComboBox(&dialog);
@@ -281,6 +306,34 @@ void YourClassName::openApplicationSettings() {
     if (languageCombo->currentIndex() < 0) {
         languageCombo->setCurrentIndex(0);
     }
+    const QString defaultStyle = qApp->property("obriiDefaultStyle").toString();
+    auto *styleCombo = new QComboBox(&dialog);
+    styleCombo->setObjectName(QStringLiteral("applicationStyleCombo"));
+    styleCombo->addItem(uiText("ui_style_default", "Default (%1)").arg(defaultStyle), QString());
+    QStringList styles = QStyleFactory::keys();
+    styles.sort(Qt::CaseInsensitive);
+    const QString savedStyle = QSettings(persistentSettingsFilePath(), QSettings::IniFormat)
+                                   .value(QStringLiteral("ui/style")).toString();
+    for (const QString &style : styles) {
+        styleCombo->addItem(style, style);
+        if (savedStyle.compare(style, Qt::CaseInsensitive) == 0)
+            styleCombo->setCurrentIndex(styleCombo->count() - 1);
+    }
+    connect(styleCombo, QOverload<int>::of(&QComboBox::activated), &dialog,
+            [this, styleCombo, defaultStyle](int) {
+        const QString chosen = styleCombo->currentData().toString();
+        const QString key = chosen.isEmpty() ? defaultStyle : chosen;
+        if (QApplication::style()->objectName().compare(key, Qt::CaseInsensitive) != 0 &&
+            !QApplication::setStyle(key)) {
+            QMessageBox::warning(styleCombo, uiText("ui_style", "Interface style"),
+                uiText("ui_style_unavailable", "Qt could not load the selected style."));
+            const QString current = QApplication::style()->objectName();
+            const int index = styleCombo->findText(current, Qt::MatchFixedString);
+            styleCombo->setCurrentIndex(current.compare(defaultStyle, Qt::CaseInsensitive) == 0 ? 0 : index);
+            return;
+        }
+        QSettings(persistentSettingsFilePath(), QSettings::IniFormat).setValue(QStringLiteral("ui/style"), chosen);
+    });
 
     QComboBox *fineTuneModeCombo = new QComboBox(&dialog);
     fineTuneModeCombo->addItem(uiText(QStringLiteral("fine_tune_scale"), QStringLiteral("Horizontal scale (mouse wheel)")),
@@ -289,68 +342,6 @@ void YourClassName::openApplicationSettings() {
                                FINE_TUNE_MODE_DIAL);
     const int fineTuneIndex = fineTuneModeCombo->findData(fineTuneControlMode);
     fineTuneModeCombo->setCurrentIndex(fineTuneIndex >= 0 ? fineTuneIndex : 0);
-
-    QComboBox *fftWindowCombo = new QComboBox(&dialog);
-    fftWindowCombo->addItem(uiText(QStringLiteral("fft_window_rectangular"), QStringLiteral("Rectangular")),
-                            FFT_WINDOW_RECTANGULAR);
-    fftWindowCombo->addItem(uiText(QStringLiteral("fft_window_hann"), QStringLiteral("Hann")),
-                            FFT_WINDOW_HANN);
-    fftWindowCombo->addItem(uiText(QStringLiteral("fft_window_hamming"), QStringLiteral("Hamming")),
-                            FFT_WINDOW_HAMMING);
-    fftWindowCombo->addItem(uiText(QStringLiteral("fft_window_blackman_harris"), QStringLiteral("Blackman-Harris")),
-                            FFT_WINDOW_BLACKMAN_HARRIS);
-    fftWindowCombo->addItem(uiText(QStringLiteral("fft_window_flat_top"), QStringLiteral("Flat-top")),
-                            FFT_WINDOW_FLAT_TOP);
-    const int fftWindowIndex = fftWindowCombo->findData(
-        normalizedFftWindowType(pendingSettings.fftWindowType));
-    fftWindowCombo->setCurrentIndex(fftWindowIndex >= 0 ? fftWindowIndex : 0);
-    fftWindowCombo->setToolTip(uiText(
-        QStringLiteral("fft_window_tooltip"),
-        QStringLiteral("FFT window applied before the transform. Hann is a good general-purpose choice; Blackman-Harris suppresses leakage near strong signals; Flat-top improves amplitude accuracy but widens RBW.")));
-
-    QComboBox *fftBackendCombo = new QComboBox(&dialog);
-    fftBackendCombo->addItem(uiText(QStringLiteral("fft_backend_auto"),
-                                     QStringLiteral("Auto (benchmark CPU/GPU)")),
-                             FFT_BACKEND_AUTO);
-    fftBackendCombo->addItem(uiText(QStringLiteral("fft_backend_cpu"),
-                                     QStringLiteral("CPU FFTW")),
-                             FFT_BACKEND_CPU_FFTW);
-    fftBackendCombo->addItem(uiText(QStringLiteral("fft_backend_gpu"),
-                                     QStringLiteral("GPU VkFFT (experimental)")),
-                             FFT_BACKEND_GPU_VKFFT);
-    const int fftBackendIndex = fftBackendCombo->findData(
-        normalizedFftBackendPreference(fftBackendPreference));
-    fftBackendCombo->setCurrentIndex(fftBackendIndex >= 0 ? fftBackendIndex : 0);
-    fftBackendCombo->setToolTip(uiText(
-        QStringLiteral("fft_backend_tooltip"),
-        QStringLiteral("Auto benchmarks FFTW and Vulkan VkFFT for large transforms and keeps the faster backend. Every GPU error falls back to FFTW without stopping reception.")));
-#ifndef FOBOSAPP_HAS_VKFFT
-    fftBackendCombo->setItemText(
-        fftBackendCombo->findData(FFT_BACKEND_GPU_VKFFT),
-        uiText(QStringLiteral("fft_backend_gpu_unavailable"),
-               QStringLiteral("GPU VkFFT (not included in this build)")));
-#endif
-
-    QSpinBox *spectrumUpdateSpin = new QSpinBox(&dialog);
-    spectrumUpdateSpin->setRange(SPECTRUM_UPDATE_AUTO_MS, SPECTRUM_UPDATE_MAX_MS);
-    spectrumUpdateSpin->setSpecialValueText(uiText(QStringLiteral("auto"), QStringLiteral("Auto")));
-    spectrumUpdateSpin->setSuffix(QStringLiteral(" ms"));
-    spectrumUpdateSpin->setSingleStep(1);
-    spectrumUpdateSpin->setValue(spectrumUpdateIntervalMs);
-    spectrumUpdateSpin->setToolTip(uiText(
-        QStringLiteral("spectrum_update_interval_tooltip"),
-        QStringLiteral("Spectrum and waterfall update interval. Auto keeps the FFT-dependent default.")));
-
-    QSpinBox *waterfallRowsSpin = new QSpinBox(&dialog);
-    waterfallRowsSpin->setRange(WATERFALL_ROWS_PER_FRAME_MIN, WATERFALL_ROWS_PER_FRAME_MAX);
-    waterfallRowsSpin->setSuffix(QStringLiteral(" rows/frame"));
-    waterfallRowsSpin->setSingleStep(1);
-    waterfallRowsSpin->setValue((std::clamp)(waterfallRowsPerFrame,
-                                             WATERFALL_ROWS_PER_FRAME_MIN,
-                                             WATERFALL_ROWS_PER_FRAME_MAX));
-    waterfallRowsSpin->setToolTip(uiText(
-        QStringLiteral("waterfall_speed_tooltip"),
-        QStringLiteral("Visual waterfall scroll speed. Higher values move more rows per FFT frame without increasing FFT load.")));
 
     QSpinBox *scanMeasurementUpdateSpin = new QSpinBox(&dialog);
     scanMeasurementUpdateSpin->setRange(SCAN_MEASUREMENT_MIN_UPDATE_MS,
@@ -374,48 +365,111 @@ void YourClassName::openApplicationSettings() {
                                                        AGILE_LIVE_RETUNE_MAX_COMMAND_INTERVAL_MS));
     agileLiveRetuneIntervalSpin->setToolTip(uiText(
         QStringLiteral("agile_live_retune_interval_tooltip"),
-        QStringLiteral("Minimum interval between live Agile center-frequency commands. Lower values make tuning more responsive but can overload USB and UI.")));
+        QStringLiteral("Minimum interval between live Fobos center-frequency commands in safe mode. Standard and Agile use their corresponding receiver libraries.")));
 
-    QPushButton *helpButton = new QPushButton(
-        uiText(QStringLiteral("program_help"), QStringLiteral("Feature guide...")),
-        &dialog);
-    helpButton->setToolTip(uiText(
-        QStringLiteral("program_help_tooltip"),
-        QStringLiteral("Open a practical guide to Obrii SDR controls, scanning, recordings, GNSS/QTH, network mode and mouse shortcuts.")));
-
-    QPushButton *fobosDetailsButton = new QPushButton(
-        uiText(QStringLiteral("show_fobos_details"), QStringLiteral("Show Fobos Details")),
-        &dialog);
-    fobosDetailsButton->setToolTip(uiText(
-        QStringLiteral("show_fobos_details_tooltip"),
-        QStringLiteral("Show Standard and Agile Fobos API versions and the currently detected receiver list.")));
-
-    generalLayout->addRow(uiText(QStringLiteral("language"), QStringLiteral("Lang:")), languageCombo);
-    generalLayout->addRow(uiText(QStringLiteral("fine_tune"), QStringLiteral("Fine tune")), fineTuneModeCombo);
-    generalLayout->addRow(uiText(QStringLiteral("fft_window"), QStringLiteral("FFT window")), fftWindowCombo);
-    generalLayout->addRow(uiText(QStringLiteral("fft_backend"), QStringLiteral("FFT backend")), fftBackendCombo);
-    auto *fftTuneButton = new QPushButton(normalizedUiLanguage(uiLanguage) == QStringLiteral("uk")
-        ? QStringLiteral("Автопідбір FFT") : QStringLiteral("FFT tuning"), &dialog);
-    generalLayout->addRow(QString(), fftTuneButton);
-    connect(fftTuneButton, &QPushButton::clicked, &dialog, [this, &dialog] {
-        showFftTuningDialog(&dialog, pendingSettings.fftLength,
-            normalizedUiLanguage(uiLanguage) == QStringLiteral("uk"), [this] {
-                return isRunningOrTransitioning() ||
-                    (playbackManager && playbackManager->isPlaying()) ||
-                    (multiSdrDialog && multiSdrDialog->anyReceiverRunning()) ||
-                    (spectrumFftWorker && (spectrumFftWorker->workOutstanding() || spectrumFftWorker->workExecuting()));
-            });
+    const bool tuningUk = normalizedUiLanguage(uiLanguage) == QStringLiteral("uk");
+    auto *retuneOptions = new QWidget(&dialog);
+    retuneOptions->setObjectName(QStringLiteral("liveRetuneOptions"));
+    retuneOptions->setToolTip(tuningUk
+        ? QStringLiteral("Для звичайного RF-приймання зі Standard або Agile. Власна прошивка не потрібна. Сканування й прямі КХ-входи використовують свої режими керування.")
+        : QStringLiteral("For normal RF reception with Standard or Agile. Custom firmware is not required. Scanning and direct HF inputs use their own control paths."));
+    auto *retuneLayout = new QGridLayout(retuneOptions);
+    retuneLayout->setContentsMargins(0, 0, 0, 0);
+    retuneLayout->setColumnStretch(1, 1);
+    retuneLayout->setColumnStretch(3, 1);
+    auto *retuneMode = new QComboBox(retuneOptions);
+    retuneMode->setObjectName(QStringLiteral("liveRetuneMode"));
+    retuneMode->addItem(tuningUk ? QStringLiteral("Безпечний — після завершення руху")
+                               : QStringLiteral("Safe — after movement stops"), false);
+    retuneMode->addItem(tuningUk ? QStringLiteral("Плавний — під час руху")
+                               : QStringLiteral("Continuous — while moving"), true);
+    retuneMode->setCurrentIndex(agileContinuousRetuneEnabled ? 1 : 0);
+    auto *retuneStep = new QDoubleSpinBox(retuneOptions);
+    retuneStep->setObjectName(QStringLiteral("liveRetuneStepPercent"));
+    retuneStep->setRange(0.1, 100.0);
+    retuneStep->setDecimals(1);
+    retuneStep->setSingleStep(0.5);
+    retuneStep->setSuffix(QStringLiteral(" %"));
+    retuneStep->setValue(agileContinuousRetuneStepPercent);
+    retuneStep->setEnabled(agileContinuousRetuneEnabled);
+    retuneStep->setToolTip(tuningUk
+        ? QStringLiteral("Відсоток семплрейту: 5% при 50 MS/s = 2,5 МГц. Під час руху команди надсилаються з цим кроком; після зупинки — точна вибрана частота. Проміжні точки не накопичуються в черзі.")
+        : QStringLiteral("Percent of sample rate: 5% at 50 MS/s = 2.5 MHz. Commands follow this step while moving; stopping applies the exact selected frequency. Intermediate targets are not queued."));
+    agileLiveRetuneIntervalSpin->setEnabled(!agileContinuousRetuneEnabled);
+    retuneLayout->addWidget(new QLabel(tuningUk ? QStringLiteral("Режим") : QStringLiteral("Mode"), retuneOptions), 0, 0);
+    retuneLayout->addWidget(retuneMode, 0, 1);
+    retuneLayout->addWidget(new QLabel(tuningUk ? QStringLiteral("Крок") : QStringLiteral("Step"), retuneOptions), 0, 2);
+    retuneLayout->addWidget(retuneStep, 0, 3);
+    retuneLayout->addWidget(new QLabel(tuningUk ? QStringLiteral("Інтервал безпечного режиму") : QStringLiteral("Safe-mode interval"), retuneOptions), 1, 0, 1, 2);
+    retuneLayout->addWidget(agileLiveRetuneIntervalSpin, 1, 2, 1, 2);
+    connect(retuneMode, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog,
+        [this, retuneMode, retuneStep, agileLiveRetuneIntervalSpin](int) {
+            agileContinuousRetuneEnabled = retuneMode->currentData().toBool();
+            retuneStep->setEnabled(agileContinuousRetuneEnabled);
+            agileLiveRetuneIntervalSpin->setEnabled(!agileContinuousRetuneEnabled);
+            if (queuedLiveCenterRetuneGeneration != 0 && !liveCenterRetuneThread)
+                flushQueuedLiveAgileCenterRetune();
+            savePersistentSettings();
+        });
+    connect(retuneStep, QOverload<double>::of(&QDoubleSpinBox::valueChanged), &dialog, [this](double percent) {
+        agileContinuousRetuneStepPercent = percent;
+        savePersistentSettings();
     });
-    generalLayout->addRow(uiText(QStringLiteral("spectrum_update_interval"), QStringLiteral("Spectrum/waterfall update")), spectrumUpdateSpin);
-    generalLayout->addRow(uiText(QStringLiteral("waterfall_speed"), QStringLiteral("Waterfall speed")), waterfallRowsSpin);
-    generalLayout->addRow(uiText(QStringLiteral("scan_measurement_update_interval"), QStringLiteral("Measurement accumulation")), scanMeasurementUpdateSpin);
-    generalLayout->addRow(uiText(QStringLiteral("agile_live_retune_interval"), QStringLiteral("Agile live retune interval")), agileLiveRetuneIntervalSpin);
-    generalLayout->addRow(helpButton);
-    generalLayout->addRow(fobosDetailsButton);
-    auto *publicSourcesButton = new QPushButton(uiText("public_data_sources", "Online data sources..."), &dialog);
-    generalLayout->addRow(publicSourcesButton);
-    connect(publicSourcesButton, &QPushButton::clicked, &dialog, [this, &dialog] {
-        spaceevents::configureSources(&dialog, normalizedUiLanguage(uiLanguage) == QStringLiteral("uk"));
+
+    auto *generalFields = new QWidget(&dialog);
+    auto *generalFieldsLayout = new QGridLayout(generalFields);
+    generalFieldsLayout->setContentsMargins(0, 0, 0, 0);
+    generalFieldsLayout->setColumnStretch(1, 1);
+    generalFieldsLayout->setColumnStretch(3, 1);
+    generalFieldsLayout->addWidget(new QLabel(uiText(QStringLiteral("language"), QStringLiteral("Lang:")), generalFields), 0, 0);
+    generalFieldsLayout->addWidget(languageCombo, 0, 1);
+    generalFieldsLayout->addWidget(new QLabel(uiText(QStringLiteral("ui_style"), QStringLiteral("Interface style")), generalFields), 0, 2);
+    generalFieldsLayout->addWidget(styleCombo, 0, 3);
+    generalFieldsLayout->addWidget(new QLabel(uiText(QStringLiteral("fine_tune"), QStringLiteral("Fine tune")), generalFields), 1, 0);
+    generalFieldsLayout->addWidget(fineTuneModeCombo, 1, 1);
+    generalFieldsLayout->addWidget(new QLabel(uiText(QStringLiteral("scan_measurement_update_interval"), QStringLiteral("Measurement accumulation")), generalFields), 1, 2);
+    generalFieldsLayout->addWidget(scanMeasurementUpdateSpin, 1, 3);
+    generalLayout->addRow(generalFields);
+    generalLayout->addRow(tuningUk ? QStringLiteral("Перестроювання") : QStringLiteral("Retuning"), retuneOptions);
+    const bool dualUk = normalizedUiLanguage(uiLanguage) == QStringLiteral("uk");
+    auto *dualLibraryBox = new QGroupBox(dualUk ? QStringLiteral("Бібліотека для Фобоса Dual")
+                                                : QStringLiteral("Fobos Dual library"), &dialog);
+    auto *dualLibraryLayout = new QVBoxLayout(dualLibraryBox);
+    auto *dualLibraryCombo = new QComboBox(dualLibraryBox);
+    dualLibraryCombo->setObjectName(QStringLiteral("fobosDualLibrary"));
+    dualLibraryCombo->addItems(dualUk ? QStringList{QStringLiteral("Agile Обрію · AUTO DMA"),
+        QStringLiteral("Штатна Agile"), QStringLiteral("Standard Обрію"), QStringLiteral("Standard RigExpert · виправлений Stop")}
+        : QStringList{QStringLiteral("Obrii Agile · AUTO DMA"), QStringLiteral("Stock Agile"),
+        QStringLiteral("Obrii Standard"), QStringLiteral("RigExpert Standard · Stop fix")});
+    auto *dualLibraryStatus = new QLabel(dualLibraryBox);
+    dualLibraryStatus->setWordWrap(true);
+    dualLibraryLayout->addWidget(dualLibraryCombo);
+    dualLibraryLayout->addWidget(dualLibraryStatus);
+    const auto updateDualLibrary = [this, dualLibraryBox, dualLibraryCombo, dualLibraryStatus, dualUk] {
+        const auto info = selectedFobosDeviceInfo();
+        const bool dual = !isNetworkClientMode() && !isExternalReceiverBackendSelected() && info.present &&
+            !info.serial.isEmpty() && isObriiDualFirmware(info.hardwareRevision, info.firmwareVersion);
+        // The library selector now lives in the separate Fobos window.  This
+        // retained controller is deliberately invisible while it keeps legacy
+        // settings state synchronized.
+        dualLibraryBox->hide();
+        dualLibraryCombo->setEnabled(dual && isIdle() && !deviceOpened &&
+            !(processor && processor->isRunning()) && !dualFobosSwitchPending);
+        dualLibraryStatus->setText(!dualFobosSwitchStatus.isEmpty() ? dualFobosSwitchStatus :
+            (dualUk ? QStringLiteral("Зупини приймання перед зміною. Бібліотеки сумісності завантажуються з fobos-compat.")
+                    : QStringLiteral("Stop reception before changing libraries. Compatibility DLLs load from fobos-compat.")));
+        if (!dual || dualFobosSwitchPending) return;
+        if (auto *model = qobject_cast<QStandardItemModel *>(dualLibraryCombo->model())) {
+            model->item(1)->setEnabled(fobosStockLibraryAvailable(FobosApiKind::Agile));
+            model->item(3)->setEnabled(fobosStockLibraryAvailable(FobosApiKind::Standard));
+        }
+        const int apiIndex = info.apiKind == FobosApiKind::Standard ? 2 : 0;
+        dualLibraryCombo->setCurrentIndex(apiIndex + (dualFobosStockLibrary.value(info.serial) ? 1 : 0));
+    };
+    updateDualLibrary();
+    connect(dualLibraryCombo, QOverload<int>::of(&QComboBox::activated), &dialog, [this, updateDualLibrary](int index) {
+        selectDualFobosLibrary(index >= 2 ? FobosApiKind::Standard : FobosApiKind::Agile, (index % 2) != 0);
+        updateDualLibrary();
     });
     rootLayout->addLayout(generalLayout);
 
@@ -444,10 +498,7 @@ void YourClassName::openApplicationSettings() {
 
     QGroupBox *quickOptionsBox = new QGroupBox(uiText(QStringLiteral("quick_options"), QStringLiteral("Quick options")), &dialog);
     QGridLayout *quickOptionsLayout = new QGridLayout(quickOptionsBox);
-    QCheckBox *audioOption = new QCheckBox(uiText(QStringLiteral("audio"), QStringLiteral("Audio")), quickOptionsBox);
     QCheckBox *syncOption = new QCheckBox(uiText(QStringLiteral("sync"), QStringLiteral("Sync")), quickOptionsBox);
-    QCheckBox *spectrum2Option = new QCheckBox(uiText(QStringLiteral("spectrum2"), QStringLiteral("Spectr 2")), quickOptionsBox);
-    QCheckBox *colorOption = new QCheckBox(uiText(QStringLiteral("colorful"), QStringLiteral("Color spectrum")), quickOptionsBox);
     QCheckBox *generalBandMarkersOption = new QCheckBox(uiText(QStringLiteral("general_band_markers"), QStringLiteral("Band markers")), quickOptionsBox);
     QCheckBox *amateurBandMarkersOption = new QCheckBox(uiText(QStringLiteral("amateur_band_markers"), QStringLiteral("HAM bands")), quickOptionsBox);
     QCheckBox *compactBandMarkersOption = new QCheckBox(uiText(QStringLiteral("compact_band_markers"), QStringLiteral("Collapsed bands")), quickOptionsBox);
@@ -455,20 +506,6 @@ void YourClassName::openApplicationSettings() {
     gpuWaterfallOption->setToolTip(uiText(
         QStringLiteral("gpu_waterfall_tooltip"),
         QStringLiteral("Experimental: prepare the waterfall for GPU-backed rendering. CPU texture rendering remains the safe fallback.")));
-    QComboBox *displayReductionCombo = new QComboBox(quickOptionsBox);
-    displayReductionCombo->addItem(uiText(QStringLiteral("display_reduction_peak"),
-                                           QStringLiteral("Peak (preserve narrow signals)")), 0);
-    displayReductionCombo->addItem(uiText(QStringLiteral("display_reduction_average_db"),
-                                           QStringLiteral("Average in dB")), 1);
-    displayReductionCombo->addItem(uiText(QStringLiteral("display_reduction_average_power"),
-                                           QStringLiteral("Average linear power (RMS)")), 2);
-    displayReductionCombo->addItem(uiText(QStringLiteral("display_reduction_sample"),
-                                           QStringLiteral("Center sample")), 3);
-    displayReductionCombo->addItem(uiText(QStringLiteral("display_reduction_minimum"),
-                                           QStringLiteral("Minimum")), 4);
-    displayReductionCombo->setToolTip(uiText(
-        QStringLiteral("display_reduction_tooltip"),
-        QStringLiteral("How groups of FFT bins are reduced to screen pixels. Peak retains short narrow signals; linear power gives the physically meaningful average noise level.")));
     QCheckBox *alternativeInterfaceOption = new QCheckBox(
         uiText(QStringLiteral("alternative_interface"), QStringLiteral("Alternative interface")),
         quickOptionsBox);
@@ -481,7 +518,7 @@ void YourClassName::openApplicationSettings() {
     gnssUbxAutoEnableOption->setToolTip(uiText(
         QStringLiteral("gnss_ubx_auto_enable_tooltip"),
         QStringLiteral("After opening a GNSS serial port, automatically request u-blox NAV-PVT, NAV-SAT and NAV-DOP output.")));
-    QCheckBox *loggingOption = new QCheckBox(uiText(QStringLiteral("logging"), QString::fromUtf8("Р›РѕРіСѓРІР°РЅРЅСЏ")), quickOptionsBox);
+    QCheckBox *loggingOption = new QCheckBox(uiText(QStringLiteral("logging"), QStringLiteral("Логування")), quickOptionsBox);
     loggingOption->setToolTip(uiText(QStringLiteral("logging_tooltip"),
                                      QStringLiteral("Write detailed diagnostic logs and DMR dumps")));
     QCheckBox *spectrumFpsOption = new QCheckBox(
@@ -536,17 +573,44 @@ void YourClassName::openApplicationSettings() {
     simplifiedAudioChannelizerOption->setToolTip(uiText(
         QStringLiteral("simplified_audio_channelizer_tooltip"),
         QStringLiteral("Use the lower-cost existing audio path and disable optional DSP branch/stream-manager work (DDC and network research branches). Main spectrum/waterfall, audio, DMR, ordinary filters and demodulators remain available. The server is started explicitly by the user on the compute laptop, independently of this mode. No speed or real-time guarantee.")));
-    audioOption->setChecked(audioCheckbox && audioCheckbox->isChecked());
+    QCheckBox *correctedFobosCommandsOption = new QCheckBox(
+        uiText(QStringLiteral("corrected_fobos_commands"), QStringLiteral("Use corrected commands")),
+        quickOptionsBox);
+    correctedFobosCommandsOption->setObjectName(QStringLiteral("correctedFobosCommandsOption"));
+    correctedFobosCommandsOption->setToolTip(uiText(
+        QStringLiteral("corrected_fobos_commands_tooltip"),
+        QStringLiteral("Use IF2350 in the affected 3.4-3.6 and 4.0-4.8 GHz ranges. Requires the optional Agile firmware extension or the Obrii standard host IF library. Stop reception and scanning before switching.")));
+    unsigned int ifMode = 0;
+    unsigned int ifState = 0;
+    const bool ifExtensionAvailable = isIdle() && !(processor && processor->isRunning()) &&
+        hasActiveFobosDevice() && getActiveFobosIfModeSafely( &ifMode, &ifState) == FOBOS_ERR_OK;
+    correctedFobosCommandsOption->setChecked(useCorrectedFobosCommands);
+    correctedFobosCommandsOption->setProperty("ifAvailable", ifExtensionAvailable);
+    correctedFobosCommandsOption->setEnabled(ifExtensionAvailable && isIdle() && ifState == 0);
+    auto *ifFirmwareStatus = new QLabel(ifExtensionAvailable && activeFobosApiKind == FobosApiKind::Standard
+        ? uiText("fobos_standard_if_found", "Standard firmware: host IF library available; no firmware update required.")
+        : ifExtensionAvailable
+        ? (isIdle() && ifState == 0
+            ? uiText("obrii_firmware_found", "Compatible Obrii firmware detected.")
+            : uiText("obrii_firmware_busy", "Obrii firmware detected. Stop reception and scanning to change IF mode."))
+        : !isIdle() || (processor && processor->isRunning())
+        ? uiText("fobos_if_readout_stopped", "IF readback: available after Stop")
+        : uiText("obrii_firmware_required", "Requires compatible Obrii firmware. See Feature guide: receiver firmware update."), quickOptionsBox);
+    ifFirmwareStatus->setWordWrap(true);
+    ifFirmwareStatus->setObjectName(QStringLiteral("ifFirmwareStatus"));
+    QCheckBox *adcProtectionOption = new QCheckBox(
+        uiText(QStringLiteral("adc_overload_protection"), QStringLiteral("Automatic ADC overload protection (VGA)")), quickOptionsBox);
+    adcProtectionOption->setObjectName(QStringLiteral("adcOverloadProtectionOption"));
+    adcProtectionOption->setChecked(adcOverloadProtectionEnabled);
+    adcProtectionOption->setToolTip(uiText(QStringLiteral("adc_overload_protection_tooltip"),
+        QStringLiteral("For local Fobos Agile RF reception: reduce VGA after sustained raw ADC saturation. Never raises gain. Disabled for HF and scanning. Does not prevent overload before the ADC; reduce LNA or use an external attenuator if needed.")));
     syncOption->setChecked(syncCheckbox && syncCheckbox->isChecked());
     syncOption->setEnabled(false);
     syncOption->setToolTip(syncCheckbox ? syncCheckbox->toolTip() : QString());
-    spectrum2Option->setChecked(graphCheckbox && graphCheckbox->isChecked());
-    colorOption->setChecked(colorCheckbox && colorCheckbox->isChecked());
     generalBandMarkersOption->setChecked(showGeneralBandMarkers);
     amateurBandMarkersOption->setChecked(showAmateurBandMarkers);
     compactBandMarkersOption->setChecked(compactBandMarkers);
     gpuWaterfallOption->setChecked(experimentalGpuWaterfall);
-    displayReductionCombo->setCurrentIndex((std::max)(0, displayReductionCombo->findData(spectrumDisplayReductionMode)));
     alternativeInterfaceOption->setChecked(alternativeInterfaceMode);
     gnssUbxAutoEnableOption->setChecked(gnssUbxAutoEnable);
     loggingOption->setChecked(diagnosticVerboseLogging);
@@ -557,10 +621,7 @@ void YourClassName::openApplicationSettings() {
     extendedSpectrumInfoOption->setChecked(showExtendedSpectrumInfo);
     extendedRecordingMetadataOption->setChecked(extendedRecordingMetadataEnabled);
     simplifiedAudioChannelizerOption->setChecked(pendingSettings.simplifiedAudioChannelizer);
-    quickOptionsLayout->addWidget(audioOption, 0, 0);
-    quickOptionsLayout->addWidget(syncOption, 0, 1);
-    quickOptionsLayout->addWidget(spectrum2Option, 1, 0);
-    quickOptionsLayout->addWidget(colorOption, 1, 1);
+    quickOptionsLayout->addWidget(syncOption, 0, 0);
     quickOptionsLayout->addWidget(generalBandMarkersOption, 2, 0);
     quickOptionsLayout->addWidget(amateurBandMarkersOption, 2, 1);
     quickOptionsLayout->addWidget(compactBandMarkersOption, 2, 2);
@@ -572,15 +633,231 @@ void YourClassName::openApplicationSettings() {
     quickOptionsLayout->addWidget(extendedSpectrumInfoOption, 4, 2);
     quickOptionsLayout->addWidget(spectrumPeakMeterOption, 5, 0);
     quickOptionsLayout->addWidget(spectrumPeakMeterStyleCombo, 5, 1, 1, 2);
-    quickOptionsLayout->addWidget(simplifiedAudioChannelizerOption, 6, 0, 1, 3);
-    quickOptionsLayout->addWidget(extendedRecordingMetadataOption, 7, 0, 1, 3);
-    quickOptionsLayout->addWidget(alternativeInterfaceOption, 8, 0, 1, 3);
-    quickOptionsLayout->addWidget(new QLabel(uiText(QStringLiteral("display_reduction"),
-                                                     QStringLiteral("FFT display reduction:")),
-                                             quickOptionsBox), 9, 0);
-    quickOptionsLayout->addWidget(displayReductionCombo, 9, 1, 1, 2);
-    quickOptionsLayout->addWidget(audioQueueDropRowsOption, 10, 0, 1, 3);
+    quickOptionsLayout->addWidget(simplifiedAudioChannelizerOption, 6, 0);
+    quickOptionsLayout->addWidget(extendedRecordingMetadataOption, 6, 1);
+    quickOptionsLayout->addWidget(alternativeInterfaceOption, 7, 0);
+    quickOptionsLayout->addWidget(audioQueueDropRowsOption, 7, 1);
+    quickOptionsLayout->addWidget(correctedFobosCommandsOption, 8, 0);
+    quickOptionsLayout->addWidget(adcProtectionOption, 8, 1);
+    quickOptionsLayout->addWidget(ifFirmwareStatus, 9, 0, 1, 3);
     rootLayout->addWidget(quickOptionsBox);
+
+    auto *ifTestBox = new QGroupBox(uiText("fobos_if_test_title", "Fobos intermediate frequency"), content);
+    auto *ifTestLayout = new QFormLayout(ifTestBox);
+    ifTestLayout->setRowWrapPolicy(QFormLayout::WrapAllRows);
+    auto *ifTestCombo = new QComboBox(ifTestBox);
+    ifTestCombo->setObjectName(QStringLiteral("fobosIfTestMode"));
+    ifTestCombo->addItem(uiText("fobos_if_test_native", "Use selected original/corrected plan"), 0);
+    ifTestCombo->addItem(QStringLiteral("2350 MHz"), 1);
+    ifTestCombo->addItem(QStringLiteral("2450 MHz"), 2);
+    ifTestCombo->addItem(uiText("fobos_if_test_auto", "Automatic IF table (50 MS/s)"), 3);
+    unsigned int actualIfTest = 0, ifTestState = 0, row3IfMhz = 0, ifCapabilities = 0;
+    const bool ifTestAvailable = ifExtensionAvailable &&
+        getActiveFobosIfPlanSafely( &actualIfTest, &ifTestState, &row3IfMhz, &ifCapabilities) == FOBOS_ERR_OK && (ifCapabilities & 4u);
+    const bool autoIfAvailable = ifTestAvailable && (ifCapabilities & 2u);
+    if (auto *model = qobject_cast<QStandardItemModel *>(ifTestCombo->model()))
+        model->item(3)->setEnabled(autoIfAvailable);
+    ifTestCombo->setCurrentIndex(fobosIfTestMode);
+    ifTestCombo->setProperty("ifAvailable", ifTestAvailable);
+    ifTestCombo->setEnabled(ifTestAvailable && isIdle() && ifTestState == 0);
+    auto *ifTestHint = new QLabel(uiText("fobos_if_test_hint",
+        "Agile requires revision6; stock firmware uses the optional host IF library. Manual2350/2450 applies to every converted RF band. RF bypass and HF direct inputs have no fixed IF. Auto policy2 requires49–51 MS/s. Stop reception/scanning before selecting a mode. IF2450 may admit Wi-Fi."), ifTestBox);
+    ifTestHint->setWordWrap(true);
+    ifTestLayout->addRow(uiText("fobos_if_test_choice", "Intermediate frequency"), ifTestCombo);
+    ifTestLayout->addRow(ifTestHint);
+    auto *ifActual = new QLabel(ifTestBox);
+    ifActual->setObjectName(QStringLiteral("fobosActualIfSettings"));
+    ifActual->setWordWrap(true);
+    ifTestLayout->addRow(ifActual);
+
+    auto *ifTableButton = new QPushButton(uiText("fobos_if_table_button", "IF table..."), ifTestBox);
+    ifTableButton->setEnabled(autoIfAvailable && FobosRuntimeIf::HasFactoryPolicy);
+    ifTestLayout->addRow(ifTableButton);
+    auto *ifEditorButton = new QPushButton(uiText("fobos_if_edit_rules", uiLanguage == QStringLiteral("uk")
+        ? QStringLiteral("Налаштувати правила ПЧ…") : QStringLiteral("Edit IF rules…")), ifTestBox);
+    ifEditorButton->setObjectName(QStringLiteral("fobosEditIfRules"));
+    ifEditorButton->setEnabled(ifTestAvailable && (ifCapabilities & 8u) && FobosRuntimeIf::HasFactoryPolicy);
+    ifTestLayout->addRow(ifEditorButton);
+    connect(ifEditorButton, &QPushButton::clicked, &dialog, [this] { openFobosIfEditor(); });
+
+    connect(ifTableButton, &QPushButton::clicked, &dialog, [this, &dialog] {
+        QDialog tableDialog(&dialog);
+        tableDialog.setWindowTitle(uiText("fobos_if_table_title", "IF table · policy2"));
+        tableDialog.resize(900, 560);
+        auto *layout = new QVBoxLayout(&tableDialog);
+        const bool uk = uiLanguage == QStringLiteral("uk");
+        const auto activeFrame = FobosRuntimeIf::validFrame(fobosActiveIfRulesFrame)
+            ? fobosActiveIfRulesFrame : FobosRuntimeIf::builtinFrame();
+        const auto activeRules = FobosRuntimeIf::rules(activeFrame);
+        const bool customTable = fobosCustomIfRulesActive && FobosRuntimeIf::validFrame(fobosActiveIfRulesFrame);
+        const double maximum = activeFobosApiKind == FobosApiKind::Standard ? RF_EXPERIMENTAL_MAX_FREQUENCY : 6900e6;
+        QString explanation = (uk
+            ? QStringLiteral("Інтервали [від; до), верхня апаратна межа %1 МГц включена. Авто використовує базовий план поза правилами та при Fs поза49–51 MS/s. Ручна ПЧ має пріоритет.")
+            : QStringLiteral("Intervals are [from; to); the receiver limit%1 MHz is included. Auto retains the base plan outside rules and49–51 MS/s. Manual IF takes priority."))
+            .arg(maximum / 1e6, 0, 'f', 0);
+        if (customTable) explanation += (uk
+            ? QStringLiteral("\nВласна таблиця, CRC32 %1. Її правила потребують власного A/B-порівняння; позначки перевірених вбудованих правил на неї не переносяться.")
+            : QStringLiteral("\nCustom table, CRC32%1. These rules require their own A/B test; built-in qualification labels do not carry over."))
+            .arg(QString::number(FobosRuntimeIf::rulesCrc(activeFrame), 16).rightJustified(8, QLatin1Char('0')));
+        else explanation += (uk
+            ? QStringLiteral("\nВбудована таблиця: нові правила за спостереженнями/моделлю потребують A/B-перевірки. На2929–2946 МГц завади можливі з обома ПЧ.")
+            : QStringLiteral("\nBuilt-in table: new survey/model rules require A/B verification. Both IFs may be contaminated at2929–2946 MHz."));
+        auto *note = new QLabel(explanation, &tableDialog);
+        note->setWordWrap(true); layout->addWidget(note);
+        QVector<double> cuts = {50e6,2200.5e6,2300.5e6,2550.5e6,3000.5e6,3100.5e6,
+            3200.5e6,3400.5e6,3600.5e6,4000.5e6,4800.5e6,maximum + 1.0};
+        for (const auto &rule : activeRules) {
+            if (rule.fromHz > 50e6 && rule.fromHz <= maximum) cuts.append(rule.fromHz);
+            if (rule.toHz > 50e6 && rule.toHz <= maximum + 1.0) cuts.append(rule.toHz);
+        }
+        std::sort(cuts.begin(),cuts.end());
+        cuts.erase(std::unique(cuts.begin(),cuts.end()),cuts.end());
+        auto *table = new QTableWidget(cuts.size()-1,5,&tableDialog);
+        table->setHorizontalHeaderLabels({uiText("fobos_if_table_rf", "Center MHz"),
+            uiText("fobos_if_table_original", "Original IF"),uiText("fobos_if_table_corrected", "Corrected IF"),
+            uiText("fobos_if_table_auto_column", "Auto / chosen plan"),uiText("fobos_if_table_evidence", "Basis")});
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        table->verticalHeader()->hide();
+        for (int index=0; index+1<cuts.size(); ++index) {
+            const double middle=(std::min)((cuts[index]+cuts[index+1])*0.5,maximum);
+            const auto text = [this](int mhz) { return mhz ? QString::number(mhz) : uiText("fobos_if_table_bypass", "RF bypass"); };
+            QString basis=uiText("fobos_if_table_base", "Existing base plan");
+            bool hasOverride = false;
+            for (const auto &rule : activeRules)
+                if (middle >= rule.fromHz && middle < rule.toHz) hasOverride = true;
+            if (hasOverride) {
+                if (customTable) basis = uk ? QStringLiteral("Власне правило; потрібен A/B-тест")
+                                            : QStringLiteral("Custom rule; A/B test required");
+                else {
+                    basis=uiText("fobos_if_table_provisional", "Survey/model; awaiting A/B test");
+#ifdef OBRII_LOCAL_FOBOS_IF_HEADER
+                    if (middle>=OBRII_IF_AUTO_FROM_HZ && middle<OBRII_IF_AUTO_TO_HZ)
+                        basis=uiText("fobos_if_table_measured", "Measured LO6 bypass");
+#endif
+                    if (middle>=2929e6 && middle<2946e6)
+                        basis=uiText("fobos_if_table_conflict", "Both IFs may have interference");
+                }
+            }
+            const QStringList values={QStringLiteral("%1–%2").arg(cuts[index]/1e6,0,'f',6).arg(cuts[index+1]/1e6,0,'f',6),
+                text(obriiIfBaseMhz(middle,false)),text(obriiIfBaseMhz(middle,true)),
+                text(FobosRuntimeIf::chooseEffectiveIf(activeFrame,middle,50e6,useCorrectedFobosCommands,3)),basis};
+            for (int column=0; column<values.size(); ++column)
+                table->setItem(index,column,new QTableWidgetItem(values[column]));
+        }
+        table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+        table->horizontalHeader()->setStretchLastSection(true);
+        layout->addWidget(table,1);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close,&tableDialog);
+        connect(buttons,&QDialogButtonBox::rejected,&tableDialog,&QDialog::reject);
+        layout->addWidget(buttons); tableDialog.exec();
+    });
+    auto *fobosAdvancedHeader = new QToolButton(content);
+    fobosAdvancedHeader->setObjectName(QStringLiteral("fobosAdvancedSettingsHeader"));
+    fobosAdvancedHeader->setText(uiText(QStringLiteral("show_fobos_details"), QStringLiteral("Fobos details")));
+    fobosAdvancedHeader->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    fobosAdvancedHeader->setCheckable(true);
+    fobosAdvancedHeader->setChecked(false);
+    fobosAdvancedHeader->setArrowType(Qt::RightArrow);
+    auto *fobosAdvancedContent = new QWidget(content);
+    fobosAdvancedContent->setObjectName(QStringLiteral("fobosAdvancedSettingsContent"));
+    auto *fobosAdvancedLayout = new QVBoxLayout(fobosAdvancedContent);
+    fobosAdvancedLayout->setContentsMargins(0, 0, 0, 0);
+    fobosAdvancedLayout->setSpacing(6);
+    fobosAdvancedLayout->addWidget(ifTestBox);
+    fobosAdvancedLayout->addWidget(createFobosRuntimeControls(fobosAdvancedContent));
+    fobosAdvancedContent->setVisible(false);
+    connect(fobosAdvancedHeader, &QToolButton::toggled, &dialog,
+            [fobosAdvancedHeader, fobosAdvancedContent](bool expanded) {
+                fobosAdvancedHeader->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+                fobosAdvancedContent->setVisible(expanded);
+            });
+    // Fobos controls were moved into the receiver-specific dialog.  They stay
+    // parented here solely for the legacy signal handlers below.
+    fobosAdvancedHeader->hide();
+    fobosAdvancedContent->hide();
+
+    auto *spurBox = new QGroupBox(uiText("spur_settings", "Internal spur suppression"), content);
+    auto *spurLayout = new QVBoxLayout(spurBox);
+    auto *spurEnabled = new QCheckBox(spurSuppressionCheckbox->text(), spurBox);
+    spurEnabled->setObjectName(QStringLiteral("spurSuppressionOption"));
+    spurEnabled->setChecked(spurSuppressionEnabled);
+    spurEnabled->setToolTip(spurSuppressionCheckbox->toolTip());
+    auto *spurStatus = new QLabel(spurSuppressionStatusLabel->text(), spurBox);
+    spurStatus->setWordWrap(true);
+    auto *spurButtons = new QHBoxLayout;
+    auto *spurCalibrate = new QPushButton(uiText("spur_calibrate_full", "Calibrate full RF range..."), spurBox);
+    auto *spurClear = new QPushButton(spurClearButton->text(), spurBox);
+    spurButtons->addWidget(spurCalibrate);
+    spurButtons->addWidget(spurClear);
+    spurLayout->addWidget(spurEnabled);
+    auto *spurThreshold = new QDoubleSpinBox(spurBox);
+    spurThreshold->setObjectName(QStringLiteral("spurDetectionThreshold"));
+    spurThreshold->setRange(3.0, 30.0); spurThreshold->setDecimals(1); spurThreshold->setSuffix(QStringLiteral(" dB"));
+    spurThreshold->setValue(spurDetectionThresholdDb); spurThreshold->setKeyboardTracking(false);
+    spurThreshold->setToolTip(uiText("spur_threshold_hint", "Minimum calibrated prominence above the local floor. Higher values keep only stronger spurs immediately. Lower values require recalibration to discover additional weak lines; averaging confidence also applies."));
+    auto *spurThresholdForm = new QFormLayout;
+    spurThresholdForm->addRow(uiText("spur_threshold", "Spur detection threshold"), spurThreshold);
+    spurLayout->addLayout(spurThresholdForm);
+    spurLayout->addWidget(spurStatus);
+    spurLayout->addLayout(spurButtons);
+    rootLayout->addWidget(spurBox);
+    connect(spurThreshold, QOverload<double>::of(&QDoubleSpinBox::valueChanged), &dialog, [this](double value) {
+        spurDetectionThresholdDb = value; updateSpurSuppressionStatus(); savePersistentSettings();
+    });
+    connect(spurEnabled, &QCheckBox::toggled, spurSuppressionCheckbox, &QCheckBox::setChecked);
+    connect(spurCalibrate, &QPushButton::clicked, &dialog, [this, spurEnabled, spurStatus] {
+        startSpurCalibration();
+        const QSignalBlocker blocker(spurEnabled);
+        spurEnabled->setChecked(spurSuppressionEnabled);
+        spurStatus->setText(spurSuppressionStatusLabel->text());
+    });
+    connect(spurClear, &QPushButton::clicked, &dialog, [this, spurEnabled, spurStatus] {
+        clearSpurMask();
+        const QSignalBlocker blocker(spurEnabled);
+        spurEnabled->setChecked(spurSuppressionEnabled);
+        spurStatus->setText(spurSuppressionStatusLabel->text());
+    });
+    connect(spurEnabled, &QCheckBox::toggled, &dialog, [this, spurStatus] {
+        spurStatus->setText(spurSuppressionStatusLabel->text());
+    });
+
+    auto *noiseBox = new QGroupBox(uiText("receiver_noise_shape", "Broad noise shape (VGA / receiver)"), content);
+    auto *noiseLayout = new QVBoxLayout(noiseBox);
+    auto *noiseEnabled = new QCheckBox(uiText("receiver_noise_shape_enable", "Suppress calibrated broad noise shape"), noiseBox);
+    noiseEnabled->setChecked(receiverNoiseBaselineMode == static_cast<int>(ReceiverNoiseBaselineMode::WideShape));
+    noiseEnabled->setObjectName(QStringLiteral("receiverNoiseShapeOption"));
+    auto *noiseStrength = new QSpinBox(noiseBox);
+    noiseStrength->setRange(0, 100); noiseStrength->setSuffix(QStringLiteral(" %"));
+    noiseStrength->setValue(static_cast<int>(receiverNoiseShapeStrength * 100));
+    auto *noiseStrengthForm = new QFormLayout;
+    noiseStrengthForm->addRow(uiText("receiver_noise_shape_strength", "Broad-shape suppression"), noiseStrength);
+    auto *noiseDetails = new QPushButton(uiText("receiver_noise_shape_settings", "Profile and broad-noise settings..."), noiseBox);
+    auto *noiseStatus = new QLabel(noiseBox); noiseStatus->setWordWrap(true);
+    const auto refreshNoiseStatus = [this, noiseStatus] {
+        const auto key = receiverNoiseBaselineKey(spectrumProcessingSettings());
+        noiseStatus->setText(receiverNoiseBaseline.hasMatchingProfile(key, true)
+            ? uiText("receiver_noise_shape_ready", "A matching broad profile is available for this gain and RF region.")
+            : uiText("receiver_noise_shape_missing", "No broad profile for this gain/RF region. Capture it with a50-ohm load, or repeat spur calibration. FFT/window changes are accepted; gain changes need a matching profile."));
+    };
+    noiseLayout->addWidget(noiseEnabled); noiseLayout->addLayout(noiseStrengthForm);
+    noiseLayout->addWidget(noiseStatus); noiseLayout->addWidget(noiseDetails);
+    rootLayout->addWidget(noiseBox);
+    refreshNoiseStatus();
+    connect(spurCalibrate, &QPushButton::clicked, &dialog, [refreshNoiseStatus] { refreshNoiseStatus(); });
+    connect(noiseEnabled, &QCheckBox::toggled, &dialog, [this](bool checked) {
+        receiverNoiseBaselineMode = static_cast<int>(checked ? ReceiverNoiseBaselineMode::WideShape : ReceiverNoiseBaselineMode::Off);
+        savePersistentSettings();
+    });
+    connect(noiseStrength, QOverload<int>::of(&QSpinBox::valueChanged), &dialog, [this](int value) {
+        receiverNoiseShapeStrength = value / 100.0; savePersistentSettings();
+    });
+    connect(noiseDetails, &QPushButton::clicked, &dialog, [this, noiseEnabled, noiseStrength, refreshNoiseStatus] {
+        openReceiverNoiseBaselineDialog();
+        const QSignalBlocker a(noiseEnabled), b(noiseStrength);
+        noiseEnabled->setChecked(receiverNoiseBaselineMode == static_cast<int>(ReceiverNoiseBaselineMode::WideShape));
+        noiseStrength->setValue(static_cast<int>(receiverNoiseShapeStrength * 100));
+        refreshNoiseStatus();
+    });
 
     const bool ukrainian = normalizedUiLanguage(uiLanguage) == QStringLiteral("uk");
     QGroupBox *layoutProfilesBox = new QGroupBox(
@@ -645,37 +922,6 @@ void YourClassName::openApplicationSettings() {
         updateFineTuneControlMode();
         savePersistentSettings();
     };
-    auto applyFftWindow = [this, fftWindowCombo]() {
-        pendingSettings.fftWindowType = normalizedFftWindowType(
-            fftWindowCombo->currentData().toInt());
-        savePersistentSettings();
-    };
-    auto applyFftBackend = [this, fftBackendCombo]() {
-        fftBackendPreference = normalizedFftBackendPreference(
-            fftBackendCombo->currentData().toInt());
-        savePersistentSettings();
-    };
-    auto applySpectrumUpdateInterval = [this, spectrumUpdateSpin]() {
-        int value = spectrumUpdateSpin->value();
-        if (value > SPECTRUM_UPDATE_AUTO_MS && value < SPECTRUM_UPDATE_MIN_MS) {
-            value = SPECTRUM_UPDATE_MIN_MS;
-            QSignalBlocker blocker(spectrumUpdateSpin);
-            spectrumUpdateSpin->setValue(value);
-        }
-        spectrumUpdateIntervalMs = value;
-        updateSpectrumTimerInterval();
-        if (wirelessLabDialog) wirelessLabDialog->setSpectrumUpdateInterval(value);
-        savePersistentSettings();
-    };
-    auto applyWaterfallRowsPerFrame = [this, waterfallRowsSpin]() {
-        waterfallRowsPerFrame = (std::clamp)(waterfallRowsSpin->value(),
-                                             WATERFALL_ROWS_PER_FRAME_MIN,
-                                             WATERFALL_ROWS_PER_FRAME_MAX);
-        if (waterfallWidget) {
-            waterfallWidget->setRowsPerFrame(waterfallRowsPerFrame);
-        }
-        savePersistentSettings();
-    };
     auto applyScanMeasurementUpdateInterval = [this, scanMeasurementUpdateSpin]() {
         scanMeasurementUpdateIntervalMs =
             (std::clamp)(scanMeasurementUpdateSpin->value(),
@@ -701,29 +947,11 @@ void YourClassName::openApplicationSettings() {
     connect(fineTuneModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog, [applyFineTuneMode](int) {
         applyFineTuneMode();
     });
-    connect(fftWindowCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog, [applyFftWindow](int) {
-        applyFftWindow();
-    });
-    connect(fftBackendCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog, [applyFftBackend](int) {
-        applyFftBackend();
-    });
-    connect(spectrumUpdateSpin, QOverload<int>::of(&QSpinBox::valueChanged), &dialog, [applySpectrumUpdateInterval](int) {
-        applySpectrumUpdateInterval();
-    });
-    connect(waterfallRowsSpin, QOverload<int>::of(&QSpinBox::valueChanged), &dialog, [applyWaterfallRowsPerFrame](int) {
-        applyWaterfallRowsPerFrame();
-    });
     connect(scanMeasurementUpdateSpin, QOverload<int>::of(&QSpinBox::valueChanged), &dialog, [applyScanMeasurementUpdateInterval](int) {
         applyScanMeasurementUpdateInterval();
     });
     connect(agileLiveRetuneIntervalSpin, QOverload<int>::of(&QSpinBox::valueChanged), &dialog, [applyAgileLiveRetuneInterval](int) {
         applyAgileLiveRetuneInterval();
-    });
-    connect(helpButton, &QPushButton::clicked, &dialog, [this]() {
-        openApplicationHelp();
-    });
-    connect(fobosDetailsButton, &QPushButton::clicked, &dialog, [this]() {
-        listFobosDevices();
     });
     connect(exportSettingsButton, &QPushButton::clicked, &dialog, [this]() {
         exportSettingsBackup();
@@ -858,24 +1086,6 @@ void YourClassName::openApplicationSettings() {
                 storeInterfaceLayoutProfiles(profiles);
                 populateLayoutProfiles();
             });
-    connect(audioOption, &QCheckBox::toggled, &dialog, [this](bool checked) {
-        if (audioCheckbox) {
-            audioCheckbox->setChecked(checked);
-        }
-        savePersistentSettings();
-    });
-    connect(spectrum2Option, &QCheckBox::toggled, &dialog, [this](bool checked) {
-        if (graphCheckbox) {
-            graphCheckbox->setChecked(checked);
-        }
-        savePersistentSettings();
-    });
-    connect(colorOption, &QCheckBox::toggled, &dialog, [this](bool checked) {
-        if (colorCheckbox) {
-            colorCheckbox->setChecked(checked);
-        }
-        savePersistentSettings();
-    });
     connect(generalBandMarkersOption, &QCheckBox::toggled, &dialog, [this](bool checked) {
         showGeneralBandMarkers = checked;
         updateGraphBandMarkers();
@@ -900,13 +1110,6 @@ void YourClassName::openApplicationSettings() {
         }
         savePersistentSettings();
     });
-    connect(displayReductionCombo,
-            QOverload<int>::of(&QComboBox::currentIndexChanged),
-            &dialog,
-            [this, displayReductionCombo](int) {
-                spectrumDisplayReductionMode = (std::clamp)(displayReductionCombo->currentData().toInt(), 0, 4);
-                savePersistentSettings();
-            });
     connect(alternativeInterfaceOption, &QCheckBox::toggled, &dialog, [this](bool checked) {
         alternativeInterfaceMode = checked;
         applyAlternativeInterfaceMode();
@@ -981,15 +1184,96 @@ void YourClassName::openApplicationSettings() {
         }
     });
 
+    connect(correctedFobosCommandsOption, &QCheckBox::toggled, &dialog,
+            [this, correctedFobosCommandsOption, &dialog](bool checked) {
+        const bool previous = useCorrectedFobosCommands;
+        if (checked == previous) return;
+        if (!isIdle() || !hasActiveFobosDevice()) {
+            const QSignalBlocker blocker(correctedFobosCommandsOption);
+            correctedFobosCommandsOption->setChecked(previous);
+            return;
+        }
+        useCorrectedFobosCommands = checked;
+        if (!prepareFobosSessionFromSettings(QStringLiteral("IF mode change"))) {
+            useCorrectedFobosCommands = previous;
+            hardwareSettingsApplied = false;
+            const bool restored = prepareFobosSessionFromSettings(QStringLiteral("IF mode rollback"));
+            qWarning() << "[Fobos IF] mode change failed; rollback" << restored;
+            const QSignalBlocker blocker(correctedFobosCommandsOption);
+            correctedFobosCommandsOption->setChecked(previous);
+            QMessageBox::warning(&dialog, uiText(QStringLiteral("error"), QStringLiteral("Error")),
+                uiText(QStringLiteral("corrected_fobos_commands_failed"),
+                       QStringLiteral("Could not change the receiver IF mode. Stop reception and scanning, and check the compatible Agile firmware and library.")));
+            return;
+        }
+        savePersistentSettings();
+    });
+    connect(ifTestCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog,
+            [this, ifTestCombo, &dialog](int index) {
+        const int previous = fobosIfTestMode;
+        const int requested = ifTestCombo->itemData(index).toInt();
+        if (requested == previous) return;
+        if (!isIdle() || !hasActiveFobosDevice()) {
+            const QSignalBlocker blocker(ifTestCombo);
+            ifTestCombo->setCurrentIndex(previous);
+            return;
+        }
+        fobosIfTestMode = requested;
+        if (!prepareFobosSessionFromSettings(QStringLiteral("global IF selection"))) {
+            fobosIfTestMode = previous;
+            hardwareSettingsApplied = false;
+            const bool restored = prepareFobosSessionFromSettings(QStringLiteral("global IF rollback"));
+            qWarning() << "[Fobos IF] test mode change failed; rollback" << restored;
+            const QSignalBlocker blocker(ifTestCombo);
+            ifTestCombo->setCurrentIndex(previous);
+            QMessageBox::warning(&dialog, uiText("error", "Error"),
+                uiText("fobos_if_test_failed", "Could not select the test IF. Stop reception/scanning and check Obrii firmware revision4+ and the matching Agile library."));
+            return;
+        }
+        updateSpurSuppressionStatus();
+        savePersistentSettings();
+    });
+    connect(adcProtectionOption, &QCheckBox::toggled, &dialog, [this](bool enabled) {
+        adcOverloadProtectionEnabled = enabled;
+        adcOverloadGuard.reset();
+        savePersistentSettings();
+    });
+
     QDialogButtonBox *buttonBox = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
     if (QPushButton *closeButton = buttonBox->button(QDialogButtonBox::Close)) {
         closeButton->setText(uiText(QStringLiteral("close"), QStringLiteral("Close")));
     }
-    rootLayout->addWidget(buttonBox);
+    outerLayout->addWidget(buttonBox);
 
     connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
-    dialog.exec();
+    auto *availabilityTimer = new QTimer(&dialog);
+    connect(availabilityTimer, &QTimer::timeout, &dialog, updateDualLibrary);
+    connect(availabilityTimer, &QTimer::timeout, &dialog,
+        [this, correctedFobosCommandsOption, ifTestCombo, ifFirmwareStatus] {
+            const bool idle = isIdle() && !(processor && processor->isRunning()) &&
+                hasActiveFobosDevice() && !isNetworkClientMode();
+            const int ticks = correctedFobosCommandsOption->property("probeTicks").toInt() + 1;
+            correctedFobosCommandsOption->setProperty("probeTicks", ticks % 4);
+            if (idle && ticks >= 4) {
+                unsigned int mode=0, state=0, mhz=0, capabilities=0;
+                const bool extension = getActiveFobosIfModeSafely(&mode, &state) == FOBOS_ERR_OK;
+                const bool plan = extension && getActiveFobosIfPlanSafely(&mode, &state, &mhz, &capabilities) == FOBOS_ERR_OK;
+                correctedFobosCommandsOption->setProperty("ifAvailable", extension && state == 0);
+                ifTestCombo->setProperty("ifAvailable", plan && state == 0 && (capabilities & 4u));
+                if (auto *model=qobject_cast<QStandardItemModel *>(ifTestCombo->model()))
+                    model->item(3)->setEnabled(plan && (capabilities & 2u));
+                ifFirmwareStatus->setText(extension
+                    ? (activeFobosApiKind == FobosApiKind::Standard
+                        ? uiText("fobos_standard_if_found", "Standard firmware: host IF library available; no firmware update required.")
+                        : uiText("obrii_firmware_found", "Compatible Obrii firmware detected."))
+                    : uiText("obrii_firmware_required", "Requires compatible Obrii firmware. See Feature guide: receiver firmware update."));
+            }
+            correctedFobosCommandsOption->setEnabled(idle && correctedFobosCommandsOption->property("ifAvailable").toBool());
+            ifTestCombo->setEnabled(idle && ifTestCombo->property("ifAvailable").toBool());
+        });
+    availabilityTimer->start(250);
+    dialog.show();
 }
 
 void YourClassName::exportSettingsBackup() {

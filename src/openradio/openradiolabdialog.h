@@ -2,15 +2,21 @@
 #define OPENRADIOLABDIALOG_H
 
 #include <QDialog>
+#include <QHash>
 #include "ax25codec.h"
+#include "kisscodec.h"
 
+class QCheckBox;
 class QComboBox;
+class QDoubleSpinBox;
 class QLineEdit;
 class QPlainTextEdit;
 class QSpinBox;
 class QTcpServer;
+class QTcpSocket;
 class QLabel;
 class Ax25LiveDecoder;
+class KissVirtualTx;
 
 class OpenRadioLabDialog : public QDialog {
     Q_OBJECT
@@ -46,6 +52,12 @@ private:
     QSpinBox *kissPort = nullptr;
     QPushButton *kissToggle = nullptr;
     QLabel *kissStatus = nullptr;
+    QCheckBox *kissTxEnabled = nullptr;
+    QLineEdit *kissTxChannel = nullptr;
+    QDoubleSpinBox *kissTxCenter = nullptr;
+    QLabel *kissTxStatus = nullptr;
+    KissVirtualTx *kissTx = nullptr;
+    QHash<QTcpSocket *, KissStreamDecoder> kissClients;
     QComboBox *axWireFormat = nullptr;
     QLineEdit *m17Source = nullptr;
     QLineEdit *m17Destination = nullptr;

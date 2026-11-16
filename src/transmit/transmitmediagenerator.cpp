@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace {
 constexpr double Pi = 3.14159265358979323846;
@@ -168,7 +169,7 @@ QVector<float> TransmitMediaGenerator::resampleAudio(const QVector<float> &input
     return output;
 }
 
-TxAudioMedia TransmitMediaGenerator::loadWav(const QString &path, int targetSampleRate) {
+TxAudioMedia TransmitMediaGenerator::loadWav(const QString &path, int targetSampleRate, int maximumOutputSamples) {
     TxAudioMedia result;
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
@@ -185,9 +186,12 @@ TxAudioMedia TransmitMediaGenerator::loadWav(const QString &path, int targetSamp
     int pcmBytes = 0;
     for (int offset = 12; offset + 8 <= data.size();) {
         const QByteArray id = data.mid(offset, 4);
-        const int size = static_cast<int>(readU32(data, offset + 4));
-        if (id == "fmt ") formatOffset = offset + 8;
-        if (id == "data") { pcmOffset = offset + 8; pcmBytes = (std::min)(size, data.size() - pcmOffset); }
+        const quint32 chunkSize = readU32(data, offset + 4);
+        const int available = data.size() - offset - 8;
+        const int size = int((std::min)(chunkSize, quint32(available)));
+        if (id == "fmt " && size >= 16) formatOffset = offset + 8;
+        if (id == "data") { pcmOffset = offset + 8; pcmBytes = size; }
+        if (chunkSize >= quint32(available)) break;
         offset += 8 + size + (size & 1);
     }
     if (formatOffset < 0 || pcmOffset < 0) {
@@ -201,8 +205,14 @@ TxAudioMedia TransmitMediaGenerator::loadWav(const QString &path, int targetSamp
     const int bytesPerSample = bits / 8;
     const int frameBytes = channels * bytesPerSample;
     if ((format != 1 && format != 3) || channels < 1 || channels > 8 ||
-        sourceRate <= 0 || frameBytes <= 0) {
+        sourceRate <= 0 || targetSampleRate <= 0 || frameBytes <= 0) {
         result.error = QStringLiteral("Unsupported WAVE format");
+        return result;
+    }
+    const auto outputCount = std::llround(double(pcmBytes / frameBytes) * targetSampleRate / sourceRate);
+    if (outputCount <= 0 || outputCount > (std::numeric_limits<int>::max)() ||
+        (maximumOutputSamples > 0 && outputCount > maximumOutputSamples)) {
+        result.error = QStringLiteral("WAVE duration is empty or exceeds the selected mode's sample limit");
         return result;
     }
     QVector<float> mono;
@@ -214,6 +224,10 @@ TxAudioMedia TransmitMediaGenerator::loadWav(const QString &path, int targetSamp
             float value = 0.0f;
             if (format == 3 && bits == 32) {
                 std::memcpy(&value, sample, sizeof(float));
+                if (!std::isfinite(value)) {
+                    result.error = QStringLiteral("WAVE file contains non-finite audio samples");
+                    return result;
+                }
             } else if (format == 1 && bits == 16) {
                 value = static_cast<float>(qFromLittleEndian<qint16>(reinterpret_cast<const uchar *>(sample))) / 32768.0f;
             } else if (format == 1 && bits == 8) {

@@ -25,6 +25,8 @@ public:
 
 private:
     QByteArray buffer;
+    bool inFrame = false;
+    bool oversized = false;
 };
 
 #endif // KISSCODEC_H

@@ -37,8 +37,8 @@ radio backend. Simulator/IQ-file output remains the safe default. Selecting
 `HackRF native` resamples that same complex baseband stream to a supported
 2–20 Msps DAC rate and feeds signed 8-bit IQ to `hackrf_start_tx`.
 
-TX requires the user to arm RF output for every run. The arm state is never
-persisted. TX VGA defaults to 0 dB, the RF amplifier defaults off, a watchdog
+Click **Start RF** in the TX window to transmit manually.
+TX VGA defaults to 0 dB, the RF amplifier defaults off, a watchdog
 limits live transmission, and Stop disables the RF amplifier before closing the
 device. Stop RX on the same device first. Initial hardware validation should use
 a suitable dummy load and comply with local radio regulations.
@@ -77,6 +77,3 @@ verbose logging in Obrii SDR, try one start/stop cycle, and keep
 `hackrf/hackrf_probe.log` together with `ObriiSDR_diagnostic.log`. A PortaPack
 must be in HackRF/USB SDR mode and use the WinUSB driver for the HackRF
 interface.
-
-Transmission is intentionally left locked. It must be implemented as a
-separate explicitly armed workflow with device and regulatory safety checks.

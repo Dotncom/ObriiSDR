@@ -40,6 +40,7 @@ public:
         int cn0DbHz = -1;
         bool usedInFix = false;
         bool enabled = true;
+        bool outlinedSquare = false;
     };
 
     explicit QthMapWidget(QWidget *parent = nullptr);
@@ -56,6 +57,7 @@ public:
     void setGridPrecision(int precision);
     void setOverlayMode(OverlayMode mode);
     void setSatelliteMarkers(const QVector<SatelliteMarker> &markers);
+    void setRejectedFixMarkers(const QVector<qth::RejectedFixMarker> &markers);
     void setPositionVisible(bool visible);
     void setPositionStatusVisible(bool visible);
     void centerOnPosition();
@@ -86,6 +88,7 @@ signals:
     void pointPicked(double latitude, double longitude);
 
 protected:
+    bool event(QEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
@@ -127,6 +130,7 @@ private:
     bool currentPositionAtPosition(const QPointF &point, const QRectF &mapRect) const;
     void drawUserMarkers(QPainter &painter, const QRectF &mapRect);
     void drawSatelliteMarkers(QPainter &painter, const QRectF &mapRect);
+    void drawRejectedFixMarkers(QPainter &painter, const QRectF &mapRect);
     void drawMarkerAndTitle(QPainter &painter, const QRectF &mapRect);
     void drawFooter(QPainter &painter, const QRectF &mapRect);
     void drawRasterOverlay(QPainter &painter, const QRectF &mapRect);
@@ -162,6 +166,7 @@ private:
     QPointF lastDragPosition;
     QVector<qth::UserMarker> userMarkers;
     QVector<SatelliteMarker> satelliteMarkers;
+    QVector<qth::RejectedFixMarker> rejectedFixMarkers;
     bool hasSearchMarker = false;
     qth::UserMarker searchMarker;
     QImage rasterOverlay;

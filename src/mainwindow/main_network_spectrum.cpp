@@ -1,19 +1,22 @@
 #include "main.h"
+#include "analyzer/multisdrdialog.h"
 #include "appconstants.h"
 #include "appruntimeutils.h"
 #include "diagnosticlogging.h"
 #include "displayspectrumcodec.h"
+#include "displaylevelstep.h"
 #include "iqbuffer.h"
 #include "modulationutils.h"
 #include "samplefileutils.h"
 #include "scanvisualutils.h"
 #include "spectrumfftworker.h"
 #include "tuningutils.h"
-#include "wirelesslabdialog.h"
+#include "wireless/wirelesslabdialog.h"
 
 #include <QAbstractSocket>
 #include <QByteArray>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDebug>
 #include <QHostAddress>
 #include <QJsonArray>
@@ -61,12 +64,11 @@ void YourClassName::sendNetworkSpectrumFrame(const std::vector<float> &frequenci
                                   : (isChannelIqProcessingMode()
                                          ? NETWORK_CHANNEL_SPECTRUM_INTERVAL_MS
                                          : NETWORK_SPECTRUM_INTERVAL_MS);
-    if (networkSpectrumFrameTimer.isValid() &&
+    // In server-only display mode the FFT timer already paces fresh frames.
+    if (!networkSpectrumCadenceActive() && networkSpectrumFrameTimer.isValid() &&
         networkSpectrumFrameTimer.elapsed() < minIntervalMs) {
         return;
     }
-    networkSpectrumFrameTimer.restart();
-
     if (!std::isfinite(frameCenterFrequency)) {
         double scanCenterFrequency = currentAgileScanCenterFrequencyHz();
         if (!std::isfinite(scanCenterFrequency)) {
@@ -141,19 +143,11 @@ void YourClassName::sendNetworkSpectrumFrame(const std::vector<float> &frequenci
     if (targetCount <= 0) {
         return;
     }
-    const double step = static_cast<double>(sourceCount) / static_cast<double>(targetCount);
-    QJsonArray frequencyArray;
-    QJsonArray magnitudeArray;
-    QJsonArray referenceMagnitudeArray;
-    std::vector<float> resampledMagnitudes(static_cast<std::size_t>(targetCount),
-                                           -160.0f);
-    std::vector<float> resampledReferenceMagnitudes(static_cast<std::size_t>(targetCount),
-                                                    -160.0f);
     const bool haveReferenceMagnitudes =
         static_cast<int>(referenceMagnitudes.size()) >= dataCount &&
         pendingSettings.inputMode == INPUT_HF_NOISE_CANCEL;
     const bool useBinarySpectrumFrame = networkFullResolutionSpectrumFrames;
-    bool compactEligible = scanSegments.isEmpty();
+    bool compactEligible = scanSegments.isEmpty() && targetCount <= 32 * 1024 * 1024;
     if (compactEligible && sourceCount > 2) {
         const double firstHz = frequencies[sourceStart];
         const double lastHz = frequencies[sourceEnd - 1];
@@ -169,15 +163,44 @@ void YourClassName::sendNetworkSpectrumFrame(const std::vector<float> &frequenci
                 std::abs(frequencies[index] - expectedHz) <= toleranceHz;
         }
     }
-    const QStringList displayPeers = networkController->readyPeerIds();
+    QStringList displayPeers;
     bool needJson = !compactEligible;
-    for (const QString &peerId : displayPeers) {
-        if (networkController->peerStreamProfile(peerId) != QStringLiteral("remote-vfo") &&
-            !networkController->peerSupportsCompactSpectrum(peerId)) {
-            needJson = true;
-            break;
-        }
+    bool sendCompact = false;
+    bool sendPacked = false;
+    for (const QString &peerId : networkController->readyPeerIds()) {
+        if (networkController->peerStreamProfile(peerId) == QStringLiteral("remote-vfo") ||
+            networkController->pendingBytesForPeer(peerId) > NETWORK_SPECTRUM_MAX_PENDING_BYTES)
+            continue;
+        displayPeers.append(peerId);
+        const bool peerCompact = networkController->peerSupportsCompactSpectrum(peerId);
+        needJson |= !peerCompact;
+        sendCompact |= compactEligible && peerCompact;
+        sendPacked |= compactEligible && peerCompact && networkController->peerSupportsPackedSpectrum(peerId);
     }
+    if (displayPeers.isEmpty()) return;
+
+    if (useBinarySpectrumFrame && networkSpectrumFrameTimer.isValid()) {
+        // Audio shares this TCP stream. Limit the visual byte rate as bins
+        // grow so the sender can drain each frame before adding the next one.
+        const qint64 binBytes = needJson ? sizeof(float) : sizeof(qint16);
+        const qint64 payloadBytes = targetCount * binBytes * (haveReferenceMagnitudes ? 2 : 1);
+        const qint64 byteBudget = NETWORK_FULL_RESOLUTION_SPECTRUM_BYTES_PER_SECOND;
+        const qint64 transferIntervalMs = (payloadBytes * 1000 + byteBudget - 1) / byteBudget;
+        if (networkSpectrumFrameTimer.elapsed() < transferIntervalMs) return;
+    }
+    networkSpectrumFrameTimer.restart();
+
+    const double step = static_cast<double>(sourceCount) / static_cast<double>(targetCount);
+    QJsonArray frequencyArray;
+    QJsonArray magnitudeArray;
+    QJsonArray referenceMagnitudeArray;
+    const int roundingStep = !needJson && networkSpectrumLevelStepTenths == DisplayLevelStep::DefaultNetworkTenths
+                                 ? 0 : networkSpectrumLevelStepTenths;
+    const float floorLevel = DisplayLevelStep::rounded(-160.0f, roundingStep);
+    std::vector<float> resampledMagnitudes(static_cast<std::size_t>(targetCount), floorLevel);
+    std::vector<float> resampledReferenceMagnitudes;
+    if (haveReferenceMagnitudes)
+        resampledReferenceMagnitudes.assign(static_cast<std::size_t>(targetCount), floorLevel);
 
     for (int i = 0; i < targetCount; ++i) {
         const int index = (std::min)(sourceEnd - 1,
@@ -190,10 +213,10 @@ void YourClassName::sendNetworkSpectrumFrame(const std::vector<float> &frequenci
             frequencyArray.append(frequencies[index]);
         }
         resampledMagnitudes[static_cast<std::size_t>((i + targetCount / 2) % targetCount)] =
-            magnitudes[magnitudeIndex];
+            DisplayLevelStep::rounded(magnitudes[magnitudeIndex], roundingStep);
         if (haveReferenceMagnitudes && std::isfinite(referenceMagnitudes[magnitudeIndex])) {
             resampledReferenceMagnitudes[static_cast<std::size_t>((i + targetCount / 2) % targetCount)] =
-                referenceMagnitudes[magnitudeIndex];
+                DisplayLevelStep::rounded(referenceMagnitudes[magnitudeIndex], roundingStep);
         }
     }
 
@@ -227,6 +250,10 @@ void YourClassName::sendNetworkSpectrumFrame(const std::vector<float> &frequenci
     frame["minFrequency"] = frameMinFrequency;
     frame["maxFrequency"] = frameMaxFrequency;
     frame["clientViewportApplied"] = clientViewportApplied;
+    if (clientViewportApplied) {
+        frame["requestedViewportCenterHz"] = networkRemoteViewportCenterHz;
+        frame["requestedViewportSpanHz"] = networkRemoteViewportSpanHz;
+    }
     if (!scanSegments.isEmpty()) {
         QJsonArray segmentArray;
         for (const ScanVisualSegment &segment : scanSegments) {
@@ -249,6 +276,31 @@ void YourClassName::sendNetworkSpectrumFrame(const std::vector<float> &frequenci
             frame["scanSegments"] = segmentArray;
         }
     }
+    QJsonObject compactFrame = frame;
+    compactFrame["type"] = QStringLiteral("spectrumbin");
+    compactFrame["binFormat"] = QStringLiteral("s16le-db10");
+    compactFrame["frequencyLayout"] = QStringLiteral("linear-min-max");
+    compactFrame["hasReferenceMagnitudes"] = haveReferenceMagnitudes;
+    const auto packed = sendPacked && roundingStep > 0
+        ? DisplaySpectrumCodec::encodeU8(resampledMagnitudes, resampledReferenceMagnitudes, roundingStep)
+        : DisplaySpectrumCodec::PackedLevels{};
+    QJsonObject packedFrame;
+    if (!packed.payload.isEmpty()) {
+        packedFrame = compactFrame;
+        packedFrame["binFormat"] = QStringLiteral("u8-level-step");
+        packedFrame["levelStepTenths"] = roundingStep;
+        packedFrame["levelOffsetSteps"] = packed.offsetSteps;
+    }
+    QByteArray compactPayload;
+    const auto sendCompactFrame = [&](const QString &peerId) {
+        if (!packed.payload.isEmpty() && networkController->peerSupportsPackedSpectrum(peerId)) {
+            networkController->sendBinaryCommandToPeer(peerId, packedFrame, packed.payload);
+            return;
+        }
+        if (compactPayload.isEmpty())
+            compactPayload = DisplaySpectrumCodec::encodeDb10(resampledMagnitudes, resampledReferenceMagnitudes);
+        networkController->sendBinaryCommandToPeer(peerId, compactFrame, compactPayload);
+    };
     if (useBinarySpectrumFrame) {
         frame["type"] = "spectrumbin";
         frame["binFormat"] = "f32le";
@@ -256,19 +308,21 @@ void YourClassName::sendNetworkSpectrumFrame(const std::vector<float> &frequenci
         frame["frequencyLayout"] = "linear-min-max";
 
         QByteArray payload;
-        payload.reserve(static_cast<int>(targetCount * static_cast<int>(sizeof(float)) *
-                                         (haveReferenceMagnitudes ? 2 : 1)));
-        payload.append(reinterpret_cast<const char*>(resampledMagnitudes.data()),
-                       targetCount * static_cast<int>(sizeof(float)));
-        if (haveReferenceMagnitudes) {
-            payload.append(reinterpret_cast<const char*>(resampledReferenceMagnitudes.data()),
+        if (needJson) {
+            payload.reserve(targetCount * static_cast<int>(sizeof(float)) *
+                            (haveReferenceMagnitudes ? 2 : 1));
+            payload.append(reinterpret_cast<const char*>(resampledMagnitudes.data()),
                            targetCount * static_cast<int>(sizeof(float)));
+            if (haveReferenceMagnitudes) {
+                payload.append(reinterpret_cast<const char*>(resampledReferenceMagnitudes.data()),
+                               targetCount * static_cast<int>(sizeof(float)));
+            }
         }
         for (const QString &peerId : displayPeers) {
-            if (networkController->peerStreamProfile(peerId) == QStringLiteral("remote-vfo") ||
-                networkController->pendingBytesForPeer(peerId) > NETWORK_SPECTRUM_MAX_PENDING_BYTES)
-                continue;
-            networkController->sendBinaryCommandToPeer(peerId, frame, payload);
+            if (sendCompact && networkController->peerSupportsCompactSpectrum(peerId))
+                sendCompactFrame(peerId);
+            else
+                networkController->sendBinaryCommandToPeer(peerId, frame, payload);
         }
         return;
     }
@@ -278,37 +332,93 @@ void YourClassName::sendNetworkSpectrumFrame(const std::vector<float> &frequenci
         legacyFrame["magnitudes"] = magnitudeArray;
         if (haveReferenceMagnitudes) legacyFrame["referenceMagnitudes"] = referenceMagnitudeArray;
     }
-    const QByteArray compactPayload = compactEligible
-        ? DisplaySpectrumCodec::encodeDb10(
-            resampledMagnitudes,
-            haveReferenceMagnitudes ? resampledReferenceMagnitudes : std::vector<float>{})
-        : QByteArray{};
-    QJsonObject compactFrame = frame;
-    compactFrame["type"] = QStringLiteral("spectrumbin");
-    compactFrame["binFormat"] = QStringLiteral("s16le-db10");
-    compactFrame["frequencyLayout"] = QStringLiteral("linear-min-max");
-    compactFrame["hasReferenceMagnitudes"] = haveReferenceMagnitudes;
-    constexpr qint64 VisualPendingLimit = 64 * 1024;
     for (const QString &peerId : displayPeers) {
-        if (networkController->peerStreamProfile(peerId) == QStringLiteral("remote-vfo") ||
-            networkController->pendingBytesForPeer(peerId) > VisualPendingLimit)
-            continue;
-        if (compactEligible && networkController->peerSupportsCompactSpectrum(peerId))
-            networkController->sendBinaryCommandToPeer(peerId, compactFrame, compactPayload);
+        if (sendCompact && networkController->peerSupportsCompactSpectrum(peerId))
+            sendCompactFrame(peerId);
         else if (needJson)
             networkController->sendControlCommandToPeer(peerId, legacyFrame);
     }
 }
 
-void YourClassName::displayNetworkSpectrumFrame(const QJsonObject &frame) {
-    if (networkMode == NetworkMode::Client &&
-        runState == RadioRunState::Idle &&
-        networkController &&
-        !networkController->clientHasControl()) {
-        runState = RadioRunState::Running;
-        updateUiForRunState();
+int YourClassName::remoteUhdCompanionChannel() const {
+    if (networkMode != NetworkMode::Client || isRemoteVfoProcessingMode() ||
+        !networkController || !networkController->isControlReady() || !remoteReceiverDeviceListValid)
+        return -1;
+    const auto secondary = networkClientConfirmedSettingsJson.value(QStringLiteral("uhdRx"))
+                               .toObject().value(QStringLiteral("secondary")).toObject();
+    const int channel = secondary.value(QStringLiteral("channel")).toInt(-1);
+    return channel == 0 || channel == 1 ? channel : -1;
+}
+
+void YourClassName::receiveRemoteUhdSpectrum(const QJsonObject &frame, const QByteArray &payload) {
+    const int channel = frame.value(QStringLiteral("channel")).toInt(-1);
+    if (!multiSdrDialog || !multiSdrDialog->isVisible() ||
+        channel < 0 || channel != remoteUhdCompanionChannel()) return;
+    const int count = frame.value(QStringLiteral("fftLength")).toInt();
+    const double center = frame.value(QStringLiteral("centerFrequency")).toDouble();
+    const double rate = frame.value(QStringLiteral("sampleRate")).toDouble();
+    if (count < 2 || count > 512 || payload.size() != count * int(sizeof(qint16)) ||
+        !std::isfinite(center) || center <= 0.0 || !std::isfinite(rate) || rate <= 0.0 ||
+        frame.value(QStringLiteral("binFormat")).toString() != QStringLiteral("s16le-db10")) return;
+    AnalyzerSpectrumFrame spectrum;
+    if (!DisplaySpectrumCodec::decodeDb10(payload, count, false, &spectrum.levelsDb) ||
+        !acceptNetworkReceiverFrame()) return;
+    spectrum.sequence = frame.value(QStringLiteral("sequence")).toString().toULongLong();
+    spectrum.utcMs = QDateTime::currentMSecsSinceEpoch();
+    spectrum.centerHz = center;
+    spectrum.minimumHz = center - rate * 0.5;
+    spectrum.maximumHz = center + rate * 0.5;
+    spectrum.sourceFftLength = frame.value(QStringLiteral("sourceFftLength")).toInt(count);
+    multiSdrDialog->consumeRemoteUhdSpectrum(channel, spectrum);
+}
+
+void YourClassName::feedRemoteUhdPrimarySpectrum(const QJsonObject &frame,
+                                                const std::vector<float> &nativeLevels,
+                                                double centerHz, double minimumHz, double maximumHz) {
+    if (!multiSdrDialog || !multiSdrDialog->isVisible() || remoteUhdCompanionChannel() < 0 ||
+        nativeLevels.size() < 2 || !std::isfinite(centerHz) || !std::isfinite(minimumHz) ||
+        !std::isfinite(maximumHz) || maximumHz <= minimumHz ||
+        !frame.value(QStringLiteral("fresh")).toBool(true)) return;
+    AnalyzerSpectrumFrame spectrum;
+    spectrum.sequence = frame.value(QStringLiteral("sequence")).toString().toULongLong();
+    spectrum.utcMs = QDateTime::currentMSecsSinceEpoch();
+    spectrum.centerHz = centerHz;
+    spectrum.minimumHz = minimumHz;
+    spectrum.maximumHz = maximumHz;
+    spectrum.sourceFftLength =
+        frame.value(QStringLiteral("sourceFftLength")).toInt(static_cast<int>(nativeLevels.size()));
+    spectrum.levelsDb.resize(nativeLevels.size());
+    const auto first = nativeLevels.begin() + (nativeLevels.size() + 1) / 2;
+    std::rotate_copy(nativeLevels.begin(), first, nativeLevels.end(), spectrum.levelsDb.begin());
+    multiSdrDialog->consumePrimaryFrame(spectrum);
+}
+
+bool YourClassName::networkSpectrumMatchesViewport(const QJsonObject &frame) const {
+    if (!frame.value(QStringLiteral("clientViewportApplied")).toBool(false) ||
+        networkProcessingMode != NetworkProcessingMode::ServerSide ||
+        !networkController || !networkController->clientHasControl() ||
+        !std::isfinite(networkClientViewportCenterHz) || !std::isfinite(networkClientViewportSpanHz))
+        return true;
+
+    const auto requestedCenter = frame.value(QStringLiteral("requestedViewportCenterHz"));
+    const auto requestedSpan = frame.value(QStringLiteral("requestedViewportSpanHz"));
+    if (requestedCenter.isDouble() && requestedSpan.isDouble()) {
+        return std::abs(requestedCenter.toDouble() - networkClientViewportCenterHz) <= 0.5 &&
+               std::abs(requestedSpan.toDouble() - networkClientViewportSpanHz) <= 0.5;
     }
 
+    // Older servers only send the clamped viewport. Allow for the last bin
+    // falling one FFT step short of the nominal receiver band edge.
+    const double minimum = frame.value(QStringLiteral("minFrequency")).toDouble();
+    const double maximum = frame.value(QStringLiteral("maxFrequency")).toDouble();
+    const int bins = (std::max)(1, frame.value(QStringLiteral("sourceFftLength")).toInt());
+    const double toleranceHz = (std::max)(1.0, frame.value(QStringLiteral("sampleRate")).toDouble() / bins);
+    return std::abs(0.5 * (minimum + maximum) - networkClientViewportCenterHz) <= toleranceHz &&
+           std::abs(maximum - minimum - networkClientViewportSpanHz) <= toleranceHz;
+}
+
+void YourClassName::displayNetworkSpectrumFrame(const QJsonObject &frame) {
+    if (!networkSpectrumMatchesViewport(frame)) return;
     const QJsonArray frequencyArray = frame.value("frequencies").toArray();
     const QJsonArray magnitudeArray = frame.value("magnitudes").toArray();
     const QJsonArray referenceMagnitudeArray = frame.value("referenceMagnitudes").toArray();
@@ -316,6 +426,7 @@ void YourClassName::displayNetworkSpectrumFrame(const QJsonObject &frame) {
     if (dataCount <= 0) {
         return;
     }
+    if (!acceptNetworkReceiverFrame()) return;
 
     std::vector<float> frequencies;
     std::vector<float> magnitudes;
@@ -350,6 +461,7 @@ void YourClassName::displayNetworkSpectrumFrame(const QJsonObject &frame) {
     const double frameMinFrequency = frame.value("minFrequency").toDouble(minFrequency);
     const double frameMaxFrequency = frame.value("maxFrequency").toDouble(maxFrequency);
     const double frameCenterFrequency = frame.value("centerFrequency").toDouble(pendingSettings.centerFrequency);
+    feedRemoteUhdPrimarySpectrum(frame, magnitudes, frameCenterFrequency, frameMinFrequency, frameMaxFrequency);
     const bool frameFresh = frame.value("fresh").toBool(true);
     const QVector<ScanVisualSegment> frameScanSegments = scanSegmentsFromFrame(frame);
     const bool frameShowScanSegmentMarkers =
@@ -540,19 +652,14 @@ void YourClassName::displayNetworkSpectrumFrame(const QJsonObject &frame) {
 }
 
 void YourClassName::displayNetworkSpectrumFrameBinary(const QJsonObject &frame, const QByteArray &payload) {
-    if (networkMode == NetworkMode::Client &&
-        runState == RadioRunState::Idle &&
-        networkController &&
-        !networkController->clientHasControl()) {
-        runState = RadioRunState::Running;
-        updateUiForRunState();
-    }
-
+    if (!networkSpectrumMatchesViewport(frame)) return;
     const int frameFftLength = frame.value("fftLength").toInt();
     const double frameMinFrequency = frame.value("minFrequency").toDouble(minFrequency);
     const double frameMaxFrequency = frame.value("maxFrequency").toDouble(maxFrequency);
-    const bool compact = frame.value("binFormat").toString() == QStringLiteral("s16le-db10");
-    const int binBytes = compact ? static_cast<int>(sizeof(qint16)) : static_cast<int>(sizeof(float));
+    const auto format = frame.value("binFormat").toString();
+    const bool packed = format == QStringLiteral("u8-level-step");
+    const bool compact = packed || format == QStringLiteral("s16le-db10");
+    const int binBytes = packed ? 1 : compact ? static_cast<int>(sizeof(qint16)) : static_cast<int>(sizeof(float));
     if (frameFftLength <= 0 || frameFftLength > 32 * 1024 * 1024 ||
         payload.size() < static_cast<qint64>(frameFftLength) * binBytes ||
         !std::isfinite(frameMinFrequency) ||
@@ -565,6 +672,7 @@ void YourClassName::displayNetworkSpectrumFrameBinary(const QJsonObject &frame, 
                  << "max" << frameMaxFrequency;
         return;
     }
+    if (!acceptNetworkReceiverFrame()) return;
 
     std::vector<float> frequencies(static_cast<std::size_t>(frameFftLength), 0.0f);
     std::vector<float> magnitudes(static_cast<std::size_t>(frameFftLength), -160.0f);
@@ -583,9 +691,8 @@ void YourClassName::displayNetworkSpectrumFrameBinary(const QJsonObject &frame, 
                         frameFftLength * sizeof(float));
         }
     }
-    if (compact && !DisplaySpectrumCodec::decodeDb10(payload, frameFftLength,
-                                                      haveReferenceMagnitudes, &magnitudes,
-                                                      &referenceMagnitudes)) return;
+    if (compact && !DisplaySpectrumCodec::decodeCompact(frame, payload, &magnitudes,
+                                                        &referenceMagnitudes)) return;
 
     const double frequencyStep =
         frameFftLength > 1
@@ -604,6 +711,7 @@ void YourClassName::displayNetworkSpectrumFrameBinary(const QJsonObject &frame, 
     }
 
     const double frameCenterFrequency = frame.value("centerFrequency").toDouble(pendingSettings.centerFrequency);
+    feedRemoteUhdPrimarySpectrum(frame, magnitudes, frameCenterFrequency, frameMinFrequency, frameMaxFrequency);
     const bool frameFresh = frame.value("fresh").toBool(true);
     const QVector<ScanVisualSegment> frameScanSegments = scanSegmentsFromFrame(frame);
     const bool frameShowScanSegmentMarkers =

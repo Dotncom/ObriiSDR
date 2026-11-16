@@ -679,7 +679,12 @@ QJsonObject topologySnapshot(const Project &project){
         if(node.protocol.value("type")=="meshtastic"){auto protocol=entry.value("protocol").toObject();if(!protocol.contains("nodeNumber"))protocol["nodeNumber"]=0x100+index;if(!protocol.contains("relayRole"))protocol["relayRole"]=protocol.value("role").toString("router");protocol.remove("role");entry["protocol"]=protocol;}
         nodes.append(entry);
     }
-    for(const auto &link:project.links)links.append(link.json());
+    for(const auto &link:project.links){
+        auto value=link.json();
+        value.remove("frequencyOffsetHz"); // Impairment belongs to the local sample mixer.
+        value.remove("clockPpm");
+        links.append(value);
+    }
     return {{"nodes",nodes},{"links",links}};
 }
 }

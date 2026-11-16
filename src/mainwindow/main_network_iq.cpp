@@ -97,17 +97,6 @@ void YourClassName::handleNetworkIqPayload(const QJsonObject &frame, QByteArray 
     if (networkMode != NetworkMode::Client || !isClientIqProcessingMode()) {
         return;
     }
-    if (runState == RadioRunState::Idle &&
-        networkController &&
-        !networkController->clientHasControl()) {
-        runState = RadioRunState::Running;
-        updateUiForRunState();
-        startNetworkClientProcessing();
-    }
-    if (runState == RadioRunState::Idle) {
-        return;
-    }
-
     const bool channelizedFrame = frame.value("channelized").toBool(false);
     const QString sampleFormat = frame.value("sampleFormat").toString();
     if ((!channelizedFrame && sampleFormat != QStringLiteral("iq_s8_interleaved")) ||
@@ -138,6 +127,7 @@ void YourClassName::handleNetworkIqPayload(const QJsonObject &frame, QByteArray 
     if (frameSampleRate <= 0.0) {
         return;
     }
+    if (!acceptNetworkReceiverFrame()) return;
     const int frameSampleCount = frame.value("sampleCount").toInt(iqBytes.size() / bytesPerIqSample);
     handleSpectrumEventIqFrame(iqBytes, frameSampleRate, frameSampleCount, channelizedFrame);
     processVideoIqFrame(iqBytes, frameSampleRate, frameSampleCount);

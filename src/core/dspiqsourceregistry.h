@@ -24,6 +24,8 @@ struct DspIqSourceSnapshot {
     bool sampleClockValid = false;
     bool hardwareTimestamp = false;
     bool clockLocked = false;
+    bool sharedSampleTimeline = false;
+    std::uint64_t continuityId = 0;
     int nativeAdcBits = 0;
     QString nativeSampleFormat;
     double normalizedFullScale = 1.0;
@@ -38,6 +40,8 @@ struct DspIqTimingMetadata {
     bool sampleClockValid = false;
     bool hardwareTimestamp = false;
     bool clockLocked = false;
+    // firstComplexSample is comparable across sources only when this is true.
+    bool sharedSampleTimeline = false;
     int nativeAdcBits = 0;
     QString nativeSampleFormat;
     double normalizedFullScale = 1.0;
@@ -71,7 +75,7 @@ public:
                        std::uint64_t previousEpoch,
                        std::uint64_t previousEndFloatCount,
                        std::size_t maximumFloatCount,
-                       DspIqSourceSnapshot &snapshot) const;
+                       DspIqSourceSnapshot &snapshot, bool consumeGap = true) const;
     DspIqSourceRegistryStats stats() const;
     void clear(const DspSourceIdentity &source);
     void clearAll();

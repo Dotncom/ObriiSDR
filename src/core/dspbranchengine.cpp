@@ -174,6 +174,10 @@ struct DspBranchEngine::Impl {
         frame.source = block.source;
         frame.gaps += state.transportGaps;
         if (outputGap) state.history.clear();
+        if (!config.external && !config.packetDecoderId.isEmpty() && !block.iq.empty()) {
+            DspIqSourceRegistry::instance().publish(dspPacketBranchSource(config.id), block.iq.data(),
+                block.iq.size(), frame.sampleRateHz, block.centerHz, outputGap);
+        }
         if (recorder && recorder->active() && output.iq && !output.iq->empty()) {
             DspStreamBlock recorded;
             recorded.stream = block.stream; recorded.source = block.source;

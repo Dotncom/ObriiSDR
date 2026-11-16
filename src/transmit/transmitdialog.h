@@ -4,6 +4,7 @@
 #include "transmitterbackend.h"
 #include "hackrftransmitterbackend.h"
 #include "virtualtransmitterbackend.h"
+#include "uhdtransmitterbackend.h"
 #include "transmitwaveformgenerator.h"
 #include "signallabgenerator.h"
 
@@ -11,6 +12,7 @@
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QJsonObject>
 #include <QVector>
 
 #include <complex>
@@ -33,6 +35,8 @@ class QToolButton;
 class QIODevice;
 class TxWaveformPreviewWidget;
 class DmrTransmitEncoder;
+class M17VoiceStream;
+class IqChannelizer;
 class SignalLabDialog;
 #ifdef _WIN32
 class WindowsMicrophoneCapture;
@@ -51,13 +55,19 @@ public:
 
     void setLanguage(const QString &language);
     void setHackRfReceiverUseChecker(HackRfReceiverUseChecker checker);
+    void setSharedUhdTxSessionProvider(std::function<std::shared_ptr<UhdRxSession>(int)> provider);
+    void setUhdContext(NetworkController *network, std::function<QJsonObject()> remoteSettings,
+                       QString fpgaImage, const QString &serverHost, int serverPort,
+                       std::function<void()> openToneTest);
     void prepareFt8Message(const QString &message, double dialFrequencyHz,
                            double audioFrequencyHz, int slotParity);
     bool startPreparedFt8Automatically(QString *error = nullptr);
     void cancelAutomaticFt8();
+    void startLaboratoryTransmission(const SignalLabGenerationResult &result, double centerHz = -1.0);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void reject() override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
@@ -80,10 +90,11 @@ private:
     void loadSettings();
     void saveSettings() const;
     void startTransmission();
-    void startLaboratoryTransmission(const SignalLabGenerationResult &result);
     void pumpVirtualIq();
     void stopTransmission(const QString &reason = QString());
     void startTextSimulation(const TxConfiguration &configuration);
+    void startGeneratedWaveform(const TxConfiguration &configuration, const TxGenerationResult &generated);
+    void startM17VoiceFile(TxConfiguration configuration);
     void beginTextWaveform();
     void startMicrophoneSimulation(TxConfiguration configuration);
     void startManualCw(TxConfiguration configuration);
@@ -97,6 +108,8 @@ private:
     bool configureDmrEncoder(const TxConfiguration &configuration, QString *error);
     bool beginDmrCall(QString *error);
     bool finishDmrCall(QString *error);
+    bool beginM17Call(QString *error);
+    bool finishM17Call(QString *error);
     void setLiveKey(bool pressed);
     void chooseMediaFile();
     void editMediaImage();
@@ -104,6 +117,14 @@ private:
     void exportIq();
     void setStatus(const QString &message, bool error = false);
     bool hackRfSelected() const;
+    bool localUhdSelected() const;
+    bool remoteUhdSelected() const;
+    void refreshUhdOutput();
+    void finishUhdWaveform();
+    bool authorizeRfOutput();
+    UhdTransmitterBackend *activeUhdBackend();
+    QJsonObject uhdRemoteCapabilities() const;
+    void connectUhdTxEndpoint();
     bool virtualSignalSelected() const;
     void applyVirtualSignalEndpoint();
     bool selectedHackRfBusyForReception() const;
@@ -114,6 +135,15 @@ private:
     SimulatorTransmitterBackend simulator;
     HackRfTransmitterBackend hackRf;
     VirtualTransmitterBackend virtualSignal;
+    UhdTransmitterBackend localUhd;
+    UhdTransmitterBackend remoteUhd{true};
+    std::function<QJsonObject()> remoteUhdSettings;
+    std::function<void()> openUhdToneTest;
+    NetworkController *txNetwork = nullptr;
+    NetworkController *sharedNetwork = nullptr;
+    QJsonObject txServerCapabilities;
+    QString uhdFpgaImage;
+    bool finishingUhdWaveform = false;
     TransmitterBackend *activeBackend = nullptr;
     TxConfiguration activeConfiguration;
     TxModulatorState modulatorState;
@@ -122,9 +152,26 @@ private:
     std::unique_ptr<DmrTransmitEncoder> dmrEncoder;
     bool dmrCallActive = false;
     bool dmrFinishing = false;
+    std::unique_ptr<M17VoiceStream> m17VoiceStream;
+    std::unique_ptr<IqChannelizer> m17AudioResampler;
 
     QComboBox *backendCombo = nullptr;
     QComboBox *deviceCombo = nullptr;
+    QComboBox *uhdDeviceCombo = nullptr;
+    QComboBox *uhdChannelCombo = nullptr;
+    QComboBox *uhdAntennaCombo = nullptr;
+    QDoubleSpinBox *uhdGainSpin = nullptr;
+    QLineEdit *uhdArmCodeEdit = nullptr;
+    QLabel *uhdChannelLabel = nullptr;
+    QLabel *uhdAntennaLabel = nullptr;
+    QLabel *uhdGainLabel = nullptr;
+    QLabel *uhdArmCodeLabel = nullptr;
+    QLabel *uhdServerLabel = nullptr;
+    QLabel *uhdServerPortLabel = nullptr;
+    QLineEdit *uhdServerEdit = nullptr;
+    QSpinBox *uhdServerPort = nullptr;
+    QPushButton *uhdConnectButton = nullptr;
+    QPushButton *uhdToneTestButton = nullptr;
     QComboBox *virtualTransportCombo = nullptr;
     QLineEdit *virtualLocalNameEdit = nullptr;
     QLineEdit *virtualHostEdit = nullptr;
@@ -147,7 +194,6 @@ private:
     QSpinBox *txGainSpin = nullptr;
     QSpinBox *watchdogSpin = nullptr;
     QCheckBox *rfAmpCheck = nullptr;
-    QCheckBox *armCheck = nullptr;
     QDoubleSpinBox *deviationSpin = nullptr;
     QDoubleSpinBox *toneSpin = nullptr;
     QSpinBox *cwWpmSpin = nullptr;
@@ -157,6 +203,12 @@ private:
     QCheckBox *invertDataCheck = nullptr;
     QCheckBox *ft8UtcCheck = nullptr;
     QGroupBox *dmrBox = nullptr;
+    QGroupBox *m17Box = nullptr;
+    QLabel *m17SourceLabel = nullptr;
+    QLabel *m17DestinationLabel = nullptr;
+    QLineEdit *m17SourceEdit = nullptr;
+    QLineEdit *m17DestinationEdit = nullptr;
+    QSpinBox *m17CanSpin = nullptr;
     QSpinBox *dmrColorCodeSpin = nullptr;
     QComboBox *dmrTimeslotCombo = nullptr;
     QSpinBox *dmrSourceIdSpin = nullptr;
@@ -237,6 +289,7 @@ private:
     bool automaticFt8Active = false;
     bool pttMode = false;
     bool liveKeyPressed = false;
+    bool liveKeyArmingClick = false;
     float microphoneRmsDb = -120.0f;
     float microphonePeakDb = -120.0f;
     float microphoneSoftwareGain = 1.0f;
@@ -252,6 +305,7 @@ private:
     QAudioInput *audioInput = nullptr;
     QIODevice *audioDevice = nullptr;
     int audioCaptureChannels = 1;
+    int audioCaptureRate = 48000;
     int audioCaptureSampleSize = 16;
     int audioCaptureSampleType = 0;
     bool audioCaptureLittleEndian = true;

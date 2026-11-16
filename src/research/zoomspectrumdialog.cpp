@@ -5,7 +5,6 @@
 #include "appsettingsutils.h"
 #include "scalewidget.h"
 #include "zoomspectrumprocessor.h"
-#include "waterfall3dview.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -16,7 +15,6 @@
 #include <QLabel>
 #include <QSettings>
 #include <QSpinBox>
-#include <QStackedWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -44,12 +42,7 @@ ZoomSpectrumDialog::ZoomSpectrumDialog(QWidget *parent)
     waterfall->setRowsPerFrame(1);
     waterfall->setDisplayMode(MyWaterfallWidget::DisplayMode::Waterfall2D);
     waterfall->setFpsOverlayEnabled(true);
-    waterfall3D = new Waterfall3DView(this);
-    waterfall3D->setHistoryCapacity(160);
-    waterfall3D->setResolutionDivisor(1);
-    waterfallStack = new QStackedWidget(this);
-    waterfallStack->addWidget(waterfall);
-    waterfallStack->addWidget(waterfall3D);
+    waterfall->set3DHistoryRows(160);
 
     enabledCheck = new QCheckBox(QString::fromUtf8(u8"Аналізувати / Run"), this);
     enabledCheck->setChecked(true);
@@ -100,7 +93,7 @@ ZoomSpectrumDialog::ZoomSpectrumDialog(QWidget *parent)
     layout->addWidget(rangeLabel);
     layout->addWidget(graph, 2);
     layout->addWidget(scale);
-    layout->addWidget(waterfallStack, 3);
+    layout->addWidget(waterfall, 3);
     layout->addWidget(statusLabel);
 
     QSettings settings(persistentSettingsFilePath(), QSettings::IniFormat);
@@ -111,7 +104,8 @@ ZoomSpectrumDialog::ZoomSpectrumDialog(QWidget *parent)
     enabledCheck->setChecked(settings.value(QStringLiteral("zoomSpectrum/enabled"), true).toBool());
     displayModeCombo->setCurrentIndex((std::max)(0, displayModeCombo->findData(
         settings.value(QStringLiteral("zoomSpectrum/displayMode"), 0))));
-    waterfallStack->setCurrentIndex(displayModeCombo->currentData().toInt());
+    waterfall->setDisplayMode(static_cast<MyWaterfallWidget::DisplayMode>(
+        displayModeCombo->currentData().toInt()));
     const QByteArray geometry = settings.value(QStringLiteral("zoomSpectrum/geometry")).toByteArray();
     if (!geometry.isEmpty()) {
         restoreGeometry(geometry);
@@ -120,7 +114,8 @@ ZoomSpectrumDialog::ZoomSpectrumDialog(QWidget *parent)
     const auto configurationChanged = [this]() { applyConfiguration(); };
     connect(enabledCheck, &QCheckBox::toggled, this, configurationChanged);
     connect(displayModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
-        waterfallStack->setCurrentIndex(displayModeCombo->currentData().toInt());
+        waterfall->setDisplayMode(static_cast<MyWaterfallWidget::DisplayMode>(
+            displayModeCombo->currentData().toInt()));
         QSettings settings(persistentSettingsFilePath(), QSettings::IniFormat);
         settings.setValue(QStringLiteral("zoomSpectrum/displayMode"), displayModeCombo->currentData());
     });
@@ -229,22 +224,6 @@ void ZoomSpectrumDialog::pollFrames() {
                            levelMinSpin->value(),
                            levelMaxSpin->value(),
                            true);
-        if (displayModeCombo->currentData().toInt() == 1) {
-            colorScratch.resize(frame.levels.size() * 3U);
-            const double low = levelMinSpin->value();
-            const double span = (std::max)(1.0, levelMaxSpin->value() - low);
-            for (std::size_t i = 0; i < frame.levels.size(); ++i) {
-                const double t = std::clamp((frame.levels[i] - low) / span, 0.0, 1.0);
-                const QColor color = QColor::fromHsvF((1.0 - t) * 0.66, 1.0, t > 0.02 ? 1.0 : 0.0);
-                colorScratch[i * 3U] = static_cast<unsigned char>(color.red());
-                colorScratch[i * 3U + 1U] = static_cast<unsigned char>(color.green());
-                colorScratch[i * 3U + 2U] = static_cast<unsigned char>(color.blue());
-            }
-            waterfall3D->appendHistoryRow(frame.levels,
-                                          colorScratch,
-                                          levelMinSpin->value(),
-                                          levelMaxSpin->value());
-        }
     }
     const ZoomSpectrumFrame &latest = frames.back();
     graph->setData(latest.frequencies,

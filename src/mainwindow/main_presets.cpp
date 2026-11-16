@@ -112,6 +112,9 @@ void YourClassName::ensureDefaultFrequencyPresets() {
         addMissingFrequencyPreset(QStringLiteral("FPV video %1 MHz").arg(mhz, 0, 'f', 0),
                                   mhz * 1000000.0);
     }
+    for (double mhz : fpv6GhzVideoFrequenciesMhz()) {
+        addMissingFrequencyPreset(fpv6GhzFrequencyPresetName(mhz), mhz * 1000000.0);
+    }
     addMissingFrequencyPreset(QStringLiteral("GNSS L1 compact center 1583 MHz"), GNSS_L1_LISTENING_SCAN_CENTER_HZ);
     addMissingFrequencyPreset(QStringLiteral("GNSS L1 band center 1584.5 MHz"), GNSS_L1_BAND_CENTER_HZ);
     addMissingFrequencyPreset(QStringLiteral("GPS/Galileo L1 1575.42 MHz"), GNSS_GPS_L1_HZ);

@@ -48,6 +48,7 @@ void YourClassName::sendNetworkAudioFrame(const QByteArray &pcmData) {
     frame["channels"] = 1;
     frame["sampleFormat"] = "pcm_s16le";
     static quint64 sentAudioFrames = 0;
+    static quint64 skippedAudioDeliveries = 0;
     frame["sequence"] = QString::number(++sentAudioFrames);
     frame["sourceTimeMs"] = QString::number(QDateTime::currentMSecsSinceEpoch());
     quint64 slowPeers = 0;
@@ -69,11 +70,14 @@ void YourClassName::sendNetworkAudioFrame(const QByteArray &pcmData) {
             networkController->sendControlCommandToPeer(peerId, legacyFrame);
         }
     }
+    skippedAudioDeliveries += slowPeers;
     if (fobosVerboseLoggingEnabled() && sentAudioFrames % 200 == 1) {
         qDebug() << "[NetworkAudio] sent PCM frame"
                  << "frames" << static_cast<qulonglong>(sentAudioFrames)
                  << "bytes" << pcmData.size()
-                 << "slowPeers" << slowPeers;
+                 << "slowPeers" << slowPeers
+                 << "skippedDeliveries" << skippedAudioDeliveries;
+        skippedAudioDeliveries = 0;
     }
 }
 
@@ -99,6 +103,10 @@ void YourClassName::playNetworkAudioPcmFrame(const QJsonObject &frame,
     }
 
     if (pcmData.isEmpty() || pcmData.size() % int(sizeof(qint16)) != 0) return;
+    if (!acceptNetworkReceiverFrame()) return;
+    const bool wideFm = networkClientConfirmedSettingsJson.value(QStringLiteral("modulationType"))
+                            .toInt(pendingSettings.modulationType) == MOD_WFM;
+    remoteAudioPlayer->setWideFmNetworkBuffer(wideFm);
     static quint64 receivedAudioFrames = 0;
     static quint64 expectedSequence = 0;
     static quint64 missingFrames = 0;
@@ -144,17 +152,20 @@ void YourClassName::updateAudioRelaySocket() {
     }
 
     if (!audioRelayReceiveEnabled) {
+        audioRelayPlayer->stop();
         if (audioRelaySocket->state() != QAbstractSocket::UnconnectedState) {
             audioRelaySocket->close();
         }
         return;
     }
 
+    audioRelayPlayer->setRelayBufferMs(audioRelayBufferMs);
     if (audioRelaySocket->state() != QAbstractSocket::UnconnectedState &&
         audioRelaySocket->localPort() == audioRelayListenPort) {
         return;
     }
 
+    audioRelayPlayer->stop();
     audioRelaySocket->close();
     const bool bound = audioRelaySocket->bind(QHostAddress::AnyIPv4,
                                               audioRelayListenPort,
@@ -230,7 +241,7 @@ void YourClassName::receiveAudioRelayDatagrams() {
         }
 
         const quint32 payloadBytes = readLe32(datagram.constData() + 8);
-        if (payloadBytes == 0 ||
+        if (payloadBytes == 0 || payloadBytes % sizeof(qint16) != 0 ||
             payloadBytes > static_cast<quint32>(datagram.size() - AUDIO_RELAY_HEADER_BYTES)) {
             continue;
         }
@@ -245,15 +256,7 @@ void YourClassName::receiveAudioRelayDatagrams() {
                      << "bytes" << pcmData.size()
                      << "port" << audioRelayListenPort;
         }
-        if (remoteAudioPlayer) {
-            remoteAudioPlayer->playPcmFrame(pcmData);
-        } else if (fobosVerboseLoggingEnabled()) {
-            static bool loggedMissingPlayer = false;
-            if (!loggedMissingPlayer) {
-                loggedMissingPlayer = true;
-                qDebug() << "[AudioRelay] received PCM but no remote audio player is available";
-            }
-        }
+        audioRelayPlayer->playRelayPcmFrame(pcmData);
     }
 }
 

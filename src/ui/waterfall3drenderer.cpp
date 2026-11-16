@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cmath>
 #include <limits>
 
@@ -127,8 +128,9 @@ void Waterfall3DRenderer::appendRow(const std::vector<float> &levels,
     HistoryRow row(static_cast<std::size_t>(outputColumns));
 
     for (int column = 0; column < outputColumns; ++column) {
-        const int begin = column * sourceColumns / outputColumns;
-        const int end = (std::max)(begin + 1, (column + 1) * sourceColumns / outputColumns);
+        const int begin = static_cast<int>(std::int64_t{column} * sourceColumns / outputColumns);
+        const int end = (std::max)(begin + 1, static_cast<int>(
+            std::int64_t{column + 1} * sourceColumns / outputColumns));
         double levelSum = 0.0;
         int validLevels = 0;
         for (int source = begin; source < end && source < sourceColumns; ++source) {
@@ -1491,7 +1493,6 @@ void Waterfall3DRenderer::render(int viewportWidth, int viewportHeight) {
         return;
     }
 
-    glViewport(0, 0, viewportWidth, viewportHeight);
     glDisable(GL_TEXTURE_2D);
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);

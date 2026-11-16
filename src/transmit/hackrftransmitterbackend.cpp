@@ -102,6 +102,11 @@ bool HackRfTransmitterBackend::start(const TxConfiguration &configuration, QStri
         closeDevice();
         return false;
     }
+    if (configuration.liveSource && configuration.modulation == TxModulation::M17Voice &&
+        !configureTxFlush(error)) {
+        closeDevice();
+        return false;
+    }
 
     running.store(true, std::memory_order_release);
     qInfo().noquote() << "[HackRFTX] armed"
@@ -153,9 +158,16 @@ bool HackRfTransmitterBackend::writeIq(const std::complex<float> *samples,
             std::memory_order_release);
     }
     if (!streaming.load(std::memory_order_acquire)) {
-        const qint64 prebufferSamples =
-            (static_cast<qint64>(currentConfiguration.sampleRate) *
-             (std::clamp)(currentConfiguration.prebufferMilliseconds, 20, 2000)) / 1000;
+        int prebufferMs = (std::clamp)(currentConfiguration.prebufferMilliseconds, 20, 2000);
+        if (currentConfiguration.liveSource && currentConfiguration.modulation == TxModulation::M17Voice) {
+            // libhackrf requests four 256 KiB transfers synchronously at start.
+            // Reserve those SC8 samples and a microphone frame of headroom.
+            constexpr int StartupIqSamples = 4 * 256 * 1024 / 2;
+            const int startupMs = (StartupIqSamples * 1000 + currentConfiguration.deviceSampleRate - 1) /
+                                  currentConfiguration.deviceSampleRate;
+            prebufferMs = (std::max)(prebufferMs, startupMs + 40);
+        }
+        const qint64 prebufferSamples = qint64(currentConfiguration.sampleRate) * prebufferMs / 1000;
         const bool prebuffered = !currentConfiguration.liveSource ||
                                  bufferedSourceSamples() >= prebufferSamples;
         if (prebuffered && !beginStreaming(error)) {
@@ -199,9 +211,7 @@ bool HackRfTransmitterBackend::writeFiniteBurst(const std::complex<float> *sampl
         if (error) *error = QStringLiteral("Finite HackRF TX must be staged after start and before streaming");
         return false;
     }
-    if (enableHackRfTxFlushSafely(device, &HackRfTransmitterBackend::flushCallback, this) != HackRfSuccess ||
-        setHackRfTxBlockCompleteCallbackSafely(device, &HackRfTransmitterBackend::blockCompleteCallback) != HackRfSuccess) {
-        if (error) *error = hackRfLastErrorMessage();
+    if (!configureTxFlush(error)) {
         stop();
         return false;
     }
@@ -211,6 +221,39 @@ bool HackRfTransmitterBackend::writeFiniteBurst(const std::complex<float> *sampl
         return false;
     }
     return true;
+}
+
+bool HackRfTransmitterBackend::configureTxFlush(QString *error) {
+    if (enableHackRfTxFlushSafely(device, &HackRfTransmitterBackend::flushCallback, this) == HackRfSuccess &&
+        setHackRfTxBlockCompleteCallbackSafely(device, &HackRfTransmitterBackend::blockCompleteCallback) == HackRfSuccess)
+        return true;
+    if (error) *error = hackRfLastErrorMessage();
+    return false;
+}
+
+bool HackRfTransmitterBackend::stageLiveBurstEnd(const std::complex<float> *samples, int count,
+                                                 QString *error) {
+    if (!isRunning() || !outputEnabled.load(std::memory_order_acquire) ||
+        !currentConfiguration.liveSource || currentConfiguration.modulation != TxModulation::M17Voice ||
+        finiteState.load(std::memory_order_acquire) != FiniteState::Inactive ||
+        !samples || count <= 0) {
+        if (error) *error = QStringLiteral("M17 live TX is unavailable for flushing");
+        return false;
+    }
+    QMutexLocker locker(&queueMutex);
+    sourceQueue.resize(sourceQueue.size() + count + 1);
+    std::copy_n(samples, count, sourceQueue.end() - count - 1);
+    sourceQueue.back() = {}; // Lookahead for the final interpolated sample.
+    bufferedSamples.store(sourceQueue.size() - static_cast<int>(sourcePosition), std::memory_order_release);
+    finiteState.store(FiniteState::Pending, std::memory_order_release);
+    return true;
+}
+
+bool HackRfTransmitterBackend::finishLiveBurst(const std::complex<float> *samples, int count,
+                                               QString *error) {
+    if (!stageLiveBurstEnd(samples, count, error)) return false;
+    if (!streaming.load(std::memory_order_acquire) && !beginStreaming(error)) return false;
+    return drain(1500, error);
 }
 
 bool HackRfTransmitterBackend::finiteBurstComplete() const {
@@ -263,6 +306,11 @@ bool HackRfTransmitterBackend::setOutputEnabled(bool enabled, QString *error) {
             sourceQueue.clear();
             sourcePosition = 0.0;
             bufferedSamples.store(0, std::memory_order_release);
+        }
+        if (currentConfiguration.liveSource && currentConfiguration.modulation == TxModulation::M17Voice) {
+            finiteInputDrained.store(false, std::memory_order_relaxed);
+            finiteEosReturned.store(false, std::memory_order_relaxed);
+            finiteState.store(FiniteState::Inactive, std::memory_order_release);
         }
         stopping.store(false, std::memory_order_release);
     }
@@ -380,7 +428,8 @@ int HackRfTransmitterBackend::fillTransfer(HackRfTransfer *transfer) {
     }
     transfer->validLength = bytes;
     // Hand off the final valid buffer now; EOS must be returned on the NEXT callback.
-    if (finite && bufferedSamples.load(std::memory_order_acquire) <= 1)
+    if (finiteState.load(std::memory_order_acquire) == FiniteState::Pending &&
+        bufferedSamples.load(std::memory_order_acquire) <= 1)
         finiteInputDrained.store(true, std::memory_order_release);
     generatedSamples.fetch_add(static_cast<quint64>(complexSamples), std::memory_order_relaxed);
     missingSourceSamples.fetch_add(missing, std::memory_order_relaxed);

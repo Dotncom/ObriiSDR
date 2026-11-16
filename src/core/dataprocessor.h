@@ -16,6 +16,7 @@
 #include <QElapsedTimer>
 #include <QByteArray>
 #include <QJsonArray>
+#include <QVariantMap>
 #include <QString>
 #include <atomic>
 #include <array>
@@ -25,8 +26,10 @@
 #include "iqchannelizer.h"
 #include "iqframequeuebudget.h"
 #include "receiverbackend.h"
+#include "uhdbackend.h"
 
 class ZoomSpectrumProcessor;
+class AtvIqWorker;
 struct HackRfDeviceDiagnostics;
 
 class DataProcessor : public QThread {
@@ -68,30 +71,44 @@ public:
     bool applyHackRfGainSettings(int lnaGainDb, int vgaGainDb);
     bool queryHackRfDiagnostics(HackRfDeviceDiagnostics *diagnostics,
                                 QString *errorMessage = nullptr);
+    bool uhdStreamReady() const { return uhdStreamReady_.load(std::memory_order_acquire); }
+    std::shared_ptr<UhdRxSession> sharedUhdTxSession(int deviceIndex) const;
+    UhdClockStatus uhdClockStatus() const;
+    void setUhdGnssPollingEnabled(bool enabled);
+    UhdGnssStatus uhdGnssStatus() const;
     void updateNetworkIqSettings(const RadioSettings &settings, bool channelizeFrames);
-    void configureNetworkIqStreaming(const RadioSettings &settings, bool emitFrames, bool channelizeFrames);
+    void configureNetworkIqStreaming(const RadioSettings &settings, bool emitFrames, bool channelizeFrames,
+                                     bool atvFrames = false);
     void setWifiIqStreamingEnabled(bool enabled);
+    void setFullIqRecordingEnabled(bool enabled);
     std::shared_ptr<IqFrameQueueBudget> iqFrameQueueBudget() const { return iqFrameBudget; }
+    std::shared_ptr<IqFrameQueueBudget> fullIqRecordingQueueBudget() const { return fullIqRecordingBudget; }
     std::shared_ptr<ZoomSpectrumProcessor> zoomSpectrumProcessor() const { return zoomProcessor; }
 signals:
     void iqFrameReady(const QByteArray &iqData, double sampleRate, int sampleCount,
                       bool channelized, qint64 queuedAtNs);
     void wifiIqFrameReady(const QByteArray &iqData, double sampleRate,
                           double centerFrequency, int sampleCount);
+    void fullIqRecordingFrameReady(const QByteArray &iqData, double sampleRate, int sampleCount,
+                                   quint64 firstSample, quint64 epoch, qint64 utcMs);
+    void atvIqDiscontinuity(quint64 droppedSamples);
     void readerFailed(int errorCode, bool stoppedByRequest);
     void virtualSignalMetadataChanged(double sampleRateHz, double centerFrequencyHz);
+    void fobosStreamMetricsReady(const QVariantMap &metrics);
 
 private:
     void publishCoherentIq(const float *samples, std::size_t floatCount,
                            std::uint64_t epoch, bool discontinuity = false);
-    void emitIqFrame(const float *samples, std::size_t floatCount);
+    void emitIqFrame(const float *samples, std::size_t floatCount, std::uint64_t sourceEpoch);
     void emitFullIqFrame(const float *samples, std::size_t floatCount);
+    void emitFullIqRecordingFrame(const float *samples, std::size_t floatCount, std::uint64_t epoch);
     void emitWifiIqFrame(const float *samples, std::size_t floatCount);
     void emitChannelIqFrame(const float *samples, std::size_t floatCount, const RadioSettings &settings);
     void emitBufferedChannelIqFrame(double sampleRate);
     void resetNetworkIqState();
     void resetStreamDiagnostics();
     void updateStreamDiagnostics(const float *samples, uint32_t sampleCount, const char *readerMode);
+    void updateFobosIntegrityMetrics();
     void captureRetuneRawDumpBlock(const float *samples, uint32_t sampleCount, uint64_t callbackEpoch);
     void finishRetuneRawDumpLocked(const QString &status);
     void runRtlTcpReader(const ReceiverStreamDescriptor &stream, uint32_t blockSamples);
@@ -110,6 +127,11 @@ private:
     std::atomic<bool> requestedPublishIqSnapshot;
     std::atomic<bool> requestedEmitIqFrames;
     std::atomic<bool> requestedWifiIqFrames{false};
+    std::atomic<bool> requestedFullIqRecording{false};
+    std::atomic<bool> requestedAtvIqFrames{false};
+    std::atomic<quint64> fullIqRecordingSamples{0};
+    std::unique_ptr<AtvIqWorker> atvIqWorker;
+    std::shared_ptr<IqFrameQueueBudget> fullIqRecordingBudget = std::make_shared<IqFrameQueueBudget>();
     float wifiIqGain = 0.0f;
     std::atomic<bool> requestedChannelizeIqFrames;
     std::atomic<bool> requestedAgileScanEnabled;
@@ -126,6 +148,13 @@ private:
     QString activeBackendId;
     QString activeBackendName;
     ReceiverStreamDescriptor activeStreamDescriptor;
+    std::atomic<bool> uhdStreamReady_{false};
+    mutable QMutex uhdStatusMutex;
+    std::shared_ptr<UhdRxSession> activeUhdDuplexSession;
+    int activeUhdDuplexDevice = -1;
+    UhdClockStatus activeUhdClock;
+    UhdGnssStatus activeUhdGnss;
+    std::atomic<bool> uhdGnssPollingEnabled{false};
     std::mutex networkIqSettingsMutex;
     RadioSettings networkIqSettings;
     double networkIqNcoPhase = 0.0;
@@ -152,6 +181,7 @@ private:
     double networkIqFrameSampleRate = 0.0;
     QElapsedTimer asyncRateTimer;
     QElapsedTimer streamDiagnosticTimer;
+    QElapsedTimer fobosIntegrityReportTimer;
     uint64_t asyncMeasuredSamples = 0;
     uint64_t asyncCallbackCounter = 0;
     int asyncRateReportCount = 0;

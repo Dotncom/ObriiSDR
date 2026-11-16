@@ -283,7 +283,7 @@ FpgaPipelineAnalysis FpgaPipelineCompiler::analyze(const QVector<FpgaPipelineSta
             QString error;
             if (!FpgaLogicBlock::fromJson(stage.customLogic, &block, &error))
                 result.errors << prefix + QStringLiteral("власний блок: ") + error;
-        } else {
+        } else if (stage.type != QStringLiteral("passthrough")) {
             result.errors << prefix + QStringLiteral("невідомий тип блоку.");
         }
         result.contracts << contract;
@@ -317,8 +317,9 @@ QByteArray FpgaPipelineCompiler::generateVerilog(const QVector<FpgaPipelineStage
     QStringList definitions;
     QStringList customDefinitions;
     for (int index = 0; index < stages.size(); ++index) {
-        const QString prefix = QStringLiteral("s%1").arg(index);
         const auto &stage = stages.at(index);
+        if (stage.type == QStringLiteral("passthrough")) continue;
+        const QString prefix = QStringLiteral("s%1").arg(index);
         lines << QStringLiteral("wire %1_valid;").arg(prefix)
               << QStringLiteral("wire signed [15:0] %1_i, %1_q;").arg(prefix);
         if (stage.type == QStringLiteral("ddc")) {

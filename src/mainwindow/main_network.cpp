@@ -1,4 +1,6 @@
 #include "main.h"
+#include "displaylevelstep.h"
+#include "analyzer/multisdrdialog.h"
 #include "ffttuningguard.h"
 #include "appconstants.h"
 #include "appruntimeutils.h"
@@ -90,6 +92,8 @@ void YourClassName::appendNetworkState(QJsonObject &command) const {
     command["processingMode"] = static_cast<int>(networkProcessingMode);
     if (networkMode == NetworkMode::Server) {
         command["serverDisableLocalVisualAudio"] = serverDisableLocalVisualAudio;
+        command["spectrumLevelStepTenths"] = networkSpectrumLevelStepTenths;
+        command["spectrumMaxFps"] = networkSpectrumMaxFps;
     }
     command["fullResolutionSpectrumFrames"] = networkFullResolutionSpectrumFrames;
 }
@@ -115,6 +119,15 @@ void YourClassName::applyNetworkStateFromCommand(const QJsonObject &command) {
     if (command.contains("fullResolutionSpectrumFrames")) {
         networkFullResolutionSpectrumFrames =
             command.value("fullResolutionSpectrumFrames").toBool(networkFullResolutionSpectrumFrames);
+    }
+    if (isNetworkClientMode()) {
+        const int step = command.value(QStringLiteral("spectrumLevelStepTenths")).toInt();
+        remoteSpectrumLevelStepTenths =
+            step >= DisplayLevelStep::DefaultNetworkTenths && step <= DisplayLevelStep::MaximumTenths
+                ? step : 0;
+        const int fps = command.value(QStringLiteral("spectrumMaxFps")).toInt();
+        remoteSpectrumMaxFps =
+            fps >= NETWORK_SPECTRUM_FPS_MIN && fps <= NETWORK_SPECTRUM_FPS_MAX ? fps : 0;
     }
     onNetworkStatusChanged(networkController ? networkController->statusText() : QString());
 }
@@ -151,6 +164,10 @@ QJsonObject YourClassName::networkClientSettingsForCommand(const QJsonObject &se
     // must not overwrite it when sending ordinary tuning commands.
     sanitized.remove(QStringLiteral("calibrationTableEnabled"));
     sanitized.remove(QStringLiteral("calibrationTable"));
+    if (networkProcessingMode == NetworkProcessingMode::ServerSide) {
+        sanitized.remove(QStringLiteral("scalePercent"));
+        sanitized.remove(QStringLiteral("additionalScaleDivisor"));
+    }
 
     const bool maySendReceiverChoice =
         remoteReceiverDeviceListValid &&
@@ -168,21 +185,34 @@ QJsonObject YourClassName::networkClientSettingsForCommand(const QJsonObject &se
 void YourClassName::applyAuthoritativeNetworkState(const QJsonObject &command) {
     const RadioSettings previousSettings = pendingSettings;
     const NetworkProcessingMode previousProcessingMode = networkProcessingMode;
+    const bool wasRunning = runState == RadioRunState::Running;
     const int previousFftLength = pendingSettings.fftLength;
     const int previousScanVisualMode = scanVisualMode;
-    const QJsonObject settings = command.value(QStringLiteral("settings")).toObject();
+    QJsonObject settings = command.value(QStringLiteral("settings")).toObject();
 
+    if (!settings.isEmpty()) {
+        networkClientConfirmedSettingsJson = settings;
+        networkClientConfirmedSettingsValid = true;
+    }
     applyNetworkStateFromCommand(command);
+    if (networkProcessingMode == NetworkProcessingMode::ServerSide) {
+        settings.remove(QStringLiteral("scalePercent"));
+        settings.remove(QStringLiteral("additionalScaleDivisor"));
+    }
     applyReceiverDeviceListFromJson(command.value(QStringLiteral("receiverDevices")).toArray());
     applySettingsFromJson(settings, false);
     publishSettingsToGlobals();
-    if (networkMode == NetworkMode::Client && runState == RadioRunState::Running &&
-        previousProcessingMode != networkProcessingMode) {
-        if (isClientIqProcessingMode()) startNetworkClientProcessing();
-        else stopNetworkClientProcessing();
-    }
     if (previousFftLength != pendingSettings.fftLength) {
         applyFftLengthChange(pendingSettings.fftLength, false);
+    }
+    const auto receiverRunning = command.value(QStringLiteral("receiverRunning"));
+    if (receiverRunning.isBool()) {
+        networkClientCanInferRunning = false;
+        setNetworkClientReceiverRunning(receiverRunning.toBool());
+    }
+    if (wasRunning && runState == RadioRunState::Running && previousProcessingMode != networkProcessingMode) {
+        if (isClientIqProcessingMode()) startNetworkClientProcessing();
+        else stopNetworkClientProcessing();
     }
     if (normalizedScanVisualMode(previousScanVisualMode) != normalizedScanVisualMode(scanVisualMode)) {
         scanVisualAssembler.reset();
@@ -207,10 +237,6 @@ void YourClassName::applyAuthoritativeNetworkState(const QJsonObject &command) {
         }
     }
 
-    if (!settings.isEmpty()) {
-        networkClientConfirmedSettingsJson = settings;
-        networkClientConfirmedSettingsValid = true;
-    }
     networkClientAwaitingSettingsAck = false;
     if (networkSettingsAckTimer) {
         networkSettingsAckTimer->stop();
@@ -237,7 +263,8 @@ void YourClassName::sendSettingsAckToPeer(const QString &peerId,
     }
     appendNetworkState(ack);
     ack["settings"] = settingsToJson();
-    ack["receiverRunning"] = runState == RadioRunState::Running;
+    if (runState == RadioRunState::Idle || runState == RadioRunState::Running)
+        ack["receiverRunning"] = runState == RadioRunState::Running;
     ack["receiverDevices"] = receiverDeviceListToJson();
     networkController->sendControlCommandToPeer(peerId, ack);
 }
@@ -249,7 +276,7 @@ void YourClassName::startNetworkSettingsAckWait() {
 
     networkClientAwaitingSettingsAck = true;
     if (networkSettingsAckTimer) {
-        networkSettingsAckTimer->start();
+        networkSettingsAckTimer->start(NETWORK_SETTINGS_ACK_TIMEOUT_MS);
     }
 }
 
@@ -262,7 +289,12 @@ void YourClassName::handleNetworkSettingsAckTimeout() {
     qDebug() << "[Network] settings ack timeout; restoring last confirmed server state";
     if (networkClientConfirmedSettingsValid) {
         const int previousFftLength = pendingSettings.fftLength;
-        applySettingsFromJson(networkClientConfirmedSettingsJson, false);
+        QJsonObject settings = networkClientConfirmedSettingsJson;
+        if (networkProcessingMode == NetworkProcessingMode::ServerSide) {
+            settings.remove(QStringLiteral("scalePercent"));
+            settings.remove(QStringLiteral("additionalScaleDivisor"));
+        }
+        applySettingsFromJson(settings, false);
         publishSettingsToGlobals();
         if (previousFftLength != pendingSettings.fftLength) {
             applyFftLengthChange(pendingSettings.fftLength, false);
@@ -283,7 +315,8 @@ void YourClassName::sendServerStateToClients() {
     state["action"] = "serverState";
     appendNetworkState(state);
     state["settings"] = settingsToJson();
-    state["receiverRunning"] = runState == RadioRunState::Running;
+    if (runState == RadioRunState::Idle || runState == RadioRunState::Running)
+        state["receiverRunning"] = runState == RadioRunState::Running;
     state["receiverDevices"] = receiverDeviceListToJson();
     networkController->sendControlCommand(state);
 }
@@ -370,6 +403,27 @@ void YourClassName::startNetworkClientProcessing() {
              << "audioPrebuffer" << pendingNetworkAudioStartAfterIqPrebuffer;
 }
 
+void YourClassName::setNetworkClientReceiverRunning(bool running) {
+    const auto nextState = running ? RadioRunState::Running : RadioRunState::Idle;
+    if (runState == nextState) return;
+    runState = nextState;
+    qDebug() << "[Network] remote receiver running" << running
+             << "inferred" << networkClientCanInferRunning;
+    if (running && isClientIqProcessingMode())
+        startNetworkClientProcessing();
+    else if (!running)
+        stopNetworkClientProcessing();
+}
+
+bool YourClassName::acceptNetworkReceiverFrame() {
+    if (isRemoteVfoProcessingMode()) return true;
+    if (runState == RadioRunState::Idle && networkClientCanInferRunning) {
+        setNetworkClientReceiverRunning(true);
+        updateUiForRunState();
+    }
+    return runState == RadioRunState::Running;
+}
+
 void YourClassName::stopNetworkClientProcessing() {
     if (spectrumFftWorker) spectrumFftWorker->resetHfNoiseCancelState();
     if (updateTimer) {
@@ -402,7 +456,9 @@ bool YourClassName::sendRemoteControlCommand(const QString &action, const QJsonO
 
     if (action != QStringLiteral("setParameters") &&
         action != QStringLiteral("settings") &&
-        action != QStringLiteral("setViewport")) {
+        action != QStringLiteral("setViewport") &&
+        action != QStringLiteral("setSpectrumLevelStep") &&
+        action != QStringLiteral("setSpectrumMaxFps")) {
         cancelPendingRemoteSettingsCommand();
     }
 
@@ -446,6 +502,11 @@ bool YourClassName::sendRemoteControlCommand(const QString &action, const QJsonO
     } else {
         if (carriesSettings) {
             startNetworkSettingsAckWait();
+            const auto settings = command.value(QStringLiteral("settings")).toObject();
+            if (networkSettingsAckTimer && (settings.contains(QStringLiteral("uhdRx")) ||
+                                            settings.contains(QStringLiteral("uhdTx")))) {
+                networkSettingsAckTimer->start(7000);
+            }
         }
         if (action != QStringLiteral("setViewport") || fobosVerboseLoggingEnabled())
             qDebug() << "[Network] remote command sent" << action;
@@ -632,6 +693,12 @@ void YourClassName::onNetworkControlCommandReceived(const QJsonObject &command) 
 
     if (networkMode == NetworkMode::Client && command.value("type").toString() == "control") {
         const QString action = command.value("action").toString();
+        if (action == QStringLiteral("uhdClockStatus")) {
+            const auto status = command.value(QStringLiteral("status"));
+            if (networkClientConfirmedSettingsJson.value(QStringLiteral("uhdRx")).isObject() && status.isObject())
+                networkClientConfirmedSettingsJson.insert(QStringLiteral("uhdClock"), status);
+            return;
+        }
         if (action == QStringLiteral("serverState") ||
             action == QStringLiteral("settingsAck")) {
             if (isRemoteVfoProcessingMode()) return;
@@ -831,6 +898,27 @@ void YourClassName::onNetworkControlCommandReceived(const QJsonObject &command) 
             networkRemoteViewportCenterHz = centerHz;
             networkRemoteViewportSpanHz = spanHz;
         }
+        return;
+    }
+
+    if (action == QStringLiteral("setSpectrumLevelStep")) {
+        const int step = command.value(QStringLiteral("spectrumLevelStepTenths")).toInt();
+        if (step >= DisplayLevelStep::DefaultNetworkTenths && step <= DisplayLevelStep::MaximumTenths) {
+            networkSpectrumLevelStepTenths = step;
+            savePersistentSettings();
+        }
+        sendServerStateToClients();
+        return;
+    }
+
+    if (action == QStringLiteral("setSpectrumMaxFps")) {
+        const int fps = command.value(QStringLiteral("spectrumMaxFps")).toInt();
+        if (fps >= NETWORK_SPECTRUM_FPS_MIN && fps <= NETWORK_SPECTRUM_FPS_MAX) {
+            networkSpectrumMaxFps = fps;
+            updateSpectrumTimerInterval();
+            savePersistentSettings();
+        }
+        sendServerStateToClients();
         return;
     }
 
@@ -1036,4 +1124,6 @@ void YourClassName::updateNetworkButtonText() {
 void YourClassName::onNetworkStatusChanged(const QString &status) {
     qDebug() << "[Network]" << status;
     updateNetworkButtonText();
+    if (multiSdrDialog)
+        multiSdrDialog->setRemoteUhdCompanionChannel(remoteUhdCompanionChannel());
 }

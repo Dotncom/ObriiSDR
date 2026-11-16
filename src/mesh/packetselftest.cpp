@@ -3,6 +3,7 @@
 #include <QJsonDocument>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 
 namespace {
 void check(bool ok,const char *name){std::printf("%s %s\n",ok?"PASS":"FAIL",name);if(!ok)std::exit(1);}
@@ -44,6 +45,51 @@ int main(int argc,char **argv) {
     check(!e.send("A","D","reroute",4,&error).isEmpty()&&e.advanceTo(5)&&e.setLink("B","D",false,10,&error)&&e.advanceTo(23),"change graph while datagram is in flight");
     check(last(e).value("path").toArray()==QJsonArray{"A","B","C","D"}&&last(e).value("status")=="delivered","B chooses a new next hop instead of replaying a precomputed path");
     check(e.configure(topology(),&error)&&!e.send("A","C","flight",16,&error).isEmpty()&&e.advanceTo(5)&&e.setLink("A","B",false,10,&error)&&e.advanceTo(11)&&last(e).value("status")=="link_down","link failure during transit is explicit");
+    check(e.configure(topology(), &error) && e.setRadioRange(100, &error) &&
+          e.setNodeMotion("B", {{99, 0}, {100, 0}}, &error) &&
+          e.route("A", "C") == QStringList{"A", "B", "C"},
+          "moving relay starts within the configured range");
+    check(!e.send("A", "C", "crossing", 16, &error).isEmpty() && e.advanceTo(11) &&
+          last(e).value("status") == "out_of_range" && e.route("A", "C").isEmpty(),
+          "range crossing drops an in-flight packet and invalidates cached routes");
+    check(e.setNodeMotion("B", {e.nodeMotion("B").position, {-100, 0}}, &error) &&
+          e.advanceTo(30) && e.route("A", "C") == QStringList{"A", "B", "C"} &&
+          !e.send("A", "C", "return", 16, &error).isEmpty() && e.advanceTo(62) &&
+          last(e).value("status") == "delivered",
+          "reversing velocity restores the route and delivery");
+    check(Mesh::PacketEngine::replay(e.scenario(), &replay, &error) && replay.snapshot() == e.snapshot(),
+          "scenario replay reproduces motion, range crossings and deliveries");
+    const auto beforeInvalidMotion = e.snapshot();
+    check(!e.setNodeMotion("B", {{0,0}, {std::numeric_limits<double>::infinity(),0}}, &error) &&
+          !e.setRadioRange(-1, &error) && e.snapshot() == beforeInvalidMotion,
+          "invalid motion and range leave the simulation unchanged");
+    check(e.setNodeMotion("B", {{500, 0}, {0, 0}}, &error) && e.route("A", "C").isEmpty() &&
+          e.setRadioRange(0, &error) && e.route("A", "C").size() == 3,
+          "disabling the range limit restores the directed graph");
+    check(e.configure(topology(true), &error) && e.setAirBitrate(8000, &error) &&
+          !e.send("B", "D", "x", 1, &error).isEmpty() &&
+          !e.send("C", "D", "x", 1, &error).isEmpty() && e.advanceTo(4) &&
+          !e.setAirBitrate(0, &error),
+          "two overlapping transmissions share a receiver, bitrate stays fixed in flight");
+    check(Mesh::PacketEngine::replay(e.scenario(), &replay, &error) && replay.pending() == 2 &&
+          replay.advanceTo(20) && e.advanceTo(20) && replay.snapshot() == e.snapshot() &&
+          e.snapshot().value("dropReasons").toObject().value("collision") == "2",
+          "overlapping packets collide and in-flight replay preserves the outcomes");
+    auto halfDuplex = topology();
+    halfDuplex["airBitrate"] = 8000;
+    check(e.configure(halfDuplex, &error) && e.airBitrate() == 8000 &&
+          !e.send("A", "B", "x", 1, &error).isEmpty() &&
+          !e.send("B", "C", "x", 1, &error).isEmpty() && e.advanceTo(30) &&
+          count(e, "delivered") == 1 && last(e).value("destination") == "C" &&
+          e.snapshot().value("dropReasons").toObject().value("half_duplex") == "1",
+          "a transmitting node loses its incoming frame without harming an isolated receiver");
+    check(e.configure(halfDuplex, &error) &&
+          !e.send("A", "B", "x", 1, &error).isEmpty() &&
+          !e.send("A", "B", "y", 1, &error).isEmpty() && e.advanceTo(9) &&
+          last(e).value("status") == "tx_busy" &&
+          !e.send("A", "B", "z", 1, &error).isEmpty() && e.advanceTo(29) &&
+          count(e, "delivered") == 2 && last(e).value("latencyMs").toInt() == 20,
+          "sender occupancy ends with airtime, ahead of the link delay");
     check(e.configure(topology(),&error),"reset for duplicate ingress");
     check(!e.send("A","C","pending",16,&error).isEmpty()&&e.advanceTo(5),"prepare partial experiment");
     const auto partial=e.scenario();

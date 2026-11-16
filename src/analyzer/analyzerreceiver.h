@@ -21,6 +21,7 @@ struct AnalyzerReceiverDevice {
     double minimumFrequencyHz = 0.0;
     double maximumFrequencyHz = 0.0;
     QString capabilitySummary;
+    QString uhdDeviceAddress;
 };
 
 struct AnalyzerReceiverSettings {
@@ -47,6 +48,10 @@ struct AnalyzerReceiverSettings {
     int nativeAdcBits = 0;
     QString nativeSampleFormat;
     QVector<double> agileScanFrequenciesHz;
+    QString uhdDeviceAddress;
+    double uhdRxGainDb = 30.0;
+    QString uhdRxAntenna;
+    QString uhdFpgaImagePath;
 };
 
 class AnalyzerReceiver final : public QObject {
@@ -56,7 +61,7 @@ public:
     ~AnalyzerReceiver() override;
 
     QVector<AnalyzerReceiverDevice> enumerate();
-    static QVector<AnalyzerReceiverDevice> enumerateDevices();
+    static QVector<AnalyzerReceiverDevice> enumerateDevices(bool includeNativeUhd = false);
     bool start(const AnalyzerReceiverSettings &settings);
     bool retune(double centerHz);
     bool setGains(int lnaGainDb, int vgaGainDb);

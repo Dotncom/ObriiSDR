@@ -2,6 +2,7 @@
 #include "radiosettings.h"
 #include "audiofilterchain.h"
 
+#include <QCryptographicHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QSet>
@@ -10,7 +11,8 @@
 
 namespace {
 bool rawSource(const QString &type) {
-    return type == "receiver_source" || type == "iq_source" || type == "network_input" || type == "playback";
+    return type == "receiver_source" || type == "iq_source" || type == "network_input" ||
+           type == "playback" || type == "lab_iq";
 }
 bool researchSettings(const QString &type) {
     return type == "oscilloscope" || type == "constellation" || type == "eye_diagram" || type == "digital_sync_lab";
@@ -35,7 +37,33 @@ bool dspIsBranchType(const QString &type) {
            type == "branch_audio_filter" || type == "branch_audio_output";
 }
 
+bool dspIsSignalBlock(const QString &type) {
+    return type == "lab_carrier" || type == "lab_modulator" || type == "lab_text" ||
+           type == "lab_audio" || type == "lab_image" || type == "lab_file" ||
+           type == "lab_cf32" || type == "lab_iq" || type == "lab_tx" ||
+           type == "lab_packet_decoder" || type == "lab_received";
+}
+
+DspSourceIdentity dspSignalSource(const QString &blockId) {
+    return {QStringLiteral("board-iq"), QString::fromLatin1(
+        QCryptographicHash::hash(blockId.toUtf8(), QCryptographicHash::Sha256).toHex())};
+}
+
+DspSourceIdentity dspPacketBranchSource(const QString &blockId) {
+    return {QStringLiteral("board-ddc"), dspSignalSource(blockId).channelId};
+}
+
 DspLinkKind dspLinkKind(const QString &source, const QString &target) {
+    if (target == "lab_modulator") {
+        if (source == "lab_carrier") return DspLinkKind::Carrier;
+        if (source == "lab_text" || source == "lab_audio" || source == "lab_image" || source == "lab_file")
+            return DspLinkKind::Payload;
+    }
+    if ((target == "lab_iq" && (source == "lab_modulator" || source == "lab_cf32")) ||
+        ((target == "lab_tx" || target == "lab_packet_decoder") && source == "lab_iq")) return DspLinkKind::LabIq;
+    if (source == "lab_packet_decoder" && target == "lab_received") return DspLinkKind::DecodedPayload;
+    if (source == "ddc_channelizer" && target == "lab_packet_decoder") return DspLinkKind::Iq;
+    if (dspIsSignalBlock(target)) return DspLinkKind::Invalid;
     if (source == "run_control" || source == "enable_control" || source == "frequency_control" || source == "fine_tune_control")
         return DspLinkKind::Control;
     if ((source == "spectrum_display" && target == "workspace_spectrum") ||
@@ -54,6 +82,7 @@ DspLinkKind dspLinkKind(const QString &source, const QString &target) {
     if ((source == "branch_demodulator" || source == "branch_audio_filter") &&
         (target == "branch_audio_filter" || target == "branch_audio_output")) return DspLinkKind::Audio;
     if (source == "branch_fft" && (target == "branch_spectrum" || target == "branch_waterfall")) return DspLinkKind::Spectrum;
+    if (dspIsSignalBlock(source) || dspIsSignalBlock(target)) return DspLinkKind::Invalid;
     if (dspIsBranchType(source) || dspIsBranchType(target)) return DspLinkKind::Invalid;
     return DspLinkKind::Documentation;
 }
@@ -66,17 +95,40 @@ QString dspLinkDescription(DspLinkKind kind, bool uk) {
     case DspLinkKind::Iq: return uk ? QStringLiteral("Потік IQ") : QStringLiteral("IQ stream");
     case DspLinkKind::Spectrum: return uk ? QStringLiteral("Спектральні кадри") : QStringLiteral("Spectrum frames");
     case DspLinkKind::Audio: return uk ? QStringLiteral("Незалежний потік PCM 48 кГц") : QStringLiteral("Independent 48 kHz PCM stream");
+    case DspLinkKind::Carrier: return uk ? QStringLiteral("Параметри носійної") : QStringLiteral("Carrier parameters");
+    case DspLinkKind::Payload: return uk ? QStringLiteral("Дані для модулятора") : QStringLiteral("Modulator payload");
+    case DspLinkKind::LabIq: return uk ? QStringLiteral("Лабораторний буфер I/Q") : QStringLiteral("Laboratory I/Q buffer");
+    case DspLinkKind::DecodedPayload: return uk ? QStringLiteral("Перевірені дані пакета") : QStringLiteral("Verified packet payload");
     case DspLinkKind::Invalid: return uk ? QStringLiteral("Несумісні типи потоків") : QStringLiteral("Incompatible stream types");
     default: return uk ? QStringLiteral("Лише схема: цей зв'язок не передає сигнал і не змінює порядок DSP")
                       : QStringLiteral("Diagram only: this link does not carry samples or change DSP order");
     }
 }
 
-DspGraphPlan compileDspGraph(const QJsonObject &graph) {
+QString dspLinkRateError(const QString &sourceType, const QJsonObject &sourceSettings,
+                         const QString &targetType, const QJsonObject &targetSettings, bool uk) {
+    // Lab IQ generation and CF32 playback use the explicitly configured rate.
+    // Receiver, network and PFB input rates are known only to the running pipeline.
+    if (sourceType != "lab_iq" || targetType != "ddc_channelizer") return {};
+    const int inputRate = sourceSettings.value("rate").toInt();
+    const double outputRate = targetSettings.value("outputRateHz").toDouble();
+    if (inputRate < 8000 || inputRate > 2000000 ||
+        !std::isfinite(outputRate) || outputRate < 1000.0 || outputRate > 2000000.0) return {};
+
+    const int decimation = std::clamp(targetSettings.value("decimation").toInt(), 1, 4096);
+    const double maximumRate = double(inputRate) / decimation;
+    if (outputRate <= maximumRate) return {};
+    return (uk ? QStringLiteral("Запитано %1 відл./с. Для цього входу IQ та децимації DDC доступно до %2 відл./с.")
+               : QStringLiteral("Requested %1 samples/s. This IQ input and DDC decimation allow up to %2 samples/s."))
+        .arg(outputRate, 0, 'f', 2).arg(maximumRate, 0, 'f', 2);
+}
+
+DspGraphPlan compileDspGraph(const QJsonObject &graph, bool uk) {
     DspGraphPlan plan;
     QHash<QString, QJsonObject> blocks;
     QHash<QString, QString> inputs;
     QHash<QString, QString> displaySettingsInputs;
+    QHash<QString, QSet<int>> labInputs;
     for (const auto &v : graph.value("blocks").toArray()) {
         const auto block = v.toObject();
         const QString id = block.value("id").toString();
@@ -92,6 +144,17 @@ DspGraphPlan compileDspGraph(const QJsonObject &graph) {
         }
         const auto kind = dspLinkKind(blocks[source].value("type").toString(), blocks[target].value("type").toString());
         if (kind == DspLinkKind::Invalid) { plan.errors << "Incompatible stream connection"; continue; }
+        if (kind == DspLinkKind::Carrier || kind == DspLinkKind::Payload || kind == DspLinkKind::LabIq ||
+            kind == DspLinkKind::DecodedPayload) {
+            auto &roles = labInputs[target];
+            if (roles.contains(int(kind))) plan.errors << "Multiple connections to the same laboratory input";
+            roles.insert(int(kind));
+            if (kind == DspLinkKind::LabIq && blocks[target].value("type") == "lab_packet_decoder") {
+                if (inputs.contains(target)) plan.errors << "The packet decoder accepts one I/Q input";
+                else inputs.insert(target, source);
+            }
+            continue;
+        }
         if (kind == DspLinkKind::Settings && mainDisplaySettings(blocks[source].value("type").toString())) {
             if (displaySettingsInputs.contains(target)) plan.errors << "Multiple display settings inputs are not supported";
             else displaySettingsInputs.insert(target, source);
@@ -154,6 +217,7 @@ DspGraphPlan compileDspGraph(const QJsonObject &graph) {
     // Compile only bounded typed branches; legacy main-path wires never replace the live receiver.
     QJsonArray execution;
     int activeBranches = 0;
+    int activePacketDecoders = 0;
     QHash<QString, QPair<int, int>> activePfbBanks;
     QStringList ids = blocks.keys();
     std::sort(ids.begin(), ids.end());
@@ -161,12 +225,17 @@ DspGraphPlan compileDspGraph(const QJsonObject &graph) {
         const auto block = blocks[id];
         if (block.value("type") != "ddc_channelizer" || !inputs.contains(id)) continue;
         const auto s = block.value("settings").toObject();
+        const QString parent = inputs.value(id);
+        const auto inputBlock = blocks.value(parent);
+        const QString rateError = dspLinkRateError(inputBlock.value("type").toString(),
+            inputBlock.value("settings").toObject(), block.value("type").toString(), s, uk);
+        if (!rateError.isEmpty()) plan.branchInputErrors.insert(id, rateError);
         DspBranchConfig branch;
         branch.id = id;
         branch.source = DspSourceIdentity::normalized(
             s.value("receiverId").toString(QStringLiteral("main")),
             s.value("channelId").toString(QStringLiteral("rx0")));
-        branch.enabled = s.value("enabled").toBool(false);
+        branch.enabled = s.value("enabled").toBool(false) && rateError.isEmpty();
         // Retain inactive routes for the board without reserving worker resources.
         if (branch.enabled && ++activeBranches > DspMaxBranches) { plan.errors << "At most eight DDC branches can run"; continue; }
         branch.frequencyHz = finiteValue(s, "frequencyHz", 0.0, 0.0, 8.0e9);
@@ -177,8 +246,9 @@ DspGraphPlan compileDspGraph(const QJsonObject &graph) {
         if (branch.firTaps != 16 && branch.firTaps != 32 && branch.firTaps != 64 &&
             branch.firTaps != 128 && branch.firTaps != 256) branch.firTaps = 32;
         branch.transitionHz = finiteValue(s, "transitionHz", 0.0, 0.0, 500000.0);
-        const QString parent = inputs.value(id);
-        branch.pfb = blocks.value(parent).value("type") == "pfb_channelizer";
+        branch.pfb = inputBlock.value("type") == "pfb_channelizer";
+        const QString rawInput = branch.pfb ? inputs.value(parent) : parent;
+        if (blocks.value(rawInput).value("type") == "lab_iq") branch.source = dspSignalSource(rawInput);
         if (branch.pfb) {
             if (!inputs.contains(parent) || !rawSource(blocks.value(inputs.value(parent)).value("type").toString())) {
                 plan.errors << "PFB requires a connected IQ source"; continue;
@@ -240,7 +310,18 @@ DspGraphPlan compileDspGraph(const QJsonObject &graph) {
             if (inputs.value(consumer) != id) continue;
             const auto target = blocks[consumer];
             const QString type = target.value("type").toString();
-            if (researchSettings(type)) {
+            if (type == "lab_packet_decoder") {
+                if (!branch.packetDecoderId.isEmpty()) {
+                    plan.errors << "Connect at most one packet decoder per DDC";
+                    continue;
+                }
+                if (branch.enabled && ++activePacketDecoders > 4) {
+                    plan.errors << "At most four live packet decoders can run";
+                    continue;
+                }
+                branch.packetDecoderId = consumer;
+                branch.packetSymbolRate = finiteValue(target.value("settings").toObject(), "symbols", 1200, 100, 96000);
+            } else if (researchSettings(type)) {
                 branch.iqConsumer = true;
                 branch.iqSamples = std::max(branch.iqSamples, std::clamp(target.value("settings").toObject().value("samples").toInt(4096), 256, 65536));
                 plan.researchRoutes.insert(consumer, id);
@@ -274,6 +355,7 @@ DspGraphPlan compileDspGraph(const QJsonObject &graph) {
             {"frequency", branch.frequencyHz},
             {"bandwidth", branch.bandwidthHz}, {"rate", branch.outputRateHz}, {"decimation", branch.decimation},
             {"enabled", branch.enabled}, {"external", branch.external}, {"iqConsumer", branch.iqConsumer}, {"iqSamples", branch.iqSamples}, {"ffts", ffts},
+            {"packetDecoderId", branch.packetDecoderId}, {"packetSymbolRate", branch.packetSymbolRate},
             {"firTaps", branch.firTaps}, {"transitionHz", branch.transitionHz}, {"pfb", branch.pfb},
             {"pfbChannels", branch.pfbChannels}, {"pfbTaps", branch.pfbTaps},
             {"audioId", branch.audioOutputId}, {"audioEnabled", branch.audioEnabled}, {"modulation", branch.modulation},

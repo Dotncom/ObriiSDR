@@ -11,6 +11,7 @@
 #include <deque>
 #include <array>
 #include <QColor>
+#include <QIcon>
 #include <QElapsedTimer>
 #include <QOpenGLTexture>
 #include <QMutex>
@@ -40,6 +41,15 @@ public:
         Waterfall3DWithMini = 2
     };
 
+    enum class ColorPalette {
+        Classic = 0,
+        Thermal = 1,
+        Ice = 2,
+        VioletYellow = 3,
+        Amber = 4,
+        Grayscale = 5
+    };
+
     enum class DiscontinuityKind {
         ProcessingQueueDrop,
         VisualSnapshotSkip
@@ -55,6 +65,8 @@ public:
     RenderBackend renderBackend() const;
     void setDisplayMode(DisplayMode mode);
     DisplayMode displayMode() const;
+    void setColorPalette(ColorPalette palette);
+    static QIcon colorPalettePreview(ColorPalette palette);
     void set3DResolutionDivisor(int divisor);
     void set3DHistoryRows(int rows);
     void set3DSurfaceStyle(int style);
@@ -76,6 +88,7 @@ public:
     void setAlternativeSpectrumGradientFill(bool enabled);
     void setAlternativeSpectrumGradientOpacity(int percent);
     void setLevelRange(float minLevel, float maxLevel);
+    void setDisplayLevelStep(int tenths) { displayLevelStepTenths = tenths; }
     void setBandMarkersEnabled(bool generalEnabled, bool amateurEnabled);
     void setBandMarkersCompact(bool compact);
     void setBandMarkers(const QVector<GraphBandMarker> &markers);
@@ -88,6 +101,8 @@ public:
                              int fftWindowType);
     void setFpsOverlayEnabled(bool enabled);
     void setExtendedInfoOverlayEnabled(bool enabled);
+    void setReceiverStatusText(const QString &text);
+    void updateReceiverStatusOverlay();
     void setAreaMeasurementEnabled(bool enabled);
     void setPauseControlVisible(bool visible);
     void setDisplayPaused(bool paused);
@@ -169,10 +184,10 @@ private:
     std::vector<float> pixelMaxData;
     std::vector<float> pixelFrequencyData;
     std::vector<float> pixelLevelData;
-    QColor valueToColor(float value, float contrastFactor, float sensitivityFactor);
     QColor valueToColors(float value) const;
     float normalizedLevel(float value) const;
     float yMin, yMax, contrast, sensitivity, levelMin, levelMax;
+    int displayLevelStepTenths = 0;
     double xMin, xMax;
     double metadataCenterFrequencyHz = 0.0;
     double metadataListeningFrequencyHz = 0.0;
@@ -186,6 +201,7 @@ private:
     int rowsPerFrame = 2;
     RenderBackend activeRenderBackend = RenderBackend::CpuTexture;
     DisplayMode activeDisplayMode = DisplayMode::Waterfall2D;
+    ColorPalette activeColorPalette = ColorPalette::Classic;
     std::unique_ptr<Waterfall3DRenderer> waterfall3DRenderer;
     bool waterfallProgramReady = false;
     bool waterfallProgramTried = false;
@@ -230,6 +246,7 @@ private:
     bool scanSegmentMarkersVisible = true;
     bool fpsOverlayEnabled = false;
     bool extendedInfoOverlayEnabled = false;
+    QString receiverStatusText;
     std::vector<float> scienceMaxHoldData;
     std::vector<float> scienceMinHoldData;
     std::vector<float> scienceAverageData;

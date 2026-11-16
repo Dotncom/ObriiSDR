@@ -227,8 +227,16 @@ bool NetworkController::peerSupportsCompactSpectrum(const QString &peerIdValue) 
     return compactSpectrumPeers.contains(peerForId(peerIdValue));
 }
 
+bool NetworkController::peerSupportsPackedSpectrum(const QString &peerIdValue) const {
+    return packedSpectrumPeers.contains(peerForId(peerIdValue));
+}
+
 bool NetworkController::peerSupportsBinaryAudio(const QString &peerIdValue) const {
     return binaryAudioPeers.contains(peerForId(peerIdValue));
+}
+
+bool NetworkController::peerSupportsUhdRxSpectrum(const QString &peerIdValue) const {
+    return uhdRxSpectrumPeers.contains(peerForId(peerIdValue));
 }
 
 void NetworkController::stop() {
@@ -441,7 +449,7 @@ bool NetworkController::setPeerStreamProfile(const QString &peerIdValue,
     if (!isReadyPeer(socket)) return false;
     const QString normalized = profile.trimmed().toLower();
     peerStreamProfiles.insert(socket,
-                              normalized == QStringLiteral("remote-vfo")
+                              normalized == QStringLiteral("remote-vfo") || normalized == QStringLiteral("uhd-tx")
                                   ? normalized
                                   : QStringLiteral("legacy"));
     return true;
@@ -515,7 +523,9 @@ void NetworkController::closePeerSocket(QTcpSocket *socket) {
         peerPriorityKeys.remove(peer);
         peerStreamProfiles.remove(peer);
         compactSpectrumPeers.remove(peer);
+        packedSpectrumPeers.remove(peer);
         binaryAudioPeers.remove(peer);
+        uhdRxSpectrumPeers.remove(peer);
         peerLastMessageTimers.remove(peer);
         processingPeerReads.remove(peer);
         peerSockets.removeAll(peer);
@@ -549,7 +559,9 @@ void NetworkController::closePeerSocket(QTcpSocket *socket) {
     peerPriorityKeys.clear();
     peerStreamProfiles.clear();
     compactSpectrumPeers.clear();
+    packedSpectrumPeers.clear();
     binaryAudioPeers.clear();
+    uhdRxSpectrumPeers.clear();
     peerLastMessageTimers.clear();
     processingPeerReads.clear();
     peerSocket = nullptr;
@@ -671,8 +683,7 @@ bool NetworkController::isReadyPeer(QTcpSocket *socket) const {
 }
 
 bool NetworkController::acceptsLegacyStream(QTcpSocket *socket) const {
-    return peerStreamProfiles.value(socket, QStringLiteral("legacy")) !=
-           QStringLiteral("remote-vfo");
+    return peerStreamProfiles.value(socket, QStringLiteral("legacy")) == QStringLiteral("legacy");
 }
 
 void NetworkController::promoteControllerIfNeeded() {
@@ -872,7 +883,12 @@ void NetworkController::processLine(QTcpSocket *socket, const QByteArray &line) 
             QJsonObject capabilities;
             capabilities[QStringLiteral("type")] = QStringLiteral("capabilities");
             capabilities[QStringLiteral("compactSpectrumS16")] = true;
+            capabilities[QStringLiteral("compactSpectrumU8")] = true;
             capabilities[QStringLiteral("binaryAudioPcmS16")] = true;
+            if (uhdRxSpectrumEnabled)
+                capabilities[QStringLiteral("uhdRxSpectrum")] = true;
+            if (uhdTxOnlyEnabled)
+                capabilities[QStringLiteral("uhdTxOnly")] = true;
             sendJsonToSocket(socket, capabilities);
             const QString message = QString("Control channel ready: %1:%2")
                                         .arg(clientSocket->peerAddress().toString())
@@ -908,16 +924,33 @@ void NetworkController::processLine(QTcpSocket *socket, const QByteArray &line) 
             compactSpectrumPeers.insert(socket);
         else
             compactSpectrumPeers.remove(socket);
+        if (command.value(QStringLiteral("compactSpectrumU8")).toBool(false))
+            packedSpectrumPeers.insert(socket);
+        else
+            packedSpectrumPeers.remove(socket);
         if (command.value(QStringLiteral("binaryAudioPcmS16")).toBool(false))
             binaryAudioPeers.insert(socket);
         else
             binaryAudioPeers.remove(socket);
+        if (command.value(QStringLiteral("uhdRxSpectrum")).toBool(false))
+            uhdRxSpectrumPeers.insert(socket);
+        else
+            uhdRxSpectrumPeers.remove(socket);
+        if (command.value(QStringLiteral("uhdTxOnly")).toBool(false))
+            setPeerStreamProfile(peerId(socket), QStringLiteral("uhd-tx"));
         return;
     }
     if (command.contains("payloadBytes")) {
         bool ok = false;
         const qint64 payloadBytes = command.value("payloadBytes").toVariant().toLongLong(&ok);
-        if (!ok || payloadBytes <= 0 || payloadBytes > (512LL * 1024LL * 1024LL)) {
+        const bool txIq = command.value("type") == QLatin1String("uhdTxIq");
+        if (!ok || payloadBytes <= 0 || payloadBytes > (512LL * 1024LL * 1024LL) ||
+            (txIq && (currentMode != NetworkMode::Server || socket != peerSocket ||
+                      payloadBytes > 16384 || payloadBytes % 4))) {
+            if (txIq && currentMode == NetworkMode::Server && peerSockets.contains(socket)) {
+                closePeerSocket(socket);
+                promoteControllerIfNeeded();
+            }
             setStatus(QString("Ignoring invalid binary payload header"));
             return;
         }

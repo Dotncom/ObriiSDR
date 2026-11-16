@@ -134,12 +134,17 @@ ObriiCli control agent stop
 Start returns its actual loopback port and a newly generated session token;
 status does not return the token. Do not save that start reply in shared logs.
 The JSON-line API is read-only by default, allows receiver controls only after
-the explicit local grant, and permanently denies file/TX access. No model is
-launched. A GUI Console can connect to it using the Remote selector, port and
-token. Binding is `127.0.0.1` only; use a trusted SSH tunnel or the existing SDR
-network client for a remote Raspberry. It is not native MCP. Detailed wire
-format/limits: `docs/command_control_api.md`; command contract:
-`docs/command_dispatcher.md`; GUI console: `docs/command_console.md`.
+the explicit local grant, and permanently denies file/TX access. The GUI
+Console connects with the Remote selector, port and token. The service listens
+on `127.0.0.1`. See [Command Control API](command_control_api.md) for the
+wire format and [GUI console](command_console.md) for setup.
+
+`ObriiCli mcp PORT` bridges this session to an MCP client over stdio. Pass
+the token in `OBRII_MCP_TOKEN` in the client's process environment. The adapter
+exposes only commands marked read-only, even if you grant receiver control.
+For a single status question, run `ObriiCli ask-local PORT MODEL "QUESTION"`.
+It sends one status snapshot to a running Ollama at `127.0.0.1:11434`. Set
+`MODEL` to an already installed model name. Neither command starts a model.
 
 ## Presets and reproducible experiments
 
@@ -691,6 +696,9 @@ ObriiCli module tx dmr --pcm-file voice.pcm --dmr-source 1234 --dmr-target 9 \
   --tx-sink file --freq 438.5M --output dmr.cf32
 ObriiCli module tx ft8 "CQ K1ABC FN42" --tx-sink virtual --freq 100M
 ObriiCli module tx ft4 "CQ K1ABC FN42" --tx-sink file --freq 100M --output ft4.cf32
+ObriiCli module tx m17 "TEST" --m17-source N0CALL --m17-destination @ALL --m17-can 0 --tx-sink file --freq 145.5M --output m17.cf32
+ObriiCli module tx m17-voice --wav-file recording.wav --m17-source N0CALL \
+  --m17-destination @ALL --m17-can 0 --tx-sink file --freq 145.5M --output m17-voice.cf32
 ObriiCli module tx cw "TEST" --tx-sink virtual --virtual-host 192.168.1.5 \
   --virtual-port 17661 --freq 100M
 ObriiCli module tx lab --lab-preset docs/cli_signal_lab_ofdm.json \
@@ -711,6 +719,24 @@ ObriiCli module tx cw "TEST" --tx-sink uhd --rf-confirm \
   --freq 144.5M --tx-device 0 --tx-channel 0 --rate 2M --device-rate 2M \
   --tx-gain-db 0
 ```
+
+To accept KISS packets from a TCP client, start a local virtual IQ receiver at
+48 kS/s and the same center, then run `ObriiCli module tx kiss 8002
+obrii-virtual-iq 144.8M`. The command binds loopback and uses the port 0 AX.25 UI
+path. Run the RX-only KISS module on another port if needed.
+
+`ObriiCli module tx kiss-uhd PORT CENTER_HZ --rf-confirm` opens a local KISS
+port for AX.25 UI bursts on a standalone UHD transmitter. It opens the device
+on the first valid frame and ends each burst with UHD end-of-burst metadata.
+The default arm expires in 60 seconds. Set the device, channel, gain, FPGA
+image and duration using `module tx kiss-uhd --help`.
+
+M17 SMS and Codec2 3200 voice TX both use 4FSK. File and virtual sinks default to 48 kS/s.
+For UHD the generator follows `--device-rate` up to 2 MS/s if `--rate` is
+omitted. `m17-voice` requires the Codec2 runtime with encoder support. It
+converts RIFF/WAVE to mono 8 kHz audio and accepts up to 60 seconds, 32 MiB
+of input and 20 million generated IQ samples. The software loopback checks
+the SMS and voice paths through the production receiver.
 
 The `file` sink creates CF32LE IQ and a JSON sidecar; it refuses to overwrite
 existing files. The `virtual` sink sends paced IQ to a local IPC virtual RX
@@ -992,6 +1018,8 @@ cd ~/ObriiSDR-raspberry-source
 ```
 
 The control server listens **only on 127.0.0.1** (port 17675 by default).
+The CLI reports command-write and reply failures separately. If the command
+was written but no reply arrived, check status before sending it again.
 Use a local terminal or SSH for control; it does not expose an unauthenticated
 control port on the LAN. Without `--serve`, `run` prints one JSON status line
 per second and stops on Ctrl+C, `control stop`, or `--seconds`; a server stays
@@ -1129,6 +1157,18 @@ move the demodulator within the recorded band. Playback ends at EOF without
 This uses the same server/client, spectrum, audio and virtual-IQ output paths
 as a live receiver, making repeatable tests possible without SDR hardware.
 
+## WSPR and JS8 WAV decoding
+
+```sh
+ObriiCli module wspr 261113_1504.wav 14.0956
+ObriiCli module js8 261113_150015.wav
+```
+
+Use one WSPR-2 or JS8 Normal slot in a 12 kHz mono PCM16 WAV with a canonical
+44-byte header and a UTC timestamp in the filename. The command returns the
+decoder output as JSON. It looks for `wsprd` from WSJT-X or `js8` from JS8Call
+on PATH. Set `OBRII_WSPRD` or `OBRII_JS8_DECODER` to select an absolute path.
+
 ## Recording and virtual receiver
 
 ```bash
@@ -1172,7 +1212,9 @@ queues, drop/delay counters, and optional `--delay-ms`, `--noise-sigma`,
 `--seed` and `--collision-ms` experiments. It forwards whole frames in arrival
 order rather than summing simultaneous IQ waveforms. The opt-in
 `--mix-rate 48000 --mix-center 1000000` mode sums sample-aligned CF32 per RX
-with bounded buffers and per-link gain/delay. TX must use the exact rate/center;
+with bounded buffers and per-link gain, delay and optional `frequencyOffsetHz`.
+The offset shifts baseband IQ while retaining the configured center in frame
+metadata. TX must use the exact rate/center;
 source clocks need synchronization for accurate inter-host alignment. This is
 not a coherent physical RF channel or a routed mesh network, and it has no authentication; use loopback or
 a trusted lab network. Add `--scenario docs/virtual_iq_link_scenario.json` to

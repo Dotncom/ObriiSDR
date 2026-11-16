@@ -1,4 +1,5 @@
 #include "meshproject.h"
+#include "../openradio/virtualiqhub.h"
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
@@ -70,6 +71,8 @@ QJsonObject Link::json() const {
     if(txPort!="radio")result["txPort"]=txPort;
     if(rxPort!="radio")result["rxPort"]=rxPort;
     if(!modem.isEmpty())result["modem"]=modemJson(modem);
+    if(frequencyOffsetHz!=0)result["frequencyOffsetHz"]=frequencyOffsetHz;
+    if(clockPpm!=0)result["clockPpm"]=clockPpm;
     return result;
 }
 QJsonArray defaultNodePorts(){
@@ -119,6 +122,12 @@ QString validateLinkOptions(const Link &link){
     if(modem.contains("ldro")&&!QStringList{"auto","on","off"}.contains(modem.value("ldro").toString()))return "Invalid LoRa LDRO mode";
     return {};
 }
+bool validLinkFrequencyOffset(double offsetHz,int sampleRate,bool mixIq){
+    return offsetHz==0||(mixIq&&std::isfinite(offsetHz)&&std::abs(offsetHz)<sampleRate/2.0);
+}
+bool validLinkClockPpm(double ppm,bool mixIq){
+    return ppm==0||(mixIq&&std::isfinite(ppm)&&std::abs(ppm)<=VirtualIqLinkSettings::MaximumClockPpm);
+}
 QJsonObject Project::json() const {
     QJsonArray n,l; for(const auto &v:nodes)n.append(v.json()); for(const auto &v:links)l.append(v.json());
     return {{"format","obrii-mesh-project"},{"version",1},{"centerHz",centerHz},{"sampleRate",sampleRate},{"mixIq",mixIq},{"nodes",n},{"links",l}};
@@ -154,6 +163,10 @@ QString Project::validate(const QVector<HostPreset> &presets) const {
         const QString key=l.tx+"/"+l.rx;
         if(!ids.contains(l.tx)||!ids.contains(l.rx)||l.tx==l.rx||pairs.contains(key)||!std::isfinite(l.gainDb)||l.gainDb< -120||l.gainDb>60||l.delayMs<0||l.delayMs>500)
             return "Invalid/duplicate link: "+key;
+        if(!validLinkFrequencyOffset(l.frequencyOffsetHz,sampleRate,mixIq))
+            return "Link frequency offset requires sample-mix mode and must be below half the sample rate: "+key;
+        if(!validLinkClockPpm(l.clockPpm,mixIq))
+            return "Link clock error requires sample-mix mode and must be within ±1000 ppm: "+key;
         pairs.insert(key);
         const auto options=validateLinkOptions(l);if(!options.isEmpty())return options;
     }
@@ -179,6 +192,14 @@ bool Project::parse(const QJsonObject &o, Project *out, QString *error) {
         if((l.contains("bearer")&&!l.value("bearer").isString())||(l.contains("txPort")&&!l.value("txPort").isString())||
             (l.contains("rxPort")&&!l.value("rxPort").isString())||(l.contains("modem")&&!l.value("modem").isObject()))return fail(error,"Invalid link selectors/modem schema");
         Link link{l.value("tx").toString(),l.value("rx").toString(),l.value("gainDb").toDouble(),l.value("delayMs").toInt(),l.value("enabled").toBool()};
+        const auto offset=l.value("frequencyOffsetHz");
+        if(!offset.isUndefined()&&(!offset.isDouble()||!validLinkFrequencyOffset(offset.toDouble(),p.sampleRate,p.mixIq)))
+            return fail(error,"Invalid link frequency offset for this medium");
+        link.frequencyOffsetHz=offset.toDouble();
+        const auto clock=l.value("clockPpm");
+        if(!clock.isUndefined()&&(!clock.isDouble()||!validLinkClockPpm(clock.toDouble(),p.mixIq)))
+            return fail(error,"Invalid link clock error for this medium");
+        link.clockPpm=clock.toDouble();
         link.bearer=l.value("bearer").toString("inherit");link.txPort=l.value("txPort").toString("radio");link.rxPort=l.value("rxPort").toString("radio");link.modem=l.value("modem").toObject();
         const auto options=validateLinkOptions(link);if(!options.isEmpty())return fail(error,options);p.links.push_back(link);
     }

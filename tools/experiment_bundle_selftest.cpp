@@ -48,7 +48,8 @@ void rejectedRead(const QString &manifest) {
         "Rejected bundle exposed stale or unverified contents");
 }
 void testMissingIqPairs(const QDir &dir) {
-    const QStringList suffixes{"_channel_iq.wav", "_channel_iq.json", "_full_iq_s8.iq8", "_full_iq_s8.json"};
+    const QStringList suffixes{"_channel_iq.wav", "_channel_iq.json", "_full_iq_s8.iq8", "_full_iq_s8.json",
+                              "_full_iq_s16.cs16", "_full_iq_s16.json"};
     for (int i = 0; i < suffixes.size(); ++i) {
         const auto base = dir.filePath(QStringLiteral("missing-%1").arg(i));
         const auto source = base + "_spectrum.fbspec"; fixture(source);
@@ -72,6 +73,32 @@ void testTraversal(const QString &bundle) {
         rejectedRead(path);
     }
     writeBytes(path, original);
+}
+
+void testFullIq16Bundle(const QDir &dir) {
+    const auto base=dir.filePath("quality16");
+    fixture(base+"_spectrum.fbspec");
+    const QByteArray iq=QByteArray::fromHex("cd0c33f3002000e000000000ff7f0080");
+    writeBytes(base+"_full_iq_s16.cs16",iq);
+    writeBytes(base+"_full_iq_s16.json",QJsonDocument(QJsonObject{
+        {"format","full_iq_raw_s16le_interleaved"},{"sampleEncoding","ci16_le"},
+        {"sampleRate",192000.},{"bytesWritten",iq.size()},{"sampleCount",4},
+        {"inputGain",1.},{"sampleScale",1./32768}}).toJson());
+    writeBytes(base+"_full_iq_s16.sigmf-meta",QJsonDocument(QJsonObject{
+        {"global",QJsonObject{{"core:datatype","ci16_le"},{"core:sample_rate",192000.}}}}).toJson());
+    const auto destination=dir.filePath("quality16-bundle");
+    writeBundle(destination,base+"_spectrum.fbspec");
+    ExperimentBundle::Contents contents;
+    QString error;
+    require(ExperimentBundle::read(QDir(destination).filePath("manifest.json"),contents,&error),
+            "quality IQ16 bundle read failed");
+    QFile data(QDir(destination).filePath("recording_full_iq_s16.cs16"));
+    require(data.open(QIODevice::ReadOnly) && data.readAll()==iq,"quality IQ16 bundle changed IQ samples");
+    QFile sidecar(QDir(destination).filePath("recording_full_iq_s16.json"));
+    require(sidecar.open(QIODevice::ReadOnly),"quality IQ16 sidecar missing");
+    const auto metadata=QJsonDocument::fromJson(sidecar.readAll()).object();
+    require(metadata["sampleEncoding"]=="ci16_le" && metadata["sampleScale"].toDouble()==1./32768,
+            "quality IQ16 bundle lost encoding or scale");
 }
 void testCancellation(const QDir &dir, const QString &validBundle) {
     const auto source = dir.filePath("cancel_spectrum.fbspec"); fixture(source, 131072);
@@ -215,6 +242,7 @@ int main(int argc, char **argv) {
         writeBytes(yFactorAttachment, originalYFactor);
         require(!ExperimentBundle::write(destination, source, context, &error), "existing destination overwritten");
         testMissingIqPairs(dir);
+        testFullIq16Bundle(dir);
         testTraversal(destination);
         testCancellation(dir, destination);
         testActiveWriters(dir);

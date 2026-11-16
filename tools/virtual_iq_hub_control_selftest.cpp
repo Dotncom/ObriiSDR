@@ -209,6 +209,18 @@ int main(int argc,char **argv) {
     check(medium.takeReady("C",2200000000LL).isEmpty()&&hub.takeDue("C",1400).isEmpty(),"unrelated receiver remains isolated");
     envelope["command"]="status";reply=request(control,envelope);
     check(reply.value("revision")=="3"&&reply.value("links").toArray().first().toObject().value("delayMs")==8&&!reply.contains("token"),"status reports applied link without credentials");
+    envelope["command"]="setLink";envelope["expectedRevision"]="3";
+    link["frequencyOffsetHz"]=4000;envelope["args"]=link;
+    reply=request(control,envelope);
+    check(reply.value("errorCode")=="link_capacity"&&reply.value("revision")=="3","Nyquist offset rejected atomically");
+    link["frequencyOffsetHz"]=-250;envelope["args"]=link;
+    reply=request(control,envelope);
+    check(reply.value("revision")=="4"&&reply.value("link").toObject().value("frequencyOffsetHz")==-250,
+          "frequency offset acknowledged and reported");
+    envelope["expectedRevision"]="4";link.remove("frequencyOffsetHz");link["gainDb"]=-4;envelope["args"]=link;
+    reply=request(control,envelope);
+    check(reply.value("revision")=="5"&&reply.value("link").toObject().value("frequencyOffsetHz")==-250,
+          "legacy gain update preserves the frequency offset");
     QTcpSocket idle;idle.connectToHost(QHostAddress::LocalHost,control.port());
     check(waitFor([&]{return idle.state()==QAbstractSocket::ConnectedState;}),"idle client connects");
     check(waitFor([&]{return idle.state()==QAbstractSocket::UnconnectedState;},2600),"idle client timeout bounded");
