@@ -146,7 +146,7 @@ QString AnalyzerMainWindow::uiText(const QString &english) const {
         {QStringLiteral("Connect Obrii"), QStringLiteral("Підключити Obrii")},
         {QStringLiteral("Disconnect"), QStringLiteral("Відключити")},
         {QStringLiteral("Export CSV"), QStringLiteral("Експорт CSV")},
-        {QStringLiteral("Multi-SDR..."), QStringLiteral("Multi-SDR...")},
+        {QStringLiteral("Multi-SDR"), QStringLiteral("Мульти-SDR")},
         {QStringLiteral("Instrument lab..."), QStringLiteral("Лабораторія приладів...")},
         {QStringLiteral("  No source"), QStringLiteral("  Немає джерела")},
         {QStringLiteral("Scale:"), QStringLiteral("Масштаб:")},
@@ -214,7 +214,7 @@ QString AnalyzerMainWindow::uiText(const QString &english) const {
         {QStringLiteral("Current"), QStringLiteral("Поточна")},
         {QStringLiteral("Clear traces"), QStringLiteral("Очистити траси")},
         {QStringLiteral("Markers"), QStringLiteral("Маркери")},
-        {QStringLiteral("Pairs..."), QStringLiteral("Пари...")},
+        {QStringLiteral("Pairs"), QStringLiteral("Пари")},
         {QStringLiteral("No active markers"), QStringLiteral("Немає активних маркерів")},
         {QStringLiteral("Peak"), QStringLiteral("Пік")},
         {QStringLiteral("Prev"), QStringLiteral("Попер.")},
@@ -345,7 +345,7 @@ void AnalyzerMainWindow::buildUi() {
     playButton = new QPushButton(QStringLiteral("Play"), this);
     connectButton = new QPushButton(QStringLiteral("Connect Obrii"), this);
     auto *exportButton = new QPushButton(QStringLiteral("Export CSV"), this);
-    auto *multiSdrButton = new QPushButton(QStringLiteral("Multi-SDR..."), this);
+    auto *multiSdrButton = new QPushButton(QStringLiteral("Multi-SDR"), this);
     auto *instrumentLabButton = new QPushButton(QStringLiteral("Instrument lab..."), this);
     toolbar->addWidget(openButton);
     toolbar->addWidget(playButton);
@@ -762,7 +762,7 @@ void AnalyzerMainWindow::buildUi() {
     auto *previousButton = new QPushButton(QStringLiteral("Prev"), markerBox);
     auto *nextButton = new QPushButton(QStringLiteral("Next"), markerBox);
     auto *clearButton = new QPushButton(QStringLiteral("Clear"), markerBox);
-    auto *pairsButton = new QPushButton(QStringLiteral("Pairs..."), markerBox);
+    auto *pairsButton = new QPushButton(QStringLiteral("Pairs"), markerBox);
     markerRow->addWidget(markerCombo);
     markerRow->addWidget(peakButton);
     markerRow->addWidget(previousButton);

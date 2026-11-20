@@ -222,6 +222,11 @@ TransmitDialog::TransmitDialog(const QString &language, QWidget *parent)
     resize(qMin(600, qRound(available.width() * 0.5)),
            qMin(680, qRound(available.height() * 0.8)));
     buildUi();
+    networkDmrRelayIdleTimer = new QTimer(this);
+    networkDmrRelayIdleTimer->setSingleShot(true);
+    networkDmrRelayIdleTimer->setInterval(850);
+    connect(networkDmrRelayIdleTimer, &QTimer::timeout,
+            this, &TransmitDialog::stopNetworkDmrRelay);
     populateAudioInputs();
     populateHackRfDevices();
     loadSettings();
@@ -665,7 +670,7 @@ void TransmitDialog::buildUi() {
     messageEdit = new QPlainTextEdit(messageBox);
     messageEdit->setPlaceholderText(QStringLiteral("CQ TEST KN34 / HELLO WORLD"));
     messageEdit->setMaximumBlockCount(20);
-    messageEdit->setMinimumHeight(64);
+    messageEdit->setFixedHeight(32);
     messageLayout->addWidget(messageEdit);
 
     QGroupBox *mediaBox = new QGroupBox(this);
@@ -1199,7 +1204,7 @@ void TransmitDialog::cancelAutomaticFt8() {
                           QString::fromUtf8(u8"Автоматичну FT8-передачу скасовано.")));
 }
 void TransmitDialog::updateTexts() {
-    setWindowTitle(text(QStringLiteral("Transmitter laboratory"), QString::fromUtf8(u8"Лабораторія передавача")));
+    setWindowTitle(text(QStringLiteral("Transmitter"), QString::fromUtf8(u8"Передавач")));
     if (auto *box = findChild<QGroupBox *>(QStringLiteral("txHardwareBox")))
         box->setTitle(text(QStringLiteral("Device / backend and safety"), QString::fromUtf8(u8"Пристрій / бекенд і безпека")));
     if (auto *box = findChild<QGroupBox *>(QStringLiteral("txSignalBox")))
@@ -1415,7 +1420,7 @@ void TransmitDialog::updateTexts() {
     stopButton->setText(text(QStringLiteral("Stop"), QStringLiteral("Стоп")));
     stopButton->setToolTip(text(QStringLiteral("Stop transmission"), QStringLiteral("Зупинити передачу")));
     exportButton->setText(text(QStringLiteral("Export IQ…"), QStringLiteral("Експорт IQ…")));
-    signalLabButton->setText(text(QStringLiteral("Signal lab…"), QStringLiteral("Лаб. сигналів…")));
+    signalLabButton->setText(text(QStringLiteral("Signal generator"), QStringLiteral("Ген. сигналів")));
     signalLabButton->setToolTip(text(QStringLiteral("Open the signal laboratory"),
                                      QStringLiteral("Відкрити лабораторію сигналів")));
     ft8UtcCheck->setText(text(QStringLiteral("FT8 UTC"), QStringLiteral("FT8 UTC")));
@@ -2792,6 +2797,106 @@ bool TransmitDialog::configureDmrEncoder(const TxConfiguration &configuration, Q
     return configured;
 }
 
+bool TransmitDialog::configureRawDmrRelay(const TxConfiguration &configuration, QString *error) {
+    if (!dmrEncoder) dmrEncoder = std::make_unique<DmrTransmitEncoder>();
+    DmrTxParameters parameters;
+    parameters.outputSampleRate = configuration.sampleRate;
+    parameters.level = configuration.level;
+    parameters.colorCode = configuration.dmrColorCode;
+    parameters.timeslot = configuration.dmrTimeslot;
+    parameters.sourceId = configuration.dmrSourceId;
+    parameters.destinationId = configuration.dmrDestinationId;
+    dmrCallActive = false;
+    return dmrEncoder->configureRawRelay(parameters, error);
+}
+
+bool TransmitDialog::enqueueNetworkDmrRelayFrame(const QByteArray &payload,
+                                                  int colorCode,
+                                                  int timeslot,
+                                                  quint32 sourceId,
+                                                  quint32 targetId,
+                                                  QString *error) {
+    const auto fail = [this, error](const QString &message) {
+        if (error) *error = message;
+        setStatus(message, true);
+        return false;
+    };
+    if (payload.size() != 33 || colorCode < 0 || colorCode > 15 ||
+        (timeslot != 1 && timeslot != 2) || !sourceId || !targetId)
+        return fail(text(QStringLiteral("Invalid network DMR relay frame"),
+                         QString::fromUtf8(u8"Некоректний мережевий DMR-кадр для ретрансляції")));
+    if (!networkDmrRelayActive) {
+        if (activeBackend && activeBackend->isRunning())
+            return fail(text(QStringLiteral("Stop the current transmission before enabling DMR relay"),
+                             QString::fromUtf8(u8"Зупиніть поточну передачу перед увімкненням DMR-ретрансляції")));
+        if (selectedModulation() != TxModulation::Dmr)
+            return fail(text(QStringLiteral("Select DMR in the transmitter before enabling network relay"),
+                             QString::fromUtf8(u8"Оберіть DMR у передавачі перед увімкненням мережевої ретрансляції")));
+        if (remoteUhdSelected()) refreshUhdOutput();
+        activeBackend = selectedBackend();
+        if (!activeBackend) return fail(text(QStringLiteral("No transmitter backend is selected"),
+                                             QString::fromUtf8(u8"Не вибрано backend передавача")));
+        if (activeBackend->isRfCapable() && qEnvironmentVariableIntValue("OBRII_DMR_GATEWAY_ALLOW_RF_RELAY") != 1) {
+            activeBackend = nullptr;
+            return fail(text(QStringLiteral("Hardware DMR relay requires OBRII_DMR_GATEWAY_ALLOW_RF_RELAY=1"),
+                             QString::fromUtf8(u8"Апаратна DMR-ретрансляція потребує OBRII_DMR_GATEWAY_ALLOW_RF_RELAY=1")));
+        }
+        if (!authorizeRfOutput()) {
+            activeBackend = nullptr;
+            return false;
+        }
+        TxConfiguration configuration = configurationFromUi();
+        if (remoteUhdSelected()) configuration.uhdArmCode = uhdArmCodeEdit->text().trimmed();
+        uhdArmCodeEdit->clear();
+        if (configuration.dmrColorCode != colorCode || configuration.dmrTimeslot != timeslot) {
+            activeBackend = nullptr;
+            return fail(text(QStringLiteral("Relay frame colour code or timeslot does not match the TX DMR settings"),
+                             QString::fromUtf8(u8"Колірний код або слот кадру ретрансляції не відповідає налаштуванням TX DMR")));
+        }
+        configuration.liveSource = true;
+        configuration.signalBandwidthHz = 12500.0;
+        activeConfiguration = configuration;
+        QString startupError;
+        if (!configureRawDmrRelay(configuration, &startupError) ||
+            !activeBackend->start(configuration, &startupError)) {
+            if (activeBackend) activeBackend->stop();
+            activeBackend = nullptr;
+            if (dmrEncoder) dmrEncoder->reset();
+            return fail(startupError);
+        }
+        networkDmrRelayActive = true;
+        startButton->setEnabled(false);
+        stopButton->setEnabled(true);
+        sourceCombo->setEnabled(false);
+        modulationCombo->setEnabled(false);
+        backendCombo->setEnabled(false);
+    }
+    QString relayError;
+    const QVector<std::complex<float>> iq = dmrEncoder->modulateRawRelayBurst(payload, &relayError);
+    if (iq.isEmpty() || !writeActiveIq(iq.constData(), iq.size(), &relayError)) {
+        stopNetworkDmrRelay();
+        return fail(relayError.isEmpty()
+                        ? text(QStringLiteral("Could not queue a DMR relay frame"),
+                               QString::fromUtf8(u8"Не вдалося поставити DMR-кадр ретрансляції в чергу"))
+                        : relayError);
+    }
+    preview->setIq(iq);
+    networkDmrRelayIdleTimer->start();
+    setStatus(text(QStringLiteral("DMR network relay active: %1 -> %2, TS%3")
+                       .arg(sourceId).arg(targetId).arg(timeslot),
+                   QString::fromUtf8(u8"DMR-ретрансляція з мережі активна: %1 → %2, TS%3")
+                       .arg(sourceId).arg(targetId).arg(timeslot)));
+    return true;
+}
+
+void TransmitDialog::stopNetworkDmrRelay() {
+    if (!networkDmrRelayActive) return;
+    networkDmrRelayActive = false;
+    if (networkDmrRelayIdleTimer) networkDmrRelayIdleTimer->stop();
+    stopTransmission(text(QStringLiteral("DMR network relay idle timeout"),
+                          QString::fromUtf8(u8"Тайм-аут простою мережевої DMR-ретрансляції")));
+}
+
 bool TransmitDialog::beginDmrCall(QString *error) {
     if (!dmrEncoder) {
         if (error) *error = QStringLiteral("DMR encoder is not configured");
@@ -3389,6 +3494,8 @@ void TransmitDialog::finishUhdWaveform() {
 }
 
 void TransmitDialog::stopTransmission(const QString &reason) {
+    networkDmrRelayActive = false;
+    if (networkDmrRelayIdleTimer) networkDmrRelayIdleTimer->stop();
     const bool virtualMicrophone = activeBackend == &virtualSignal &&
         (sourceCombo->currentData().toString() == QStringLiteral("microphone") ||
          sourceCombo->currentData().toString() == QStringLiteral("microphone-ptt"));

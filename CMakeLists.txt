@@ -1192,6 +1192,13 @@ include_directories(BEFORE
     "${CMAKE_SOURCE_DIR}/src/openradio"
     "${CMAKE_SOURCE_DIR}/src/wireless")
 add_executable(ObriiSDR ${SOURCES})
+# The executable checks a beside-it translations.json after the bundled
+# resource. Keep that editable runtime copy synchronized during ordinary
+# builds; otherwise an older file silently overrides freshly compiled labels.
+add_custom_command(TARGET ObriiSDR POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/translations.json"
+        "$<TARGET_FILE_DIR:ObriiSDR>/translations.json")
 # These two UI modules are also included from the main window translation
 # units.  Keep their directories attached at target creation time: this is
 # required by the Visual Studio generator when it emits per-configuration

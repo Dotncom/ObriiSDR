@@ -279,7 +279,7 @@ quint32 DmrTransmitEncoder::currentPrivacyMiValue() const {
     return currentPrivacyMi;
 }
 
-bool DmrTransmitEncoder::configure(const DmrTxParameters &next, QString *error) {
+bool DmrTransmitEncoder::validateParameters(const DmrTxParameters &next, QString *error) const {
     if (next.outputSampleRate < InternalSampleRate || next.outputSampleRate > 1000000) {
         if (error) *error = QStringLiteral("DMR generator rate must be between 24 kHz and 1 MHz");
         return false;
@@ -290,6 +290,11 @@ bool DmrTransmitEncoder::configure(const DmrTxParameters &next, QString *error) 
         if (error) *error = QStringLiteral("Invalid DMR Color Code, time slot or 24-bit radio ID");
         return false;
     }
+    return true;
+}
+
+bool DmrTransmitEncoder::configure(const DmrTxParameters &next, QString *error) {
+    if (!validateParameters(next, error)) return false;
     if (!vocoder.canEncode()) {
         if (error) *error = QStringLiteral("No DMR AMBE+2 encoder backend is available (OpenDMR backend required)");
         return false;
@@ -316,6 +321,20 @@ bool DmrTransmitEncoder::configure(const DmrTxParameters &next, QString *error) 
     parameters.level = (std::clamp)(parameters.level, 0.0f, 0.95f);
     configured = true;
     resetCallState();
+    return true;
+}
+
+bool DmrTransmitEncoder::configureRawRelay(const DmrTxParameters &next, QString *error) {
+    if (!validateParameters(next, error)) return false;
+    parameters = next;
+    // The payload is already assembled (and can itself be encrypted).  Do not
+    // derive or apply any privacy stream in the relay modulator.
+    parameters.privacyMode = DMR_PRIVACY_NONE;
+    parameters.privacyKey.clear();
+    parameters.level = (std::clamp)(parameters.level, 0.0f, 0.95f);
+    resetCallState();
+    configured = true;
+    active = true;
     return true;
 }
 
@@ -549,7 +568,15 @@ QVector<std::complex<float>> DmrTransmitEncoder::modulateBytes(const QByteArray 
         const int left = (std::min)(internal.size() - 1, static_cast<int>(position));
         const int right = (std::min)(internal.size() - 1, left + 1);
         const float fraction = static_cast<float>(position - left);
-        output[index] = internal[left] + (internal[right] - internal[left]) * fraction;
+        // DMR is continuous-phase 4FSK.  Interpolating I and Q directly makes
+        // the vector shorter between two phase points, i.e. it accidentally
+        // turns a constant-envelope signal into AM.  Interpolate the wrapped
+        // phase instead and restore the configured RF level explicitly.
+        const double leftPhase = std::arg(internal[left]);
+        const double rightPhase = std::arg(internal[right]);
+        const double delta = std::remainder(rightPhase - leftPhase, 2.0 * Pi);
+        output[index] = std::polar(parameters.level,
+                                   static_cast<float>(leftPhase + delta * fraction));
     }
     return output;
 }
@@ -689,4 +716,17 @@ QVector<std::complex<float>> DmrTransmitEncoder::finish(QString *error) {
     audioInput.clear();
     pcm8k.clear();
     return result;
+}
+
+QVector<std::complex<float>> DmrTransmitEncoder::modulateRawRelayBurst(const QByteArray &payload,
+                                                                         QString *error) {
+    if (!configured || !active) {
+        if (error) *error = QStringLiteral("Raw DMR relay is not configured.");
+        return {};
+    }
+    if (payload.size() != ActiveBurstBytes) {
+        if (error) *error = QStringLiteral("Raw DMR relay requires one 33-byte burst.");
+        return {};
+    }
+    return modulateBytes(withFill(payload));
 }

@@ -416,7 +416,7 @@ void MultiVfoWidget::setLanguage(bool useUkrainian) {
     removeButton->setToolTip(ukrainian ? QStringLiteral("Видалити VFO") : QStringLiteral("Remove VFO"));
     upButton->setToolTip(ukrainian ? QStringLiteral("Підняти") : QStringLiteral("Move up"));
     downButton->setToolTip(ukrainian ? QStringLiteral("Опустити") : QStringLiteral("Move down"));
-    monitorButton->setText(ukrainian ? QStringLiteral("Слухати обраний") : QStringLiteral("Monitor selected"));
+    monitorButton->setText(ukrainian ? QStringLiteral("Слухати") : QStringLiteral("Monitor"));
     mosaicButton->setText(ukrainian ? QStringLiteral("Мозаїка") : QStringLiteral("Mosaic"));
     viewModeCombo->setItemText(0, ukrainian ? QStringLiteral("Спектр") : QStringLiteral("Spectrum"));
     viewModeCombo->setItemText(1, ukrainian ? QStringLiteral("Водоспад") : QStringLiteral("Waterfall"));

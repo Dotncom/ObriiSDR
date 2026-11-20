@@ -32,12 +32,18 @@ public:
     bool canEncodeVoice() const;
     quint32 currentPrivacyMiValue() const;
     bool configure(const DmrTxParameters &parameters, QString *error = nullptr);
+    // Relay mode preserves an already encoded 33-byte on-air DMR burst. It
+    // intentionally does not need an AMBE encoder and does not synthesize LC,
+    // headers or voice frames.
+    bool configureRawRelay(const DmrTxParameters &parameters, QString *error = nullptr);
     bool isActive() const;
 
     QVector<std::complex<float>> begin(QString *error = nullptr);
     QVector<std::complex<float>> pushAudio(const QVector<float> &audio,
                                            QString *error = nullptr);
     QVector<std::complex<float>> finish(QString *error = nullptr);
+    QVector<std::complex<float>> modulateRawRelayBurst(const QByteArray &payload,
+                                                        QString *error = nullptr);
     void reset();
 
     static QByteArray buildLinkControlBurst(const DmrTxParameters &parameters,
@@ -63,6 +69,7 @@ private:
     void appendIq(QVector<std::complex<float>> &target,
                   const QVector<std::complex<float>> &source) const;
     void resetCallState();
+    bool validateParameters(const DmrTxParameters &parameters, QString *error) const;
 
     DmrVocoder vocoder;
     DmrTxParameters parameters;

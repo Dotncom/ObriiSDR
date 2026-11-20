@@ -64,6 +64,15 @@ public:
     bool startPreparedFt8Automatically(QString *error = nullptr);
     void cancelAutomaticFt8();
     void startLaboratoryTransmission(const SignalLabGenerationResult &result, double centerHz = -1.0);
+    // Accept one already-encoded Homebrew DMR burst.  This is intended for a
+    // local relay controller, not manual voice generation.  Hardware RF is
+    // additionally gated by OBRII_DMR_GATEWAY_ALLOW_RF_RELAY=1.
+    bool enqueueNetworkDmrRelayFrame(const QByteArray &payload,
+                                     int colorCode,
+                                     int timeslot,
+                                     quint32 sourceId,
+                                     quint32 targetId,
+                                     QString *error = nullptr);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -106,6 +115,8 @@ private:
     QVector<std::complex<float>> modulateActiveAudio(const QVector<float> &audio,
                                                      QString *error);
     bool configureDmrEncoder(const TxConfiguration &configuration, QString *error);
+    bool configureRawDmrRelay(const TxConfiguration &configuration, QString *error);
+    void stopNetworkDmrRelay();
     bool beginDmrCall(QString *error);
     bool finishDmrCall(QString *error);
     bool beginM17Call(QString *error);
@@ -152,6 +163,8 @@ private:
     std::unique_ptr<DmrTransmitEncoder> dmrEncoder;
     bool dmrCallActive = false;
     bool dmrFinishing = false;
+    bool networkDmrRelayActive = false;
+    QTimer *networkDmrRelayIdleTimer = nullptr;
     std::unique_ptr<M17VoiceStream> m17VoiceStream;
     std::unique_ptr<IqChannelizer> m17AudioResampler;
 

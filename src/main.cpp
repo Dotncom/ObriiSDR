@@ -302,8 +302,8 @@ YourClassName::YourClassName(QWidget *parent)
     dmrPrivacyCapabilityLabel->setWordWrap(true);
     dmrPrivacyCapabilityLabel->setMinimumWidth(0);
     dmrPrivacyCapabilityLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    dmrPrivacyKeysButton = new QPushButton("Keys...", digitalWidget);
-    markTranslatable(dmrPrivacyKeysButton, QStringLiteral("dmr_privacy_keys"), QStringLiteral("Keys..."));
+    dmrPrivacyKeysButton = new QPushButton("Keys", digitalWidget);
+    markTranslatable(dmrPrivacyKeysButton, QStringLiteral("dmr_privacy_keys"), QStringLiteral("Keys"));
     dmrPrivacyKeysButton->setToolTip(uiText(QStringLiteral("dmr_privacy_keys_tooltip"),
                                             QStringLiteral("Open the DMR privacy key table and choose the active key for backend tests.")));
     dmrPrivacyFrameOffsetCombo = new QComboBox(digitalWidget);
@@ -401,10 +401,10 @@ YourClassName::YourClassName(QWidget *parent)
     dsdNeoUdpOutputPortSpin->setMaximumWidth(82);
     QPushButton *digitalClearButton = new QPushButton("Clear", digitalWidget);
     markTranslatable(digitalClearButton, QStringLiteral("clear"), QStringLiteral("Clear"));
-    ft8StationButton = new QPushButton(QStringLiteral("FT8 Station..."), digitalWidget);
-    markTranslatable(ft8StationButton, QStringLiteral("ft8_station"), QStringLiteral("FT8 Station..."));
-    QPushButton *openRadioButton = new QPushButton(QStringLiteral("Open Radio..."), digitalWidget);
-    markTranslatable(openRadioButton, QStringLiteral("open_radio_lab"), QStringLiteral("Open Radio..."));
+    ft8StationButton = new QPushButton(QStringLiteral("FT8 Station"), digitalWidget);
+    markTranslatable(ft8StationButton, QStringLiteral("ft8_station"), QStringLiteral("FT8 Station"));
+    QPushButton *openRadioButton = new QPushButton(QStringLiteral("Open Radio"), digitalWidget);
+    markTranslatable(openRadioButton, QStringLiteral("open_radio_lab"), QStringLiteral("Open Radio"));
     openRadioButton->setToolTip(QStringLiteral("M17, AX.25/KISS and optional open modem backends"));
     digitalStatusLabel = new QLabel(uiText(QStringLiteral("digital_audio_idle"), QStringLiteral("Digital audio decoder idle")), digitalWidget);
     digitalStatusLabel->setWordWrap(false);
@@ -1608,8 +1608,8 @@ YourClassName::YourClassName(QWidget *parent)
     videoToggleButton->setMaximumWidth(54);
     videoToggleButton->setFixedHeight(44);
     videoToggleButton->setToolTip("Show or hide the video/image decoder panel");
-    transmitButton = new QPushButton(QStringLiteral("TX..."), this);
-    markTranslatable(transmitButton, QStringLiteral("transmitter"), QStringLiteral("TX..."));
+    transmitButton = new QPushButton(QStringLiteral("TX"), this);
+    markTranslatable(transmitButton, QStringLiteral("transmitter"), QStringLiteral("TX"));
     transmitButton->setMaximumWidth(58);
     transmitButton->setFixedHeight(44);
     transmitButton->setToolTip(uiText(
@@ -1991,10 +1991,10 @@ YourClassName::YourClassName(QWidget *parent)
                                                   QStringLiteral("Move the active marker to the next local peak")));
     spectrumScienceClearButton = new QPushButton("Clear", spectrumMeasurementBox);
     markTranslatable(spectrumScienceClearButton, QStringLiteral("clear"), QStringLiteral("Clear"));
-    auto *spectrumSciencePairsButton = new QPushButton("Pairs...", spectrumMeasurementBox);
+    auto *spectrumSciencePairsButton = new QPushButton("Pairs", spectrumMeasurementBox);
     markTranslatable(spectrumSciencePairsButton,
                      QStringLiteral("science_marker_pairs"),
-                     QStringLiteral("Pairs..."));
+                     QStringLiteral("Pairs"));
     spectrumSciencePairsButton->setToolTip(uiText(
         QStringLiteral("science_marker_pairs_tooltip"),
         QStringLiteral("Choose the primary measurement range and add parallel marker pairs.")));
@@ -2025,8 +2025,8 @@ YourClassName::YourClassName(QWidget *parent)
     markTranslatable(spectrumScienceExportButton, QStringLiteral("science_report"), QStringLiteral("Report"));
     spectrumScienceExportButton->setToolTip(uiText(QStringLiteral("science_report_tooltip"),
                                                     QStringLiteral("Export the current spectrum, traces, markers and metrics to CSV")));
-    zeroSpanButton = new QPushButton("Zero Span...", spectrumMeasurementBox);
-    markTranslatable(zeroSpanButton, QStringLiteral("zero_span_open"), QStringLiteral("Zero Span..."));
+    zeroSpanButton = new QPushButton("Zero Span", spectrumMeasurementBox);
+    markTranslatable(zeroSpanButton, QStringLiteral("zero_span_open"), QStringLiteral("Zero Span"));
     zeroSpanButton->setToolTip(uiText(QStringLiteral("zero_span_open_tooltip"),
                                       QStringLiteral("Open time-domain level analysis at one selected frequency")));
     researchToolsButton = new QPushButton("Research", toolsPanel);
@@ -2329,8 +2329,8 @@ YourClassName::YourClassName(QWidget *parent)
                        QStringLiteral("ObriiFpgaLab executable was not found or could not be started.")));
         }
     });
-    auto *multiSdrButton = new QPushButton(QStringLiteral("Multi-SDR..."), this);
-    markTranslatable(multiSdrButton, QStringLiteral("multi_sdr"), QStringLiteral("Multi-SDR..."));
+    auto *multiSdrButton = new QPushButton(QStringLiteral("Multi-SDR"), this);
+    markTranslatable(multiSdrButton, QStringLiteral("multi_sdr"), QStringLiteral("Multi-SDR"));
     multiSdrButton->setToolTip(uiText(
         QStringLiteral("multi_sdr_tooltip"),
         QStringLiteral("Combine the main receiver with a second SDR on one frequency axis.")));
@@ -3874,7 +3874,7 @@ YourClassName::YourClassName(QWidget *parent)
     fftSettings->addWidget(fftWindowCombo, 1, 0);
     fftSettings->addWidget(fftBackendCombo, 1, 1);
     auto *fftTuneButton = new QPushButton(this);
-    markTranslatable(fftTuneButton, "fft_tuning", "FFT tuning...");
+    markTranslatable(fftTuneButton, "fft_tuning", "FFT tuning");
     fftSettings->addWidget(fftTuneButton, 2, 0, 1, 2);
     connect(fftTuneButton, &QPushButton::clicked, this, [this] {
         showFftTuningDialog(this, pendingSettings.fftLength,

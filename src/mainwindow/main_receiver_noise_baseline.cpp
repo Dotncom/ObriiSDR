@@ -197,7 +197,7 @@ void YourClassName::openReceiverNoiseBaselineDialog() {
                     cancelButton,
                     clearCurrentButton, modeCombo]() {
         const ReceiverNoiseBaselineKey key = currentKey();
-        contextLabel->setText((ukrainian ? QStringLiteral("РџРѕС‚РѕС‡РЅР° РєРѕРЅС„С–РіСѓСЂР°С†С–СЏ: ")
+        contextLabel->setText((ukrainian ? QString::fromUtf8(u8"Поточна конфігурація: ")
                                          : QStringLiteral("Current configuration: ")) +
                               key.description());
         progress->setMaximum((std::max)(1, receiverNoiseBaseline.targetFrames()));

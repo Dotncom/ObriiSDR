@@ -829,9 +829,12 @@ void YourClassName::openApplicationSettings() {
     auto *noiseStrength = new QSpinBox(noiseBox);
     noiseStrength->setRange(0, 100); noiseStrength->setSuffix(QStringLiteral(" %"));
     noiseStrength->setValue(static_cast<int>(receiverNoiseShapeStrength * 100));
-    auto *noiseStrengthForm = new QFormLayout;
-    noiseStrengthForm->addRow(uiText("receiver_noise_shape_strength", "Broad-shape suppression"), noiseStrength);
-    auto *noiseDetails = new QPushButton(uiText("receiver_noise_shape_settings", "Profile and broad-noise settings..."), noiseBox);
+    auto *noiseDetails = new QPushButton(uiText("receiver_noise_shape_settings", "Profile and broad-noise settings"), noiseBox);
+    auto *noiseStrengthRow = new QHBoxLayout;
+    noiseStrengthRow->addWidget(new QLabel(uiText("receiver_noise_shape_strength", "Broad-shape suppression"), noiseBox));
+    noiseStrengthRow->addWidget(noiseStrength);
+    noiseStrengthRow->addWidget(noiseDetails);
+    noiseStrengthRow->addStretch(1);
     auto *noiseStatus = new QLabel(noiseBox); noiseStatus->setWordWrap(true);
     const auto refreshNoiseStatus = [this, noiseStatus] {
         const auto key = receiverNoiseBaselineKey(spectrumProcessingSettings());
@@ -839,8 +842,8 @@ void YourClassName::openApplicationSettings() {
             ? uiText("receiver_noise_shape_ready", "A matching broad profile is available for this gain and RF region.")
             : uiText("receiver_noise_shape_missing", "No broad profile for this gain/RF region. Capture it with a50-ohm load, or repeat spur calibration. FFT/window changes are accepted; gain changes need a matching profile."));
     };
-    noiseLayout->addWidget(noiseEnabled); noiseLayout->addLayout(noiseStrengthForm);
-    noiseLayout->addWidget(noiseStatus); noiseLayout->addWidget(noiseDetails);
+    noiseLayout->addWidget(noiseEnabled); noiseLayout->addLayout(noiseStrengthRow);
+    noiseLayout->addWidget(noiseStatus);
     rootLayout->addWidget(noiseBox);
     refreshNoiseStatus();
     connect(spurCalibrate, &QPushButton::clicked, &dialog, [refreshNoiseStatus] { refreshNoiseStatus(); });
